@@ -1,0 +1,17 @@
+# Virtual environments
+.venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Test caches
+.pytest_cache/
+
+# Throwaway live-driver scripts and their local state
+scratch/

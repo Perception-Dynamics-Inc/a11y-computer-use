@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "computeruse"
+version = "0.0.1"
+description = "Accessibility-first computer-use framework for macOS (Windows next): pruned a11y-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "pyobjc-framework-Cocoa",
+    "pyobjc-framework-Quartz",
+    "pyobjc-framework-ApplicationServices",
+    "mcp",
+    "pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+computeruse = "computeruse.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["computeruse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
