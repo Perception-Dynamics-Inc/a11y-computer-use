@@ -15,7 +15,7 @@ The world does not need another screenshot-loop browser agent — that market is
 
 **The shape:** macOS-first MVP shipped as a single signed binary = MCP server + CLI, then Windows as the second launch beat. A11y-tree-first, vision/pixel fallback. Apache-2.0, rug-pull-proof governance.
 
-**Two things to do before writing more code:** (1) validate demand with real failed-automation stories (§5); (2) pick a distinct name — "computerUse" is un-Googleable and collides with Anthropic's feature branding (§10).
+**Two things to do before writing more code:** (1) validate demand with real failed-automation stories (§5) — ✅ done (COM-1); (2) ~~pick a distinct name~~ — **decided (COM-3, 2026-07-12): keep "computerUse"** (owner's call); mitigate the un-Googleable/branding-collision risk with a distinct SEO tagline (§10).
 
 ---
 
@@ -235,7 +235,7 @@ Actions:
 
 ## 10. Launch plan
 
-1. **Name first.** "computerUse" is un-Googleable, collides with Anthropic's feature/branding (Anthropic ships an MCP server literally named `computer-use`), and reads as a fan clone of the quickstart. Pick a distinct name (the incumbents that survived all have one: Stagehand, Skyvern, Terminator), keep the generic phrase as the SEO tagline. Rename now while the cost is zero.
+1. **Name — decided: keep "computerUse"** (COM-3, 2026-07-12, owner's call). The known downside stands (un-Googleable; collides with Anthropic's `computer-use` MCP; reads as a fan clone), so the mitigation is mandatory: **lead every public surface with a distinct tagline** — "computerUse — the accessibility-first computer-use framework for macOS" — so search and disambiguation ride on the tagline, not the bare name. (A vetted rename shortlist — axreach / axweave / axwright / axgrove / treewright, all registry-free — is parked on COM-3 if we ever reconsider.)
 2. Benchmark blog post → **Show HN** ("Show HN: X — give any LLM native control of your Mac via the accessibility tree, with head-to-head token numbers") → **r/LocalLLaMA** post leading with Ollama/local-model support.
 3. Submit to every MCP registry the week of launch (registry.modelcontextprotocol.io, Smithery, PulseMCP, mcp.so, Cursor/Cline directories) — free, high-intent distribution.
 4. `examples/` gallery with 5 copy-paste recipes against apps people feel (Mail, Spotify, Slack, System Settings, Finder).
