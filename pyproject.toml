@@ -9,6 +9,14 @@ description = "Accessibility-first computer-use framework for macOS (Windows nex
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = [
     "pyobjc-framework-Cocoa",
     "pyobjc-framework-Quartz",

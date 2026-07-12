@@ -243,7 +243,7 @@ Actions:
 
 ## 11. License, governance & sustainability
 
-- **Apache-2.0** (patent grant matters; avoid AGPL — it verifiably suppresses adoption here). ⚠️ **The repo currently carries an MIT LICENSE — decide and switch before any external contribution arrives**; relicensing later invites exactly the suspicion we're preempting.
+- **Apache-2.0** (patent grant matters; avoid AGPL — it verifiably suppresses adoption here). ✅ **DONE (COM-4, 2026-07-12): the repo LICENSE is now Apache-2.0** (+ NOTICE, PyPI classifier), switched while the cost was still near-zero — relicensing later would have invited exactly the suspicion we're preempting.
 - Governance note at launch: no CLA-to-relicense trap, roadmap in the open, signed releases.
 - **Sustainability honesty beats a governance promise** (the graveyard projects all had implicit promises too): state the funding reality — e.g. GitHub Sponsors + a clearly-scoped future hosted service that never gates the core, or an explicit "this is a 12-month bet; here's the fork-friendly exit (permissive license, no proprietary deps, documented release process)."
 

@@ -127,7 +127,7 @@ See [PLAN.md §9](./PLAN.md) for the full roadmap and exit criteria.
 
 ## License
 
-Currently MIT (see [LICENSE](./LICENSE)). **A switch to Apache-2.0 is planned before external contributions arrive** — the patent grant matters for a project that injects input and reads UI trees, and relicensing later invites suspicion. Governance intent: no CLA-to-relicense trap, roadmap in the open, signed releases.
+**[Apache-2.0](./LICENSE)** (with [NOTICE](./NOTICE)). The explicit patent grant matters for a project that injects input and reads UI trees, and it's the license the credible OSS peers use (Chrome DevTools MCP, Playwright MCP). Governance intent: no CLA-to-relicense trap, roadmap in the open, signed releases.
 
 ## Contributing
 
