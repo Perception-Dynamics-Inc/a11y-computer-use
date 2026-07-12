@@ -1,8 +1,10 @@
 # computerUse
 
-**The accessibility-first computer-use framework for macOS — give any LLM native control of your Mac through the accessibility tree, not guessed pixel coordinates.**
+**The accessibility-first computer-use SDK for macOS — embed native Mac control into your AI agent platform, driven by the accessibility tree instead of guessed pixel coordinates.**
 
-> ⚠️ **Status: Phase-0 spike (v0.0.1).** macOS-only, early, and evolving fast. The core loop is built and live-proven (see [Proof it works](#proof-it-works)); the public benchmark, Windows support, and PyPI release are on the roadmap, not shipped. The project name is a working title — a rename is planned before launch.
+computerUse is **infrastructure for people building AI platforms**, not an end-user app. You embed it so *your* product can control the desktop — instead of building and maintaining a whole computer-use stack yourself. Your app owns the identity: code-signing, entitlements, and OS permissions ride on **your** Developer ID, not ours (see [Integrating computerUse](#integrating-computeruse-into-your-platform)).
+
+> ⚠️ **Status: Phase-0 spike (v0.0.1).** macOS-only, early, and evolving fast. The core loop is built and live-proven (see [Proof it works](#proof-it-works)); Windows, non-Python language bindings, and a PyPI release are on the roadmap, not shipped.
 
 ---
 
@@ -22,6 +24,7 @@ The browser world already solved this a better way. Tools like [Playwright MCP](
 - **Any model works** — a11y refs are plain text, so cheap non-vision models and **local Ollama models** can drive the desktop; vision is a fallback, not a requirement.
 - **It doesn't fight you for the mouse** — ref actions execute through the accessibility API (`AXPress` / set `AXValue`), so the agent can click and type **without moving your physical cursor or stealing keyboard focus.** A pixel-loop agent cannot do this — it hijacks your mouse on every step.
 - **Deterministic & auditable** — every action resolves through a structured element ref and is written to an always-on JSONL audit log. You can see exactly what the agent did and why.
+- **Embeddable, not a walled app** — a library + MCP server you drop into your own agent loop (any language, via MCP). Your product, your branding, your signing identity: the OS permissions attach to *your* app, not to us.
 
 Honest note: this is **not** a token-savings pitch. Phase-0 measurement found pruned window snapshots run ~680–1,460 tokens — about the same as one screenshot, not 10× smaller. The win is *reliability + model choice + non-intrusiveness + auditability*, and we intend to prove it with a published head-to-head benchmark, not adjectives.
 
@@ -72,6 +75,38 @@ claude mcp add computeruse -- "$(pwd)/.venv/bin/computeruse" mcp
 # Or run the server directly:
 computeruse mcp
 ```
+
+---
+
+## Integrating computerUse into your platform
+
+computerUse is meant to be **embedded in your product**. There are two integration shapes, and in both, **your app is the identity the OS trusts** — you never ship a computerUse-branded binary or our certificate.
+
+**1. In-process (cleanest; Python hosts).** Import the library; it runs *as* your app, under your process's signature and permission grants.
+
+```python
+from computeruse import server
+runtime = server.Runtime()                 # your app owns the permission store + audit log
+print(runtime.desktop_snapshot("com.apple.TextEdit"))
+runtime.click(ref="e14")
+```
+
+**2. Subprocess / MCP (any language).** Spawn the MCP server from your app — Go, Rust, Swift, Node, Python, anything that speaks [MCP](https://modelcontextprotocol.io) — and drive it over stdio:
+
+```bash
+computeruse mcp        # your app spawns this as a child and speaks MCP to it
+```
+
+### You own signing & permissions — we need no certificate
+
+macOS attaches Accessibility / Screen Recording grants (and Gatekeeper/notarization) to the **responsible process** — *your* app — and computerUse inherits them. The integrator's checklist:
+
+- **Sign your app with your own Developer ID** (macOS) / Authenticode cert (Windows). computerUse ships no certificate and needs none.
+- **Request the OS permissions** your app uses (Accessibility always; Screen Recording only for the vision fallback). `computeruse doctor` verifies them from inside your process and names what's missing.
+- **Handle hardened-runtime library validation** — embed in-process, sign the bundled components with your Team ID, or set `com.apple.security.cs.disable-library-validation` (standard for any app embedding Python).
+- **Subprocess model:** ensure TCC's "responsible process" resolves to your signed app (embed in-process, or ship the helper signed with your Team ID at a stable path). `doctor` reports the responsible app so you can check.
+
+The payoff: your users grant permissions to *your* trusted app **once**, and the grants survive your updates — because the identity is yours and stable.
 
 ---
 
