@@ -216,6 +216,7 @@ Actions:
 - Signing + notarization pipeline; TCC attribution tested from Terminal, Claude Desktop, and an IDE.
 - Throwaway MCP server (~8 tools) driven from Claude Code; confirmation-gate UX prototyped.
 - **Exit criteria (numeric):** per-app-category coverage table published; filtered snapshots ≤ ~1k tokens on ≥7/10 apps; one top-3 workflow completed end-to-end via refs alone; Rust-vs-Swift-shim boundary decided by the 3-day kill criterion. **If a11y coverage on Electron apps is unsalvageable even with fallback, rethink before Phase 1.**
+- **✅ OUTCOME (COM-12, 2026-07-13): GO to Phase 1.** Hero workflow live via refs alone (Calendar); coverage table published (native/Chromium excellent; custom-drawn Telegram = zero a11y → **vision fallback proven**); language decided (Python); confirmation gate prototyped. Partials carried to Phase 1: dense-grid token budget (Calendar ~3,220 tok needs per-widget pruning) and signing (needs cert). Snapshot tokens ~680–1,460 (≈ one screenshot, **not** 10× less). Full memo + measured numbers + coverage table: [docs/phase-0-review.md](./docs/phase-0-review.md).
 
 ### Phase 1 — macOS-only MVP + launch (8–12 weeks, honest estimate)
 - macOS driver hardened: observe/act/window/clipboard/wait_for, tree pruning engine, vision fallback handoff on Electron (own exit criterion), supervised worker isolation.
