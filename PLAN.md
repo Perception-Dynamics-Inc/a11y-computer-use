@@ -1,7 +1,7 @@
 # computerUse — Project Plan
 
 **Status:** v0.2 — revised after adversarial review (3 independent critiques) · **Date:** 2026-07-02
-**Vision (from README):** an open-source computer-use framework for agentic AI on macOS & Windows, easy to plug into any AI project.
+**Vision (from README):** an open-source, **embeddable computer-use SDK for AI-platform builders** on macOS & Windows — integrate native desktop control into your product instead of building your own. The host app owns the identity (signing, entitlements, OS permissions); computerUse is the layer, not the end-user product.
 
 All landscape facts were pulled from the GitHub API and official vendor docs on 2026-07-02 and independently fact-checked. Sources linked inline.
 
@@ -13,7 +13,7 @@ The world does not need another screenshot-loop browser agent — that market is
 
 **The wedge (one claim, with receipts):** *native Mac control for any LLM via the accessibility tree — exact clickable element refs instead of guessed pixel coordinates, so fewer misclicks, cheap non-vision/local models work, and every action is deterministic and auditable; benchmarked head-to-head in public.* Everything else (safety layer, Windows, adapters) supports that claim; none of it replaces it. (Phase-0 measurement, COM-6: pruned snapshots run ~680–1,460 tokens — about the same as one screenshot, not 10× less — so the wedge is reliability + any-model, **not** token savings.)
 
-**The shape:** macOS-first MVP shipped as a single signed binary = MCP server + CLI, then Windows as the second launch beat. A11y-tree-first, vision/pixel fallback. Apache-2.0, rug-pull-proof governance.
+**The shape:** macOS-first MVP shipped as an **embeddable library + MCP server + CLI** (integrators embed it and sign *their own* app — we ship no certificate), then Windows as the second launch beat. A11y-tree-first, vision/pixel fallback. Apache-2.0, rug-pull-proof governance.
 
 **Two things to do before writing more code:** (1) validate demand with real failed-automation stories (§5) — ✅ done (COM-1); (2) ~~pick a distinct name~~ — **decided (COM-3, 2026-07-12): keep "computerUse"** (owner's call); mitigate the un-Googleable/branding-collision risk with a distinct SEO tagline (§10).
 
@@ -115,7 +115,9 @@ The **model** only emits structured actions — it never touches the machine. Th
 
 *Phase-0 measured reality (COM-6, 2026-07-12):* real pruned window snapshots on the hero apps came in at ~680–1,460 tokens (Calendar's month grid: ~3,220 — dense grids need per-widget pruning tuning in Phase 1). One screenshot costs ~1,100–1,600 tokens. So "fraction of the token cost" is dead as the headline; refs-not-coordinates, any-model, deterministic+auditable is the wedge.
 
-**Why us and not the built-in?** (the question every Claude Code user will ask): Claude Desktop's computer use is Anthropic-only, closed, app-not-library, and un-scriptable. We are **model-agnostic** (any MCP host, any provider loop, local models via Ollama), **embeddable** (SDK + adapters), and **scriptable/auditable** (trajectory logs, deterministic refs). Same answer applies to Microsoft's MXC/Agent Workspace on Windows later.
+**Who it's for:** teams **building AI platforms** who need native desktop control as a *capability in their product* — they embed computerUse (their app, their signing identity, their branding) instead of building and maintaining a computer-use stack themselves. We are the layer, not the end-user product — infrastructure, in the Stripe/Twilio sense.
+
+**Why us and not the built-in?** (the question every platform builder will ask): Claude Desktop's computer use is Anthropic-only, closed, **app-not-library**, and un-scriptable — you can't embed it in *your* product. We are **model-agnostic** (any MCP host, any provider loop, local models via Ollama), **embeddable** (in-process library or MCP subprocess, any language; the host owns signing/permissions), and **scriptable/auditable** (trajectory logs, deterministic refs). Same answer applies to Microsoft's MXC/Agent Workspace on Windows later.
 
 Supporting differentiators (in service of the wedge, not co-equal to it):
 
@@ -197,10 +199,12 @@ Actions:
 
 ## 7. Distribution & trust (launch blockers, not polish)
 
-- **macOS TCC reality:** Accessibility + Screen Recording grants key off code-signing identity and are attributed to the *responsible process* — an npx-spawned binary at a hashed path silently loses grants on every version bump. Design: a **signed, notarized helper app at a stable path** (`~/Library/Application Support/...`) owns the TCC grants; the `npx`/`uvx`/`pip` entry point talks to it over local IPC. Apple Developer ID + `notarytool` CI from **Phase 0** (TCC testing requires signed builds). `doctor` detects which *host* app (Terminal, Claude Desktop, IDE) needs the grant and names it.
-- **Windows (Phase 2):** an unsigned binary that injects input, captures screens, and reads UI trees is a textbook malware signature — budget for Authenticode/Azure Trusted Signing (EV for SmartScreen reputation) and AV false-positive triage before the Windows launch.
-- **One distribution channel done well first** (single binary via curl/brew + PyPI), not three flaky ones. npm arrives with the TS SDK.
-- The quickstart honestly includes **one guided permissions step** — "5 minutes including the TCC dance," not a fantasy zero-setup claim.
+**Audience reframe (2026-07-13): computerUse is an embeddable SDK for AI-platform builders, not an end-user app.** We don't ship a signed consumer binary — integrators embed us in *their* app and sign it with *their* Developer ID. That flips the signing burden off us and onto a party who already has it, and it's the correct model (Playwright/browser-use don't ship their own signing identity either). Our job is to be cleanly embeddable and to document the host's checklist.
+
+- **macOS TCC reality — inherited from the host.** Accessibility + Screen Recording grants key off code-signing identity and are attributed to the *responsible process* = **the integrator's app**. computerUse runs under that identity (in-process, or as a child the host spawns) and inherits its grants; **we need no certificate of our own**. The integrator: signs with their Developer ID, requests the permissions, and — for the subprocess model — ensures TCC responsibility resolves to their signed app (embed in-process, or ship the helper signed with their Team ID at a stable path). Hardened-runtime **library validation** is the host's to satisfy (embed in-process / sign bundled components with their Team ID / `disable-library-validation`). `doctor` detects, from inside the host, which app holds the grant and what's missing.
+- **Windows (Phase 2) — same inheritance.** No TCC, but Authenticode/SmartScreen reputation and UIPI/elevation are governed by the **host app's** signature and integrity level; the integrator signs with their EV cert. We ship no Windows certificate. (An unsigned input-injecting/screen-reading binary is a textbook malware signature — which is exactly why the identity must be the integrator's trusted app, not ours.)
+- **Distribution is developer-first:** PyPI/`uvx` for Python hosts (in-process import or `computeruse mcp` subprocess), then language bindings / a C-ABI core so non-Python hosts (Swift, Electron, Go, Rust agents) embed in-process cleanly. No consumer `.app`, no our-side notarization.
+- **Integration docs are a launch deliverable** — the host checklist (sign, entitle, request TCC, library validation, responsible-process for the subprocess model), with `doctor` as the in-process verifier. This replaces the old "signed helper we ship" plan.
 
 ## 8. MCP tool surface v1 (~12 tools — the front door, designed not implied)
 
