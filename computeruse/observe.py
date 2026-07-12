@@ -230,10 +230,11 @@ def build_snapshot(
     snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
     elements: list[Element] = []
     elisions: dict[str, int] = {}
+    handles: dict[str, object] = {}
     if root is not None:
         pruned = _prune_root(root, accessor, tuple(geometry))
-        _flatten(pruned, None, (), snapshot_id, elements, elisions)
-    _register_epoch(snapshot_id, elisions)
+        _flatten(pruned, None, (), snapshot_id, elements, elisions, handles)
+    _register_epoch(snapshot_id, elisions, handles)
     return Snapshot(
         snapshot_id=snapshot_id,
         scope=scope,
@@ -292,6 +293,76 @@ def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> El
     return match
 
 
+#: AX actions that activate an element, in preference order. `AXPress` covers
+#: buttons/links/checkboxes; `AXConfirm`/`AXOpen`/`AXPick` cover the stragglers
+#: (default buttons, Finder items, pop-ups).
+_ACTIVATE_ACTIONS = ("AXPress", "AXConfirm", "AXOpen", "AXPick")
+
+
+def press_element(element: Element) -> bool:
+    """Activate ``element`` through the accessibility API — no cursor movement.
+
+    This is the payoff of being accessibility-first: because the element is a
+    real AX object (not a guessed coordinate), it can be pressed or focused
+    directly, so the agent never warps the user's physical mouse or steals the
+    pointer mid-task. The click tool tries this first and falls back to a
+    synthetic mouse click only when it returns False.
+
+    ``element`` must come from a live snapshot (e.g. `resolve_ref`'s result) so
+    its handle is still registered.
+
+    Returns:
+        True when the element was pressed (or, for a plain editable field,
+        focused) via AX. False — meaning *fall back to a synthetic click* —
+        when the element is secure, no live handle is registered for its epoch,
+        it exposes no activate action, or the AX call reported an error.
+    """
+    if element.secure:
+        return False  # secure fields require human handoff; let the click path raise
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return False
+    names = set(_copy_action_names(handle))
+    for action in _ACTIVATE_ACTIONS:
+        if action in names:
+            return _perform_action(handle, action)
+    if element.editable:  # a text field with no press action: focus it without a click
+        return _set_focused(handle)
+    return False
+
+
+def _copy_action_names(handle: object) -> tuple[str, ...]:
+    """The AX action names ``handle`` supports (empty tuple on any AX error).
+
+    Broad except: pyobjc raises assorted bridging errors and a live app's AX
+    server can fail arbitrarily; the safe answer is "no known action", which
+    makes `press_element` fall back to a synthetic click rather than crash.
+    """
+    try:
+        err, names = _appservices().AXUIElementCopyActionNames(handle, None)
+    except Exception:
+        return ()
+    if err != 0 or not names:
+        return ()
+    return tuple(str(n) for n in names)
+
+
+def _perform_action(handle: object, action: str) -> bool:
+    """Perform one AX action; True iff the AX API reports success (err 0)."""
+    try:
+        return _appservices().AXUIElementPerformAction(handle, action) == 0
+    except Exception:
+        return False
+
+
+def _set_focused(handle: object) -> bool:
+    """Give ``handle`` keyboard focus via AX; True iff the AX API reports success."""
+    try:
+        return _appservices().AXUIElementSetAttributeValue(handle, "AXFocused", True) == 0
+    except Exception:
+        return False
+
+
 def render_text(snap: Snapshot) -> str:
     """Render ``snap`` as compact indented text for LLM consumption.
 
@@ -343,6 +414,7 @@ class _PNode:
     children: list[_PNode]
     elided: int  #: direct children hidden by the depth/fan-out caps
     has_interactive: bool  #: self or any kept descendant is interactive
+    node: object | None = None  #: accessor handle (live AXUIElementRef), for act-time AX actions
 
 
 def _prune_root(
@@ -362,7 +434,7 @@ def _prune_root(
         bounds = _project(raw.position, raw.size, main)
     else:
         bounds = Bounds(main.display.display_id, 0, 0, main.display.width, main.display.height)
-    return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False)
+    return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False, node=node)
 
 
 def _prune_inner(
@@ -404,13 +476,14 @@ def _prune_inner(
         and len(kept) == 1
         and elided == 0
     ):
-        return kept[0]  # collapse single-child wrapper
+        return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
     return _PNode(
         raw=raw,
         bounds=bounds,
         children=kept,
         elided=elided,
         has_interactive=interactive or any(c.has_interactive for c in kept),
+        node=node,
     )
 
 
@@ -452,11 +525,14 @@ def _flatten(
     snapshot_id: str,
     out: list[Element],
     elisions: dict[str, int],
+    handles: dict[str, object],
 ) -> None:
     """Assign pre-order refs and emit `Element`s (parents before children)."""
     ref = f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
     clickable, editable, secure = _flags(node.raw)
+    if node.node is not None:  # retain the live handle for act-time AX actions
+        handles[ref] = node.node
     value: str | None = None
     if node.raw.value is not None and not secure:  # secure fields never leak values
         value = _clip(str(node.raw.value), _MAX_VALUE_CHARS)
@@ -480,7 +556,7 @@ def _flatten(
     if node.elided:
         elisions[ref] = node.elided
     for child in node.children:
-        _flatten(child, ref, path, snapshot_id, out, elisions)
+        _flatten(child, ref, path, snapshot_id, out, elisions, handles)
 
 
 def _to_bounds(
@@ -565,12 +641,32 @@ _EPOCH_COUNTER = itertools.count(1)
 #: snapshot_id -> {parent ref -> elided child count}, for render markers.
 #: Bounded FIFO: refs are snapshot-scoped, so old epochs are worthless.
 _EPOCHS: OrderedDict[str, dict[str, int]] = OrderedDict()
+#: snapshot_id -> {ref -> live accessor handle (AXUIElementRef)}. Lets
+#: `press_element` activate an element through the AX API without moving the
+#: cursor. Same bounded FIFO as `_EPOCHS`; the handles keep the walk's AX
+#: objects alive only for the recent epochs an in-flight act can still target.
+_HANDLES: OrderedDict[str, dict[str, object]] = OrderedDict()
 
 
-def _register_epoch(snapshot_id: str, elisions: dict[str, int]) -> None:
+def _register_epoch(
+    snapshot_id: str, elisions: dict[str, int], handles: dict[str, object]
+) -> None:
     _EPOCHS[snapshot_id] = elisions
+    _HANDLES[snapshot_id] = handles
     while len(_EPOCHS) > _MAX_EPOCHS:
         _EPOCHS.popitem(last=False)
+    while len(_HANDLES) > _MAX_EPOCHS:
+        _HANDLES.popitem(last=False)
+
+
+def ax_handle_for(snapshot_id: str, ref: str) -> object | None:
+    """Return the live accessor handle for ``ref`` in ``snapshot_id``, or None.
+
+    None means the epoch was evicted (older than the last `_MAX_EPOCHS`
+    snapshots) or the ref carried no handle (e.g. a synthetic root) — the
+    caller falls back to coordinate-based input.
+    """
+    return _HANDLES.get(snapshot_id, {}).get(ref)
 
 
 # ---------------------------------------------------------------------------

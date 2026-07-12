@@ -31,6 +31,7 @@ doctor`` still works.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from functools import partial
 from typing import TYPE_CHECKING
@@ -81,6 +82,13 @@ _DOCTOR_HINT = "run `computeruse doctor` to see which host app needs the grant"
 
 #: Ceiling for the ``wait_for`` timeout parameter (seconds).
 MAX_WAIT_TIMEOUT_S = 60.0
+
+#: Prefer AX activation (``AXPress``/focus — no cursor movement) over a
+#: synthetic mouse click for simple left single-clicks on a ref. This is what
+#: lets the agent work without hijacking the user's pointer. Set
+#: ``COMPUTERUSE_AX_CLICKS=0`` to force synthetic-mouse clicks everywhere
+#: (e.g. for an app whose AX press handlers misbehave).
+PREFER_AX_ACTIONS = os.environ.get("COMPUTERUSE_AX_CLICKS", "1") != "0"
 
 _PERMISSION_CODES = frozenset(
     {ErrorCode.PERMISSION_DENIED_ACCESSIBILITY, ErrorCode.PERMISSION_DENIED_SCREEN}
@@ -543,11 +551,24 @@ class Runtime:
             raise ValueError(f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}")
         target, app = self._target(ref, x, y, display_id)
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
+
+        def execute() -> None:
+            # AX activation (no cursor movement) is only meaningful for a plain
+            # left single-click on a resolved element; anything with a button,
+            # count, or modifier semantics goes through synthesized mouse events.
+            if (
+                PREFER_AX_ACTIONS
+                and isinstance(target, Element)
+                and parsed_button is MouseButton.LEFT
+                and count == 1
+                and not mods
+                and observe.press_element(target)
+            ):
+                return  # activated via AX — the user's cursor never moved
+            act.click(target, button=parsed_button, count=count, modifiers=mods)
+
         self._run_gated(
-            action,
-            app,
-            lambda: act.click(target, button=parsed_button, count=count, modifiers=mods),
-            recheck=partial(_recheck_target_app, target=target),
+            action, app, execute, recheck=partial(_recheck_target_app, target=target)
         )
         return f"clicked {_describe(target)}"
 

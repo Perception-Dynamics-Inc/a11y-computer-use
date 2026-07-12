@@ -319,6 +319,51 @@ async def test_click_rejects_unknown_modifier_before_gating(
     assert audit_entries(audit_dir) == []  # fail-fast validation, not a gate event
 
 
+# --- AX activation vs synthetic mouse (the non-intrusive-cursor contract) -------
+
+
+async def test_click_prefers_ax_activation_and_skips_the_mouse(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    pressed: list[str] = []
+    monkeypatch.setattr(observe, "press_element", lambda el: pressed.append(el.ref) or True)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert not result.isError
+    assert pressed == ["e2"]  # activated through the AX API
+    assert mocked_driver["click"] == []  # no synthetic mouse events => cursor never moved
+
+
+async def test_click_falls_back_to_mouse_when_ax_declines(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    monkeypatch.setattr(observe, "press_element", lambda el: False)  # e.g. no live handle
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert not result.isError
+    assert len(mocked_driver["click"]) == 1  # fell back to a synthetic mouse click
+
+
+async def test_modified_and_multiclicks_never_use_ax(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    attempted: list[str] = []
+    monkeypatch.setattr(observe, "press_element", lambda el: attempted.append(el.ref) or True)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+
+    await call_tool(mcp_server, "click", {"ref": "e2", "button": "right"})
+    await call_tool(mcp_server, "click", {"ref": "e2", "count": 2})
+    await call_tool(mcp_server, "click", {"ref": "e2", "modifiers": ["cmd"]})
+
+    assert attempted == []  # AX activation is only for plain left single-clicks
+    assert len(mocked_driver["click"]) == 3  # right/double/modified all synthesize mouse events
+
+
 # --- same-window recheck (decision -> injection race) ---------------------------
 
 
