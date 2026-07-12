@@ -102,6 +102,18 @@ CONFIRMATION_GATE = os.environ.get("COMPUTERUSE_CONFIRM", "1") != "0"
 #: safety core.
 Confirmer = Callable[[str], bool]
 
+#: Appended to a snapshot that exposes no actionable refs — the a11y→vision
+#: handoff signal (PLAN §6 / COM-12). Custom-drawn apps (Telegram, some games,
+#: Electron before AXManualAccessibility) yield a shell with nothing to click,
+#: so the agent should switch to the pixel path.
+_VISION_HANDOFF_HINT = (
+    "note: no interactive elements were found in this app's accessibility tree — "
+    "it is likely custom-drawn (e.g. Telegram, some games/Electron apps), so the "
+    "a11y ref path cannot target it. Fall back to the `screenshot` tool and act "
+    "by x/y coordinates; if it is Electron, the tree may populate after the app "
+    "gets focus. (Try scope='app' if you used 'window'.)"
+)
+
 _PERMISSION_CODES = frozenset(
     {ErrorCode.PERMISSION_DENIED_ACCESSIBILITY, ErrorCode.PERMISSION_DENIED_SCREEN}
 )
@@ -532,7 +544,10 @@ class Runtime:
         def execute() -> str:
             snap = observe.snapshot(Scope(scope), app=bundle)
             self._current = snap
-            return observe.render_text(snap)
+            text = observe.render_text(snap)
+            if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
+                text = f"{text}\n\n{_VISION_HANDOFF_HINT}"
+            return text
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
