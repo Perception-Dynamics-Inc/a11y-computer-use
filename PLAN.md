@@ -11,7 +11,7 @@ All landscape facts were pulled from the GitHub API and official vendor docs on 
 
 The world does not need another screenshot-loop browser agent — that market is won ([browser-use](https://github.com/browser-use/browser-use) ~102k stars, [Playwright MCP](https://github.com/microsoft/playwright-mcp) ~34.6k, [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) ~45k). What nobody owns is **native desktop control**: the marquee open-source desktop projects died or pivoted in the last 12 months, and the accessibility-tree-first desktop projects are tiny and fragmented — the macOS niche is effectively vacant.
 
-**The wedge (one claim, with receipts):** *native Mac control for any LLM via the accessibility tree — a fraction of the tokens and far fewer misclicks than screenshot loops, benchmarked head-to-head in public.* Everything else (safety layer, local models, Windows, adapters) supports that claim; none of it replaces it.
+**The wedge (one claim, with receipts):** *native Mac control for any LLM via the accessibility tree — exact clickable element refs instead of guessed pixel coordinates, so fewer misclicks, cheap non-vision/local models work, and every action is deterministic and auditable; benchmarked head-to-head in public.* Everything else (safety layer, Windows, adapters) supports that claim; none of it replaces it. (Phase-0 measurement, COM-6: pruned snapshots run ~680–1,460 tokens — about the same as one screenshot, not 10× less — so the wedge is reliability + any-model, **not** token savings.)
 
 **The shape:** macOS-first MVP shipped as a single signed binary = MCP server + CLI, then Windows as the second launch beat. A11y-tree-first, vision/pixel fallback. Apache-2.0, rug-pull-proof governance.
 
@@ -111,7 +111,9 @@ The **model** only emits structured actions — it never touches the machine. Th
 
 ## 4. Positioning & wedge
 
-**Launch claim (falsifiable, benchmarked):** *"Native Mac control for any LLM at a fraction of the token cost of screenshot loops — here are the head-to-head numbers."* The launch asset is a published benchmark: the same N real native-app tasks run by (a) the Anthropic pixel-loop reference and (b) this framework — completion rate, tokens, dollars, wall-clock. That table is the README header, the blog post, and the Show HN.
+**Launch claim (falsifiable, benchmarked):** *"Native Mac control for any LLM — exact element refs instead of pixel guessing: higher completion rates, fewer misclicks, and it works with cheap non-vision and local models. Here are the head-to-head numbers."* The launch asset is a published benchmark: the same N real native-app tasks run by (a) the Anthropic pixel-loop reference and (b) this framework — completion rate, misclicks/retries, steps, dollars, wall-clock (tokens reported honestly: per-step context is comparable to a screenshot, ~0.7–1.5k; the dollar win comes from cheaper non-vision models and fewer retries, not smaller prompts). That table is the README header, the blog post, and the Show HN.
+
+*Phase-0 measured reality (COM-6, 2026-07-12):* real pruned window snapshots on the hero apps came in at ~680–1,460 tokens (Calendar's month grid: ~3,220 — dense grids need per-widget pruning tuning in Phase 1). One screenshot costs ~1,100–1,600 tokens. So "fraction of the token cost" is dead as the headline; refs-not-coordinates, any-model, deterministic+auditable is the wedge.
 
 **Why us and not the built-in?** (the question every Claude Code user will ask): Claude Desktop's computer use is Anthropic-only, closed, app-not-library, and un-scriptable. We are **model-agnostic** (any MCP host, any provider loop, local models via Ollama), **embeddable** (SDK + adapters), and **scriptable/auditable** (trajectory logs, deterministic refs). Same answer applies to Microsoft's MXC/Agent Workspace on Windows later.
 
@@ -251,7 +253,7 @@ Actions:
 |---|---|
 | The gap is a graveyard, not a market — demand may be thin | §5 demand validation gates everything; hero workflows come from real failed-automation stories, not synthesis |
 | A11y trees are poor exactly where users want automation (Electron) | Vision fallback is a Phase 1 deliverable with its own exit criterion; Phase 0 measures hostile apps first; per-app policy engine |
-| Token-cost claim doesn't survive desktop tree sizes | Pruning engine as named deliverable; claim treated as hypothesis until Phase 0 measures it; benchmark published either way |
+| Token-cost claim doesn't survive desktop tree sizes | **RESOLVED (Phase 0, COM-6): it doesn't.** Snapshots ≈ one screenshot (~0.7–1.5k tok; dense grids worse). Wedge re-framed to refs-not-coordinates / any-model / deterministic+auditable; §4 updated; benchmark still published, honest token column included |
 | TCC/signing friction kills the quickstart | Signed stable-path helper + IPC design; notarization CI from Phase 0; `doctor` names the responsible host app |
 | Scope explosion for a 1–2 person team | macOS-only Phase 1; Windows/adapters/SDK gated on traction; anti-goals enforced |
 | Provider contract churn (twice in 18 months) | Adapter layer is the only thing that changes; contract tests on recorded fixtures |
