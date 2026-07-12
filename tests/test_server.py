@@ -613,3 +613,30 @@ async def test_safe_click_never_triggers_confirmation(
     result = await _snapshot_then_click_e2(mcp_server, None)
     assert not result.isError
     assert len(mocked_driver["click"]) == 1
+
+
+# --- scroll: AX reveal (cursor-free) vs synthetic wheel ------------------------
+
+
+async def test_scroll_into_view_uses_ax_and_skips_the_wheel(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    revealed: list[str] = []
+    monkeypatch.setattr(observe, "scroll_into_view", lambda el: revealed.append(el.ref) or True)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+
+    result = await call_tool(mcp_server, "scroll", {"ref": "e2", "into_view": True})
+    assert not result.isError
+    assert "into view" in result.content[0].text
+    assert revealed == ["e2"]  # revealed via AX
+    assert mocked_driver["scroll"] == []  # no synthetic wheel => cursor never moved
+
+
+async def test_scroll_delta_uses_the_wheel(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+
+    result = await call_tool(mcp_server, "scroll", {"ref": "e2", "dy": 3})
+    assert not result.isError
+    assert len(mocked_driver["scroll"]) == 1  # delta scroll -> synthetic wheel path

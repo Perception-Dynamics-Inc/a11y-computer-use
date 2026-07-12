@@ -153,3 +153,36 @@ def test_press_element_non_editable_without_action_falls_back(
     assert not el.editable
     monkeypatch.setattr(observe, "_copy_action_names", lambda h: ())
     assert press_element(el) is False
+
+
+# --- scroll_into_view (AXScrollToVisible, the cursor-free scroll) -------------
+
+
+def test_scroll_into_view_performs_ax_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    alpha = button("Alpha", (110.0, 60.0))
+    snap = _snap(_window(alpha))
+    el = snap.element("e2")
+    performed: list[tuple[object, str]] = []
+    monkeypatch.setattr(observe, "_perform_action", lambda h, a: performed.append((h, a)) or True)
+
+    assert observe.scroll_into_view(el) is True
+    assert performed == [(alpha, "AXScrollToVisible")]
+
+
+def test_scroll_into_view_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    snap = _snap(_window(button("Alpha", (110.0, 60.0))))
+    el = snap.element("e2")
+    monkeypatch.setattr(observe, "_perform_action", lambda h, a: False)
+    assert observe.scroll_into_view(el) is False  # caller falls back to a wheel scroll
+
+
+def test_scroll_into_view_without_handle_falls_back() -> None:
+    orphan = Element(
+        ref="e1",
+        role="AXButton",
+        title="x",
+        value=None,
+        bounds=Bounds(1, 0, 0, 10, 10),
+        snapshot_id="snap-never-registered",
+    )
+    assert observe.scroll_into_view(orphan) is False

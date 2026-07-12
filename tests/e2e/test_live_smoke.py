@@ -62,6 +62,13 @@ def _require_frontmost() -> None:
         pytest.fail(f"aborting before input injection: frontmost app is not {TEXTEDIT}")
 
 
+def _refocus(rt: server.Runtime) -> None:
+    """Re-assert TextEdit focus right before an action, so a concurrent app
+    (e.g. a browser stealing the foreground) doesn't abort the smoke test."""
+    rt.app("focus", TEXTEDIT)
+    time.sleep(0.3)
+
+
 def _snapshot_epoch(rt: server.Runtime) -> Snapshot:
     """Fresh snapshot through the runtime, returned as the structured tree.
 
@@ -153,9 +160,11 @@ def test_textedit_type_and_ax_verify(runtime: server.Runtime, tmp_path: Path) ->
     try:
         area = _wait_for_document(runtime, doc.name)
 
+        _refocus(runtime)
         _require_frontmost()
         runtime.click(ref=area.ref)  # element-ref click: the flagship path
 
+        _refocus(runtime)
         _require_frontmost()
         runtime.type_text(SMOKE_TEXT)
 

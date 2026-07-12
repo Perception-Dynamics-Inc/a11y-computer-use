@@ -631,16 +631,30 @@ class Runtime:
         dx: int = 0,
         dy: int = 0,
         unit: str = "lines",
+        into_view: bool = False,
     ) -> str:
         parsed_unit = ScrollUnit(unit)
         target, app = self._target(ref, x, y, display_id)
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
+
+        def execute() -> None:
+            # into_view on a ref reveals the element via AX (no cursor
+            # movement); everything else is a synthetic wheel scroll, which
+            # macOS routes by moving the pointer to the scroll point.
+            if (
+                into_view
+                and PREFER_AX_ACTIONS
+                and isinstance(target, Element)
+                and observe.scroll_into_view(target)
+            ):
+                return
+            act.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
+
         self._run_gated(
-            action,
-            app,
-            lambda: act.scroll(target, dx=dx, dy=dy, unit=parsed_unit),
-            recheck=partial(_recheck_target_app, target=target),
+            action, app, execute, recheck=partial(_recheck_target_app, target=target)
         )
+        if into_view:
+            return f"scrolled {_describe(target)} into view"
         return f"scrolled {_describe(target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
 
     def drag(
@@ -929,11 +943,15 @@ def build_server(
         dx: int = 0,
         dy: int = 0,
         unit: str = "lines",
+        into_view: bool = False,
     ) -> str:
         """Scroll over an element ref (latest snapshot) or an x/y point.
         Positive dy scrolls content up, positive dx scrolls content left;
-        unit is 'lines' or 'pixels'. Gated at tier 'click'."""
-        return await run(runtime.scroll, ref, x, y, display_id, dx, dy, unit)
+        unit is 'lines' or 'pixels'. Gated at tier 'click'. Pass
+        into_view=true with a ref to reveal that element via the accessibility
+        API WITHOUT moving the pointer (dx/dy ignored); a wheel scroll instead
+        moves the cursor to the scroll point."""
+        return await run(runtime.scroll, ref, x, y, display_id, dx, dy, unit, into_view)
 
     @server.tool(name="drag")
     async def drag(

@@ -189,9 +189,9 @@ Actions:
 - **Permission enforcement mechanism:** frontmost-window hit-test (CGWindowList / WindowFromPoint) at `act()` time with a same-window recheck between decision and injection (toasts and overlays can race the click).
 - **Secure input fields:** detect `IsSecureEventInputEnabled` / password AX roles → structured `secure_field` state → safety layer converts to human-handoff gate. (Password fields blind event taps anyway; turning that into a feature is a safety story competitors lack.)
 
-### Language: pre-committed hybrid
+### Language: stay Python for Phase 1 (COM-11 decision, 2026-07-13)
 
-**Rust core** (schema, safety engine, pruning, MCP server; later the Windows driver via `windows-rs`) **+ a small Swift static library** for ScreenCaptureKit and TCC-adjacent code, linked into one binary. Rationale: Terminator validates Rust for Windows/UIA, but macOS's modern capture APIs are async Swift-first and genuinely painful through `objc2`. Numeric kill criterion: if any macOS primitive fights the FFI for >3 days in Phase 0, move that primitive to the Swift shim and move on.
+**Revised by Phase-0 evidence.** The MVP is Python + PyObjC and is live-verified end-to-end, capture included (`CGWindowListCreateImage` + `screencapture` fallback — **ScreenCaptureKit not needed**). Every "hard" primitive bridged through PyObjC without fighting the FFI, so the pre-committed Rust-core + Swift-shim rewrite is **deferred, not adopted**: harden the Python core for Phase 1, ship a signed binary via `py2app`/PyInstaller (COM-8), and keep the accessor/schema seams clean so a compiled core is a later *incremental* port, not a rewrite. If a real need appears (measured perf bottleneck, zero-dependency distribution, or `CGWindowListCreateImage` removal + streaming capture), *then* draw the boundary — **Rust** for schema/pruning/safety/MCP (+ the Phase-2 Windows/UIA driver via `windows-rs`), a **Swift static lib** for ScreenCaptureKit's async-Swift-first API — and re-run the 3-day-per-primitive kill criterion against the Python reference. Full analysis: [docs/language-boundary.md](./docs/language-boundary.md).
 
 ---
 

@@ -331,6 +331,29 @@ def press_element(element: Element) -> bool:
     return False
 
 
+def scroll_into_view(element: Element) -> bool:
+    """Scroll ``element`` into view through the AX API — no cursor movement.
+
+    A synthetic scroll-wheel event repositions the physical pointer to the
+    scroll location (macOS routes wheel events by where the cursor lands), so
+    delta scrolling is inherently intrusive. ``AXScrollToVisible`` is the one
+    cursor-free scroll: it asks the element's own scroll ancestors to reveal
+    it. It's a *reveal* operation, not a by-N-lines delta — the click/scroll
+    tool exposes it as an opt-in (``into_view``) alongside the wheel path.
+
+    ``element`` must come from a live snapshot so its handle is registered.
+
+    Returns:
+        True if the AX scroll-to-visible succeeded; False when no handle is
+        registered or the element doesn't support the action — the caller
+        falls back to a synthetic wheel scroll.
+    """
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return False
+    return _perform_action(handle, "AXScrollToVisible")
+
+
 def _copy_action_names(handle: object) -> tuple[str, ...]:
     """The AX action names ``handle`` supports (empty tuple on any AX error).
 
