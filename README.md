@@ -2,6 +2,10 @@
 
 **The accessibility-first computer-use SDK for macOS — embed native Mac control into your AI agent platform, driven by the accessibility tree instead of guessed pixel coordinates.**
 
+![computerUse driving TextEdit through accessibility refs, with its own blue cursor](./docs/hero-demo.gif)
+
+*A real, unedited capture: computerUse finds the text box as a labelled element ref (`e3`) — not a pixel it guessed — activates it through the AX API, and types. The **blue arrow is computerUse's own cursor**; your real pointer never moves.*
+
 computerUse is **infrastructure for people building AI platforms**, not an end-user app. You embed it so *your* product can control the desktop — instead of building and maintaining a whole computer-use stack yourself. Your app owns the identity: code-signing, entitlements, and OS permissions ride on **your** Developer ID, not ours (see [Integrating computerUse](#integrating-computeruse-into-your-platform)).
 
 > ⚠️ **Status: Phase-0 spike (v0.0.1).** macOS-only, early, and evolving fast. The core loop is built and live-proven (see [Proof it works](#proof-it-works)); Windows, non-Python language bindings, and a PyPI release are on the roadmap, not shipped.
@@ -147,9 +151,20 @@ The full write-up — provider contracts, the three grounding approaches, per-OS
 
 ## Proof it works
 
-- **Live end-to-end:** an agent opened TextEdit, found the text area as a structured element, clicked it, typed, and verified the result by reading the AX tree back — with the action in the audit log.
-- **Rich refs on real apps:** Calendar exposes 102 labeled clickable refs; System Settings its full sidebar — all as plain-text refs a non-vision model can target.
-- **190 tests** (unit + live e2e smoke + a real-subprocess MCP handshake).
+- **Hero workflow, live:** an agent drove Calendar create→verify→delete end-to-end — **element refs only, zero pixels** — and self-cleaned.
+- **Vision fallback, live:** native Telegram exposes *no* accessibility tree (custom-drawn), so computerUse drove it by screenshot→coordinate and sent messages — proving it controls *any* app, a11y tree or not.
+- **Non-intrusive:** ref clicks, typing, and scroll-into-view activate through the AX API and move **no** cursor.
+- **292 tests** (unit + live e2e smoke + real-subprocess MCP handshake).
+
+### Measured so far
+
+| | |
+|---|---|
+| a11y coverage | native + Chromium excellent (Chrome = 199 elements, editable address bar); custom-drawn (Telegram) = none → vision |
+| Snapshot size | ~680–1,460 tokens (dense grids more) — **comparable to one screenshot, not 10× less** |
+| Hero workflow | Calendar create→verify→delete, refs only, self-cleaning |
+
+A published **head-to-head benchmark** (completion rate / misclicks / steps / cost vs. the pixel-loop reference) is the next launch asset — it needs a harness that runs *both* approaches, so these are our honest single-sided numbers until then. Full detail: [docs/phase-0-review.md](./docs/phase-0-review.md).
 
 ## Roadmap
 
