@@ -51,6 +51,13 @@ MAX_DEPTH = 12
 #: keeping interactive/labelled children preferentially.
 MAX_CHILDREN = 24
 
+#: Tighter per-widget cap for dense, repetitive containers (grids/tables/
+#: outlines — e.g. Calendar's month grid, a spreadsheet). These blow the
+#: snapshot token budget with near-identical rows, so cap them harder; the
+#: elision marker tells the agent to scroll/re-observe for the rest (COM-12).
+DENSE_MAX_CHILDREN = 12
+_DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
+
 #: Raw children inspected per node before giving up — virtualized lists can
 #: report thousands of rows and each read costs several AX round-trips.
 _MAX_WALK_CHILDREN = 200
@@ -423,6 +430,16 @@ def estimate_tokens(snap: Snapshot) -> int:
     return (len(render_text(snap)) + 3) // 4
 
 
+def interactive_count(snap: Snapshot) -> int:
+    """How many elements the model can actually act on (clickable or editable).
+
+    Zero is the a11y→vision handoff signal: a custom-drawn app (Telegram, many
+    games, some Electron before `AXManualAccessibility`) exposes a shell with
+    no actionable refs, so the caller should fall back to screenshot+coordinates.
+    """
+    return sum(1 for el in snap.elements if el.clickable or el.editable)
+
+
 # ---------------------------------------------------------------------------
 # Pruning engine
 # ---------------------------------------------------------------------------
@@ -483,8 +500,9 @@ def _prune_inner(
             pruned = _prune_inner(child, accessor.read(child), accessor, geometry, depth + 1)
             if pruned is not None:
                 kept.append(pruned)
-        if len(kept) > MAX_CHILDREN:
-            kept, dropped = _cap_children(kept)
+        cap = DENSE_MAX_CHILDREN if raw.role in _DENSE_CONTAINER_ROLES else MAX_CHILDREN
+        if len(kept) > cap:
+            kept, dropped = _cap_children(kept, cap)
             elided += dropped
 
     clickable, editable, _ = _flags(raw)
@@ -510,11 +528,11 @@ def _prune_inner(
     )
 
 
-def _cap_children(kept: list[_PNode]) -> tuple[list[_PNode], int]:
-    """Keep the `MAX_CHILDREN` highest-priority children, in document order."""
+def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:
+    """Keep the ``cap`` highest-priority children, in document order."""
     ranked = sorted(range(len(kept)), key=lambda i: (-_keep_priority(kept[i]), i))
-    winners = sorted(ranked[:MAX_CHILDREN])
-    return [kept[i] for i in winners], len(kept) - MAX_CHILDREN
+    winners = sorted(ranked[:cap])
+    return [kept[i] for i in winners], len(kept) - cap
 
 
 def _keep_priority(node: _PNode) -> int:

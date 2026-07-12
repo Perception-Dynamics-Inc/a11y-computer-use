@@ -20,7 +20,7 @@ from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
 from computeruse import act, capture, observe, safety, server
-from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode
+from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 pytestmark = pytest.mark.anyio
@@ -640,3 +640,49 @@ async def test_scroll_delta_uses_the_wheel(mcp_server, mocked_driver, store) -> 
     result = await call_tool(mcp_server, "scroll", {"ref": "e2", "dy": 3})
     assert not result.isError
     assert len(mocked_driver["scroll"]) == 1  # delta scroll -> synthetic wheel path
+
+
+# --- a11y->vision auto-handoff signal (COM-12) --------------------------------
+
+
+def _empty_snapshot() -> Snapshot:
+    """A custom-drawn app's shell: a window with no actionable refs."""
+    return Snapshot(
+        snapshot_id="snap-empty",
+        scope=Scope.WINDOW,
+        app=APP,
+        pid=1,
+        created_at=0.0,
+        displays=(Display(display_id=1, width=2880, height=1800, scale=2.0, is_main=True),),
+        elements=(
+            Element(
+                ref="e1",
+                role="AXWindow",
+                title="Telegram",
+                value=None,
+                bounds=Bounds(1, 0, 0, 100, 100),
+                snapshot_id="snap-empty",
+            ),
+        ),
+    )
+
+
+async def test_snapshot_with_no_refs_appends_vision_handoff(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: _empty_snapshot())
+
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    assert not result.isError
+    text = result.content[0].text
+    assert "no interactive elements" in text  # the handoff signal fired
+    assert "screenshot" in text  # points the agent at the vision path
+
+
+async def test_snapshot_with_refs_has_no_handoff(mcp_server, mocked_driver, store) -> None:
+    # the default synthetic snapshot has actionable refs (Save button, text area)
+    store.set_tier(APP, safety.Tier.FULL)
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    assert not result.isError
+    assert "no interactive elements" not in result.content[0].text

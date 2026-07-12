@@ -317,3 +317,37 @@ def test_snapshot_live_smoke() -> None:
     snap = snapshot(Scope.APP, app="com.apple.finder")
     assert snap.elements, "Finder should expose at least its menu bar"
     assert estimate_tokens(snap) <= 2000
+
+
+# --- per-widget pruning + interactive coverage (COM-12) ----------------------
+
+
+def test_dense_container_capped_tighter_than_lists() -> None:
+    # A grid (dense container) with many interactive cells is capped harder
+    # than the plain MAX_CHILDREN, to keep dense widgets (calendar month grid,
+    # spreadsheets) within the snapshot token budget.
+    cells = [button(f"cell {i}", (110.0, 60.0 + 25.0 * i)) for i in range(30)]
+    grid = ax("AXGrid", at=(100.0, 50.0), size=(400.0, 900.0), children=cells)
+    root = ax("AXWindow", title="Grid", at=(100.0, 50.0), size=(500.0, 1000.0), children=[grid])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+
+    grid_el = next(el for el in snap.elements if el.role == "AXGrid")
+    kept = [el for el in snap.elements if el.parent == grid_el.ref]
+    assert len(kept) == observe.DENSE_MAX_CHILDREN
+    assert observe.DENSE_MAX_CHILDREN < MAX_CHILDREN
+    assert f"… {30 - observe.DENSE_MAX_CHILDREN} more" in render_text(snap)
+
+
+def test_interactive_count_distinguishes_hostile_apps() -> None:
+    rich = build_snapshot(
+        typical_app_window(), DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY
+    )
+    assert observe.interactive_count(rich) > 0  # buttons + text area
+
+    # a window of only static text (a custom-drawn app's shell) has none
+    plain = ax(
+        "AXWindow", title="W", at=(100.0, 50.0), size=(300.0, 200.0),
+        children=[ax("AXStaticText", value="hi", at=(110.0, 60.0), size=(100.0, 20.0))],
+    )
+    bare = build_snapshot(plain, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+    assert observe.interactive_count(bare) == 0
