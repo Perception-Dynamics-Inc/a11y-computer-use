@@ -26,6 +26,7 @@ from computeruse.schema import (
     ClipboardOp,
     ClipboardVerb,
     Drag,
+    Element,
     KeyChord,
     ObserveOp,
     Scroll,
@@ -286,6 +287,54 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
         required=required,
         granted=granted,
         reason=f"{kind} permitted at tier '{granted.value}'",
+    )
+
+
+#: Substrings (matched case-insensitively against a click target's label) that
+#: flag a plausibly irreversible action. Deliberately conservative — a
+#: false-negative just means "no extra prompt", but a false-positive nags the
+#: user on a safe click. Word-ish, clearly-destructive verbs only; "send",
+#: "remove", "reset" are intentionally excluded to avoid over-triggering.
+_DESTRUCTIVE_LABEL_SUBSTRINGS: tuple[str, ...] = (
+    "delete",
+    "move to trash",
+    "empty trash",
+    "trash",
+    "discard",
+    "erase",
+    "uninstall",
+    "permanently",
+    "wipe",
+    "don't save",
+    "don’t save",  # curly apostrophe — the label AppKit actually renders
+)
+
+
+def confirmation_prompt(action: Action, target_app: str) -> str | None:
+    """One human-readable confirmation question, or None if none is warranted.
+
+    The tier gate answers "is this app allowed to click?"; this answers the
+    orthogonal "should a human explicitly okay *this* click first?" for
+    plausibly irreversible actions (PLAN.md §8 confirmation gates). MVP scope:
+    a label heuristic on click targets — the destructive buttons users fear an
+    agent misfiring on (Delete, Move to Trash, Discard...). Only ref-resolved
+    `Click`s carry a label; coordinate clicks and every non-click action return
+    None (nothing to key the heuristic on).
+
+    Returns:
+        A confirmation question to route to the host (e.g. via MCP
+        elicitation), or None when the action needs no extra confirmation.
+    """
+    if not isinstance(action, Click) or not isinstance(action.target, Element):
+        return None
+    title = action.target.title.strip()
+    lowered = title.lower()
+    match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+    if match is None:
+        return None
+    return (
+        f'Confirm a potentially irreversible action: click "{title}" in '
+        f"{target_app}? (matched “{match}”)"
     )
 
 

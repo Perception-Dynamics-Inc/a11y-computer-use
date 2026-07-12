@@ -22,16 +22,19 @@ from computeruse.safety import (
     Tier,
     Verdict,
     check_action,
+    confirmation_prompt,
     frontmost_app,
     required_tier,
 )
 from computeruse.schema import (
     AppOp,
     AppVerb,
+    Bounds,
     Click,
     ClipboardOp,
     ClipboardVerb,
     Drag,
+    Element,
     KeyChord,
     ObserveOp,
     ObserveVerb,
@@ -351,3 +354,62 @@ def test_frontmost_app_degrades_without_appkit(monkeypatch: pytest.MonkeyPatch) 
     # ImportError — the non-macOS / missing-pyobjc path, structured not fatal.
     monkeypatch.setitem(sys.modules, "AppKit", None)
     assert frontmost_app() == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# confirmation_prompt — the irreversible-action heuristic (COM-10)
+# ---------------------------------------------------------------------------
+
+
+def _clickable(title: str) -> Element:
+    return Element(
+        ref="e2",
+        role="AXButton",
+        title=title,
+        value=None,
+        bounds=Bounds(1, 10, 10, 100, 40),
+        snapshot_id="snap-x",
+        clickable=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Delete",
+        "Delete Message",
+        "Move to Trash",
+        "Empty Trash",
+        "Discard Changes",
+        "Erase Disk…",
+        "Uninstall",
+        "Don't Save",
+        "Permanently Erase",
+        "WIPE DEVICE",  # case-insensitive
+    ],
+)
+def test_confirmation_prompt_flags_destructive_labels(label: str) -> None:
+    prompt = confirmation_prompt(Click(target=_clickable(label)), APP)
+    assert prompt is not None
+    assert label in prompt and APP in prompt
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Save", "OK", "Cancel", "Reply", "Send", "Add", "Remove Filter", "Reset Zoom", ""],
+)
+def test_confirmation_prompt_ignores_safe_labels(label: str) -> None:
+    # "Send"/"Remove"/"Reset" are intentionally NOT in the destructive set to
+    # avoid nagging on common safe buttons.
+    assert confirmation_prompt(Click(target=_clickable(label)), APP) is None
+
+
+def test_confirmation_prompt_ignores_coordinate_clicks() -> None:
+    # A raw point has no label to key the heuristic on.
+    assert confirmation_prompt(CLICK, APP) is None
+
+
+def test_confirmation_prompt_ignores_non_click_actions() -> None:
+    assert confirmation_prompt(TYPE, APP) is None
+    assert confirmation_prompt(KEY, APP) is None
+    assert confirmation_prompt(OBSERVE, APP) is None

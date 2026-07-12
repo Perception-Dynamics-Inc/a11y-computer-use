@@ -13,6 +13,7 @@ the real ``~/.computeruse`` state.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -100,7 +101,15 @@ def test_desktop_snapshot_permission_error_is_a_tool_result(tmp_path: Path) -> N
 
 @pytest.mark.skipif(not HAS_AX, reason="requires the Accessibility TCC grant")
 def test_desktop_snapshot_succeeds_when_granted(tmp_path: Path) -> None:
-    """Read-only snapshot of Finder (always running; no input injected)."""
+    """Read-only snapshot of Finder (always running; no input injected).
+
+    HOME is isolated, so the subprocess starts with an empty grant store —
+    seed a 'read' tier for Finder, otherwise the tier gate (correctly) returns
+    needs_permission before AX is ever consulted.
+    """
+    store = tmp_path / ".computeruse" / "permissions.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(json.dumps({"apps": {"com.apple.finder": {"tier": "read"}}}))
     _init, _tools, call = _drive(
         tmp_path, tool="desktop_snapshot", params={"app": "com.apple.finder"}
     )

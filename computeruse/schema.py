@@ -230,6 +230,10 @@ class ErrorCode(str, Enum):
     TIMEOUT = "timeout"
     """The operation (e.g. ``wait_for``, a hung-app AX call) timed out."""
 
+    CONFIRMATION_DECLINED = "confirmation_declined"
+    """An irreversible action needed explicit human confirmation and it was
+    declined, cancelled, or could not be requested (no elicitation channel)."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.

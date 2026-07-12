@@ -9,12 +9,14 @@ resolution, safety gating, audit logging, and structured-error rendering.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 from pathlib import Path
 
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session as client_session
+from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
 from computeruse import act, capture, observe, safety, server
@@ -515,3 +517,99 @@ async def test_clipboard_write_needs_full_tier(mcp_server, store, monkeypatch) -
     assert not read.isError  # READ tier suffices for clipboard read
     assert write.isError
     assert "deny" in write.content[0].text
+
+
+# --- confirmation gate: irreversible clicks over MCP elicitation (COM-10) ------
+
+
+def _use_destructive_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point observe at a snapshot whose e2 is a "Delete" button.
+
+    Overrides mocked_driver's snapshot/resolve_ref (later setattr wins), so the
+    click on e2 trips `safety.confirmation_prompt`.
+    """
+    base = build_synthetic_snapshot()
+    elements = tuple(
+        dataclasses.replace(el, title="Delete") if el.ref == "e2" else el
+        for el in base.elements
+    )
+    snap = dataclasses.replace(base, elements=elements)
+    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snap)
+    monkeypatch.setattr(observe, "resolve_ref", lambda s, ref, *, live=None: s.element(ref))
+
+
+async def _accept_elicitation(context, params):
+    return ElicitResult(action="accept", content={})
+
+
+async def _decline_elicitation(context, params):
+    return ElicitResult(action="decline")
+
+
+async def _snapshot_then_click_e2(mcp_server, elicitation_callback=None):
+    """One session: desktop_snapshot (sets the epoch) then click e2."""
+    async with client_session(
+        mcp_server, elicitation_callback=elicitation_callback
+    ) as client:
+        await client.call_tool("desktop_snapshot", {"app": "TextEdit"})
+        return await client.call_tool("click", {"ref": "e2"})
+
+
+async def test_destructive_click_proceeds_when_confirmed(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    _use_destructive_snapshot(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+
+    result = await _snapshot_then_click_e2(mcp_server, _accept_elicitation)
+    assert not result.isError
+    assert len(mocked_driver["click"]) == 1  # confirmed -> executed
+
+
+async def test_destructive_click_blocked_when_declined(
+    mcp_server, mocked_driver, store, audit_dir, monkeypatch
+) -> None:
+    _use_destructive_snapshot(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+
+    result = await _snapshot_then_click_e2(mcp_server, _decline_elicitation)
+    assert result.isError
+    assert "confirmation_declined" in result.content[0].text
+    assert mocked_driver["click"] == []  # never executed
+    assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
+
+
+async def test_destructive_click_fails_safe_without_elicitation(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    _use_destructive_snapshot(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+
+    # No elicitation callback => the host cannot prompt => fail-safe block.
+    result = await _snapshot_then_click_e2(mcp_server, None)
+    assert result.isError
+    assert "confirmation_declined" in result.content[0].text
+    assert mocked_driver["click"] == []
+
+
+async def test_destructive_click_gate_can_be_disabled(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    _use_destructive_snapshot(monkeypatch)
+    monkeypatch.setattr(server, "CONFIRMATION_GATE", False)
+    store.set_tier(APP, safety.Tier.FULL)
+
+    result = await _snapshot_then_click_e2(mcp_server, None)  # no channel, but gate off
+    assert not result.isError
+    assert len(mocked_driver["click"]) == 1  # proceeds without confirmation
+
+
+async def test_safe_click_never_triggers_confirmation(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    # Default synthetic e2 is "Save" (non-destructive): no elicitation even
+    # though the host offers no channel.
+    store.set_tier(APP, safety.Tier.FULL)
+    result = await _snapshot_then_click_e2(mcp_server, None)
+    assert not result.isError
+    assert len(mocked_driver["click"]) == 1

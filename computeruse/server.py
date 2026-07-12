@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -89,6 +90,17 @@ MAX_WAIT_TIMEOUT_S = 60.0
 #: ``COMPUTERUSE_AX_CLICKS=0`` to force synthetic-mouse clicks everywhere
 #: (e.g. for an app whose AX press handlers misbehave).
 PREFER_AX_ACTIONS = os.environ.get("COMPUTERUSE_AX_CLICKS", "1") != "0"
+
+#: Require explicit human confirmation before a plausibly irreversible action
+#: (see `safety.confirmation_prompt`). When on and the host offers no
+#: confirmation channel, such actions fail-safe (blocked) rather than firing
+#: unconfirmed. Set ``COMPUTERUSE_CONFIRM=0`` to disable the gate entirely.
+CONFIRMATION_GATE = os.environ.get("COMPUTERUSE_CONFIRM", "1") != "0"
+
+#: A confirmer maps a prompt to the human's yes/no. Injected per call so the
+#: transport (MCP elicitation, a CLI prompt, a test double) stays out of the
+#: safety core.
+Confirmer = Callable[[str], bool]
 
 _PERMISSION_CODES = frozenset(
     {ErrorCode.PERMISSION_DENIED_ACCESSIBILITY, ErrorCode.PERMISSION_DENIED_SCREEN}
@@ -410,14 +422,21 @@ class Runtime:
 
     # -- gate + audit -------------------------------------------------------
 
-    def _run_gated(self, action, app: str, execute, *, recheck=None, secure: bool = False):
-        """check_action → recheck → execute → audit, for EVERY action.
+    def _run_gated(
+        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
+    ):
+        """check_action → confirm → recheck → execute → audit, for EVERY action.
 
         ``recheck`` is the same-window recheck (PLAN.md §6) run between the
         permission decision and injection; it receives the gated app and
-        raises `ErrorCode.FOCUS_CHANGED` on mismatch. Refusals, recheck
-        aborts, and driver errors are audited before they propagate; a
-        SECURE_FIELD failure forces redaction of injectable params.
+        raises `ErrorCode.FOCUS_CHANGED` on mismatch. ``confirm`` is the
+        optional human-confirmation callback: when the action is plausibly
+        irreversible (`safety.confirmation_prompt`) it must return True to
+        proceed. The confirmation runs *before* the recheck so the frontmost
+        check stays closest to injection (a slow human prompt could let focus
+        drift). Refusals, declined confirmations, recheck aborts, and driver
+        errors are all audited before they propagate; a SECURE_FIELD failure
+        forces redaction of injectable params.
         """
         decision = safety.check_action(action, app, store=self.store)
         if not decision.allowed:
@@ -426,6 +445,21 @@ class Runtime:
             )
             raise ActionRefused(decision)
         try:
+            if CONFIRMATION_GATE:
+                prompt = safety.confirmation_prompt(action, app)
+                if prompt is not None and not (confirm is not None and confirm(prompt)):
+                    raise ComputerUseError(
+                        ErrorCode.CONFIRMATION_DECLINED,
+                        prompt
+                        + (
+                            " — declined."
+                            if confirm is not None
+                            else " — no confirmation channel available; blocked. "
+                            "Confirm via a host that supports elicitation, or set "
+                            "COMPUTERUSE_CONFIRM=0 to disable the gate."
+                        ),
+                        detail={"app": app, "confirmable": confirm is not None},
+                    )
             if recheck is not None:
                 recheck(app)
             result = execute()
@@ -541,6 +575,7 @@ class Runtime:
         button: str = "left",
         count: int = 1,
         modifiers: list[str] | None = None,
+        confirm: Confirmer | None = None,
     ) -> str:
         parsed_button = MouseButton(button)
         if count not in (1, 2, 3):
@@ -568,7 +603,7 @@ class Runtime:
             act.click(target, button=parsed_button, count=count, modifiers=mods)
 
         self._run_gated(
-            action, app, execute, recheck=partial(_recheck_target_app, target=target)
+            action, app, execute, recheck=partial(_recheck_target_app, target=target), confirm=confirm
         )
         return f"clicked {_describe(target)}"
 
@@ -757,9 +792,11 @@ def build_server(
         The configured server; the CLI runs it over stdio
         (``computeruse mcp``).
     """
+    import anyio.from_thread
     import anyio.to_thread
     from mcp.server.fastmcp import FastMCP, Image
     from mcp.server.fastmcp.exceptions import ToolError
+    from pydantic import BaseModel
 
     runtime = Runtime(store=store, audit=audit)
     server = FastMCP("computeruse", instructions=_INSTRUCTIONS)
@@ -777,6 +814,38 @@ def build_server(
             raise ToolError(error_text(exc)) from exc
         except ActionRefused as exc:
             raise ToolError(refusal_text(exc.decision)) from exc
+
+    class _ConfirmResponse(BaseModel):
+        """Empty elicitation schema — the human's answer is carried entirely by
+        the accept/decline/cancel action, so no fields are collected."""
+
+    async def _elicit_confirmation(ctx, prompt: str) -> bool:
+        """Ask the host to confirm via MCP elicitation; True only on 'accept'.
+
+        ``ctx`` is a ``mcp.server.fastmcp.Context`` (obtained via
+        ``server.get_context()`` rather than an annotated tool param — see the
+        note in the click tool)."""
+        result = await ctx.elicit(message=prompt, schema=_ConfirmResponse)
+        return getattr(result, "action", None) == "accept"
+
+    def _confirmer_for(ctx) -> Confirmer | None:
+        """A sync confirmer bridging a worker thread to the host's elicitation.
+
+        Returns None when the gate is disabled. When enabled but the host has
+        no elicitation channel (``ctx.elicit`` raises), the confirmer returns
+        False so `_run_gated` fails the action safely rather than firing it
+        unconfirmed.
+        """
+        if not CONFIRMATION_GATE:
+            return None
+
+        def confirm(prompt: str) -> bool:
+            try:
+                return bool(anyio.from_thread.run(_elicit_confirmation, ctx, prompt))
+            except Exception:
+                return False  # host cannot elicit -> fail-safe deny
+
+        return confirm
 
     @server.tool(name="desktop_snapshot")
     async def desktop_snapshot(app: str, scope: str = "window") -> str:
@@ -825,8 +894,16 @@ def build_server(
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
-        app moved over the target — re-observe."""
-        return await run(runtime.click, ref, x, y, display_id, button, count, modifiers)
+        app moved over the target — re-observe. A plausibly irreversible click
+        (Delete, Move to Trash, ...) first asks you to confirm via elicitation;
+        confirmation_declined means it was not approved."""
+        # get_context() (not an annotated param) keeps the mcp import lazy: an
+        # annotated `ctx: Context` would force eval_str resolution of Context
+        # against module globals, which this file's lazy import can't satisfy.
+        return await run(
+            runtime.click, ref, x, y, display_id, button, count, modifiers,
+            confirm=_confirmer_for(server.get_context()),
+        )
 
     @server.tool(name="type")
     async def type_text(text: str) -> str:
