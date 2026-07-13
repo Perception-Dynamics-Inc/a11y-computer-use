@@ -18,11 +18,16 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "pyobjc-framework-Cocoa",
-    "pyobjc-framework-Quartz",
-    "pyobjc-framework-ApplicationServices",
+    # macOS backend (pyobjc) — gated so the package installs on Windows/Linux,
+    # where only the platform-free core + the Windows driver path are used.
+    "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # cross-platform
     "mcp",
     "pillow",
+    # Windows backend deps (uiautomation, comtypes) land here gated on
+    # sys_platform == 'win32' when drivers/windows.py is implemented.
 ]
 
 [project.optional-dependencies]

@@ -8,12 +8,20 @@ contract, and that Windows is an honest, mapped stub.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from computeruse import drivers
 from computeruse.drivers.base import Driver
-from computeruse.drivers.macos import MacOSDriver
-from computeruse.drivers.windows import WindowsDriver
+from computeruse.drivers.windows import WindowsDriver  # schema-only; safe on any OS
+
+IS_MACOS = sys.platform == "darwin"
+
+# The macOS backend imports pyobjc (act/capture), so only import it on macOS —
+# this file must collect on a Windows CI runner too.
+if IS_MACOS:
+    from computeruse.drivers.macos import MacOSDriver
 
 _METHODS = (
     "ensure_trusted", "snapshot", "resolve_ref", "press_element", "scroll_into_view",
@@ -23,15 +31,18 @@ _METHODS = (
 )
 
 
-def test_get_driver_selects_macos_here() -> None:
+_BACKENDS = [WindowsDriver] + ([MacOSDriver] if IS_MACOS else [])
+
+
+def test_get_driver_selects_the_current_os() -> None:
     d = drivers.get_driver()
-    assert d.name == "macos"
-    assert isinstance(d, MacOSDriver)
+    assert d.name == drivers.current_platform()
 
 
 def test_get_driver_by_name() -> None:
-    assert drivers.get_driver("macos").name == "macos"
-    assert drivers.get_driver("windows").name == "windows"
+    assert drivers.get_driver("windows").name == "windows"  # safe on any OS
+    if IS_MACOS:  # importing the macOS backend needs pyobjc
+        assert drivers.get_driver("macos").name == "macos"
 
 
 def test_get_driver_unknown_platform_raises() -> None:
@@ -39,11 +50,13 @@ def test_get_driver_unknown_platform_raises() -> None:
         drivers.get_driver("plan9")
 
 
-def test_current_platform_is_stable() -> None:
-    assert drivers.current_platform() == "macos"  # this suite runs on macOS
+def test_current_platform_is_a_known_id() -> None:
+    plat = drivers.current_platform()
+    assert plat == ("macos" if IS_MACOS else plat)
+    assert isinstance(plat, str) and plat
 
 
-@pytest.mark.parametrize("cls", [MacOSDriver, WindowsDriver])
+@pytest.mark.parametrize("cls", _BACKENDS)
 def test_backend_satisfies_the_protocol(cls) -> None:
     d = cls()
     assert isinstance(d, Driver)  # runtime_checkable structural conformance
