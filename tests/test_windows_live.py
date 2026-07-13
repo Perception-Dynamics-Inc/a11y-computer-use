@@ -110,3 +110,28 @@ def test_windows_key_chord_select_all() -> None:
             f"Ctrl+A select-all did not replace; values={values}"
     finally:
         proc.terminate()
+
+
+def test_windows_runtime_end_to_end(tmp_path) -> None:
+    """The full server stack on Windows: Runtime + safety gating (backed by the
+    Windows system ops) + driver — snapshot Notepad, type through the *gated*
+    Runtime, and confirm via a re-snapshot."""
+    from computeruse import safety, server
+    from computeruse.drivers import _win_system
+
+    proc = _open_notepad()
+    try:
+        app_id = _win_system.frontmost_app_id()  # e.g. "notepad.exe"
+        assert app_id.lower().startswith("notepad"), app_id
+        store = safety.PermissionStore(tmp_path / "perms.json")
+        store.set_tier(app_id, safety.Tier.FULL)
+        rt = server.Runtime(store=store)
+
+        tree = rt.desktop_snapshot("notepad", "window")  # gated + UIA snapshot
+        assert "window" in tree.lower(), tree[:200]
+
+        rt.type_text("via the gated MCP Runtime on Windows")  # gated + SendInput
+        after = rt.desktop_snapshot("notepad", "window")
+        assert "via the gated MCP Runtime" in after, after[:300]
+    finally:
+        proc.terminate()
