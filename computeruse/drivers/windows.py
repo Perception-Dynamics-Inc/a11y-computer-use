@@ -53,11 +53,22 @@ class WindowsDriver:
 
     # -- observe (UI Automation) -------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
-        # IUIAutomation + a CacheRequest (batch role/name/bounds/patterns in one
-        # cross-process call — the UIA equivalent of AXUIElementSetMessaging
-        # Timeout batching). Feed the walk into observe.build_snapshot via a
-        # UIA TreeAccessor, reusing the platform-free pruning engine unchanged.
-        raise _todo("IUIAutomation.GetRootElement + FindAllBuildCache")
+        """Walk the app's window via UIA and feed the SHARED pruning engine.
+
+        `_uia` maps UIA control types onto the same AX role vocabulary the
+        engine keys off, so a Windows tree prunes/indexes identically to macOS.
+        (First increment: `FindAll` walk; a `CacheRequest` batch is the perf
+        follow-up.)
+        """
+        from computeruse import observe
+        from computeruse.drivers import _uia
+
+        root = _uia.find_window(app)  # None -> build_snapshot yields an empty snapshot
+        pid = _uia._safe(lambda: root.ProcessId) if root is not None else None
+        return observe.build_snapshot(
+            root, _uia.UIAAccessor(), scope=scope, app=app, pid=pid,
+            geometry=_uia.primary_geometry(),
+        )
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         raise _todo("re-walk UIA + observe._match_anchor (shared) against the live tree")
