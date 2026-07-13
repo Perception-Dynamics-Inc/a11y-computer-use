@@ -166,7 +166,13 @@ def refusal_text(decision: safety.Decision) -> str:
 
 
 def _frontmost_bundle() -> str:
-    """Bundle id of the frontmost app; ``"unknown"`` when undetectable."""
+    """App id of the frontmost app; ``"unknown"`` when undetectable.
+
+    macOS: bundle id. Windows: process image name (e.g. "notepad.exe")."""
+    if sys.platform != "darwin":
+        from computeruse.drivers import _win_system
+
+        return _win_system.frontmost_app_id() or "unknown"
     bundle, _pid = safety.frontmost_app()
     return bundle or "unknown"
 
@@ -191,11 +197,18 @@ def _list_apps() -> list[dict[str, object]]:
 
 
 def _running_app(identifier: str) -> tuple[object, str]:
-    """Resolve a bundle id or display name to (NSRunningApplication, bundle id).
+    """Resolve an identifier to (native app handle, app id).
+
+    macOS: (NSRunningApplication, bundle id). Windows: (None, process exe) —
+    the handle is unused on the core path; app id keys the permission grant.
 
     Raises:
-        ComputerUseError: `ErrorCode.APP_NOT_FOUND` when nothing matches.
+        ComputerUseError: `ErrorCode.APP_NOT_FOUND` when nothing matches (macOS).
     """
+    if sys.platform != "darwin":
+        from computeruse.drivers import _win_system
+
+        return None, _win_system.resolve_app(identifier)
     needle = identifier.lower()
     for running in NSWorkspace.sharedWorkspace().runningApplications():
         bundle = running.bundleIdentifier()
@@ -332,6 +345,11 @@ def _app_at_point(point: Point) -> str | None:
     window at the point) — callers degrade to no recheck rather than
     blocking, because CGWindowList excludes the menu bar and desktop.
     """
+    if sys.platform != "darwin":
+        from computeruse.drivers import _win_system
+
+        return _win_system.app_at_point_id(point.x, point.y)
+
     from computeruse import act  # lazy: pyobjc-backed CGEvent, macOS-only
 
     try:

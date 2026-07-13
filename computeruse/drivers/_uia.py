@@ -123,16 +123,21 @@ def primary_geometry() -> tuple[DisplayGeometry, ...]:
 
 
 def find_window(app: str):
-    """The top-level window Control whose title or class or process matches
+    """The top-level window Control whose title, class, or process-exe matches
     ``app`` (substring, case-insensitive), or None. ``app`` may be a window
-    title, a window ClassName, or a process exe name."""
+    title, a window ClassName, or a process exe name (e.g. "notepad.exe")."""
     import uiautomation as auto
 
+    from computeruse.drivers import _win_system
+
     needle = (app or "").lower()
+    if not needle:
+        return None
     root = auto.GetRootControl()
     for w in _safe(lambda: root.GetChildren(), []) or []:
         name = (_safe(lambda: w.Name, "") or "").lower()
         cls = (_safe(lambda: w.ClassName, "") or "").lower()
-        if needle and (needle in name or needle in cls):
+        exe = (_win_system._exe_for_pid(_safe(lambda: w.ProcessId, 0)) or "").lower()
+        if needle in name or needle in cls or needle in exe:
             return w
     return None
