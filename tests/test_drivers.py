@@ -65,11 +65,11 @@ def test_backend_satisfies_the_protocol(cls) -> None:
 
 
 def test_windows_backend_stubs_name_their_native_api() -> None:
-    # snapshot is now implemented (UIA → the shared engine); the input/capture
-    # ops are still stubs and each names the native API it maps to.
+    # snapshot / press_element / type_text are implemented via UIA + SendInput;
+    # the remaining input/capture ops are still stubs, each naming its API.
     d = WindowsDriver()
     with pytest.raises(NotImplementedError) as ei:
-        d.type_text("hi")
+        d.click(None)
     assert "SendInput" in str(ei.value)
     with pytest.raises(NotImplementedError) as ei:
         d.screenshot()
