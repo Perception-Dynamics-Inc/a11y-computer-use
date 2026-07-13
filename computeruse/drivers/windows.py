@@ -147,7 +147,12 @@ class WindowsDriver:
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
-        raise _todo("SendInput with VK codes via VkKeyScanEx / MapVirtualKeyEx (layout-aware)")
+        if dry_run:
+            return None
+        from computeruse.drivers import _win_input
+
+        _win_input.press_chord(chord)
+        return None
 
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:

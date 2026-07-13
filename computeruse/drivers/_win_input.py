@@ -66,3 +66,49 @@ def type_unicode(text: str) -> None:
     n = len(events)
     arr = (_INPUT * n)(*events)
     ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
+
+
+# --- key chords (virtual-key codes) ----------------------------------------
+
+_VK_MODS = {"ctrl": 0x11, "control": 0x11, "shift": 0x10, "alt": 0x12,
+            "win": 0x5B, "cmd": 0x5B, "meta": 0x5B}
+_VK_KEYS: dict[str, int] = {c: 0x41 + i for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")}
+_VK_KEYS.update({str(d): 0x30 + d for d in range(10)})
+_VK_KEYS.update({
+    "enter": 0x0D, "return": 0x0D, "tab": 0x09, "space": 0x20, "backspace": 0x08,
+    "delete": 0x2E, "escape": 0x1B, "esc": 0x1B, "left": 0x25, "up": 0x26,
+    "right": 0x27, "down": 0x28, "home": 0x24, "end": 0x23, "pageup": 0x21,
+    "pagedown": 0x22,
+})
+_VK_KEYS.update({f"f{i}": 0x6F + i for i in range(1, 13)})  # F1=0x70 .. F12=0x7B
+
+
+def _vk_event(vk: int, up: bool) -> "_INPUT":
+    ki = _KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP if up else 0, 0, None)
+    return _INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=ki))
+
+
+def press_chord(chord: str) -> None:
+    """Press a chord like 'ctrl+a' / 'ctrl+shift+t' via VK codes (SendInput)."""
+    parts = [p.strip().lower() for p in chord.split("+") if p.strip()]
+    if not parts:
+        raise ValueError(f"empty chord {chord!r}")
+    *mods, key = parts
+    mvks = []
+    for m in mods:
+        if m not in _VK_MODS:
+            raise ValueError(f"unknown modifier {m!r} in {chord!r}")
+        mvks.append(_VK_MODS[m])
+    if key in _VK_MODS:
+        raise ValueError(f"chord {chord!r} has no non-modifier key")
+    if key not in _VK_KEYS:
+        raise ValueError(f"unknown key {key!r} in {chord!r}")
+    kvk = _VK_KEYS[key]
+    events = (
+        [_vk_event(vk, False) for vk in mvks]
+        + [_vk_event(kvk, False), _vk_event(kvk, True)]
+        + [_vk_event(vk, True) for vk in reversed(mvks)]
+    )
+    n = len(events)
+    arr = (_INPUT * n)(*events)
+    ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
