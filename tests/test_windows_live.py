@@ -58,3 +58,27 @@ def test_windows_driver_reports_its_name() -> None:
     from computeruse.drivers import get_driver
 
     assert get_driver().name == "windows"
+
+
+def test_windows_uia_type_into_notepad() -> None:
+    """Full Windows act loop: focus the edit via a UIA pattern, type via
+    SendInput, and confirm the text via a re-snapshot — all through the driver."""
+    from computeruse.drivers.windows import WindowsDriver
+
+    driver = WindowsDriver()
+    proc = _open_notepad()
+    try:
+        snap = driver.snapshot(Scope.WINDOW, "notepad")
+        edit = next((el for el in snap.elements if el.editable), None)
+        assert edit is not None, f"no editable element; roles={[e.role for e in snap.elements]}"
+
+        assert driver.press_element(edit)  # focus the edit area (UIA SetFocus)
+        time.sleep(0.4)
+        driver.type_text("computerUse on Windows")  # SendInput Unicode
+        time.sleep(0.4)
+
+        after = driver.snapshot(Scope.WINDOW, "notepad")
+        values = [el.value for el in after.elements if el.value]
+        assert any("computerUse" in (v or "") for v in values), f"typed text missing; values={values}"
+    finally:
+        proc.terminate()

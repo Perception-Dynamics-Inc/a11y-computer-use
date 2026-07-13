@@ -74,10 +74,50 @@ class WindowsDriver:
         raise _todo("re-walk UIA + observe._match_anchor (shared) against the live tree")
 
     def press_element(self, element: Element) -> bool:
-        raise _todo("InvokePattern.Invoke / TogglePattern.Toggle / SelectionItemPattern.Select")
+        from computeruse import observe
+        from computeruse.drivers import _uia
+
+        if element.secure:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        for getter, method in (
+            ("GetInvokePattern", "Invoke"),
+            ("GetTogglePattern", "Toggle"),
+            ("GetSelectionItemPattern", "Select"),
+            ("GetExpandCollapsePattern", "Expand"),
+        ):
+            pattern = _uia._safe(lambda g=getter: getattr(handle, g)())
+            if pattern is not None:
+                try:
+                    getattr(pattern, method)()
+                    return True
+                except Exception:
+                    return False
+        if element.editable:  # a text field with no invoke pattern: focus it
+            try:
+                handle.SetFocus()
+                return True
+            except Exception:
+                return False
+        return False
 
     def scroll_into_view(self, element: Element) -> bool:
-        raise _todo("ScrollItemPattern.ScrollIntoView")
+        from computeruse import observe
+        from computeruse.drivers import _uia
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        pattern = _uia._safe(lambda: handle.GetScrollItemPattern())
+        if pattern is None:
+            return False
+        try:
+            pattern.ScrollIntoView()
+            return True
+        except Exception:
+            return False
 
     # -- act (SendInput) ----------------------------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
@@ -96,7 +136,14 @@ class WindowsDriver:
 
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
-        raise _todo("SendInput(KEYBDINPUT, KEYEVENTF_UNICODE) — the Unicode path, layout-free")
+        # Layout-free Unicode path (SendInput KEYEVENTF_UNICODE); the safety
+        # pre_check hook is applied by the Runtime's gate before this is called.
+        if dry_run or not text:
+            return None
+        from computeruse.drivers import _win_input
+
+        _win_input.type_unicode(text)
+        return None
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
