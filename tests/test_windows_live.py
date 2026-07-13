@@ -82,3 +82,31 @@ def test_windows_uia_type_into_notepad() -> None:
         assert any("computerUse" in (v or "") for v in values), f"typed text missing; values={values}"
     finally:
         proc.terminate()
+
+
+def test_windows_key_chord_select_all() -> None:
+    """Prove key chords work: type 'abc', Ctrl+A to select all, type 'X' to
+    replace — the edit should end up 'X', not 'abcX'."""
+    from computeruse.drivers.windows import WindowsDriver
+
+    driver = WindowsDriver()
+    proc = _open_notepad()
+    try:
+        snap = driver.snapshot(Scope.WINDOW, "notepad")
+        edit = next((el for el in snap.elements if el.editable), None)
+        assert edit is not None
+        driver.press_element(edit)
+        time.sleep(0.3)
+        driver.type_text("abc")
+        time.sleep(0.3)
+        driver.key_chord("ctrl+a")  # select all
+        time.sleep(0.3)
+        driver.type_text("X")  # replaces the selection
+        time.sleep(0.3)
+
+        after = driver.snapshot(Scope.WINDOW, "notepad")
+        values = [el.value for el in after.elements if el.value]
+        assert any("X" in (v or "") and "abc" not in (v or "") for v in values), \
+            f"Ctrl+A select-all did not replace; values={values}"
+    finally:
+        proc.terminate()
