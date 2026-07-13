@@ -1,0 +1,128 @@
+"""Windows backend — the port target (UI Automation / SendInput / DXGI).
+
+STATUS: skeleton, UNVERIFIED. Every method is mapped to the native API it will
+use and raises `NotImplementedError` until implemented and validated on a real
+Windows box. The point of this file is that the *contract* (the `Driver`
+protocol) is identical to macOS, so porting is "fill these in", never "touch the
+core". Full mapping + integrity/signing notes: docs/windows-port.md.
+
+Terminator (mediar-ai) already validated Rust+UIA for exactly this shape; here
+the plan is Python-first via `uiautomation`/`comtypes` + `ctypes` SendInput,
+mirroring the macOS backend.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from computeruse.schema import (
+    Bounds,
+    Element,
+    MouseButton,
+    Point,
+    Scope,
+    ScrollUnit,
+    Snapshot,
+    Target,
+    WaitCondition,
+)
+
+_TODO = (
+    "Windows backend not implemented yet — this is the port target. "
+    "Run computerUse on macOS, or implement drivers/windows.py "
+    "(see docs/windows-port.md)."
+)
+
+
+def _todo(api: str):
+    return NotImplementedError(f"{_TODO}\nThis method maps to: {api}")
+
+
+class WindowsDriver:
+    """The `Driver` protocol, to be backed by UI Automation + SendInput + DXGI."""
+
+    name = "windows"
+
+    # -- permissions --------------------------------------------------------
+    def ensure_trusted(self) -> None:
+        # Windows has no TCC; the analog is process integrity/UIPI. A medium-IL
+        # process can read UIA and SendInput to same/lower-IL windows; targeting
+        # an elevated window silently no-ops (return ErrorCode.ELEVATION_BLOCKED
+        # rather than fail). Also detect locked workstation / secure desktop.
+        return None
+
+    # -- observe (UI Automation) -------------------------------------------
+    def snapshot(self, scope: Scope, app: str) -> Snapshot:
+        # IUIAutomation + a CacheRequest (batch role/name/bounds/patterns in one
+        # cross-process call — the UIA equivalent of AXUIElementSetMessaging
+        # Timeout batching). Feed the walk into observe.build_snapshot via a
+        # UIA TreeAccessor, reusing the platform-free pruning engine unchanged.
+        raise _todo("IUIAutomation.GetRootElement + FindAllBuildCache")
+
+    def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
+        raise _todo("re-walk UIA + observe._match_anchor (shared) against the live tree")
+
+    def press_element(self, element: Element) -> bool:
+        raise _todo("InvokePattern.Invoke / TogglePattern.Toggle / SelectionItemPattern.Select")
+
+    def scroll_into_view(self, element: Element) -> bool:
+        raise _todo("ScrollItemPattern.ScrollIntoView")
+
+    # -- act (SendInput) ----------------------------------------------------
+    def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
+              modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,
+              dry_run: bool = False) -> object:
+        raise _todo("SendInput(MOUSEINPUT) at physical px; prefer UIA InvokePattern for refs")
+
+    def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
+             pre_check: Callable | None = None, dry_run: bool = False) -> object:
+        raise _todo("SendInput mouse down/move/up")
+
+    def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
+               unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
+               dry_run: bool = False) -> object:
+        raise _todo("SendInput(MOUSEEVENTF_WHEEL/HWHEEL)")
+
+    def type_text(self, text: str, *, pre_check: Callable | None = None,
+                  dry_run: bool = False) -> object:
+        raise _todo("SendInput(KEYBDINPUT, KEYEVENTF_UNICODE) — the Unicode path, layout-free")
+
+    def key_chord(self, chord: str, *, pre_check: Callable | None = None,
+                  dry_run: bool = False) -> object:
+        raise _todo("SendInput with VK codes via VkKeyScanEx / MapVirtualKeyEx (layout-aware)")
+
+    def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
+                 checker: Callable | None = None) -> Element:
+        raise _todo("poll UIA re-resolution (shared observe.wait_for logic)")
+
+    # -- capture (DXGI / GDI) ----------------------------------------------
+    def screenshot(self, display_id: int | None = None) -> object:
+        raise _todo("DXGI Desktop Duplication (BitBlt/PrintWindow fallback)")
+
+    def zoom_region(self, region: Bounds) -> bytes:
+        raise _todo("crop the DXGI frame")
+
+    # -- system / windowing -------------------------------------------------
+    def frontmost_app(self) -> tuple[str | None, int | None]:
+        raise _todo("GetForegroundWindow + GetWindowThreadProcessId")
+
+    def app_at_point(self, point: Point) -> str | None:
+        raise _todo("WindowFromPoint + process image name (the hit-test recheck)")
+
+    def running_apps(self) -> list[dict]:
+        raise _todo("EnumWindows / Toolhelp32 process snapshot")
+
+    def launch_app(self, identifier: str) -> None:
+        raise _todo("ShellExecute / CreateProcess")
+
+    def activate_app(self, identifier: str) -> str:
+        raise _todo("SetForegroundWindow")
+
+    def windows(self) -> list[dict]:
+        raise _todo("EnumWindows + GetWindowText/Rect")
+
+    def read_clipboard(self) -> str | None:
+        raise _todo("OpenClipboard/GetClipboardData(CF_UNICODETEXT)")
+
+    def write_clipboard(self, text: str) -> None:
+        raise _todo("OpenClipboard/SetClipboardData(CF_UNICODETEXT)")
