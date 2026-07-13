@@ -33,20 +33,29 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING
 
-import Quartz
-from AppKit import (
-    NSApplicationActivateIgnoringOtherApps,
-    NSPasteboard,
-    NSPasteboardTypeString,
-    NSRunningApplication,
-    NSWorkspace,
-)
+if sys.platform == "darwin":
+    # macOS platform helpers. The Driver seam isolates everything OS-specific,
+    # so server.py (the Runtime + MCP surface) imports on Windows/Linux too;
+    # get_driver() picks the backend and these names are only used on macOS.
+    import Quartz
+    from AppKit import (
+        NSApplicationActivateIgnoringOtherApps,
+        NSPasteboard,
+        NSPasteboardTypeString,
+        NSRunningApplication,
+        NSWorkspace,
+    )
 
-from computeruse import act, capture, drivers, observe, safety
+from computeruse import drivers, observe, safety
+
+#: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
+#: the (pyobjc-backed) capture module at build time on non-macOS.
+_DEFAULT_MAX_LONG_EDGE = 1280
 from computeruse.schema import (
     MODIFIER_KEYS,
     AppOp,
@@ -323,6 +332,8 @@ def _app_at_point(point: Point) -> str | None:
     window at the point) — callers degrade to no recheck rather than
     blocking, because CGWindowList excludes the menu bar and desktop.
     """
+    from computeruse import act  # lazy: pyobjc-backed CGEvent, macOS-only
+
     try:
         gx, gy = act._point_to_global(point)
     except ValueError:
@@ -556,9 +567,11 @@ class Runtime:
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
     def screenshot(
-        self, display_id: int | None = None, max_long_edge: int = capture.DEFAULT_MAX_LONG_EDGE
+        self, display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE
     ) -> tuple[str, capture.ScaledImage]:
-        def execute() -> tuple[str, capture.ScaledImage]:
+        def execute() -> tuple[str, "capture.ScaledImage"]:
+            from computeruse import capture  # lazy: pyobjc-backed, macOS-only
+
             shot = self.driver.screenshot(display_id)
             scaled = capture.downscale(shot.png, max_long_edge)
             display = shot.display
@@ -634,7 +647,10 @@ class Runtime:
         return f"typed {len(text)} characters"
 
     def key(self, chord: str) -> str:
-        act.parse_chord(chord)  # validate before gating, so bad chords fail fast
+        if sys.platform == "darwin":
+            from computeruse import act  # lazy: US-layout keycode parse, macOS
+
+            act.parse_chord(chord)  # validate before gating, so bad chords fail fast
         action = KeyChord(chord=chord)
         self._run_gated(
             action, _frontmost_bundle(), lambda: self.driver.key_chord(chord), recheck=_recheck_frontmost
@@ -892,7 +908,7 @@ def build_server(
         return await run(runtime.desktop_snapshot, app, scope)
 
     @server.tool(name="screenshot")
-    async def screenshot(display_id: int | None = None, max_long_edge: int = capture.DEFAULT_MAX_LONG_EDGE) -> list:
+    async def screenshot(display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE) -> list:
         """Capture one display (default: main) as a PNG downscaled to at most
         max_long_edge px on its long edge. The accompanying text states the
         physical resolution and how to map image coordinates back to physical
