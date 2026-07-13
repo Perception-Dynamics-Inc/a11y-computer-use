@@ -161,7 +161,14 @@ async def test_snapshot_then_click_round_trip(
     (target, kwargs), = mocked_driver["click"]
     assert isinstance(target, Element)
     assert target.ref == "e2"
-    assert kwargs == {"button": server.MouseButton.LEFT, "count": 1, "modifiers": ()}
+    # the macOS driver delegates to act.click with the full explicit signature
+    assert kwargs == {
+        "button": server.MouseButton.LEFT,
+        "count": 1,
+        "modifiers": (),
+        "pre_check": None,
+        "dry_run": False,
+    }
 
     snap_entry, click_entry = audit_entries(audit_dir)  # observation is audited too
     assert snap_entry["action"] == "observeop"

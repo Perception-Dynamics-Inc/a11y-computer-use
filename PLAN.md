@@ -195,6 +195,10 @@ Actions:
 
 **Revised by Phase-0 evidence.** The MVP is Python + PyObjC and is live-verified end-to-end, capture included (`CGWindowListCreateImage` + `screencapture` fallback — **ScreenCaptureKit not needed**). Every "hard" primitive bridged through PyObjC without fighting the FFI, so the pre-committed Rust-core + Swift-shim rewrite is **deferred, not adopted**: harden the Python core for Phase 1, ship a signed binary via `py2app`/PyInstaller (COM-8), and keep the accessor/schema seams clean so a compiled core is a later *incremental* port, not a rewrite. If a real need appears (measured perf bottleneck, zero-dependency distribution, or `CGWindowListCreateImage` removal + streaming capture), *then* draw the boundary — **Rust** for schema/pruning/safety/MCP (+ the Phase-2 Windows/UIA driver via `windows-rs`), a **Swift static lib** for ScreenCaptureKit's async-Swift-first API — and re-run the 3-day-per-primitive kill criterion against the Python reference. Full analysis: [docs/language-boundary.md](./docs/language-boundary.md).
 
+### Platform seam: one `Driver` protocol per OS (cross-platform by construction)
+
+**Shipped 2026-07-13.** Everything OS-specific — walking the a11y tree, synthesizing input, capturing pixels, enumerating windows — lives behind the `Driver` protocol (`computeruse/drivers/`). The schema, pruning engine, safety layer, and MCP server are platform-free and **shared across OSes**. macOS is implemented (`AXUIElement`/`CGEvent`/Quartz, live-verified through the seam); Windows is a **mapped skeleton** (`IUIAutomation`/`SendInput`/DXGI, unverified) — every method names the native API it will use. `get_driver()` selects by OS and the Runtime routes every platform op through it, so **adding an OS is "implement `Driver`", never "touch the core".** Port guide: [docs/windows-port.md](./docs/windows-port.md).
+
 ---
 
 ## 7. Distribution & trust (launch blockers, not polish)

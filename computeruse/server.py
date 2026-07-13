@@ -46,7 +46,7 @@ from AppKit import (
     NSWorkspace,
 )
 
-from computeruse import act, capture, observe, safety
+from computeruse import act, capture, drivers, observe, safety
 from computeruse.schema import (
     MODIFIER_KEYS,
     AppOp,
@@ -427,9 +427,13 @@ class Runtime:
         *,
         store: safety.PermissionStore | None = None,
         audit: safety.AuditLog | None = None,
+        driver: "drivers.Driver | None" = None,
     ) -> None:
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        #: The OS backend. Every platform op (observe/act/capture) routes through
+        #: it, so the Runtime is OS-agnostic; defaults to the current platform.
+        self.driver = driver if driver is not None else drivers.get_driver()
         self._current: Snapshot | None = None
 
     # -- gate + audit -------------------------------------------------------
@@ -523,7 +527,7 @@ class Runtime:
         """
         if ref is not None:
             snap, _anchor = self._anchor(ref)
-            live = observe.resolve_ref(snap, ref)
+            live = self.driver.resolve_ref(snap, ref)
             return live, snap.app or _frontmost_bundle()
         if x is None or y is None:
             raise ValueError("target an element ref, or both x and y coordinates")
@@ -538,11 +542,11 @@ class Runtime:
             raise ValueError("scope must be 'window' or 'app' (display/element land later)")
         # TCC before per-app gating: on an ungranted machine the actionable
         # error is the doctor hint, not a per-app permission question.
-        observe.ensure_trusted()
+        self.driver.ensure_trusted()
         _running, bundle = _running_app(app)  # grants are keyed by bundle id
 
         def execute() -> str:
-            snap = observe.snapshot(Scope(scope), app=bundle)
+            snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
             text = observe.render_text(snap)
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
@@ -555,7 +559,7 @@ class Runtime:
         self, display_id: int | None = None, max_long_edge: int = capture.DEFAULT_MAX_LONG_EDGE
     ) -> tuple[str, capture.ScaledImage]:
         def execute() -> tuple[str, capture.ScaledImage]:
-            shot = capture.screenshot(display_id)
+            shot = self.driver.screenshot(display_id)
             scaled = capture.downscale(shot.png, max_long_edge)
             display = shot.display
             text = (
@@ -574,7 +578,7 @@ class Runtime:
         return self._run_gated(
             ObserveOp(verb=ObserveVerb.ZOOM, app=app),
             app,
-            lambda: capture.zoom_region(
+            lambda: self.driver.zoom_region(
                 Bounds(display_id=display_id, x=x, y=y, width=width, height=height)
             ),
         )
@@ -612,10 +616,10 @@ class Runtime:
                 and parsed_button is MouseButton.LEFT
                 and count == 1
                 and not mods
-                and observe.press_element(target)
+                and self.driver.press_element(target)
             ):
                 return  # activated via AX — the user's cursor never moved
-            act.click(target, button=parsed_button, count=count, modifiers=mods)
+            self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
 
         self._run_gated(
             action, app, execute, recheck=partial(_recheck_target_app, target=target), confirm=confirm
@@ -625,7 +629,7 @@ class Runtime:
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
         self._run_gated(
-            action, _frontmost_bundle(), lambda: act.type_text(text), recheck=_recheck_frontmost
+            action, _frontmost_bundle(), lambda: self.driver.type_text(text), recheck=_recheck_frontmost
         )
         return f"typed {len(text)} characters"
 
@@ -633,7 +637,7 @@ class Runtime:
         act.parse_chord(chord)  # validate before gating, so bad chords fail fast
         action = KeyChord(chord=chord)
         self._run_gated(
-            action, _frontmost_bundle(), lambda: act.key_chord(chord), recheck=_recheck_frontmost
+            action, _frontmost_bundle(), lambda: self.driver.key_chord(chord), recheck=_recheck_frontmost
         )
         return f"pressed {chord}"
 
@@ -660,10 +664,10 @@ class Runtime:
                 into_view
                 and PREFER_AX_ACTIONS
                 and isinstance(target, Element)
-                and observe.scroll_into_view(target)
+                and self.driver.scroll_into_view(target)
             ):
                 return
-            act.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
+            self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
             action, app, execute, recheck=partial(_recheck_target_app, target=target)
@@ -688,7 +692,7 @@ class Runtime:
         self._run_gated(
             action,
             start_app,
-            lambda: act.drag(start, end),
+            lambda: self.driver.drag(start, end),
             recheck=partial(_recheck_target_app, target=start),
         )
         return f"dragged {_describe(start)} -> {_describe(end)}"
@@ -703,7 +707,7 @@ class Runtime:
         self._run_gated(
             action,
             snap.app or _frontmost_bundle(),
-            lambda: act.wait_for(
+            lambda: self.driver.wait_for(
                 anchor, condition=parsed, timeout_s=timeout_s, checker=_wait_checker(snap)
             ),
         )
