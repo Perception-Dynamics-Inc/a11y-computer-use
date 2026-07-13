@@ -29,8 +29,8 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       # pyobjc is gated to sys_platform == 'darwin', so this installs cleanly on
-      # Windows — proving the package is installable without the macOS backend.
-      - run: pip install -e ".[dev]"
+      # Windows; the [windows] extra pulls the UIA deps for the live backend.
+      - run: pip install -e ".[dev,windows]"
       - name: import + driver selection smoke
         run: >
           python -c "import computeruse;
@@ -40,6 +40,10 @@ jobs:
           assert d.name == 'windows', d.name"
       # The shared, platform-free core (schema, pruning engine, ref lifecycle)
       # and the driver seam must pass on Windows too — that's the whole point of
-      # the Driver abstraction. The Windows *backend* itself is still a skeleton.
+      # the Driver abstraction.
       - name: platform-free core + driver seam
         run: pytest tests/test_drivers.py tests/test_observe.py -q
+      # The live Windows backend: UIA snapshot of Notepad through the SHARED
+      # pruning engine, on a real windows-latest runner.
+      - name: windows backend (live UIA)
+        run: pytest tests/test_windows_live.py -q -s

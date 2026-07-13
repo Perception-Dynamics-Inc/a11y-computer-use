@@ -64,14 +64,15 @@ def test_backend_satisfies_the_protocol(cls) -> None:
         assert callable(getattr(d, method)), f"{cls.__name__} missing {method}"
 
 
-def test_windows_backend_is_an_honest_mapped_stub() -> None:
+def test_windows_backend_stubs_name_their_native_api() -> None:
+    # snapshot is now implemented (UIA → the shared engine); the input/capture
+    # ops are still stubs and each names the native API it maps to.
     d = WindowsDriver()
-    # each unimplemented op names the native API it maps to
-    with pytest.raises(NotImplementedError) as ei:
-        d.snapshot(None, "app")
-    assert "UIAutomation" in str(ei.value)
     with pytest.raises(NotImplementedError) as ei:
         d.type_text("hi")
     assert "SendInput" in str(ei.value)
+    with pytest.raises(NotImplementedError) as ei:
+        d.screenshot()
+    assert "DXGI" in str(ei.value)
     # the permission probe is a benign no-op (Windows uses integrity, not TCC)
     assert d.ensure_trusted() is None

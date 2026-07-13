@@ -32,6 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+windows = ["uiautomation; sys_platform == 'win32'"]
 
 [project.scripts]
 computeruse = "computeruse.cli:main"
