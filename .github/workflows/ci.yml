@@ -43,6 +43,14 @@ jobs:
       # the Driver abstraction.
       - name: platform-free core + driver seam
         run: pytest tests/test_drivers.py tests/test_observe.py -q
+      # The MCP server (Runtime + 12-tool surface) must import and build on
+      # Windows — an agent has to be able to run `computeruse mcp` there.
+      - name: MCP server imports + builds on Windows
+        run: >
+          python -c "import computeruse.server as s;
+          srv = s.build_server();
+          assert srv is not None and srv.name == 'computeruse', srv;
+          print('MCP server built on Windows:', srv.name)"
       # The live Windows backend: UIA snapshot of Notepad through the SHARED
       # pruning engine, on a real windows-latest runner.
       - name: windows backend (live UIA)

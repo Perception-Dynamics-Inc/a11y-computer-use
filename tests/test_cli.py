@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from computeruse import cli, doctor, observe, safety, server
+from computeruse import act, cli, doctor, observe, safety, server
 from tests.conftest import HAS_AX
 from tests.test_doctor import TERMINAL_PS, _canned
 
@@ -133,7 +133,8 @@ def test_run_once_granted_action_executes(capsys, home, fake_front, monkeypatch)
         FRONT, safety.Tier.FULL
     )
     pressed: list[str] = []
-    monkeypatch.setattr(server.act, "key_chord", lambda chord, **kw: pressed.append(chord) or [])
+    # the Runtime routes key through the driver, which delegates to act.key_chord
+    monkeypatch.setattr(act, "key_chord", lambda chord, **kw: pressed.append(chord) or [])
     assert cli.main(["run-once", '{"tool": "key", "chord": "cmd+s"}']) == 0
     assert capsys.readouterr().out.strip() == "pressed cmd+s"
     assert pressed == ["cmd+s"]
