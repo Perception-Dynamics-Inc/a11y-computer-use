@@ -24,7 +24,9 @@ dependencies = [
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
     # cross-platform
-    "mcp",
+    # Pin below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (server.py imports
+    # FastMCP from there). The 1.x line (tested on 1.28.x) keeps that import.
+    "mcp<2",
     "pillow",
     # Windows backend deps (uiautomation, comtypes) land here gated on
     # sys_platform == 'win32' when drivers/windows.py is implemented.
@@ -33,6 +35,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 windows = ["uiautomation; sys_platform == 'win32'"]
+# Linux a11y-first backend: PyGObject exposes the AT-SPI2 client (gi.repository
+# .Atspi) for observe + XTEST event generation; python-xlib (pure Python) covers
+# window/frontmost/clipboard. Both need the system AT-SPI2 typelib + bus at
+# runtime: apt install gir1.2-atspi-2.0 at-spi2-core (see docs/linux-port.md).
+linux = [
+    "PyGObject; sys_platform == 'linux'",
+    "python-xlib; sys_platform == 'linux'",
+]
 
 [project.scripts]
 computeruse = "computeruse.cli:main"

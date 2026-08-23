@@ -14,12 +14,13 @@ import pytest
 
 from computeruse import drivers
 from computeruse.drivers.base import Driver
+from computeruse.drivers.linux import LinuxDriver  # lazy a11y imports; safe on any OS
 from computeruse.drivers.windows import WindowsDriver  # schema-only; safe on any OS
 
 IS_MACOS = sys.platform == "darwin"
 
 # The macOS backend imports pyobjc (act/capture), so only import it on macOS —
-# this file must collect on a Windows CI runner too.
+# this file must collect on a Windows/Linux CI runner too.
 if IS_MACOS:
     from computeruse.drivers.macos import MacOSDriver
 
@@ -31,7 +32,7 @@ _METHODS = (
 )
 
 
-_BACKENDS = [WindowsDriver] + ([MacOSDriver] if IS_MACOS else [])
+_BACKENDS = [WindowsDriver, LinuxDriver] + ([MacOSDriver] if IS_MACOS else [])
 
 
 def test_get_driver_selects_the_current_os() -> None:
@@ -62,6 +63,13 @@ def test_backend_satisfies_the_protocol(cls) -> None:
     assert isinstance(d, Driver)  # runtime_checkable structural conformance
     for method in _METHODS:
         assert callable(getattr(d, method)), f"{cls.__name__} missing {method}"
+
+
+def test_linux_backend_selects_and_names() -> None:
+    # LinuxDriver is fully implemented (not a stub); it must satisfy the protocol
+    # and report its name on any OS (a11y imports are lazy, so import is safe).
+    assert drivers.get_driver("linux").name == "linux"
+    assert isinstance(LinuxDriver(), Driver)
 
 
 def test_windows_backend_stubs_name_their_native_api() -> None:

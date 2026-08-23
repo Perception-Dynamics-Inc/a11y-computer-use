@@ -165,14 +165,26 @@ def refusal_text(decision: safety.Decision) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _system_ops():
+    """The platform system-ops module (frontmost / app-at-point / resolve /
+    windows / clipboard). macOS is handled inline; Windows and Linux each have a
+    module exposing the same function surface."""
+    if sys.platform.startswith("win"):
+        from computeruse.drivers import _win_system
+
+        return _win_system
+    from computeruse.drivers import _linux_system
+
+    return _linux_system
+
+
 def _frontmost_bundle() -> str:
     """App id of the frontmost app; ``"unknown"`` when undetectable.
 
-    macOS: bundle id. Windows: process image name (e.g. "notepad.exe")."""
+    macOS: bundle id. Windows: process image name (e.g. "notepad.exe").
+    Linux: process comm name (e.g. "gedit")."""
     if sys.platform != "darwin":
-        from computeruse.drivers import _win_system
-
-        return _win_system.frontmost_app_id() or "unknown"
+        return _system_ops().frontmost_app_id() or "unknown"
     bundle, _pid = safety.frontmost_app()
     return bundle or "unknown"
 
@@ -206,9 +218,7 @@ def _running_app(identifier: str) -> tuple[object, str]:
         ComputerUseError: `ErrorCode.APP_NOT_FOUND` when nothing matches (macOS).
     """
     if sys.platform != "darwin":
-        from computeruse.drivers import _win_system
-
-        return None, _win_system.resolve_app(identifier)
+        return None, _system_ops().resolve_app(identifier)
     needle = identifier.lower()
     for running in NSWorkspace.sharedWorkspace().runningApplications():
         bundle = running.bundleIdentifier()
@@ -346,9 +356,7 @@ def _app_at_point(point: Point) -> str | None:
     blocking, because CGWindowList excludes the menu bar and desktop.
     """
     if sys.platform != "darwin":
-        from computeruse.drivers import _win_system
-
-        return _win_system.app_at_point_id(point.x, point.y)
+        return _system_ops().app_at_point_id(point.x, point.y)
 
     from computeruse import act  # lazy: pyobjc-backed CGEvent, macOS-only
 
@@ -410,13 +418,14 @@ def _recheck_target_app(app: str, target: Target) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _wait_checker(snap: Snapshot) -> act.WaitChecker:
-    """Build the `act.wait_for` checker: poll `observe.resolve_ref` and map
-    its outcome onto the requested condition."""
+def _wait_checker(snap: Snapshot, driver) -> "act.WaitChecker":
+    """Build the wait checker: re-resolve the ref through the driver (so the
+    re-snapshot uses the current OS backend, not macOS's `observe.snapshot`) and
+    map its outcome onto the requested condition."""
 
     def checker(target: Element, condition: WaitCondition) -> Element | None:
         try:
-            live = observe.resolve_ref(snap, target.ref)
+            live = driver.resolve_ref(snap, target.ref)
         except ComputerUseError as exc:
             if exc.code is ErrorCode.STALE_REF:
                 return target if condition is WaitCondition.GONE else None
@@ -742,7 +751,8 @@ class Runtime:
             action,
             snap.app or _frontmost_bundle(),
             lambda: self.driver.wait_for(
-                anchor, condition=parsed, timeout_s=timeout_s, checker=_wait_checker(snap)
+                anchor, condition=parsed, timeout_s=timeout_s,
+                checker=_wait_checker(snap, self.driver),
             ),
         )
         return f"{ref} {parsed.value}: satisfied"

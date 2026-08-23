@@ -55,3 +55,71 @@ jobs:
       # pruning engine, on a real windows-latest runner.
       - name: windows backend (live UIA)
         run: pytest tests/test_windows_live.py -q -s
+
+  linux:
+    name: Linux · AT-SPI2 backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The AT-SPI2 stack: the a11y bus (at-spi2-core), the GI typelibs the
+      # driver imports (Atspi, Gtk3), apt's PyGObject (python3-gi), a virtual X
+      # server + D-Bus session for the live run, and xclip for the clipboard.
+      - name: install AT-SPI2 / GTK / X11 system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
+            xvfb dbus dbus-x11 xclip
+      # No setup-python here on purpose: apt's python3-gi is built for the
+      # distro interpreter, and setup-python's cannot import it. So the venv is
+      # created from the runner's /usr/bin/python3 with --system-site-packages —
+      # gi/Atspi resolve from apt, everything else (computeruse, pytest,
+      # python-xlib, pillow) from pip. The [linux] extra is skipped so pip never
+      # tries to build PyGObject from source.
+      - name: venv with system gi
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]" python-xlib
+      - name: import + driver selection smoke
+        run: >
+          .venv/bin/python -c "import computeruse;
+          from computeruse.drivers import get_driver, current_platform;
+          d = get_driver();
+          print('platform:', current_platform(), '| driver:', d.name);
+          assert d.name == 'linux', d.name"
+      # The shared, platform-free core (schema, pruning engine, ref lifecycle),
+      # the driver seam, and the bus-free synthetic AT-SPI tests must pass on
+      # Linux too — that's the whole point of the Driver abstraction.
+      - name: platform-free core + driver seam + synthetic
+        run: .venv/bin/pytest tests/test_drivers.py tests/test_observe.py tests/test_linux_synthetic.py -q
+      # The MCP server (Runtime + 12-tool surface) must import and build on
+      # Linux — an agent has to be able to run `computeruse mcp` there.
+      - name: MCP server imports + builds on Linux
+        run: >
+          .venv/bin/python -c "import computeruse.server as s;
+          srv = s.build_server();
+          assert srv is not None and srv.name == 'computeruse', srv;
+          print('MCP server built on Linux:', srv.name)"
+      # The live Linux backend: AT-SPI2 snapshot + a11y-first focus/type of a
+      # real GTK3 window, on a real ubuntu-latest runner. Headless AT-SPI needs
+      # three buses brought up in order: Xvfb (X server), dbus-run-session (a
+      # session bus), and org.a11y.Bus (the a11y bus) — at-spi-bus-launcher
+      # lives at /usr/libexec on ubuntu-24.04 and is started explicitly with
+      # --launch-immediately so the registry is up before the GTK app;
+      # GTK_MODULES=gail:atk-bridge + NO_AT_BRIDGE=0 force GTK3's atk-bridge on
+      # so the app publishes its tree. (test_linux_live.py self-skips if the
+      # bus still isn't reachable, so this stays green either way.)
+      - name: linux backend (live AT-SPI2)
+        env:
+          GTK_MODULES: gail:atk-bridge
+          NO_AT_BRIDGE: "0"
+        run: |
+          xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
+            ( /usr/libexec/at-spi-bus-launcher --launch-immediately & ) 2>/dev/null
+            sleep 2
+            timeout -k 5 120 .venv/bin/pytest tests/test_linux_live.py -q -rs
+            code=$?
+            pkill -9 -f cuatestapp 2>/dev/null; pkill -9 at-spi-bus-launcher 2>/dev/null
+            exit $code
+          '

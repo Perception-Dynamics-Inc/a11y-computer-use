@@ -16,11 +16,13 @@ from computeruse.drivers.base import Driver
 
 
 def current_platform() -> str:
-    """"macos" | "windows" | the raw ``sys.platform`` for anything else."""
+    """"macos" | "windows" | "linux" | the raw ``sys.platform`` otherwise."""
     if sys.platform == "darwin":
         return "macos"
     if sys.platform.startswith("win"):
         return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
     return sys.platform
 
 
@@ -39,8 +41,12 @@ def get_driver(name: str | None = None) -> Driver:
         from computeruse.drivers.windows import WindowsDriver
 
         return WindowsDriver()
+    if target == "linux":
+        from computeruse.drivers.linux import LinuxDriver
+
+        return LinuxDriver()
     raise NotImplementedError(
-        f"no computerUse driver for platform {target!r}; supported: macos, windows"
+        f"no computerUse driver for platform {target!r}; supported: macos, windows, linux"
     )
 
 

@@ -15,3 +15,6 @@ dist/
 
 # Throwaway live-driver scripts and their local state
 scratch/
+
+# Internal strategy/planning context — never publish in the open-source repo
+.claude/knowledgebase/

@@ -1,0 +1,408 @@
+"""AT-SPI2 adapter: presents the Linux accessibility tree to the SHARED,
+platform-free pruning engine (`observe.build_snapshot`).
+
+Same trick as the Windows adapter (`_uia.py`): map AT-SPI role names onto the
+**same AX role vocabulary** the pruning engine keys off (`AXButton`,
+`AXTextField`, `AXWindow`, ...) and AT-SPI action names onto the AX action names
+(`AXPress`/`AXPick`). Then a Linux tree prunes/indexes through the identical
+engine as macOS and Windows, with zero engine changes.
+
+Binding: PyGObject's `gi.repository.Atspi` (the modern AT-SPI2 client). Imported
+lazily so `drivers` stays import-safe on macOS/Windows. Every attribute read is
+defensive — AT-SPI is a D-Bus protocol with no batch read, so any single call
+can be slow or fail cross-process, and a flaky read must degrade to a sane
+default, not crash the walk. (The batch/prefetch weakness AT-SPI has vs UIA's
+`CacheRequest` / AX's multi-attribute reads is why we cap the fetched children:
+see `_MAX_CHILDREN_FETCH`. A subtree cache/diff is the perf follow-up.)
+
+Linux-only; imported lazily by `drivers/linux.py`.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Sequence
+
+from computeruse.observe import DisplayGeometry, RawNode
+from computeruse.schema import Display
+
+# AT-SPI role name (english, from get_role_name()) -> canonical AX role.
+# Keyed by the human role-name string rather than the numeric Atspi.Role enum
+# because the strings are stable across atspi2 versions and bindings.
+_ROLE = {
+    "push button": "AXButton",
+    "toggle button": "AXButton",
+    "spin button": "AXTextField",
+    "button": "AXButton",
+    "check box": "AXCheckBox",
+    "check menu item": "AXMenuItem",
+    "radio button": "AXRadioButton",
+    "radio menu item": "AXMenuItem",
+    "link": "AXLink",
+    "entry": "AXTextField",
+    "password text": "AXSecureTextField",
+    "text": "AXTextArea",
+    "document text": "AXTextArea",
+    "document frame": "AXGroup",
+    "document web": "AXGroup",
+    "document email": "AXGroup",
+    "label": "AXStaticText",
+    "static": "AXStaticText",
+    "heading": "AXStaticText",
+    "paragraph": "AXStaticText",
+    "caption": "AXStaticText",
+    "image": "AXImage",
+    "icon": "AXImage",
+    "frame": "AXWindow",
+    "window": "AXWindow",
+    "dialog": "AXWindow",
+    "alert": "AXWindow",
+    "file chooser": "AXWindow",
+    "color chooser": "AXWindow",
+    "menu item": "AXMenuItem",
+    "menu bar": "AXMenuBar",
+    "menu": "AXMenu",
+    "popup menu": "AXMenu",
+    "list": "AXList",
+    "list box": "AXList",
+    "list item": "AXRow",
+    "tree": "AXOutline",
+    "tree table": "AXOutline",
+    "tree item": "AXRow",
+    "table": "AXTable",
+    "combo box": "AXComboBox",
+    "tool bar": "AXToolbar",
+    "scroll bar": "AXScrollBar",
+    "scroll pane": "AXScrollArea",
+    "viewport": "AXScrollArea",
+    "page tab list": "AXTabGroup",
+    "page tab": "AXButton",
+    "panel": "AXGroup",
+    "filler": "AXGroup",
+    "section": "AXGroup",
+    "grouping": "AXGroup",
+    "redundant object": "AXUnknown",
+    "separator": "AXSplitter",
+    "unknown": "AXUnknown",
+}
+
+# AT-SPI action name (lowercased) -> AX action the pruning engine treats as
+# "interactive" (`_PRESS_ACTIONS` = AXPress/AXOpen/AXConfirm/AXPick).
+_PRESS_ACTION_NAMES = frozenset(
+    {"click", "press", "activate", "do default", "jump", "open", "toggle",
+     "expand", "collapse", "expand or contract", "show", "showmenu", "menu"}
+)
+_PICK_ACTION_NAMES = frozenset({"select", "pick"})
+
+#: Cap on children fetched per node. AT-SPI has no batch read (one D-Bus
+#: round-trip per get_child_at_index), so fetching a virtualized 10k-row list is
+#: ruinous; the engine only walks the first `_MAX_WALK_CHILDREN` (200) anyway,
+#: so stop just above that. Overflow is elided by the engine's fan-out caps.
+_MAX_CHILDREN_FETCH = 250
+
+_inited = False
+
+
+def _atspi():
+    """The `Atspi` module, initialized once. Raises ImportError if PyGObject /
+    the AT-SPI2 typelib are absent (the driver turns that into a clear message)."""
+    global _inited
+    import gi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    if not _inited:
+        _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
+        _inited = True
+    return Atspi
+
+
+def _safe(fn, default=None):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def _call_first(obj, names, *args, default=None):
+    """Call the first method in ``names`` that exists on ``obj`` (binding-version
+    tolerant — atspi2 renamed a few getters across releases)."""
+    for name in names:
+        method = getattr(obj, name, None)
+        if method is not None:
+            return _safe(lambda m=method: m(*args), default)
+    return default
+
+
+# ---------------------------------------------------------------------------
+# Per-node reads (each defensive; each may be a D-Bus round-trip)
+# ---------------------------------------------------------------------------
+
+
+def _role_name(acc) -> str:
+    return (_call_first(acc, ("get_role_name",), default="") or "").lower()
+
+
+def _component(acc):
+    return _call_first(acc, ("get_component_iface", "get_component"))
+
+
+def _extents(acc):
+    """(position, size) in SCREEN pixels, or (None, None)."""
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return None, None
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    rect = _safe(lambda: comp.get_extents(coord))
+    if rect is None:
+        return None, None
+    w = float(getattr(rect, "width", 0) or 0)
+    h = float(getattr(rect, "height", 0) or 0)
+    if w <= 0 or h <= 0:
+        return None, None
+    return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
+
+
+def _action_iface(acc):
+    return _call_first(acc, ("get_action_iface", "get_action"))
+
+
+def _action_names(acc) -> tuple[str, ...]:
+    """AX action names for this node, mapped from its AT-SPI actions."""
+    action = _action_iface(acc)
+    if action is None:
+        return ()
+    n = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    out: list[str] = []
+    for i in range(int(n)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES:
+            out.append("AXPress")
+        elif raw in _PICK_ACTION_NAMES:
+            out.append("AXPick")
+    return tuple(dict.fromkeys(out))  # de-dup, preserve order
+
+
+def _value_text(acc, role: str) -> object | None:
+    """The node's current value: text contents for text roles, numeric value
+    for sliders/progress. Secure fields never have their value read here (the
+    engine also blanks AXSecureTextField values).
+
+    Text is read via the explicit interface class form ``Atspi.Text.get_text(acc,
+    0, -1)``. The instance form (``acc.get_text_iface().get_text(a, b)``) resolves
+    to ``Atspi.Accessible.get_text`` (a 1-arg method) on this binding and raises
+    TypeError — which, swallowed defensively, silently blanked every field value.
+    Calling the interface method with the accessible as the first argument avoids
+    the name collision. Non-Text accessibles make the call raise → None."""
+    if role == "AXSecureTextField":
+        return None
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if count:
+        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+        if got:
+            return got
+    cur = _safe(lambda: Atspi.Value.get_current_value(acc))
+    if cur is not None:
+        return cur
+    return None
+
+
+def _state_flags(acc) -> tuple[bool, bool]:
+    """(enabled, focused) from the state set."""
+    Atspi = _atspi()
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return True, False
+    st = getattr(Atspi, "StateType", None)
+
+    def has(name: str) -> bool:
+        member = getattr(st, name, None)
+        return bool(member is not None and _safe(lambda: sset.contains(member), False))
+
+    enabled = has("ENABLED") or has("SENSITIVE")
+    focused = has("FOCUSED")
+    return enabled, focused
+
+
+class ATSPIAccessor:
+    """`observe.TreeAccessor` over `Atspi.Accessible` handles."""
+
+    def read(self, node: object) -> RawNode:
+        role_str = _role_name(node)
+        role = _ROLE.get(role_str, "AXGroup")
+        position, size = _extents(node)
+        enabled, focused = _state_flags(node)
+        name = _call_first(node, ("get_name",), default="") or ""
+        description = _call_first(node, ("get_description",), default="") or ""
+        return RawNode(
+            role=role,
+            subrole=None,
+            title=str(name),
+            value=_value_text(node, role),
+            description=str(description),
+            enabled=enabled,
+            focused=focused,
+            position=position,
+            size=size,
+            actions=_action_names(node),
+        )
+
+    def children(self, node: object) -> Sequence[object]:
+        count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
+        count = min(int(count), _MAX_CHILDREN_FETCH)
+        kids = []
+        for i in range(count):
+            child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
+            if child is not None:
+                kids.append(child)
+        return kids
+
+
+# ---------------------------------------------------------------------------
+# Geometry, app resolution, act-time helpers
+# ---------------------------------------------------------------------------
+
+
+def primary_geometry() -> tuple[DisplayGeometry, ...]:
+    """The primary X screen as one `DisplayGeometry`. AT-SPI SCREEN extents are
+    physical pixels with a top-left origin, so scale=1.0 makes the engine's
+    point->pixel projection an identity (same as the Windows adapter)."""
+    width, height = _screen_size()
+    display = Display(display_id=0, width=width, height=height, scale=1.0, is_main=True)
+    return (DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+
+
+def _screen_size() -> tuple[int, int]:
+    """Primary screen size in pixels: Xlib, then $COMPUTERUSE_SCREEN, then 1280x800.
+
+    A too-small guess would make the engine drop real nodes as "offscreen", so
+    err large; the value only bounds the projected coordinate space."""
+    try:
+        from Xlib import display as _xd
+
+        screen = _xd.Display().screen()
+        w = int(screen.width_in_pixels)
+        h = int(screen.height_in_pixels)
+        if w > 0 and h > 0:
+            return w, h
+    except Exception:
+        pass
+    env = os.environ.get("COMPUTERUSE_SCREEN", "")
+    if "x" in env:
+        try:
+            w_s, h_s = env.lower().split("x", 1)
+            return int(w_s), int(h_s)
+        except Exception:
+            pass
+    return 1280, 800
+
+
+def pid_of(acc) -> int | None:
+    if acc is None:
+        return None
+    pid = _call_first(acc, ("get_process_id",))
+    return int(pid) if pid else None
+
+
+def find_root(app: str, scope) -> object | None:
+    """The AT-SPI root for ``app`` at ``scope``.
+
+    ``app`` matches an application accessible by name substring (case-insensitive)
+    — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
+    accessible is returned; for `Scope.WINDOW` its active (else first) top-level
+    frame. None when nothing matches (the engine yields an empty snapshot)."""
+    from computeruse.schema import Scope
+
+    Atspi = _atspi()
+    needle = (app or "").lower()
+    if not needle:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    count = _call_first(desktop, ("get_child_count",), default=0) or 0
+    app_acc = None
+    for i in range(int(count)):
+        candidate = _call_first(desktop, ("get_child_at_index",), i)
+        if candidate is None:
+            continue
+        name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        if needle in name:
+            app_acc = candidate
+            break
+    if app_acc is None or scope is Scope.APP:
+        return app_acc
+    # WINDOW scope: prefer the ACTIVE top-level frame, else the first child.
+    st = getattr(Atspi, "StateType", None)
+    active = getattr(st, "ACTIVE", None)
+    n = _call_first(app_acc, ("get_child_count",), default=0) or 0
+    first = None
+    for j in range(int(n)):
+        frame = _call_first(app_acc, ("get_child_at_index",), j)
+        if frame is None:
+            continue
+        if first is None:
+            first = frame
+        sset = _call_first(frame, ("get_state_set",))
+        if active is not None and sset is not None and _safe(lambda: sset.contains(active), False):
+            return frame
+    return first or app_acc
+
+
+def do_press(acc) -> bool:
+    """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    n = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for i in range(int(n)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), i, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+            if _call_first(action, ("do_action", "doAction"), i, default=False):
+                return True
+    return False
+
+
+def grab_focus(acc) -> bool:
+    """Give ``acc`` keyboard focus via AT-SPI (True on success) — no cursor move."""
+    comp = _component(acc)
+    if comp is None:
+        return False
+    return bool(_call_first(comp, ("grab_focus", "grabFocus"), default=False))
+
+
+def _editable_iface(acc):
+    return _call_first(acc, ("get_editable_text_iface", "get_editable_text"))
+
+
+def insert_text(acc, text: str) -> bool:
+    """Insert ``text`` at the caret (end of the field) via AT-SPI EditableText —
+    the deterministic, a11y-first text-entry path. Unlike synthetic XTEST keys it
+    needs no X/widget focus (which headless AT-SPI grab_focus does not grant), so
+    it lands reliably. Returns False if the element exposes no EditableText."""
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    offset = _safe(lambda: _atspi().Text.get_character_count(acc)) or 0
+    return bool(_call_first(eti, ("insert_text",), int(offset), text, len(text), default=False))
+
+
+def set_text(acc, text: str) -> bool:
+    """Replace the element's whole text via AT-SPI EditableText (True on success)."""
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    return bool(_call_first(eti, ("set_text_contents",), text, default=False))
+
+
+def scroll_to(acc) -> bool:
+    """Reveal ``acc`` via AT-SPI (`Component.scroll_to ANYWHERE`) — no cursor move."""
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return False
+    stype = getattr(getattr(Atspi, "ScrollType", None), "ANYWHERE", 0)
+    return bool(_call_first(comp, ("scroll_to",), stype, default=False))
