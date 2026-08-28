@@ -114,12 +114,13 @@ jobs:
         env:
           GTK_MODULES: gail:atk-bridge
           NO_AT_BRIDGE: "0"
+        # No manual pkill cleanup: the tests terminate their own GTK apps, and a
+        # `pkill -f cuatestapp` self-matches the wrapping shell's command line and
+        # SIGKILLs it (exit 137). The backgrounded a11y bus is reaped as an orphan
+        # by the runner. `timeout` (as the block's last command) sets the exit code.
         run: |
           xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately & ) 2>/dev/null
             sleep 2
             timeout -k 5 120 .venv/bin/pytest tests/test_linux_live.py -q -rs
-            code=$?
-            pkill -9 -f cuatestapp 2>/dev/null; pkill -9 at-spi-bus-launcher 2>/dev/null
-            exit $code
           '
