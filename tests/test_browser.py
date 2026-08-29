@@ -480,6 +480,54 @@ def test_runtime_console_gated_on_browser_and_unsupported_elsewhere(tmp_path) ->
     assert ei.value.code is ErrorCode.UNSUPPORTED
 
 
+def test_network_requests_join_status_and_failures() -> None:
+    d, _ = _driver_on(lambda m, p: {})
+    d._session._events = [
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "1", "request": {"method": "POST", "url": "/api/save"}}},
+        {"method": "Network.responseReceived",
+         "params": {"requestId": "1", "response": {"status": 200, "url": "/api/save"}}},
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "2", "request": {"method": "GET", "url": "/broken"}}},
+        {"method": "Network.loadingFailed",
+         "params": {"requestId": "2", "errorText": "net::ERR_FAILED"}},
+    ]
+    reqs = d.network_requests()
+    assert {"method": "POST", "url": "/api/save", "status": 200} in reqs
+    assert {"method": "GET", "url": "/broken", "error": "net::ERR_FAILED"} in reqs
+    assert d.network_requests() == []  # cleared
+
+
+def test_runtime_network_gated_and_unsupported_elsewhere(tmp_path) -> None:
+    from computeruse import safety, server
+
+    d, _ = _driver_on(lambda m, p: {})
+    d._session._events = [
+        {"method": "Network.requestWillBeSent",
+         "params": {"requestId": "9", "request": {"method": "GET", "url": "/x"}}},
+        {"method": "Network.responseReceived",
+         "params": {"requestId": "9", "response": {"status": 404, "url": "/x"}}},
+    ]
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("TAB1", safety.Tier.READ)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "a"), driver=d)
+    assert "404" in rt.network("TAB1")
+
+    rt.driver = type("NoNet", (), {"name": "linux"})()
+    with pytest.raises(ComputerUseError) as ei:
+        rt.network("TAB1")
+    assert ei.value.code is ErrorCode.UNSUPPORTED
+
+
+def test_cdp_session_event_buffer_is_bounded() -> None:
+    from collections import deque
+    sess = _cdp.CDPSession(ScriptedTransport(lambda m, p: {}), event_buffer=3)
+    assert isinstance(sess._events, deque) and sess._events.maxlen == 3
+    for i in range(10):
+        sess._events.append({"i": i})
+    assert len(sess._events) == 3  # oldest dropped, never unbounded
+
+
 def test_browser_launch_app_rejects_non_url() -> None:
     d, _ = _driver_on()
     with pytest.raises(ComputerUseError) as ei:
@@ -588,4 +636,21 @@ def test_live_console_captures_logs_and_exceptions() -> None:
     assert "boom" in texts and "error" in levels
     assert any(m["level"] == "exception" for m in msgs)  # the uncaught ReferenceError
     assert d.console_messages() == []  # cleared after reading
+    d._reset()
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_network_reports_status_and_failures() -> None:
+    import urllib.parse
+
+    d = browser.BrowserDriver(endpoint=_live_endpoint())
+    # a same-doc fetch (200) and a fetch to an unsafe port (fails) — no external net
+    page = ("<script>fetch('data:text/plain,ok');"
+            "fetch('http://127.0.0.1:1/x').catch(()=>{})</script>")
+    d.navigate("data:text/html," + urllib.parse.quote(page))
+    reqs = d.network_requests()
+    assert any(r.get("status") == 200 for r in reqs)  # the main document / data fetch
+    assert any("error" in r for r in reqs)  # the unsafe-port fetch failed
     d._reset()

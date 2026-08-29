@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from typing import Protocol
 
 from computeruse.schema import ComputerUseError, ErrorCode
@@ -112,10 +113,14 @@ class CDPSession:
     `ComputerUseError`.
     """
 
-    def __init__(self, transport: Transport, *, default_timeout: float = 10.0) -> None:
+    def __init__(self, transport: Transport, *, default_timeout: float = 10.0,
+                 event_buffer: int = 4000) -> None:
         self._t = transport
         self._id = 0
-        self._events: list[dict] = []
+        # Bounded: high-volume domains (Network) can emit events faster than a
+        # caller drains them; the oldest silently drop instead of growing without
+        # limit. Console/Log are low-volume, so this only ever bites network bursts.
+        self._events: deque[dict] = deque(maxlen=event_buffer)
         self._default_timeout = default_timeout
 
     def call(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> dict:
@@ -148,7 +153,8 @@ class CDPSession:
 
     def drain_events(self) -> list[dict]:
         """Return and clear the events buffered while waiting on `call` replies."""
-        out, self._events = self._events, []
+        out = list(self._events)
+        self._events.clear()
         return out
 
     def close(self) -> None:

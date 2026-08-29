@@ -773,6 +773,22 @@ class Runtime:
             lambda: json.dumps(self.driver.console_messages()),
         )
 
+    def network(self, app: str) -> str:
+        """Completed network outcomes (status codes + failures) from a backend
+        that has a network (the browser). Gated + audited at READ. Raises
+        UNSUPPORTED elsewhere."""
+        if not hasattr(self.driver, "network_requests"):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "network is only available on the browser backend",
+                detail={"driver": self.driver.name},
+            )
+        _running, bundle = self._resolve_app(app)
+        return self._run_gated(
+            ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle,
+            lambda: json.dumps(self.driver.network_requests()),
+        )
+
     # -- action tools -----------------------------------------------------------
 
     def click(
@@ -1430,5 +1446,15 @@ def build_server(
             a list of {level: log|warning|error|exception, text}. Reading clears
             the buffer (you get what's new since you last looked). Tier 'read'."""
             return await run(runtime.console, app)
+
+    if hasattr(runtime.driver, "network_requests"):
+        @server.tool(name="network")
+        async def network(app: str) -> str:
+            """Completed network outcomes for a browser tab (app = the tab/target
+            id) — status codes and failures behind an action ("did that POST
+            return 200?"), which a screenshot can't reveal. Returns JSON: a list
+            of {method, url, status} for responses and {method, url, error} for
+            failures. Reading clears the buffer. Tier 'read'."""
+            return await run(runtime.network, app)
 
     return server

@@ -88,6 +88,8 @@ class BrowserDriver:
         self._session = None  # lazily connected _cdp.CDPSession
         self._enabled = False
         self._console: list[dict] = []  # accumulated console/exception entries
+        self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
+        self._network: list[dict] = []  # completed request outcomes (status/failure)
 
     # -- connection ---------------------------------------------------------
     def _connect(self):
@@ -109,10 +111,11 @@ class BrowserDriver:
         target = target or targets[0]
         self._target_id = target.get("id")
         self._session = _cdp.CDPSession(_cdp.connect(target["webSocketDebuggerUrl"]))
-        # Runtime + Log emit consoleAPICalled / exceptionThrown / entryAdded events
-        # (buffered by the session) — the console-observation feed a vision agent
-        # is blind to. Enabling here means the feed starts before the first action.
-        for domain in ("DOM", "Page", "Runtime", "Log"):
+        # Runtime + Log emit console / exception events; Network emits request/
+        # response/failure events — the console + network feeds a vision agent is
+        # blind to (buffered, bounded, by the session). Enabling here starts both
+        # feeds before the first action so nothing is missed.
+        for domain in ("DOM", "Page", "Runtime", "Log", "Network"):
             try:
                 self._session.call(f"{domain}.enable")
             except ComputerUseError:
@@ -426,6 +429,47 @@ class BrowserDriver:
         if clear:
             self._console = []
         return out
+
+    def network_requests(self, *, clear: bool = True) -> list[dict]:
+        """Completed network outcomes for the bound tab — status codes and
+        failures a screenshot can't show ("did that POST return 200?").
+
+        Each entry is ``{"method", "url", "status"}`` for a response, or
+        ``{"method", "url", "error"}`` for a failure. Request/response events are
+        joined by CDP ``requestId``; the pending-request map is bounded so a
+        long-lived tab can't accumulate ids without limit. ``clear`` empties the
+        completed buffer after reading.
+        """
+        sess = self._connect()
+        try:
+            sess.call("Runtime.evaluate", {"expression": "0", "returnByValue": True})
+        except ComputerUseError:
+            pass
+        for ev in sess.drain_events():
+            self._ingest_network(ev)
+        out = list(self._network)
+        if clear:
+            self._network = []
+        return out
+
+    def _ingest_network(self, ev: dict) -> None:
+        method = ev.get("method")
+        p = ev.get("params", {})
+        rid = p.get("requestId")
+        if method == "Network.requestWillBeSent":
+            req = p.get("request", {})
+            self._net_pending[rid] = {"method": req.get("method", "GET"),
+                                      "url": req.get("url", "")}
+            if len(self._net_pending) > 512:  # bound: drop the oldest in-flight ids
+                for k in list(self._net_pending)[:256]:
+                    self._net_pending.pop(k, None)
+        elif method == "Network.responseReceived":
+            base = self._net_pending.pop(rid, {"method": "GET",
+                                               "url": p.get("response", {}).get("url", "")})
+            self._network.append({**base, "status": p.get("response", {}).get("status")})
+        elif method == "Network.loadingFailed":
+            base = self._net_pending.pop(rid, {"method": "GET", "url": ""})
+            self._network.append({**base, "error": p.get("errorText", "failed")})
 
     # -- system / windowing (tabs as apps/windows) --------------------------
     def frontmost_app(self) -> tuple[str | None, int | None]:

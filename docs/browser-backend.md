@@ -33,6 +33,7 @@ JSONL audit, the same MCP surface.
 | Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document (same-process frames; cross-origin OOPIF skipped, never fatal) |
 | Tabs               | page targets are modelled as apps/windows (`running_apps`/`windows`/`activate_app`) |
 | Console            | `console` tool (browser-only, tier `read`): console output + uncaught JS exceptions from `Runtime.consoleAPICalled`/`exceptionThrown`/`Log.entryAdded` — how the agent verifies an action worked, which a screenshot cannot show |
+| Network            | `network` tool (browser-only, tier `read`): completed request outcomes (status codes + failures) from `Network.responseReceived`/`loadingFailed`, joined by `requestId` — "did that POST return 200?"; the session event buffer is bounded so busy pages can't grow it |
 
 `stable_id` is the backend DOM node id — stable across snapshots within a page —
 so `observe._match_anchor` re-resolves a ref deterministically after the DOM
