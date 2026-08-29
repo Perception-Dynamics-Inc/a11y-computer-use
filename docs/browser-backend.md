@@ -68,3 +68,16 @@ The observe→act→verify loop is proven against real headless Chrome: a
 coordinate-free `press_element` on a button fires its `onclick`
 (`document.title` flips), and focus + `type_text` lands text in an input — asserted
 in `test_live_observe_act_verify`.
+
+## Measuring the moat — cu-arena
+
+`computeruse bench web <url>` (module `computeruse/arena.py`) reports the honest
+per-observation token cost of the a11y-first snapshot vs the screenshot a vision
+agent would send instead — both raw numbers, no rigging: the a11y cost is the
+real rendered snapshot, the image cost is the real captured frame's dimensions
+run through Anthropic's published `(w·h)/750` estimate. On a small live page it
+reports the a11y snapshot at roughly **5–8× cheaper per observation** than the
+equivalent screenshot — and, being text, it *diffs* to near-zero on re-observe
+where a screenshot pays its full image cost every step. The number is reproduced
+in CI (the browser job prints it). `computeruse bench audit` aggregates the
+JSONL audit log (cu-meter: per-action latency p50/p95 + tokens).

@@ -73,6 +73,25 @@ def _build_parser() -> argparse.ArgumentParser:
     run_once.add_argument("action", help="JSON object with a 'tool' key plus parameters")
     run_once.set_defaults(handler=_cmd_run_once)
 
+    bench = sub.add_parser(
+        "bench",
+        help="cu-meter/cu-arena: the token + latency numbers behind the moat",
+        description="'audit' aggregates the JSONL audit log (per-action latency + "
+                    "tokens). 'web' runs the a11y-vs-vision observation-cost benchmark "
+                    "on the browser backend (needs a running Chromium; see "
+                    "docs/browser-backend.md).",
+    )
+    bench_sub = bench.add_subparsers(required=True)
+    bench_audit = bench_sub.add_parser("audit", help="aggregate the audit log (cu-meter)")
+    bench_audit.add_argument("dir", nargs="?", help="audit dir (default: the SDK's audit log dir)")
+    bench_audit.set_defaults(handler=_cmd_bench_audit)
+    bench_web = bench_sub.add_parser("web", help="a11y-vs-vision observation cost (cu-arena)")
+    bench_web.add_argument("url", help="URL to observe (e.g. https://example.com)")
+    bench_web.add_argument("--rounds", type=int, default=3, help="observations to measure")
+    bench_web.add_argument("--endpoint", help="CDP endpoint (default: $COMPUTERUSE_CDP_ENDPOINT "
+                           "or http://127.0.0.1:9222)")
+    bench_web.set_defaults(handler=_cmd_bench_web)
+
     return parser
 
 
@@ -80,6 +99,38 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
     from computeruse import server
 
     server.build_server().run(transport="stdio")
+    return 0
+
+
+def _cmd_bench_audit(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from computeruse import bench
+
+    audit_dir = Path(args.dir) if args.dir else Path.home() / ".computeruse" / "audit"
+    if not audit_dir.exists():
+        print(f"no audit log at {audit_dir}; run some actions first (or pass a dir)",
+              file=sys.stderr)
+        return 2
+    print(bench.format_report(bench.report(audit_dir)))
+    return 0
+
+
+def _cmd_bench_web(args: argparse.Namespace) -> int:
+    from computeruse import arena
+    from computeruse.drivers.browser import BrowserDriver
+    from computeruse.schema import ComputerUseError
+    from computeruse import server
+
+    driver = BrowserDriver(endpoint=args.endpoint)
+    try:
+        report = arena.run_web_task(driver, args.url, rounds=args.rounds)
+    except ComputerUseError as exc:
+        print(server.error_text(exc), file=sys.stderr)
+        return 1
+    finally:
+        driver._reset()
+    print(arena.format_report(report))
     return 0
 
 
@@ -139,3 +190,7 @@ def _cmd_run_once(args: argparse.Namespace) -> int:
         return 2
     print(result)
     return 0
+
+
+if __name__ == "__main__":  # `python -m computeruse.cli ...` alongside the console script
+    raise SystemExit(main())

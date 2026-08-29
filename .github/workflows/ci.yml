@@ -91,6 +91,11 @@ jobs:
         # Both live paths: observe→act→verify, and iframe content stitched from a
         # child frame (getFullAXTree per frame + owner-offset geometry).
         run: pytest tests/test_browser.py -k live -q -rs
+      - name: cu-arena (a11y-vs-vision observation cost, live number)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        # Prints the honest per-observation token comparison to the CI log (-s).
+        run: pytest tests/test_arena.py -k live -q -rs -s
 
   linux:
     name: Linux · AT-SPI2 backend
