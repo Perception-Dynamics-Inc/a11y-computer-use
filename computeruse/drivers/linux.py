@@ -267,13 +267,24 @@ class LinuxDriver:
             else:
                 time.sleep(min(0.1, remaining))
 
-    # -- capture (PIL X11 grab) ---------------------------------------------
+    # -- capture (grim on Wayland, PIL X11 grab otherwise) ------------------
     def screenshot(self, display_id: int | None = None) -> object:
+        import io
+
+        from PIL import Image
+
         from computeruse import capture
         from computeruse.drivers import _atspi
+        from computeruse.schema import Display
 
         png = _grab_png()
-        display = _atspi.primary_geometry()[0].display
+        # Derive the real dimensions from the frame itself — on Wayland the
+        # Xlib-based primary_geometry() is unavailable, and even on X the frame
+        # is the source of truth. Keep the display's scale/id from geometry.
+        base = _atspi.primary_geometry()[0].display
+        w, h = Image.open(io.BytesIO(png)).size
+        display = base if (base.width, base.height) == (w, h) else Display(
+            display_id=base.display_id, width=w, height=h, scale=base.scale, is_main=True)
         return capture.Screenshot(png=png, display=display)
 
     def zoom_region(self, region: Bounds) -> bytes:
@@ -330,11 +341,35 @@ class LinuxDriver:
         _linux_system.write_clipboard(text)
 
 
+def _grab_wayland() -> bytes | None:
+    """Full-screen PNG on Wayland via grim (wlroots ext-image-copy-capture) —
+    PIL's X11 grab cannot see a Wayland compositor. Returns None when grim is
+    absent or fails (caller falls through to the X path). Verified live under
+    headless sway."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("grim"):
+        return None
+    try:
+        r = subprocess.run(["grim", "-"], capture_output=True, timeout=10)  # PNG to stdout
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 and r.stdout else None
+
+
 def _grab_png() -> bytes:
-    """A full-screen PNG via PIL's X11 grab. Raises a structured screen-permission
-    error when no X capture path is available (headless without an X server)."""
+    """A full-screen PNG. On Wayland uses grim; on X11/XWayland uses PIL's grab.
+    Raises a structured screen-permission error when no capture path works."""
     import io
     import os
+
+    # Native Wayland (WAYLAND_DISPLAY set, no X): PIL grab can't see the
+    # compositor — go straight to grim.
+    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        png = _grab_wayland()
+        if png is not None:
+            return png
 
     try:
         from PIL import ImageGrab
@@ -344,10 +379,14 @@ def _grab_png() -> bytes:
         img.save(buf, format="PNG")
         return buf.getvalue()
     except Exception as exc:
+        wl = _grab_wayland()  # last resort: XWayland session where grim also works
+        if wl is not None:
+            return wl
         raise ComputerUseError(
             ErrorCode.PERMISSION_DENIED_SCREEN,
             "screen capture failed on Linux",
-            detail={"hint": "PIL X11 grab needs a reachable $DISPLAY; on headless hosts "
-                    "run under Xvfb. The a11y-first path (snapshot/press) needs no capture.",
+            detail={"hint": "X11: PIL grab needs a reachable $DISPLAY (run under Xvfb on "
+                    "headless hosts). Wayland: install grim (wlroots) or a ScreenCast portal. "
+                    "The a11y-first path (snapshot/press/type) needs no capture.",
                     "error": str(exc)},
         ) from exc
