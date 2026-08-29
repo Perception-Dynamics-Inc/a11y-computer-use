@@ -386,6 +386,41 @@ def test_browser_key_chord_dispatches_key_events() -> None:
 # --------------------------------------------------------------------------- #
 # capture + windowing
 # --------------------------------------------------------------------------- #
+def test_browser_navigate_waits_for_ready_and_launch_maps_to_url() -> None:
+    states = iter(["loading", "loading", "complete"])  # readyState settles after 2 polls
+
+    def responder(method, params):
+        if method == "Page.navigate":
+            assert params["url"] == "https://example.com"
+            return {"frameId": "F", "loaderId": "L"}
+        if method == "Runtime.evaluate":
+            return {"result": {"value": next(states, "complete")}}
+        if method in ("DOM.enable", "Page.enable", "Runtime.enable"):
+            return {}
+        raise AssertionError(method)
+
+    d, t = _driver_on(responder)
+    d.navigate("https://example.com", timeout_s=5)
+    assert ("Page.navigate", {"url": "https://example.com"}) in t.sent
+    assert sum(1 for m in t.methods() if m == "Runtime.evaluate") == 3  # polled until complete
+
+    # launch_app is the browser analog of "open": a URL navigates...
+    t.sent.clear()
+    states2 = iter(["complete"])
+    d._session = _cdp.CDPSession(ScriptedTransport(
+        lambda m, p: ({"result": {"value": next(states2, "complete")}} if m == "Runtime.evaluate"
+                      else {})))
+    d.launch_app("https://example.com/next")
+    assert any(m == "Page.navigate" for m in d._session._t.methods())
+
+
+def test_browser_launch_app_rejects_non_url() -> None:
+    d, _ = _driver_on()
+    with pytest.raises(ComputerUseError) as ei:
+        d.launch_app("com.apple.Safari")  # not a URL
+    assert ei.value.code is ErrorCode.UNSUPPORTED
+
+
 def test_browser_screenshot_returns_png_and_display() -> None:
     d, _ = _driver_on()
     shot = d.screenshot()
@@ -431,9 +466,7 @@ def test_live_observe_act_verify() -> None:
     sess = d._connect()
     html = ("<h1>hi</h1><button id=b onclick=\"document.title='CLICKED'\">Go</button>"
             "<input id=t placeholder=Name>")
-    sess.call("Page.navigate", {"url": "data:text/html," + urllib.parse.quote(html)})
-    import time
-    time.sleep(0.6)
+    d.navigate("data:text/html," + urllib.parse.quote(html))  # load-aware; no fixed sleep
 
     snap = d.snapshot(Scope.WINDOW, d._target_id)
     go = next(e for e in snap.elements if e.title == "Go")
@@ -456,17 +489,14 @@ def test_live_observe_act_verify() -> None:
                     reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_iframe_content_is_observable_and_actionable() -> None:
-    import time
     import urllib.parse
 
     d = browser.BrowserDriver(endpoint=_live_endpoint())
-    sess = d._connect()
     # srcdoc keeps the child same-origin (same process), so getFullAXTree(frameId)
     # reaches it — the common embedded-form/widget case.
     outer = ("<button>OuterBtn</button>"
              "<iframe width=300 height=200 srcdoc=\"<button id=i>InnerBtn</button>\"></iframe>")
-    sess.call("Page.navigate", {"url": "data:text/html," + urllib.parse.quote(outer)})
-    time.sleep(0.8)
+    d.navigate("data:text/html," + urllib.parse.quote(outer))  # load-aware; no fixed sleep
 
     snap = d.snapshot(Scope.WINDOW, d._target_id)
     titles = {e.title for e in snap.elements}

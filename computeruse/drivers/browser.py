@@ -407,11 +407,44 @@ class BrowserDriver:
                  "url": t.get("url", "")} for t in _cdp.page_targets(self._endpoint)]
 
     def launch_app(self, identifier: str) -> None:
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            "the browser backend attaches to a running Chromium; it does not launch apps",
-            detail={"hint": "start Chrome with --remote-debugging-port, then attach."},
-        )
+        """Navigate the bound tab to a URL — the browser analog of launching an
+        app (so the existing ``app`` tool's launch action drives it, no new MCP
+        surface). ``identifier`` must be a URL (``https://``, ``http://``,
+        ``about:``, ``data:``, ``file:``); anything else is rejected."""
+        if not _looks_like_url(identifier):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the browser backend attaches to a running Chromium; launch takes a URL to open",
+                detail={"hint": "pass a URL (https://…) to navigate the tab; start Chrome with "
+                        "--remote-debugging-port to attach."},
+            )
+        self.navigate(identifier)
+
+    def navigate(self, url: str, *, timeout_s: float = 15.0) -> None:
+        """Open ``url`` in the bound tab and block until the document finishes
+        loading (``document.readyState == "complete"``) or ``timeout_s`` elapses.
+
+        A load-aware wait means the very next snapshot sees the loaded page, not a
+        blank frame — no fixed sleep, no racing the navigation.
+        """
+        sess = self._connect()
+        result = sess.call("Page.navigate", {"url": url})
+        if isinstance(result, dict) and result.get("errorText"):
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND, f"navigation to {url} failed: {result['errorText']}",
+                detail={"url": url},
+            )
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                state = sess.call("Runtime.evaluate", {
+                    "expression": "document.readyState", "returnByValue": True,
+                }).get("result", {}).get("value")
+            except ComputerUseError:
+                state = None
+            if state == "complete":
+                return
+            time.sleep(0.05)
 
     def activate_app(self, identifier: str) -> str:
         self._bind(identifier)
@@ -428,6 +461,10 @@ class BrowserDriver:
             ErrorCode.UNSUPPORTED,
             "clipboard write is not available through the browser backend",
         )
+
+
+def _looks_like_url(s: str) -> bool:
+    return "://" in s or s.startswith(("about:", "data:", "file:", "chrome:"))
 
 
 def _mods_mask(modifiers: tuple[str, ...]) -> int:

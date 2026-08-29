@@ -29,6 +29,8 @@ JSONL audit, the same MCP surface.
 | Key chords         | `Input.dispatchKeyEvent` with a CDP modifier bitmask (`_key_events`)            |
 | Pixel fallback     | `Input.dispatchMouseEvent` (mouse/wheel) — the vision path, viewport-mapped     |
 | Capture            | `Page.captureScreenshot` (+ `clip` for zoom), `captureBeyondViewport`           |
+| Navigate           | `launch_app(url)` = `Page.navigate` + wait for `document.readyState=="complete"` (load-aware, no fixed sleep) — the browser analog of launching an app, so the existing `app` tool drives it with no new MCP surface |
+| Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document (same-process frames; cross-origin OOPIF skipped, never fatal) |
 | Tabs               | page targets are modelled as apps/windows (`running_apps`/`windows`/`activate_app`) |
 
 `stable_id` is the backend DOM node id — stable across snapshots within a page —
