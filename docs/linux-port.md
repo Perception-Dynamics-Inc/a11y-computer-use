@@ -51,6 +51,26 @@ Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` retu
 - **X11 assumptions.** Input generation is XTEST-backed, window facts are EWMH, and capture is PIL's X11 grab — all X paths, which also cover XWayland windows. On a pure-Wayland session the observe/press path (pure AT-SPI, bus-only) still works; the coordinate fallback, EWMH probes, and capture degrade. Clipboard already has the Wayland fallback (`wl-clipboard`); the rest is follow-up work. Headless hosts run under Xvfb (that's the live-test setup).
 - **Import safety.** `gi`/`Atspi`/`Xlib` are imported lazily inside methods, so `computeruse.drivers` stays import-safe on macOS and Windows — same discipline as the pyobjc and uiautomation gating.
 
+## Wayland
+
+Verified live under a headless **sway** compositor (WLR_BACKENDS=headless, no
+X): the a11y-first core is Wayland-native because AT-SPI is D-Bus, not X11.
+
+| Capability | Wayland | how |
+|---|---|---|
+| snapshot / find / diff | ✅ works | AT-SPI over D-Bus (display-agnostic) |
+| press / invoke, set_value, type (focused) | ✅ works | AT-SPI `do_action` / `EditableText` — no coordinates |
+| screenshot / zoom | ✅ works | `grim` (wlroots ext-image-copy-capture); PIL X11 grab off |
+| org.a11y.Status force-enable | ✅ works | D-Bus session bus |
+| click(x,y) / drag / wheel scroll / key_chord | ⛔ `unsupported` | XTEST is X11-only → structured `ErrorCode.UNSUPPORTED` with a hint to use ref-based actions; libei/RemoteDesktop-portal input is the session-gated follow-up |
+
+This is the moat: coordinate-free control sails through on Wayland (the 2026
+default desktop) exactly where pixel/XTEST agents break. `_on_wayland()`
+(WAYLAND_DISPLAY set, no DISPLAY) gates the X-only input paths; `_grab_png`
+probes grim before PIL. Coordinate input on Wayland needs libei + the
+`org.freedesktop.portal.RemoteDesktop` portal — recipes in the knowledgebase;
+build on a real Wayland session (portal input consent isn't headless-scriptable).
+
 ## Packaging
 
 ```
