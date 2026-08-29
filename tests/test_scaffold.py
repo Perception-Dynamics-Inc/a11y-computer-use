@@ -55,6 +55,7 @@ def test_error_codes_are_wire_stable() -> None:
         "app_not_found",
         "timeout",
         "confirmation_declined",
+        "unsupported",
     }
 
 

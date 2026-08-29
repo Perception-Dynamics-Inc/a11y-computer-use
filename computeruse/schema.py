@@ -255,6 +255,11 @@ class ErrorCode(str, Enum):
     """An irreversible action needed explicit human confirmation and it was
     declined, cancelled, or could not be requested (no elicitation channel)."""
 
+    UNSUPPORTED = "unsupported"
+    """The operation isn't available in this environment (e.g. raw coordinate /
+    key injection on native Wayland, which has no XTEST) — the detail hint names
+    the supported alternative (usually a ref-based action)."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.

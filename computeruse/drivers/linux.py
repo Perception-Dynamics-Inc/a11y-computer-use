@@ -45,6 +45,25 @@ def _point_of(target: Target) -> tuple[int, int]:
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
 
+def _on_wayland() -> bool:
+    """True on a native Wayland session (WAYLAND_DISPLAY set, no X): XTEST
+    synthetic input can't reach Wayland-native apps."""
+    import os
+
+    return bool(os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"))
+
+
+def _wayland_input_error(op: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{op}: raw coordinate/key injection (XTEST) is unavailable on native Wayland",
+        detail={"hint": "Use ref-based actions — click(ref) / press, set_value, and typing into "
+                "a focused field all work on Wayland via AT-SPI with no coordinates. Raw "
+                "coordinate/key input on Wayland needs libei/RemoteDesktop portal (planned), "
+                "or run under X/XWayland with $DISPLAY set."},
+    )
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -175,6 +194,8 @@ class LinuxDriver:
               dry_run: bool = False) -> object:
         if dry_run:
             return None
+        if _on_wayland():
+            raise _wayland_input_error("click")
         from computeruse.drivers import _linux_input
 
         x, y = _point_of(target)
@@ -186,6 +207,8 @@ class LinuxDriver:
              pre_check: Callable | None = None, dry_run: bool = False) -> object:
         if dry_run:
             return None
+        if _on_wayland():
+            raise _wayland_input_error("drag")
         from computeruse.drivers import _linux_input
 
         x1, y1 = _point_of(start)
@@ -198,6 +221,8 @@ class LinuxDriver:
                dry_run: bool = False) -> object:
         if dry_run:
             return None
+        if _on_wayland():
+            raise _wayland_input_error("scroll")
         from computeruse.drivers import _linux_input
 
         x, y = _point_of(target)
@@ -219,6 +244,8 @@ class LinuxDriver:
         handle = self._focused_editable
         if handle is not None and self._run(lambda: _atspi.insert_text(handle, text)):
             return None
+        if _on_wayland():  # a11y path unavailable and XTEST can't reach Wayland apps
+            raise _wayland_input_error("type_text (no focused editable for the a11y path)")
         from computeruse.drivers import _linux_input
 
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
@@ -232,6 +259,8 @@ class LinuxDriver:
         if dry_run:
             _linux_input.validate_chord(chord)
             return None
+        if _on_wayland():
+            raise _wayland_input_error("key_chord")
         _linux_input.press_chord(chord)
         return None
 
