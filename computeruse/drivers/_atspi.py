@@ -275,19 +275,58 @@ def _state_flags(acc):
     return enabled, focused, checked, selected, expanded
 
 
-def _stable_id(acc) -> str | None:
+# ARIA role (AT-SPI 'xml-roles' attribute, set by Chromium/GTK for web content)
+# -> canonical AX role. Used to sharpen a generic AT-SPI role (a role="button"
+# <div> is a 'section'/'panel' to AT-SPI but an AXButton to us). Standard HTML
+# already gets a proper AT-SPI role, so this only refines generic containers.
+_XML_ROLE = {
+    "button": "AXButton", "link": "AXLink", "textbox": "AXTextField",
+    "searchbox": "AXSearchField", "checkbox": "AXCheckBox", "radio": "AXRadioButton",
+    "tab": "AXButton", "menuitem": "AXMenuItem", "menuitemcheckbox": "AXMenuItem",
+    "menuitemradio": "AXMenuItem", "combobox": "AXComboBox", "switch": "AXCheckBox",
+    "slider": "AXSlider", "option": "AXRow", "listbox": "AXList", "tablist": "AXTabGroup",
+}
+
+
+def _get_attributes(acc) -> dict:
+    """The AT-SPI object attributes as a plain dict (xml-roles, id, tag, class,
+    …), fetched ONCE per node so stable-id + web-role both reuse it — one D-Bus
+    round-trip instead of two (AT-SPI has no batch read). {} on any failure."""
+    a = _call_first(acc, ("get_attributes",))
+    if a is None:
+        return {}
+    if isinstance(a, dict):
+        return a
+    if hasattr(a, "keys") and hasattr(a, "get"):  # GLib.HashTable-ish
+        try:
+            return {str(k): (a.get(k) and str(a.get(k))) for k in a.keys()}
+        except Exception:
+            return {}
+    return {}
+
+
+def _refine_web_role(role: str, attrs: dict) -> str:
+    """Upgrade a generic container role to the ARIA role its xml-roles declares,
+    so ARIA-widget <div>s become real interactive elements in the snapshot."""
+    if role == "AXGroup" and attrs:
+        for token in (attrs.get("xml-roles") or "").split():
+            if token in _XML_ROLE:
+                return _XML_ROLE[token]
+    return role
+
+
+def _stable_id(acc, attrs: dict | None = None) -> str | None:
     """A layout-independent id for ``acc``: the AT-SPI ``accessible-id``, else a
     web element's DOM id from the object attributes (Chromium exposes 'id').
     None when the app assigns none."""
     sid = _call_first(acc, ("get_accessible_id",))
     if sid:
         return str(sid)
-    attrs = _call_first(acc, ("get_attributes",))
-    if attrs is not None and hasattr(attrs, "get"):
-        for key in ("id", "html-id", "xml-id"):
-            val = _safe(lambda k=key: attrs.get(k))
-            if val:
-                return str(val)
+    attrs = attrs if attrs is not None else _get_attributes(acc)
+    for key in ("id", "html-id", "xml-id"):
+        val = attrs.get(key)
+        if val:
+            return str(val)
     return None
 
 
@@ -297,6 +336,8 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
+        role = _refine_web_role(role, attrs)
         position, size = _extents(node)
         enabled, focused, checked, selected, expanded = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
@@ -315,7 +356,7 @@ class ATSPIAccessor:
             checked=checked,
             selected=selected,
             expanded=expanded,
-            stable_id=_stable_id(node),
+            stable_id=_stable_id(node, attrs),
         )
 
     def children(self, node: object) -> Sequence[object]:
