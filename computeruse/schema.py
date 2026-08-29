@@ -145,6 +145,11 @@ class Element:
         placeholder: Prompt text shown in an empty field (e.g. "Search"),
             empty string when none — lets the agent identify a blank input by
             its purpose.
+        stable_id: A developer-assigned, layout-independent identity (macOS
+            ``AXIdentifier``, Windows ``AutomationId``, Linux ``accessible-id``),
+            or None when the app exposes none. Far more durable than the
+            title/path/bounds anchor across relayout, scroll, and dynamic lists,
+            so `resolve_ref` matches on it first when present.
     """
 
     ref: str
@@ -164,6 +169,7 @@ class Element:
     selected: bool = False
     expanded: bool | None = None
     placeholder: str = ""
+    stable_id: str | None = None
 
     @property
     def actionable(self) -> bool:

@@ -502,3 +502,48 @@ def test_web_a11y_opt_out(monkeypatch) -> None:
     ax = _FakeAx()
     observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1)
     assert ax.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Stable-id anchors (AXIdentifier / AutomationId / accessible-id)
+# ---------------------------------------------------------------------------
+
+
+def test_stable_id_survives_title_and_bounds_drift() -> None:
+    """A button whose label AND position both change still re-resolves via its
+    stable_id — the case title/path/bounds anchoring fails on (dynamic UIs)."""
+    before = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Submit", at=(10.0, 10.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ])
+    after = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Sending…", at=(250.0, 200.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ])
+    snap_before, snap_after = snap_of(before), snap_of(after)
+    anchor = by_title(snap_before, "Submit")
+    match, reason = observe._match_anchor(anchor, snap_after)
+    assert match is not None and reason == ""
+    assert match.title == "Sending…" and match.stable_id == "submit-btn"
+
+
+def test_stable_id_duplicates_disambiguate_by_proximity() -> None:
+    tree = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0), children=[
+        ax("AXButton", title="Row", at=(10.0, 10.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="row"),
+        ax("AXButton", title="Row", at=(10.0, 300.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="row"),
+    ])
+    snap = snap_of(tree)
+    top = [el for el in snap.elements if el.bounds.y < 100][0]
+    match, _ = observe._match_anchor(top, snap)
+    assert match is not None and match.bounds.y == top.bounds.y  # nearest wins
+
+
+def test_no_stable_id_falls_back_to_positional_ladder() -> None:
+    # unchanged behaviour when the app assigns no ids
+    snap1 = snap_of(save_window())
+    snap2 = snap_of(save_window(save_at=(205.0, 105.0)))
+    anchor = by_title(snap1, "Save")
+    match, reason = observe._match_anchor(anchor, snap2)
+    assert match is not None and match.title == "Save" and reason == ""

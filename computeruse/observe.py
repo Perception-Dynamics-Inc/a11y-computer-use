@@ -129,6 +129,7 @@ class RawNode:
     selected: bool = False
     expanded: bool | None = None
     placeholder: str = ""
+    stable_id: str | None = None
 
 
 class TreeAccessor(Protocol):
@@ -672,6 +673,7 @@ def _flatten(
             selected=node.raw.selected,
             expanded=node.raw.expanded,
             placeholder=node.raw.placeholder,
+            stable_id=node.raw.stable_id or None,
         )
     )
     if node.elided:
@@ -805,11 +807,29 @@ def ax_handle_for(snapshot_id: str, ref: str) -> object | None:
 def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]:
     """Find ``anchor``'s counterpart in ``live``; (None, reason) on failure.
 
-    Candidates must share the role and at least one strong anchor (title or
-    path). Title+path matches win over partial matches; ties break by bounds
-    proximity; a near-exact distance tie is ambiguous. Partial matches
-    additionally must lie within `_WEAK_ANCHOR_DRIFT_PX`.
+    A developer-assigned `stable_id` (AXIdentifier / AutomationId / accessible-id)
+    is layout-independent, so when the anchor carries one an exact (stable_id,
+    role) match is authoritative — this is what lets refs survive relayout,
+    scroll, and dynamic lists that shift title/path/bounds. Only a genuine
+    duplicate (same id and role on two live nodes) falls through to the
+    positional ladder: candidates share the role and at least one strong anchor
+    (title or path); title+path matches win; ties break by bounds proximity; a
+    near-exact distance tie is ambiguous; partial matches must lie within
+    `_WEAK_ANCHOR_DRIFT_PX`.
     """
+    if anchor.stable_id:
+        exact = [
+            el for el in live.elements
+            if el.stable_id == anchor.stable_id and el.role == anchor.role
+        ]
+        if len(exact) == 1:
+            return exact[0], ""
+        if len(exact) > 1:  # duplicate ids: disambiguate by bounds proximity
+            ranked = sorted(exact, key=lambda el: _center_distance(anchor.bounds, el.bounds))
+            d0 = _center_distance(anchor.bounds, ranked[0].bounds)
+            d1 = _center_distance(anchor.bounds, ranked[1].bounds)
+            return (None, "ambiguous") if d1 - d0 <= _AMBIGUITY_PX else (ranked[0], "")
+
     candidates: list[tuple[int, float, Element]] = []
     for el in live.elements:
         if el.role != anchor.role:
@@ -907,6 +927,7 @@ class _AXAccessor:
             selected=bool(selected) if selected is not None else False,
             expanded=bool(expanded) if expanded is not None else None,
             placeholder=str(self._attr(node, "AXPlaceholderValue") or ""),
+            stable_id=str(self._attr(node, "AXIdentifier") or "") or None,
         )
 
     def children(self, node: object) -> Sequence[object]:

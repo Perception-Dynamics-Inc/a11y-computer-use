@@ -55,6 +55,7 @@ class DictAccessor:
             selected=node.get("selected", False),
             expanded=node.get("expanded"),
             placeholder=node.get("placeholder", ""),
+            stable_id=node.get("stable_id"),
         )
 
     def children(self, node: object) -> Sequence[object]:

@@ -233,6 +233,22 @@ def _state_flags(acc):
     return enabled, focused, checked, selected, expanded
 
 
+def _stable_id(acc) -> str | None:
+    """A layout-independent id for ``acc``: the AT-SPI ``accessible-id``, else a
+    web element's DOM id from the object attributes (Chromium exposes 'id').
+    None when the app assigns none."""
+    sid = _call_first(acc, ("get_accessible_id",))
+    if sid:
+        return str(sid)
+    attrs = _call_first(acc, ("get_attributes",))
+    if attrs is not None and hasattr(attrs, "get"):
+        for key in ("id", "html-id", "xml-id"):
+            val = _safe(lambda k=key: attrs.get(k))
+            if val:
+                return str(val)
+    return None
+
+
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles."""
 
@@ -257,6 +273,7 @@ class ATSPIAccessor:
             checked=checked,
             selected=selected,
             expanded=expanded,
+            stable_id=_stable_id(node),
         )
 
     def children(self, node: object) -> Sequence[object]:

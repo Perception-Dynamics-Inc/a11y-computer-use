@@ -134,6 +134,7 @@ class UIAAccessor:
             checked=_checked(node),
             selected=_selected(node),
             expanded=_expanded(node),
+            stable_id=(_safe(lambda: node.AutomationId, "") or "") or None,
         )
 
     def children(self, node: object) -> Sequence[object]:
