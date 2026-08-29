@@ -76,6 +76,11 @@ class BrowserDriver:
     """The `Driver` protocol, backed by the Chrome DevTools Protocol."""
 
     name = "browser"
+    #: This backend's "apps" are CDP page targets (tabs), not OS applications, so
+    #: the Runtime must resolve app identity + frontmost + recheck through the
+    #: driver (frontmost_app/running_apps/activate_app), not the platform
+    #: system-ops. See Runtime._resolves_apps.
+    resolves_apps = True
 
     def __init__(self, endpoint: str | None = None, *, target_id: str | None = None) -> None:
         self._endpoint = endpoint or os.environ.get("COMPUTERUSE_CDP_ENDPOINT", _DEFAULT_ENDPOINT)

@@ -414,6 +414,30 @@ def test_browser_navigate_waits_for_ready_and_launch_maps_to_url() -> None:
     assert any(m == "Page.navigate" for m in d._session._t.methods())
 
 
+def test_gated_runtime_runs_on_the_browser_driver(tmp_path) -> None:
+    """The WHOLE gated Runtime — grants, ref resolution, recheck, verify, audit —
+    runs on the browser backend, with app identity resolved through the driver
+    (tabs), not the OS system-ops. Mirrors the Windows/Linux full-Runtime proof."""
+    from computeruse import safety, server
+
+    d, t = _driver_on()
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier("TAB1", safety.Tier.FULL)  # grant the tab (the browser's "app")
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=d)
+
+    # observe through the gate (READ), resolving "TAB1" via the driver
+    out = rt.desktop_snapshot("TAB1", scope="window")
+    assert "Save" in out and rt._current is not None
+    save = next(e for e in rt._current.elements if e.title == "Save")
+
+    # act through the gate (CLICK) with an Effect Receipt — a11y-first, no OS app
+    t.sent.clear()
+    result = rt.click(ref=save.ref, verify=True)
+    assert "clicked" in result and "effect:" in result  # verify diff appended
+    assert any("this.click()" in p.get("functionDeclaration", "")
+               for m, p in t.sent if m == "Runtime.callFunctionOn")
+
+
 def test_browser_launch_app_rejects_non_url() -> None:
     d, _ = _driver_on()
     with pytest.raises(ComputerUseError) as ei:

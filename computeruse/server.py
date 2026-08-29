@@ -487,6 +487,49 @@ class Runtime:
         self.driver = driver if driver is not None else drivers.get_driver()
         self._current: Snapshot | None = None
 
+    # -- app identity resolution -------------------------------------------
+    # The OS backends resolve app identity through the platform system-ops
+    # (NSWorkspace / _win_system / _linux_system) via the module-level
+    # `_frontmost_bundle`/`_running_app`/recheck functions. A non-OS backend —
+    # the CDP browser, whose "apps" are tabs — sets ``resolves_apps = True`` and
+    # these helpers route through the driver instead, so the WHOLE gated Runtime
+    # (grants, recheck, audit, MCP tools) runs on it. OS drivers don't set the
+    # flag, so their path is unchanged, byte for byte.
+
+    def _resolves_apps(self) -> bool:
+        return bool(getattr(self.driver, "resolves_apps", False))
+
+    def _frontmost(self) -> str:
+        if self._resolves_apps():
+            app_id, _pid = self.driver.frontmost_app()
+            return app_id or "unknown"
+        return _frontmost_bundle()
+
+    def _resolve_app(self, identifier: str) -> tuple[object, str]:
+        if self._resolves_apps():
+            return None, identifier  # the driver validates/binds at snapshot time
+        return _running_app(identifier)
+
+    def _recheck_frontmost_app(self, app: str) -> None:
+        if self._resolves_apps():
+            front, _pid = self.driver.frontmost_app()
+            if front and front != app:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    f"the active target changed from {app} to {front} between the "
+                    "permission decision and injection; re-observe and retry",
+                    detail={"gated_app": app, "frontmost_app": front},
+                )
+            return
+        _recheck_frontmost(app)
+
+    def _recheck_target(self, app: str, target: Target) -> None:
+        # A bound CDP tab does not slide under the pointer the way an OS window
+        # can, so the frontmost check is the meaningful guard there.
+        if self._resolves_apps():
+            return self._recheck_frontmost_app(app)
+        _recheck_target_app(app, target)
+
     # -- gate + audit -------------------------------------------------------
 
     def _run_gated(
@@ -605,12 +648,12 @@ class Runtime:
         if ref is not None:
             snap, _anchor = self._anchor(ref)
             live = self.driver.resolve_ref(snap, ref)
-            return live, snap.app or _frontmost_bundle()
+            return live, snap.app or self._frontmost()
         if x is None or y is None:
             raise ValueError("target an element ref, or both x and y coordinates")
         if display_id is None:
             display_id = int(Quartz.CGMainDisplayID())
-        return Point(display_id=display_id, x=x, y=y), _frontmost_bundle()
+        return Point(display_id=display_id, x=x, y=y), self._frontmost()
 
     # -- observation tools (gated at READ + audited like everything else) ------
 
@@ -622,7 +665,7 @@ class Runtime:
         # TCC before per-app gating: on an ungranted machine the actionable
         # error is the doctor hint, not a per-app permission question.
         self.driver.ensure_trusted()
-        _running, bundle = _running_app(app)  # grants are keyed by bundle id
+        _running, bundle = self._resolve_app(app)  # grants keyed by app id
 
         def execute() -> str:
             prev = self._current if mode == "diff" else None
@@ -659,7 +702,7 @@ class Runtime:
         if text is None and role is None and editable is None and clickable is None:
             raise ValueError("give at least one filter: text, role, editable, or clickable")
         self.driver.ensure_trusted()
-        _running, bundle = _running_app(app)
+        _running, bundle = self._resolve_app(app)
 
         def execute() -> str:
             snap = self.driver.snapshot(Scope(scope), bundle)
@@ -701,11 +744,11 @@ class Runtime:
                     )
             return text, scaled
 
-        app = _frontmost_bundle()
+        app = self._frontmost()
         return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
 
     def zoom(self, display_id: int, x: int, y: int, width: int, height: int) -> bytes:
-        app = _frontmost_bundle()
+        app = self._frontmost()
         return self._run_gated(
             ObserveOp(verb=ObserveVerb.ZOOM, app=app),
             app,
@@ -755,14 +798,14 @@ class Runtime:
             self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
 
         self._run_gated(
-            action, app, execute, recheck=partial(_recheck_target_app, target=target), confirm=confirm
+            action, app, execute, recheck=partial(self._recheck_target, target=target), confirm=confirm
         )
         return f"clicked {_describe(target)}" + self._effect_after(pre)
 
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
         self._run_gated(
-            action, _frontmost_bundle(), lambda: self.driver.type_text(text), recheck=_recheck_frontmost
+            action, self._frontmost(), lambda: self.driver.type_text(text), recheck=self._recheck_frontmost_app
         )
         return f"typed {len(text)} characters"
 
@@ -773,7 +816,7 @@ class Runtime:
             act.parse_chord(chord)  # validate before gating, so bad chords fail fast
         action = KeyChord(chord=chord)
         self._run_gated(
-            action, _frontmost_bundle(), lambda: self.driver.key_chord(chord), recheck=_recheck_frontmost
+            action, self._frontmost(), lambda: self.driver.key_chord(chord), recheck=self._recheck_frontmost_app
         )
         return f"pressed {chord}"
 
@@ -806,7 +849,7 @@ class Runtime:
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
-            action, app, execute, recheck=partial(_recheck_target_app, target=target)
+            action, app, execute, recheck=partial(self._recheck_target, target=target)
         )
         if into_view:
             return f"scrolled {_describe(target)} into view"
@@ -829,7 +872,7 @@ class Runtime:
             action,
             start_app,
             lambda: self.driver.drag(start, end),
-            recheck=partial(_recheck_target_app, target=start),
+            recheck=partial(self._recheck_target, target=start),
         )
         return f"dragged {_describe(start)} -> {_describe(end)}"
 
@@ -842,7 +885,7 @@ class Runtime:
         action = WaitFor(target=anchor, condition=parsed, timeout_s=timeout_s)
         self._run_gated(
             action,
-            snap.app or _frontmost_bundle(),
+            snap.app or self._frontmost(),
             lambda: self.driver.wait_for(
                 anchor, condition=parsed, timeout_s=timeout_s,
                 checker=_wait_checker(snap, self.driver),
@@ -926,7 +969,7 @@ class Runtime:
                 detail={"ref": ref},
             )
         action = TypeText(text=value)
-        app = snap.app or _frontmost_bundle()
+        app = snap.app or self._frontmost()
 
         def execute() -> None:
             if self.driver.set_value(live, value):
@@ -934,7 +977,7 @@ class Runtime:
             self.driver.press_element(live)  # fallback: focus then synthesize typing
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute, recheck=partial(_recheck_target_app, target=live))
+        self._run_gated(action, app, execute, recheck=partial(self._recheck_target, target=live))
         return f"set {ref} = {value!r}"
 
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
@@ -950,7 +993,7 @@ class Runtime:
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app'")
         self.driver.ensure_trusted()
-        _running, bundle = _running_app(app)
+        _running, bundle = self._resolve_app(app)
         dy = 5 if direction == "down" else -5
 
         def execute() -> str:
@@ -971,7 +1014,7 @@ class Runtime:
     def app(self, action: str, name: str | None = None) -> str:
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
-            rows = self._run_gated(AppOp(verb=verb), _frontmost_bundle(), _list_apps)
+            rows = self._run_gated(AppOp(verb=verb), self._frontmost(), _list_apps)
             return json.dumps(rows)
         if verb is AppVerb.QUIT:
             raise ValueError("app quit is not exposed in the MVP tool surface")
@@ -979,19 +1022,19 @@ class Runtime:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
             try:  # gate by bundle id when resolvable, so grant keys stay unified
-                _, gate_key = _running_app(name)
+                _, gate_key = self._resolve_app(name)
             except ComputerUseError:
                 gate_key = name  # not running yet: the identifier is the best key
             self._run_gated(AppOp(verb=verb, app=gate_key), gate_key, lambda: _launch_app(name))
             return f"launched {name}"
-        running, bundle = _running_app(name)  # FOCUS
+        running, bundle = self._resolve_app(name)  # FOCUS
         self._run_gated(AppOp(verb=verb, app=bundle), bundle, lambda: _activate(running))
         return f"focused {bundle}"
 
     def window(self, action: str, window_id: int | None = None) -> str:
         verb = WindowVerb(action)
         if verb is WindowVerb.LIST:
-            rows = self._run_gated(WindowOp(verb=verb), _frontmost_bundle(), _window_rows)
+            rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), _window_rows)
             return json.dumps(rows)
         if verb is not WindowVerb.RAISE:
             raise ValueError(
@@ -1016,7 +1059,7 @@ class Runtime:
 
     def clipboard(self, action: str, text: str | None = None) -> str:
         verb = ClipboardVerb(action)
-        app = _frontmost_bundle()
+        app = self._frontmost()
         if verb is ClipboardVerb.READ:
             content = self._run_gated(ClipboardOp(verb=verb), app, _read_clipboard)
             return content if content is not None else ""
