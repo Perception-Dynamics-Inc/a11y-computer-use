@@ -38,6 +38,7 @@ EXPECTED_TOOLS = {
     "scroll",
     "drag",
     "wait_for",
+    "act",
     "app",
     "window",
     "clipboard",
@@ -694,3 +695,37 @@ async def test_snapshot_with_refs_has_no_handoff(mcp_server, mocked_driver, stor
     result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
     assert not result.isError
     assert "no interactive elements" not in result.content[0].text
+
+
+def test_act_batch_dispatch_stop_and_errors() -> None:
+    """Batched act: runs steps in order, stops at the first failure, and reports
+    unknown steps / empty input — without needing a live driver."""
+    import json as _json
+
+    import pytest
+
+    from computeruse import server
+    from computeruse.schema import ComputerUseError, ErrorCode
+
+    rt = server.Runtime.__new__(server.Runtime)  # bare instance; stub the dispatch targets
+    calls: list = []
+    rt.type_text = lambda text: (calls.append(("type", text)), f"typed {text}")[1]
+    rt.key = lambda chord: (calls.append(("key", chord)), f"pressed {chord}")[1]
+
+    out = _json.loads(rt.act_batch([{"do": "type", "text": "hi"}, {"do": "key", "chord": "enter"}]))
+    assert [s["ok"] for s in out] == [True, True]
+    assert calls == [("type", "hi"), ("key", "enter")]
+
+    def boom(_text):
+        raise ComputerUseError(ErrorCode.STALE_REF, "e1 no longer resolves")
+
+    rt.type_text = boom
+    out2 = _json.loads(rt.act_batch([{"do": "type", "text": "x"}, {"do": "key", "chord": "enter"}]))
+    assert out2[0]["ok"] is False and len(out2) == 1  # stopped before the key step
+    assert "stale_ref" in out2[0]["error"]
+
+    out3 = _json.loads(rt.act_batch([{"do": "frobnicate"}]))
+    assert out3[0]["ok"] is False and "unknown step" in out3[0]["error"]
+
+    with pytest.raises(ValueError):
+        rt.act_batch([])

@@ -789,6 +789,63 @@ class Runtime:
         )
         return f"{ref} {parsed.value}: satisfied"
 
+    def act_batch(self, steps: list[dict], *, confirm: "Confirmer | None" = None) -> str:
+        """Execute act steps in ONE call — the transactional path that collapses
+        N observe→act round-trips into 1 (agent speed). Each step is gated +
+        audited exactly like its standalone tool; the batch STOPS at the first
+        failure. Returns JSON: a list of per-step {i, do, ok, result | error}.
+
+        Step shapes (key ``do`` selects the action):
+          {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
+          {"do":"type","text":"..."}
+          {"do":"key","chord":"cmd+s"}
+          {"do":"scroll","ref":"e3","dy":5}  (+ dx, unit, into_view, or x/y)
+          {"do":"drag","start_ref":"e1","end_ref":"e2"}
+          {"do":"wait_for","ref":"e7","condition":"actionable"}  (+ timeout_s)
+        """
+        if not isinstance(steps, list) or not steps:
+            raise ValueError("steps must be a non-empty list of step objects")
+        out: list[dict] = []
+        for i, step in enumerate(steps):
+            if not isinstance(step, dict) or "do" not in step:
+                out.append({"i": i, "ok": False, "error": "each step needs a 'do' field"})
+                break
+            do = step["do"]
+            try:
+                out.append({"i": i, "do": do, "ok": True, "result": self._dispatch_step(do, step, confirm)})
+            except ActionRefused as exc:
+                out.append({"i": i, "do": do, "ok": False, "error": refusal_text(exc.decision)})
+                break
+            except ComputerUseError as exc:
+                out.append({"i": i, "do": do, "ok": False, "error": error_text(exc)})
+                break
+            except (KeyError, ValueError) as exc:
+                out.append({"i": i, "do": do, "ok": False, "error": str(exc)})
+                break
+        return json.dumps(out)
+
+    def _dispatch_step(self, do: str, step: dict, confirm):
+        if do == "click":
+            return self.click(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
+                              step.get("button", "left"), step.get("count", 1),
+                              step.get("modifiers"), confirm=confirm)
+        if do == "type":
+            return self.type_text(step["text"])
+        if do == "key":
+            return self.key(step["chord"])
+        if do == "scroll":
+            return self.scroll(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
+                               step.get("dx", 0), step.get("dy", 0), step.get("unit", "lines"),
+                               step.get("into_view", False))
+        if do == "drag":
+            return self.drag(step.get("start_ref"), step.get("start_x"), step.get("start_y"),
+                             step.get("end_ref"), step.get("end_x"), step.get("end_y"),
+                             step.get("display_id"))
+        if do == "wait_for":
+            return self.wait_for(step["ref"], step.get("condition", "exists"),
+                                 step.get("timeout_s", 10.0))
+        raise ValueError(f"unknown step '{do}' — use click/type/key/scroll/drag/wait_for")
+
     def app(self, action: str, name: str | None = None) -> str:
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
@@ -1091,6 +1148,25 @@ def build_server(
         raises a structured timeout error otherwise. timeout_s is clamped to
         60s. Prefer this over fixed sleeps. Tier 'read'."""
         return await run(runtime.wait_for, ref, condition, timeout_s)
+
+    @server.tool(name="act")
+    async def act(steps: list[dict]) -> str:
+        """Run a SEQUENCE of actions in ONE call (batched/transactional) — the
+        fast path that collapses many observe→act round-trips into one. steps is
+        a list of {"do": ...} objects executed in order; the batch STOPS at the
+        first failure and reports it. Supported steps:
+          {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
+          {"do":"type","text":"..."}
+          {"do":"key","chord":"cmd+s"}
+          {"do":"scroll","ref":"e3","dy":5}  (+ "into_view")
+          {"do":"drag","start_ref":"e1","end_ref":"e2"}
+          {"do":"wait_for","ref":"e7","condition":"actionable"}
+        Refs come from the latest desktop_snapshot/find. Returns JSON: a list of
+        per-step {i, do, ok, result | error}. Every step is gated + audited
+        exactly like its standalone tool (an irreversible click still prompts for
+        confirmation). Use this to run a known multi-step interaction (fill a form,
+        open a menu and pick an item) without a round-trip per action."""
+        return await run(runtime.act_batch, steps, confirm=_confirmer_for(server.get_context()))
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None) -> str:
