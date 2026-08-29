@@ -245,18 +245,27 @@ class LinuxDriver:
         """
         if checker is None:
             raise ValueError("LinuxDriver.wait_for needs a checker; the Runtime supplies one")
+        from computeruse.drivers import _atspi_events
+
+        events_on = _atspi_events.enabled()
         deadline = time.monotonic() + timeout_s
         while True:
             result = checker(target, condition)
             if result is not None:
                 return result
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise ComputerUseError(
                     ErrorCode.TIMEOUT,
                     f"{target.ref} did not reach {condition.value} within {timeout_s}s",
                     detail={"ref": target.ref, "condition": condition.value, "timeout_s": timeout_s},
                 )
-            time.sleep(0.1)
+            if events_on:
+                # wake the instant the UI changes (any standing a11y event), with
+                # a short safety tick — far lower latency than fixed polling.
+                _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=min(0.4, remaining))
+            else:
+                time.sleep(min(0.1, remaining))
 
     # -- capture (PIL X11 grab) ---------------------------------------------
     def screenshot(self, display_id: int | None = None) -> object:

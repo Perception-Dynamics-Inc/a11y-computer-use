@@ -53,6 +53,25 @@ def current_seq() -> int:
         return _seq
 
 
+def wait_for_event(since_seq: int = 0, timeout: float = 0.5):
+    """Block until any AT-SPI event with seq > ``since_seq`` arrives (a UI change
+    on the standing set: children/state/text-changed, document:load-complete),
+    or ``timeout`` seconds pass. Returns the newest such event tuple (seq, type,
+    detail1) or None on timeout. Lets a waiter wake the instant the UI changes
+    instead of polling on a fixed tick."""
+    with _events_cv:
+        def _newest():
+            if _events and _events[-1][0] > since_seq:
+                return _events[-1]
+            return None
+
+        found = _newest()
+        if found is not None:
+            return found
+        _events_cv.wait(timeout)
+        return _newest()
+
+
 def _on_event(event) -> bool:
     global _seq
     with _events_cv:
