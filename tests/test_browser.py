@@ -528,6 +528,27 @@ def test_cdp_session_event_buffer_is_bounded() -> None:
     assert len(sess._events) == 3  # oldest dropped, never unbounded
 
 
+def test_mcp_server_exposes_console_and_network_only_on_browser(monkeypatch) -> None:
+    """`COMPUTERUSE_DRIVER=browser computeruse mcp` registers the browser-only
+    feeds; the OS surfaces don't grow. Proves the conditional registration end
+    to end, without a live browser."""
+    import asyncio
+
+    from computeruse import drivers, server
+
+    async def names(srv):
+        return {t.name for t in await srv.list_tools()}
+
+    monkeypatch.setattr(drivers, "get_driver", lambda *a, **k: browser.BrowserDriver(endpoint="x"))
+    browser_tools = asyncio.run(names(server.build_server()))
+    assert {"console", "network"} <= browser_tools
+
+    monkeypatch.setattr(drivers, "get_driver",
+                        lambda *a, **k: type("Bare", (), {"name": "macos"})())
+    os_tools = asyncio.run(names(server.build_server()))
+    assert "console" not in os_tools and "network" not in os_tools
+
+
 def test_browser_launch_app_rejects_non_url() -> None:
     d, _ = _driver_on()
     with pytest.raises(ComputerUseError) as ei:
