@@ -438,6 +438,48 @@ def test_gated_runtime_runs_on_the_browser_driver(tmp_path) -> None:
                for m, p in t.sent if m == "Runtime.callFunctionOn")
 
 
+def test_console_entry_parsing() -> None:
+    log = browser._console_entry({"method": "Runtime.consoleAPICalled",
+                                  "params": {"type": "error", "args": [{"value": "boom"}, {"value": 42}]}})
+    assert log == {"level": "error", "text": "boom 42"}
+    exc = browser._console_entry({"method": "Runtime.exceptionThrown",
+                                  "params": {"exceptionDetails": {"exception": {
+                                      "description": "TypeError: x is not a function\n  at f"}}}})
+    assert exc["level"] == "exception" and exc["text"] == "TypeError: x is not a function"
+    assert browser._console_entry({"method": "Page.frameNavigated", "params": {}}) is None
+
+
+def test_console_messages_drains_accumulates_and_clears() -> None:
+    d, _ = _driver_on(lambda m, p: {})  # Runtime.evaluate (the drain kick) returns {}
+    d._session._events = [  # events CDP pushed onto the buffer between actions
+        {"method": "Runtime.consoleAPICalled", "params": {"type": "warning", "args": [{"value": "careful"}]}},
+        {"method": "Runtime.exceptionThrown",
+         "params": {"exceptionDetails": {"exception": {"description": "ReferenceError: nope"}}}},
+    ]
+    msgs = d.console_messages()
+    assert {"level": "warning", "text": "careful"} in msgs
+    assert any(m["level"] == "exception" and "ReferenceError" in m["text"] for m in msgs)
+    assert d.console_messages() == []  # reading cleared the buffer
+
+
+def test_runtime_console_gated_on_browser_and_unsupported_elsewhere(tmp_path) -> None:
+    from computeruse import safety, server
+
+    d, _ = _driver_on(lambda m, p: {})
+    d._session._events = [{"method": "Runtime.consoleAPICalled",
+                           "params": {"type": "error", "args": [{"value": "kaboom"}]}}]
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("TAB1", safety.Tier.READ)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "a"), driver=d)
+    assert "kaboom" in rt.console("TAB1")  # gated READ, through the driver
+
+    # a backend without a console feed answers UNSUPPORTED, not a crash
+    rt.driver = type("NoConsole", (), {"name": "macos"})()
+    with pytest.raises(ComputerUseError) as ei:
+        rt.console("TAB1")
+    assert ei.value.code is ErrorCode.UNSUPPORTED
+
+
 def test_browser_launch_app_rejects_non_url() -> None:
     d, _ = _driver_on()
     with pytest.raises(ComputerUseError) as ei:
@@ -528,4 +570,22 @@ def test_live_iframe_content_is_observable_and_actionable() -> None:
     inner = next(e for e in snap.elements if e.title == "InnerBtn")  # stitched from the child frame
     assert inner.clickable and inner.role == "AXButton"
     assert d.press_element(inner) is True  # coordinate-free click INTO the iframe
+    d._reset()
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_console_captures_logs_and_exceptions() -> None:
+    import urllib.parse
+
+    d = browser.BrowserDriver(endpoint=_live_endpoint())
+    page = ("<script>console.log('hi');console.error('boom');nope.bad()</script>")
+    d.navigate("data:text/html," + urllib.parse.quote(page))
+    msgs = d.console_messages()
+    texts = {m["text"] for m in msgs}
+    levels = {m["level"] for m in msgs}
+    assert "boom" in texts and "error" in levels
+    assert any(m["level"] == "exception" for m in msgs)  # the uncaught ReferenceError
+    assert d.console_messages() == []  # cleared after reading
     d._reset()

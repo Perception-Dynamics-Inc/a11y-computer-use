@@ -87,6 +87,7 @@ class BrowserDriver:
         self._target_id = target_id
         self._session = None  # lazily connected _cdp.CDPSession
         self._enabled = False
+        self._console: list[dict] = []  # accumulated console/exception entries
 
     # -- connection ---------------------------------------------------------
     def _connect(self):
@@ -108,7 +109,10 @@ class BrowserDriver:
         target = target or targets[0]
         self._target_id = target.get("id")
         self._session = _cdp.CDPSession(_cdp.connect(target["webSocketDebuggerUrl"]))
-        for domain in ("DOM", "Page", "Runtime"):
+        # Runtime + Log emit consoleAPICalled / exceptionThrown / entryAdded events
+        # (buffered by the session) — the console-observation feed a vision agent
+        # is blind to. Enabling here means the feed starts before the first action.
+        for domain in ("DOM", "Page", "Runtime", "Log"):
             try:
                 self._session.call(f"{domain}.enable")
             except ComputerUseError:
@@ -398,6 +402,31 @@ class BrowserDriver:
         })["data"]
         return base64.b64decode(data)
 
+    # -- observation the vision path can't see ------------------------------
+    def console_messages(self, *, clear: bool = True) -> list[dict]:
+        """Console output + uncaught JS exceptions from the bound tab.
+
+        The web agent's answer to "did that click actually work?" — errors and
+        exceptions a screenshot never shows. Each entry is
+        ``{"level": log|warning|error|exception, "text": ...}``. Console events
+        arrive asynchronously, so a cheap evaluate is issued first to drain any
+        pending frames off the socket; ``clear`` empties the buffer after reading
+        (the default: an agent wants what's new since it last looked).
+        """
+        sess = self._connect()
+        try:
+            sess.call("Runtime.evaluate", {"expression": "0", "returnByValue": True})
+        except ComputerUseError:
+            pass
+        for ev in sess.drain_events():
+            entry = _console_entry(ev)
+            if entry is not None:
+                self._console.append(entry)
+        out = list(self._console)
+        if clear:
+            self._console = []
+        return out
+
     # -- system / windowing (tabs as apps/windows) --------------------------
     def frontmost_app(self) -> tuple[str | None, int | None]:
         return (self._target_id or (self._connect() and self._target_id)), None
@@ -470,6 +499,26 @@ class BrowserDriver:
 
 def _looks_like_url(s: str) -> bool:
     return "://" in s or s.startswith(("about:", "data:", "file:", "chrome:"))
+
+
+def _console_entry(event: dict) -> dict | None:
+    """Map one CDP event to a ``{"level", "text"}`` console entry, or None."""
+    method = event.get("method")
+    params = event.get("params", {})
+    if method == "Runtime.consoleAPICalled":
+        args = params.get("args", [])
+        parts = [str(a.get("value", a.get("description", ""))) for a in args]
+        # CDP levels: log|warning|error|debug|info|... — keep the model's vocab.
+        level = params.get("type", "log")
+        return {"level": "warning" if level == "warning" else level, "text": " ".join(parts)}
+    if method == "Runtime.exceptionThrown":
+        det = params.get("exceptionDetails", {})
+        text = det.get("exception", {}).get("description") or det.get("text", "uncaught exception")
+        return {"level": "exception", "text": text.splitlines()[0] if text else "uncaught exception"}
+    if method == "Log.entryAdded":
+        entry = params.get("entry", {})
+        return {"level": entry.get("level", "info"), "text": entry.get("text", "")}
+    return None
 
 
 def _mods_mask(modifiers: tuple[str, ...]) -> int:

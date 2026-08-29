@@ -757,6 +757,22 @@ class Runtime:
             ),
         )
 
+    def console(self, app: str) -> str:
+        """Recent console output + uncaught exceptions from a backend that has a
+        console (the browser). Gated + audited at READ, like any observation.
+        Raises UNSUPPORTED on backends without one."""
+        if not hasattr(self.driver, "console_messages"):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "console is only available on the browser backend",
+                detail={"driver": self.driver.name},
+            )
+        _running, bundle = self._resolve_app(app)
+        return self._run_gated(
+            ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle,
+            lambda: json.dumps(self.driver.console_messages()),
+        )
+
     # -- action tools -----------------------------------------------------------
 
     def click(
@@ -1401,5 +1417,18 @@ def build_server(
         typing path). Gated against the frontmost app. The clipboard is
         cross-app: reads may return content copied from any app."""
         return await run(runtime.clipboard, action, text)
+
+    # Browser-only: a console feed is meaningful only where the backend has one,
+    # so the tool appears on the surface exactly when the driver can serve it —
+    # the agent gets the verbs its surface actually supports.
+    if hasattr(runtime.driver, "console_messages"):
+        @server.tool(name="console")
+        async def console(app: str) -> str:
+            """Recent console output + uncaught JS exceptions from a browser tab
+            (app = the tab/target id) — how the agent verifies whether an action
+            actually worked, which a screenshot can't reveal. Returns JSON:
+            a list of {level: log|warning|error|exception, text}. Reading clears
+            the buffer (you get what's new since you last looked). Tier 'read'."""
+            return await run(runtime.console, app)
 
     return server

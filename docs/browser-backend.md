@@ -32,6 +32,7 @@ JSONL audit, the same MCP surface.
 | Navigate           | `launch_app(url)` = `Page.navigate` + wait for `document.readyState=="complete"` (load-aware, no fixed sleep) — the browser analog of launching an app, so the existing `app` tool drives it with no new MCP surface |
 | Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document (same-process frames; cross-origin OOPIF skipped, never fatal) |
 | Tabs               | page targets are modelled as apps/windows (`running_apps`/`windows`/`activate_app`) |
+| Console            | `console` tool (browser-only, tier `read`): console output + uncaught JS exceptions from `Runtime.consoleAPICalled`/`exceptionThrown`/`Log.entryAdded` — how the agent verifies an action worked, which a screenshot cannot show |
 
 `stable_id` is the backend DOM node id — stable across snapshots within a page —
 so `observe._match_anchor` re-resolves a ref deterministically after the DOM
