@@ -227,6 +227,16 @@ def _action_names(acc) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))  # de-dup, preserve order
 
 
+# Roles that never carry a text/numeric value — reading one costs two wasted
+# D-Bus round-trips per node (Text + Value iface probes that always fail), and
+# groups/buttons/windows are the bulk of a tree. Their label lives in the Name
+# (title), not the value, so skipping the value read is a pure speedup.
+_NO_VALUE_ROLES = frozenset({
+    "AXButton", "AXImage", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
+    "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
+})
+
+
 def _value_text(acc, role: str) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -346,13 +356,14 @@ class ATSPIAccessor:
             role=role,
             subrole=None,
             title=str(name),
-            value=_value_text(node, role),
             description=str(description),
             enabled=enabled,
             focused=focused,
             position=position,
             size=size,
             actions=_action_names(node),
+            # skip the value probe (2 D-Bus calls) on roles that never have one
+            value=None if role in _NO_VALUE_ROLES else _value_text(node, role),
             checked=checked,
             selected=selected,
             expanded=expanded,
