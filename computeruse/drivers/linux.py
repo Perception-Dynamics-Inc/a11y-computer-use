@@ -63,6 +63,10 @@ class LinuxDriver:
         try:
             from computeruse.drivers import _atspi
 
+            # Force the whole desktop's Chromium/Electron apps to expose their
+            # a11y tree (org.a11y.Status flip) before we probe — turns a
+            # Grok-style a11y-OFF desktop into an a11y-first one, no relaunch.
+            _atspi.enable_a11y_status()
             desktop = _atspi._safe(lambda: _atspi._atspi().get_desktop(0))
         except ImportError as exc:
             raise ComputerUseError(

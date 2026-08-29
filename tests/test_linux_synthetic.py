@@ -99,3 +99,10 @@ def test_chord_parser_and_keysyms() -> None:
         _linux_input.validate_chord("ctrl+")  # no non-modifier key
     with pytest.raises(ValueError):
         _linux_input.validate_chord("meta+nope")  # unknown key
+
+
+def test_enable_a11y_status_opt_out(monkeypatch) -> None:
+    from computeruse.drivers import _atspi
+    monkeypatch.setattr(_atspi, "_a11y_status_forced", False)
+    monkeypatch.setenv("COMPUTERUSE_NO_WEB_A11Y", "1")
+    assert _atspi.enable_a11y_status() is False  # opt-out short-circuits before any D-Bus

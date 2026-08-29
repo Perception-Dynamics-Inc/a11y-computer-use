@@ -125,6 +125,48 @@ def _safe(fn, default=None):
         return default
 
 
+_a11y_status_forced = False
+
+
+def enable_a11y_status() -> bool:
+    """Force the desktop's accessibility 'active' flags on via D-Bus so already-
+    running Chromium/Electron apps (Chrome, Slack, VS Code, Discord, Electron)
+    build their AT-SPI tree WITH NO RELAUNCH — the Linux equivalent of the macOS
+    AXEnhancedUserInterface trick, and the counter to Grok's a11y-OFF desktop.
+
+    Chromium enables renderer accessibility when ``org.a11y.Status.IsEnabled`` /
+    ``ScreenReaderEnabled`` go true on the session bus (the at-spi-bus-launcher
+    owns ``org.a11y.Bus`` at ``/org/a11y/bus``); it listens for the change live.
+    Idempotent + cached per process. Opt out with COMPUTERUSE_NO_WEB_A11Y=1.
+    Returns True if the flags are (now) set."""
+    global _a11y_status_forced
+    if _a11y_status_forced:
+        return True
+    if os.environ.get("COMPUTERUSE_NO_WEB_A11Y"):
+        return False
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")  # ensure the a11y stack is present
+        from gi.repository import Gio, GLib
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+        def _set(prop: str) -> None:
+            bus.call_sync(
+                "org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "Set",
+                GLib.Variant("(ssv)", ("org.a11y.Status", prop, GLib.Variant("b", True))),
+                None, Gio.DBusCallFlags.NONE, -1, None,
+            )
+
+        for prop in ("IsEnabled", "ScreenReaderEnabled"):
+            _safe(lambda p=prop: _set(p))
+        _a11y_status_forced = True
+        return True
+    except Exception:
+        return False
+
+
 def _call_first(obj, names, *args, default=None):
     """Call the first method in ``names`` that exists on ``obj`` (binding-version
     tolerant — atspi2 renamed a few getters across releases)."""

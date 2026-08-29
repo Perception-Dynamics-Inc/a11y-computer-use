@@ -157,3 +157,29 @@ def test_linux_a11y_type_text(tmp_path) -> None:
         assert any("hello atspi more" in (v or "") for v in values), f"typed text missing; {values}"
     finally:
         proc.terminate()
+
+
+def test_linux_forces_a11y_status() -> None:
+    """The org.a11y.Status flip: after the driver initializes, the desktop's
+    accessibility flags are on so Chromium/Electron apps expose their tree with
+    no relaunch (the Linux counter to Grok's a11y-OFF desktop)."""
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import GLib, Gio
+
+    from computeruse.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)  # ensure_trusted() -> enable_a11y_status()
+
+    def getp(name: str):
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        r = bus.call_sync(
+            "org.a11y.Bus", "/org/a11y/bus", "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.a11y.Status", name)), GLib.VariantType("(v)"),
+            Gio.DBusCallFlags.NONE, -1, None,
+        )
+        return r.unpack()[0]
+
+    assert getp("IsEnabled") is True
+    assert getp("ScreenReaderEnabled") is True
