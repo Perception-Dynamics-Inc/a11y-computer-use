@@ -503,6 +503,99 @@ def render_matches(snap: Snapshot, matches: Sequence[Element]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Snapshot diffing — the non-accumulation token win (send deltas, not the tree)
+# ---------------------------------------------------------------------------
+
+
+def _identity(el: Element) -> tuple:
+    """A cross-epoch identity key for an element. A developer-assigned stable_id
+    is authoritative; otherwise fall back to (role, title, path) — the same
+    signal `_match_anchor` trusts, minus the live bounds that a diff expects to
+    move."""
+    if el.stable_id:
+        return ("id", el.stable_id, el.role)
+    return ("rtp", el.role, el.title, el.path)
+
+
+_DIFF_ATTRS = ("value", "title", "enabled", "focused", "checked", "selected", "expanded")
+
+
+def _state_changes(a: Element, b: Element) -> dict[str, tuple]:
+    """The per-attribute changes between two elements sharing an identity."""
+    changes: dict[str, tuple] = {}
+    for attr in _DIFF_ATTRS:
+        av, bv = getattr(a, attr), getattr(b, attr)
+        if av != bv:
+            changes[attr] = (av, bv)
+    ab, bb = a.bounds, b.bounds
+    if (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
+        changes["bounds"] = ((ab.x, ab.y), (bb.x, bb.y))
+    return changes
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotDiff:
+    """What changed between two snapshots of the same app. Refs on ``added`` /
+    ``changed`` are the NEW snapshot's (act on them); ``removed`` carries the old
+    element only to report what's gone."""
+
+    old_id: str
+    new_id: str
+    added: tuple[Element, ...]
+    removed: tuple[Element, ...]
+    changed: tuple[tuple[Element, Element, dict], ...]  # (old, new, changes)
+
+    @property
+    def empty(self) -> bool:
+        return not (self.added or self.removed or self.changed)
+
+
+def diff_snapshots(old: Snapshot, new: Snapshot) -> SnapshotDiff:
+    """Structured delta between two snapshots (pure; platform-free). Elements are
+    matched by `_identity` (stable_id, else role/title/path); an element only in
+    ``new`` is *added*, only in ``old`` is *removed*, in both with a differing
+    state signature is *changed*. Unchanged elements are omitted — that omission
+    is the whole point: after an action the agent re-observes deltas, not the
+    entire (largely identical) tree, so context stops accumulating."""
+    old_by: dict[tuple, Element] = {}
+    for el in old.elements:
+        old_by.setdefault(_identity(el), el)
+    new_by: dict[tuple, Element] = {}
+    for el in new.elements:
+        new_by.setdefault(_identity(el), el)
+    added = tuple(el for k, el in new_by.items() if k not in old_by)
+    removed = tuple(el for k, el in old_by.items() if k not in new_by)
+    changed = tuple(
+        (old_by[k], nel, ch)
+        for k, nel in new_by.items()
+        if k in old_by and (ch := _state_changes(old_by[k], nel))
+    )
+    return SnapshotDiff(old.snapshot_id, new.snapshot_id, added, removed, changed)
+
+
+def render_diff(diff: SnapshotDiff) -> str:
+    """Render a `SnapshotDiff` as compact text: a header line then +added,
+    -removed, ~changed. Empty diff says so explicitly (a real, useful signal:
+    'the action produced no observable tree change')."""
+    head = f"[{diff.new_id} ← {diff.old_id}] +{len(diff.added)} -{len(diff.removed)} ~{len(diff.changed)}"
+    if diff.empty:
+        return head + "\n  (no change)"
+    lines = [head]
+    for el in diff.added:
+        lines.append("  + " + _render_line(el))
+    for el in diff.removed:
+        role = el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
+        title = f' "{el.title}"' if el.title else ""
+        lines.append(f"  - {el.ref} {role}{title} (gone)")
+    for _old, new, changes in diff.changed:
+        parts = ", ".join(
+            f"{attr}: {_clip(str(a), 24)}→{_clip(str(b), 24)}" for attr, (a, b) in changes.items()
+        )
+        lines.append(f"  ~ {new.ref} {new.role[2:].lower() if new.role.startswith('AX') else new.role.lower()} [{parts}]")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Pruning engine
 # ---------------------------------------------------------------------------
 

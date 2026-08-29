@@ -547,3 +547,69 @@ def test_no_stable_id_falls_back_to_positional_ladder() -> None:
     anchor = by_title(snap1, "Save")
     match, reason = observe._match_anchor(anchor, snap2)
     assert match is not None and match.title == "Save" and reason == ""
+
+
+# ---------------------------------------------------------------------------
+# Snapshot diffing (the non-accumulation token win)
+# ---------------------------------------------------------------------------
+
+
+def _btn(title, at, sid=None):
+    node = ax("AXButton", title=title, at=at, size=(80.0, 30.0), actions=("AXPress",))
+    if sid:
+        node["stable_id"] = sid
+    return node
+
+
+def test_diff_add_remove_change() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXTextField", title="Name", value="", at=(10.0, 50.0), size=(200.0, 30.0)),
+        _btn("Cancel", (10.0, 90.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXTextField", title="Name", value="Alice", at=(10.0, 50.0), size=(200.0, 30.0)),
+        _btn("Submit", (10.0, 90.0)),
+    ])
+    d = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert {e.title for e in d.added} == {"Submit"}
+    assert {e.title for e in d.removed} == {"Cancel"}
+    assert len(d.changed) == 1
+    _oel, nel, ch = d.changed[0]
+    assert nel.title == "Name" and ch["value"] == ("", "Alice")
+    assert not d.empty
+
+
+def test_diff_no_change_is_empty() -> None:
+    d = observe.diff_snapshots(snap_of(save_window()), snap_of(save_window()))
+    assert d.empty
+    assert "(no change)" in observe.render_diff(d)
+
+
+def test_diff_stable_id_move_is_change_not_add_remove() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(500.0, 500.0),
+             children=[_btn("Go", (10.0, 10.0), sid="go")])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(500.0, 500.0),
+             children=[_btn("Going…", (300.0, 400.0), sid="go")])
+    d = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert not d.added and not d.removed  # same stable_id -> matched
+    assert len(d.changed) == 1
+    _o, _n, ch = d.changed[0]
+    assert "title" in ch and "bounds" in ch
+
+
+def test_render_diff_shows_all_three_sections() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Keep", (10.0, 10.0)),
+        _btn("Old", (10.0, 50.0)),
+        ax("AXTextField", title="F", value="a", at=(10.0, 90.0), size=(200.0, 30.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Keep", (10.0, 10.0)),
+        _btn("New", (10.0, 50.0)),
+        ax("AXTextField", title="F", value="b", at=(10.0, 90.0), size=(200.0, 30.0)),
+    ])
+    text = observe.render_diff(observe.diff_snapshots(snap_of(old), snap_of(new)))
+    assert "+1 -1 ~1" in text
+    assert "New" in text and "gone" in text and "→" in text

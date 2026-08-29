@@ -575,17 +575,24 @@ class Runtime:
 
     # -- observation tools (gated at READ + audited like everything else) ------
 
-    def desktop_snapshot(self, app: str, scope: str = "window") -> str:
+    def desktop_snapshot(self, app: str, scope: str = "window", mode: str = "full") -> str:
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app' (display/element land later)")
+        if mode not in ("full", "diff"):
+            raise ValueError("mode must be 'full' or 'diff'")
         # TCC before per-app gating: on an ungranted machine the actionable
         # error is the doctor hint, not a per-app permission question.
         self.driver.ensure_trusted()
         _running, bundle = _running_app(app)  # grants are keyed by bundle id
 
         def execute() -> str:
+            prev = self._current if mode == "diff" else None
             snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
+            # diff only against a prior snapshot of the SAME app (else the agent
+            # switched targets and a delta is meaningless — fall back to full).
+            if prev is not None and prev.app == snap.app:
+                return observe.render_diff(observe.diff_snapshots(prev, snap))
             text = observe.render_text(snap)
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
                 text = f"{text}\n\n{_VISION_HANDOFF_HINT}"
@@ -1014,15 +1021,22 @@ def build_server(
         return confirm
 
     @server.tool(name="desktop_snapshot")
-    async def desktop_snapshot(app: str, scope: str = "window") -> str:
+    async def desktop_snapshot(app: str, scope: str = "window", mode: str = "full") -> str:
         """Capture a pruned accessibility-tree snapshot of one app as indented
         text with element refs (e1, e2, ...). Refs are valid ONLY against this
         latest snapshot: act on them promptly and re-observe after the UI
         changes (a stale_ref error means the tree moved). scope='window'
-        covers the frontmost window, 'app' all windows. Tier 'read' for the
-        scoped app. Needs the Accessibility permission (see `computeruse
-        doctor`)."""
-        return await run(runtime.desktop_snapshot, app, scope)
+        covers the frontmost window, 'app' all windows.
+
+        mode='diff' returns ONLY what changed since your last snapshot of this
+        app — added / removed / changed elements — instead of the whole tree.
+        Use it to re-observe after an action: it's far fewer tokens, so your
+        context stops accumulating full trees, and '(no change)' is itself a
+        useful signal that the action had no visible effect. mode='full'
+        (default) returns the complete tree; use it for the first observation.
+        Tier 'read' for the scoped app. Needs the Accessibility permission (see
+        `computeruse doctor`)."""
+        return await run(runtime.desktop_snapshot, app, scope, mode)
 
     @server.tool(name="find")
     async def find(
