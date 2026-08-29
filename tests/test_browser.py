@@ -60,6 +60,8 @@ def _fixture_responder(method: str, params: dict):
     """A small, realistic page: button, text field, password field, checkbox, link."""
     if method == "Accessibility.getFullAXTree":
         return {"nodes": _AX_NODES}
+    if method == "Page.getFrameTree":
+        return {"frameTree": {"frame": {"id": "MAIN"}, "childFrames": []}}
     if method == "DOMSnapshot.captureSnapshot":
         return _DOM_SNAPSHOT
     if method == "DOM.resolveNode":
@@ -115,6 +117,46 @@ _DOM_SNAPSHOT = {
         },
     }],
 }
+
+
+# --- iframe fixtures: a main page with one same-process child frame ---------- #
+_IFRAME_MAIN = [
+    _ax("1", "RootWebArea", backend=100, children=["2", "3"]),
+    _ax("2", "button", "Outer", backend=101, parent="1", props={"focusable": True}),
+    _ax("3", "Iframe", backend=110, parent="1"),  # empty childIds — the dead end
+]
+_IFRAME_CHILD = [
+    _ax("1", "RootWebArea", backend=200, children=["2"]),
+    _ax("2", "button", "Inner", backend=201, parent="1", props={"focusable": True}),
+]
+_IFRAME_DOM = {
+    "strings": ["MAIN", "CHILD", "about:outer", "about:inner"],
+    "documents": [
+        {"frameId": 0, "documentURL": 2, "contentWidth": 800, "contentHeight": 600,
+         "nodes": {"backendNodeId": [100, 101, 110], "nodeName": [-1, -1, -1],
+                   "attributes": [[], [], []]},
+         "layout": {"nodeIndex": [0, 1, 2],
+                    "bounds": [[0, 0, 800, 600], [8, 8, 80, 30], [50, 60, 300, 200]]}},
+        {"frameId": 1, "documentURL": 3, "contentWidth": 300, "contentHeight": 200,
+         "nodes": {"backendNodeId": [200, 201], "nodeName": [-1, -1], "attributes": [[], []]},
+         "layout": {"nodeIndex": [0, 1], "bounds": [[0, 0, 300, 200], [8, 8, 80, 30]]}},
+    ],
+}
+
+
+def _iframe_responder(method: str, params: dict):
+    if method == "Accessibility.getFullAXTree":
+        return {"nodes": _IFRAME_CHILD if params.get("frameId") == "CHILD" else _IFRAME_MAIN}
+    if method == "Page.getFrameTree":
+        return {"frameTree": {"frame": {"id": "MAIN"},
+                              "childFrames": [{"frame": {"id": "CHILD"}}]}}
+    if method == "DOM.getFrameOwner":
+        return {"backendNodeId": 110}  # the <iframe> element
+    if method == "DOMSnapshot.captureSnapshot":
+        return _IFRAME_DOM
+    if method in ("DOM.enable", "Page.enable", "Runtime.enable"):
+        return {}
+    raise AssertionError(f"unexpected CDP method {method}")
 
 
 def _driver_on(responder=_fixture_responder) -> tuple[browser.BrowserDriver, ScriptedTransport]:
@@ -188,6 +230,60 @@ def test_cdp_accessor_multiline_textbox_is_textarea() -> None:
     node = _ax("9", "textbox", "Bio", backend=9, props={"editable": "plaintext", "multiline": True})
     acc = _cdp_ax.CDPAccessor([node], {9: (0, 0, 100, 60)}, frozenset())
     assert acc.read(node).role == "AXTextArea"
+
+
+# --------------------------------------------------------------------------- #
+# iframe stitching
+# --------------------------------------------------------------------------- #
+def test_stitch_frames_grafts_child_under_owner_iframe() -> None:
+    pooled = _cdp_ax.stitch_frames([
+        {"nodes": _IFRAME_MAIN, "owner_backend": None},
+        {"nodes": _IFRAME_CHILD, "owner_backend": 110},  # owned by the Iframe node (backend 110)
+    ])
+    by_id = {n["nodeId"]: n for n in pooled}
+    # node ids are namespaced per frame so they never collide across frames
+    assert "0:1" in by_id and "1:1" in by_id
+    iframe_node = next(n for n in pooled if n.get("backendDOMNodeId") == 110)
+    assert "1:1" in iframe_node["childIds"]  # child frame root grafted under the <iframe>
+    assert by_id["1:1"]["parentId"] == iframe_node["nodeId"]
+    # exactly one root survives (the main frame)
+    assert [n["nodeId"] for n in pooled if not n.get("parentId")] == ["0:1"]
+
+
+def test_build_frame_offsets_composes_nested() -> None:
+    raw = {110: (50, 60, 300, 200), 210: (5, 5, 100, 100)}
+    frames = [
+        {"id": "MAIN", "parent_id": None, "owner_backend": None},
+        {"id": "CHILD", "parent_id": "MAIN", "owner_backend": 110},
+        {"id": "GRAND", "parent_id": "CHILD", "owner_backend": 210},
+    ]
+    offsets = _cdp_ax.build_frame_offsets(raw, frames)
+    assert offsets["MAIN"] == (0.0, 0.0)
+    assert offsets["CHILD"] == (50, 60)
+    assert offsets["GRAND"] == (55, 65)  # parent offset + owner's frame-local position
+
+
+def test_browser_snapshot_includes_iframe_content_offset() -> None:
+    d, _ = _driver_on(_iframe_responder)
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    titles = {e.title: e for e in snap.elements}
+    assert "Outer" in titles and titles["Outer"].clickable  # main-frame button
+    inner = titles["Inner"]  # button INSIDE the iframe — invisible without stitching
+    assert inner.clickable and inner.role == "AXButton"
+    # its box was shifted into the top document's space (iframe at 50,60 + 8,8)
+    assert inner.bounds.x == 58 and inner.bounds.y == 68
+
+
+def test_browser_snapshot_survives_cross_origin_frame() -> None:
+    def oopif(method, params):
+        if method == "Accessibility.getFullAXTree" and params.get("frameId") == "CHILD":
+            raise _CDPError("Frame with the given id is not found (OOPIF)")
+        return _iframe_responder(method, params)
+
+    d, _ = _driver_on(oopif)
+    snap = d.snapshot(Scope.WINDOW, "TAB1")  # must not raise
+    titles = {e.title for e in snap.elements}
+    assert "Outer" in titles and "Inner" not in titles  # OOPIF skipped, main intact
 
 
 # --------------------------------------------------------------------------- #
@@ -353,4 +449,29 @@ def test_live_observe_act_verify() -> None:
     val = sess.call("Runtime.evaluate",
                     {"expression": "document.getElementById('t').value"})["result"]["value"]
     assert val == "Alice"
+    d._reset()
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_iframe_content_is_observable_and_actionable() -> None:
+    import time
+    import urllib.parse
+
+    d = browser.BrowserDriver(endpoint=_live_endpoint())
+    sess = d._connect()
+    # srcdoc keeps the child same-origin (same process), so getFullAXTree(frameId)
+    # reaches it — the common embedded-form/widget case.
+    outer = ("<button>OuterBtn</button>"
+             "<iframe width=300 height=200 srcdoc=\"<button id=i>InnerBtn</button>\"></iframe>")
+    sess.call("Page.navigate", {"url": "data:text/html," + urllib.parse.quote(outer)})
+    time.sleep(0.8)
+
+    snap = d.snapshot(Scope.WINDOW, d._target_id)
+    titles = {e.title for e in snap.elements}
+    assert "OuterBtn" in titles
+    inner = next(e for e in snap.elements if e.title == "InnerBtn")  # stitched from the child frame
+    assert inner.clickable and inner.role == "AXButton"
+    assert d.press_element(inner) is True  # coordinate-free click INTO the iframe
     d._reset()

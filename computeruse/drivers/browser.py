@@ -127,14 +127,54 @@ class BrowserDriver:
         from computeruse.drivers import _cdp_ax
 
         sess = self._bind(app)
-        ax_nodes = sess.call("Accessibility.getFullAXTree").get("nodes", [])
+        frames = self._collect_frames(sess)  # main first, then reachable child frames
         dom = sess.call("DOMSnapshot.captureSnapshot", {"computedStyles": []})
-        geometry, secure_ids = _cdp_ax.parse_dom_snapshot(dom)
-        accessor = _cdp_ax.CDPAccessor(ax_nodes, geometry, secure_ids)
+        # Two-pass geometry: frame-local first (to read each iframe's owner box),
+        # then offset each frame's boxes into the top document's space.
+        raw_geom, secure_ids = _cdp_ax.parse_dom_snapshot(dom)
+        offsets = _cdp_ax.build_frame_offsets(raw_geom, frames)
+        geometry, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
+        stitched = _cdp_ax.stitch_frames(
+            [{"nodes": f["nodes"], "owner_backend": f["owner_backend"]} for f in frames]
+        )
+        accessor = _cdp_ax.CDPAccessor(stitched, geometry, secure_ids)
         return observe.build_snapshot(
             accessor.root(), accessor, scope=scope, app=self._target_id, pid=None,
             geometry=self._page_geometry(dom),
         )
+
+    #: Cap on frames stitched into one snapshot — a backstop against pathological
+    #: ad-heavy pages, not a real-page limit.
+    _MAX_FRAMES = 24
+
+    def _collect_frames(self, sess) -> list[dict]:
+        """The main AX tree plus each reachable child frame's, in tree order.
+
+        Cross-origin out-of-process iframes live in a separate CDP target; their
+        ``getFullAXTree``/``getFrameOwner`` raise here and are skipped (a
+        documented follow-up), so same-process (same-origin/about:blank) frames —
+        the common embedded-form/widget case — become observable without the
+        stitch ever crashing on an OOPIF.
+        """
+        main_nodes = sess.call("Accessibility.getFullAXTree").get("nodes", [])
+        tree = sess.call("Page.getFrameTree").get("frameTree", {})
+        main_id = tree.get("frame", {}).get("id")
+        frames = [{"id": main_id, "parent_id": None, "owner_backend": None, "nodes": main_nodes}]
+        queue = [(c, main_id) for c in tree.get("childFrames", [])]
+        while queue and len(frames) < self._MAX_FRAMES:
+            node, parent_id = queue.pop(0)
+            fid = node.get("frame", {}).get("id")
+            if not fid:
+                continue
+            try:
+                owner = sess.call("DOM.getFrameOwner", {"frameId": fid}).get("backendNodeId")
+                sub = sess.call("Accessibility.getFullAXTree", {"frameId": fid}).get("nodes", [])
+            except ComputerUseError:
+                continue  # OOPIF / detached frame — skip, never fail the snapshot
+            frames.append({"id": fid, "parent_id": parent_id,
+                           "owner_backend": owner, "nodes": sub})
+            queue.extend((c, fid) for c in node.get("childFrames", []))
+        return frames
 
     def _bind(self, app: str | None):
         """Return the session for ``app`` (a page target id), switching if needed."""

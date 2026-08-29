@@ -88,7 +88,9 @@ jobs:
       - name: browser backend (live headless Chromium)
         env:
           COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
-        run: pytest tests/test_browser.py::test_live_observe_act_verify -q -rs
+        # Both live paths: observe→act→verify, and iframe content stitched from a
+        # child frame (getFullAXTree per frame + owner-offset geometry).
+        run: pytest tests/test_browser.py -k live -q -rs
 
   linux:
     name: Linux · AT-SPI2 backend

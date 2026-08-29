@@ -172,25 +172,32 @@ def _tristate(v: object) -> bool | None:
 
 def parse_dom_snapshot(
     snapshot: dict,
+    frame_offsets: dict[str, tuple[float, float]] | None = None,
 ) -> tuple[dict[int, tuple[float, float, float, float]], frozenset[int]]:
     """Join `DOMSnapshot.captureSnapshot` into geometry + password-field ids.
 
     Returns ``(geometry, secure_ids)`` where ``geometry`` maps each laid-out
-    node's ``backendNodeId`` to its ``(x, y, w, h)`` box in document CSS pixels,
-    and ``secure_ids`` is the set of backend ids for ``<input type=password>``
-    (so BrowserDriver never types into a secret). Layout/DOM come as parallel
-    index arrays with a shared ``strings`` table; only rendered nodes appear in
-    ``layout``, so nodes absent from ``geometry`` are correctly pruned as
-    off-layout.
+    node's ``backendNodeId`` to its ``(x, y, w, h)`` box, and ``secure_ids`` is
+    the set of backend ids for ``<input type=password>`` (so BrowserDriver never
+    types into a secret). Layout/DOM come as parallel index arrays with a shared
+    ``strings`` table; only rendered nodes appear in ``layout``, so nodes absent
+    from ``geometry`` are correctly pruned as off-layout.
+
+    One ``document`` is returned per frame; ``frame_offsets`` (frame id ->
+    ``(dx, dy)``, from `build_frame_offsets`) shifts each frame's boxes into the
+    top document's coordinate space so an iframe's content sits where it renders.
+    Absent/None -> frame-local (identity) coordinates.
     """
     strings = snapshot.get("strings", [])
+    offsets = frame_offsets or {}
     geometry: dict[int, tuple[float, float, float, float]] = {}
     secure: set[int] = set()
 
-    def s(idx: int) -> str:
-        return strings[idx] if 0 <= idx < len(strings) else ""
+    def s(idx: object) -> str:
+        return strings[idx] if isinstance(idx, int) and 0 <= idx < len(strings) else ""
 
     for doc in snapshot.get("documents", []):
+        dx, dy = offsets.get(s(doc.get("frameId")), (0.0, 0.0))
         nodes = doc.get("nodes", {})
         backend_ids = nodes.get("backendNodeId", [])
         layout = doc.get("layout", {})
@@ -201,7 +208,7 @@ def parse_dom_snapshot(
                 continue
             box = bounds[i]
             if len(box) == 4 and (box[2] > 0 or box[3] > 0):
-                geometry[backend_ids[dom_idx]] = (box[0], box[1], box[2], box[3])
+                geometry[backend_ids[dom_idx]] = (box[0] + dx, box[1] + dy, box[2], box[3])
 
         # Password inputs: scan the parallel node attributes for type=password.
         node_names = nodes.get("nodeName", [])
@@ -218,4 +225,69 @@ def parse_dom_snapshot(
     return geometry, frozenset(secure)
 
 
-__all__ = ["CDPAccessor", "parse_dom_snapshot"]
+def build_frame_offsets(
+    raw_geometry: dict[int, tuple[float, float, float, float]],
+    frames: list[dict],
+) -> dict[str, tuple[float, float]]:
+    """Absolute pixel offset for each frame's document, top-down.
+
+    ``raw_geometry`` is the frame-LOCAL geometry (``parse_dom_snapshot`` with no
+    offsets); ``frames`` is the flattened frame tree in parent-before-child order,
+    each ``{"id", "parent_id", "owner_backend"}`` (``owner_backend`` is the
+    ``<iframe>`` element's backend id, from ``DOM.getFrameOwner``; None for the
+    main frame). A child's offset is its parent's offset plus the owner iframe's
+    (frame-local) position — so nested frames compose correctly.
+    """
+    offsets: dict[str, tuple[float, float]] = {}
+    for f in frames:
+        owner = f.get("owner_backend")
+        if owner is None:  # main frame
+            offsets[f["id"]] = (0.0, 0.0)
+            continue
+        px, py = offsets.get(f.get("parent_id"), (0.0, 0.0))
+        box = raw_geometry.get(owner)
+        offsets[f["id"]] = (px + box[0], py + box[1]) if box else (px, py)
+    return offsets
+
+
+def stitch_frames(frame_nodes: list[dict]) -> list[dict]:
+    """Splice per-frame AX trees into one tree the accessor can walk.
+
+    ``getFullAXTree`` stops at an ``Iframe`` node (empty ``childIds``); each child
+    frame's tree is fetched separately. This namespaces every frame's node ids
+    (``"<frame index>:<node id>"``) so they never collide, then grafts each child
+    frame's root under the ``Iframe`` node whose ``backendDOMNodeId`` matches the
+    frame's owner element. Input is one dict per frame, in tree order:
+    ``{"nodes": [...], "owner_backend": int|None}`` (None = the main frame).
+    """
+    pooled: list[dict] = []
+    roots: list[tuple[int, dict]] = []  # (owner_backend, prefixed root node)
+    by_backend: dict[int, dict] = {}
+    for fi, frame in enumerate(frame_nodes):
+        prefix = f"{fi}:"
+        root = None
+        for n in frame["nodes"]:
+            m = dict(n)
+            m["nodeId"] = prefix + str(n["nodeId"])
+            if n.get("parentId"):
+                m["parentId"] = prefix + str(n["parentId"])
+            m["childIds"] = [prefix + str(c) for c in n.get("childIds", ())]
+            pooled.append(m)
+            if not n.get("parentId"):
+                root = m
+            if isinstance(n.get("backendDOMNodeId"), int):
+                by_backend[n["backendDOMNodeId"]] = m
+        if root is not None:
+            roots.append((frame.get("owner_backend"), root))
+
+    for owner_backend, root in roots:
+        if owner_backend is None:
+            continue  # main frame root: stays the tree root
+        host = by_backend.get(owner_backend)
+        if host is not None:  # graft the child frame under its <iframe> node
+            host.setdefault("childIds", []).append(root["nodeId"])
+            root["parentId"] = host["nodeId"]
+    return pooled
+
+
+__all__ = ["CDPAccessor", "parse_dom_snapshot", "build_frame_offsets", "stitch_frames"]
