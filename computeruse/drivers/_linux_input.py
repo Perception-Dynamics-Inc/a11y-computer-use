@@ -33,11 +33,20 @@ def _disp():
 
 
 def _fake(event_type, detail):
+    """Queue one XTEST event WITHOUT flushing — callers flush once at the end of
+    a logical operation (a whole string, chord, or click). X processes queued
+    requests in order, so batching a keystroke's press+release (or a click's
+    warp+press+release) into one round-trip is both correct and ~2-4x fewer
+    blocking syncs than flushing per event."""
     from Xlib.ext import xtest
 
-    d = _disp()
-    xtest.fake_input(d, event_type, detail)
-    d.sync()
+    xtest.fake_input(_disp(), event_type, detail)
+
+
+def _flush():
+    """Send all queued events and wait for the server to process them (one
+    round-trip) — the single sync point at the end of an input operation."""
+    _disp().sync()
 
 
 # --- keysym helpers --------------------------------------------------------
@@ -105,11 +114,14 @@ def _tap_keysym(keysym: int) -> bool:
 
 
 def type_string(text: str) -> None:
-    """Type ``text`` into the focused element via XTEST, one keysym per char."""
+    """Type ``text`` into the focused element via XTEST, one keysym per char.
+    All events are queued and flushed once (one round-trip for the whole string,
+    not two per character)."""
     if not text:
         return
     for ch in text:
         _tap_keysym(_char_keysym(ch))
+    _flush()
 
 
 # --- key chords ------------------------------------------------------------
@@ -157,6 +169,7 @@ def press_chord(chord: str) -> None:
     for kc in reversed(mod_kcs):
         if kc:
             _fake(X.KeyRelease, kc)
+    _flush()
 
 
 @contextmanager
@@ -170,11 +183,13 @@ def held(modifiers):
     kcs = [kc for kc in kcs if kc]
     for kc in kcs:
         _fake(X.KeyPress, kc)
+    _flush()  # modifiers down before the wrapped action runs
     try:
         yield
     finally:
         for kc in reversed(kcs):
             _fake(X.KeyRelease, kc)
+        _flush()
 
 
 # --- mouse (coordinate fallback for the vision path) -----------------------
@@ -188,12 +203,12 @@ def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     from Xlib import X
 
     d = _disp()
-    d.warp_pointer(int(x), int(y))
-    d.sync()
+    d.warp_pointer(int(x), int(y))  # queued; X processes warp before the buttons
     num = _BUTTON_NUM.get(button, 1)
     for _ in range(max(1, count)):
         _fake(X.ButtonPress, num)
         _fake(X.ButtonRelease, num)
+    _flush()
 
 
 def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left") -> None:
@@ -202,11 +217,10 @@ def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left") -> None:
     d = _disp()
     num = _BUTTON_NUM.get(button, 1)
     d.warp_pointer(int(x1), int(y1))
-    d.sync()
     _fake(X.ButtonPress, num)
-    d.warp_pointer(int(x2), int(y2))
-    d.sync()
+    d.warp_pointer(int(x2), int(y2))  # motion while the button is held = the drag
     _fake(X.ButtonRelease, num)
+    _flush()
 
 
 def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
@@ -216,10 +230,10 @@ def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
 
     d = _disp()
     d.warp_pointer(int(x), int(y))
-    d.sync()
     for _ in range(abs(int(dy))):
         _fake(X.ButtonPress, 5 if dy > 0 else 4)
         _fake(X.ButtonRelease, 5 if dy > 0 else 4)
     for _ in range(abs(int(dx))):
         _fake(X.ButtonPress, 7 if dx > 0 else 6)
         _fake(X.ButtonRelease, 7 if dx > 0 else 6)
+    _flush()
