@@ -613,3 +613,37 @@ def test_render_diff_shows_all_three_sections() -> None:
     text = observe.render_diff(observe.diff_snapshots(snap_of(old), snap_of(new)))
     assert "+1 -1 ~1" in text
     assert "New" in text and "gone" in text and "→" in text
+
+
+# ---------------------------------------------------------------------------
+# Self-correcting stale-ref candidates
+# ---------------------------------------------------------------------------
+
+
+def test_stale_ref_candidates_rank_partial_title_near_misses() -> None:
+    live = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Submit form", (10.0, 10.0)),
+        _btn("Cancel", (10.0, 50.0)),
+    ]))
+    anchor = Element(ref="e9", role="AXButton", title="Submit", value=None,
+                     bounds=Bounds(0, 10, 10, 80, 30), snapshot_id="old",
+                     path=("AXWindow", "AXButton"))
+    cands = observe.stale_ref_candidates(anchor, live)
+    assert cands and cands[0]["title"] == "Submit form"  # partial overlap ranked first
+    assert all(set(c) == {"ref", "role", "title", "score"} for c in cands)
+
+
+def test_stale_ref_error_carries_candidates() -> None:
+    old = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0),
+                     children=[_btn("Submit", (10.0, 10.0))]))
+    # renamed + reparented under a toolbar → genuinely stale (path & title differ)
+    new = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXToolbar", title="Bar", at=(0.0, 0.0), size=(400.0, 40.0),
+           children=[_btn("Submit form", (10.0, 10.0))]),
+    ]))
+    anchor = by_title(old, "Submit")
+    with pytest.raises(ComputerUseError) as ei:
+        observe.resolve_ref(old, anchor.ref, live=new)
+    assert ei.value.code is ErrorCode.STALE_REF
+    cands = ei.value.detail["candidates"]
+    assert any(c["title"] == "Submit form" for c in cands)

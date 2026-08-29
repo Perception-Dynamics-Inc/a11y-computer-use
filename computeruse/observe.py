@@ -302,6 +302,8 @@ def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> El
                     "title": anchor.title,
                     "path": list(anchor.path),
                 },
+                # near-misses so the agent can retry a likely ref, no re-snapshot
+                "candidates": stale_ref_candidates(anchor, live),
             },
         )
     return match
@@ -951,6 +953,30 @@ def _center_distance(a: Bounds, b: Bounds) -> float:
     if ca.display_id != cb.display_id:
         return math.inf
     return math.hypot(ca.x - cb.x, ca.y - cb.y)
+
+
+def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> list[dict]:
+    """The best near-misses for a ref that failed to re-resolve — same role plus
+    a title/path overlap, ranked by anchor strength then proximity. Attached to
+    the STALE_REF error so the agent can self-correct to a likely-right ref
+    instead of re-snapshotting the whole tree."""
+    scored: list[tuple[int, float, Element]] = []
+    for el in live.elements:
+        if el.role != anchor.role:
+            continue
+        score = (4 if el.title == anchor.title else 0) + (2 if el.path == anchor.path else 0)
+        if score == 0 and anchor.title and el.title and (
+            anchor.title in el.title or el.title in anchor.title
+        ):
+            score = 1  # partial title overlap is a weak but useful signal
+        if score == 0:
+            continue
+        scored.append((score, _center_distance(anchor.bounds, el.bounds), el))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [
+        {"ref": el.ref, "role": el.role, "title": el.title, "score": score}
+        for score, _dist, el in scored[:limit]
+    ]
 
 
 # ---------------------------------------------------------------------------
