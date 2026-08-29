@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "wait_for",
     "act",
     "set_value",
+    "scroll_to_find",
     "app",
     "window",
     "clipboard",
@@ -776,3 +777,42 @@ def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
     with pytest.raises(ComputerUseError) as ei:
         rt.set_value("e1", "secret")
     assert ei.value.code is ErrorCode.SECURE_FIELD
+
+
+def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def mk(has_target: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXScrollArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+        if has_target:
+            els.append(Element(ref="e2", role="AXButton", title="Target", value=None,
+                               bounds=Bounds(0, 10, 10, 80, 30), snapshot_id="s", clickable=True))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+    seq = [mk(False), mk(False), mk(True)]
+    scrolls: list = []
+
+    class _D:
+        i = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return seq[min(_D.i, len(seq) - 1)]
+
+        def scroll(self, target, **kw):
+            scrolls.append(kw.get("dy"))
+            _D.i += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="Target")
+    assert "found after 2 scroll(s)" in out and "Target" in out
+    assert scrolls == [5, 5]  # scrolled twice, found on the third observation

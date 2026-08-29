@@ -41,6 +41,7 @@ EXPECTED_TOOLS = {
     "wait_for",
     "act",
     "set_value",
+    "scroll_to_find",
     "app",
     "window",
     "clipboard",

@@ -159,6 +159,18 @@ def refusal_text(decision: safety.Decision) -> str:
     return f"{decision.verdict.value}: {decision.reason}"
 
 
+def _scroll_anchor(snap):
+    """The element to scroll over while searching: the largest scroll area, else
+    the largest element (the window). None for an empty snapshot."""
+    from computeruse.schema import Element
+
+    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
+    pool = areas or list(snap.elements)
+    if not pool:
+        return None
+    return max(pool, key=lambda el: el.bounds.width * el.bounds.height)
+
+
 # ---------------------------------------------------------------------------
 # Platform helpers (thin NSWorkspace / CGWindowList / NSPasteboard adapters;
 # module-level so tests can monkeypatch them)
@@ -891,6 +903,37 @@ class Runtime:
         self._run_gated(action, app, execute, recheck=partial(_recheck_target_app, target=live))
         return f"set {ref} = {value!r}"
 
+    def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
+                       direction: str = "down", max_scrolls: int = 6, scope: str = "window") -> str:
+        """Scroll a view until an element matching text/role enters it, then
+        return its ref — for targets not in the current snapshot because they're
+        scrolled out of a long/virtualized list. Re-observes each step. Gated at
+        CLICK tier (it scrolls); the inner READ snapshots are covered by it."""
+        if text is None and role is None:
+            raise ValueError("give text and/or role to find")
+        if direction not in ("down", "up"):
+            raise ValueError("direction must be 'down' or 'up'")
+        if scope not in (Scope.WINDOW.value, Scope.APP.value):
+            raise ValueError("scope must be 'window' or 'app'")
+        self.driver.ensure_trusted()
+        _running, bundle = _running_app(app)
+        dy = 5 if direction == "down" else -5
+
+        def execute() -> str:
+            for i in range(max_scrolls + 1):
+                snap = self.driver.snapshot(Scope(scope), bundle)
+                self._current = snap
+                matches = observe.find_elements(snap, text=text, role=role)
+                if matches:
+                    return f"found after {i} scroll(s):\n{observe.render_matches(snap, matches)}"
+                anchor = _scroll_anchor(snap)
+                if i >= max_scrolls or anchor is None:
+                    break
+                self.driver.scroll(anchor, dy=dy)
+            return f"not found after {max_scrolls} scroll(s): no element matches text={text!r} role={role!r}"
+
+        return self._run_gated(Scroll(target=Point(0, 0, 0), dy=dy), bundle, execute)
+
     def app(self, action: str, name: str | None = None) -> str:
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
@@ -1236,6 +1279,19 @@ def build_server(
         refuses secure/password fields (secrets are entered by the human, never
         this tool). Ideal for filling forms fast."""
         return await run(runtime.set_value, ref, value)
+
+    @server.tool(name="scroll_to_find")
+    async def scroll_to_find(
+        app: str, text: str | None = None, role: str | None = None,
+        direction: str = "down", max_scrolls: int = 6, scope: str = "window",
+    ) -> str:
+        """Scroll a scrollable view until an element matching text and/or role
+        comes into view, then return its ref — for a target that isn't in the
+        current snapshot because it's scrolled out of a long or virtualized list.
+        Give text (substring of title/value) and/or role. Scrolls `direction`
+        ('down'|'up') up to max_scrolls times, re-observing each step; returns the
+        matching ref(s) or a not-found note. Gated at tier 'click' (it scrolls)."""
+        return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope)
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None) -> str:
