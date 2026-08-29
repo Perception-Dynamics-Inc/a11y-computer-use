@@ -31,6 +31,7 @@ doctor`` still works.
 from __future__ import annotations
 
 import json
+import time
 import os
 import subprocess
 import sys
@@ -528,7 +529,9 @@ class Runtime:
                     )
             if recheck is not None:
                 recheck(app)
+            started = time.perf_counter()
             result = execute()
+            duration_ms = (time.perf_counter() - started) * 1000.0
         except ComputerUseError as exc:
             self.audit.record_action(
                 action,
@@ -538,7 +541,16 @@ class Runtime:
                 secure=secure or exc.code is ErrorCode.SECURE_FIELD,
             )
             raise
-        self.audit.record_action(action, app=app, decision=decision, result="ok", secure=secure)
+        # cu-meter: per-action latency + (for text results) size/token estimate,
+        # so the audit log alone yields latency p50/p95, tokens/task, and the
+        # full-vs-diff snapshot savings — the numbers behind the moat.
+        metrics: dict[str, object] = {"duration_ms": round(duration_ms, 1)}
+        if isinstance(result, str):
+            metrics["result_chars"] = len(result)
+            metrics["tokens_est"] = (len(result) + 3) // 4
+        self.audit.record_action(
+            action, app=app, decision=decision, result="ok", secure=secure, metrics=metrics
+        )
         return result
 
     # -- target resolution ----------------------------------------------------

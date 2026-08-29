@@ -422,6 +422,7 @@ class AuditLog:
         decision: Decision,
         result: str,
         secure: bool = False,
+        metrics: "Mapping[str, object] | None" = None,
     ) -> Path:
         """Record one gated action attempt in the standard entry shape.
 
@@ -440,13 +441,14 @@ class AuditLog:
         if secure or isinstance(action, ClipboardOp):
             payload = _redact(payload)
         payload = _redact_target_values(payload)
-        return self.record(
-            {
-                "ts": self._now(),
-                "app": app,
-                "action": kind,
-                "params": payload,
-                "decision": decision.to_dict(),
-                "result": result,
-            }
-        )
+        entry: dict[str, object] = {
+            "ts": self._now(),
+            "app": app,
+            "action": kind,
+            "params": payload,
+            "decision": decision.to_dict(),
+            "result": result,
+        }
+        if metrics:  # cu-meter: duration_ms, result_chars, tokens_est (see server._run_gated)
+            entry["metrics"] = dict(metrics)
+        return self.record(entry)
