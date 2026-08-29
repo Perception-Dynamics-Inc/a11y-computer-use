@@ -733,6 +733,52 @@ def test_act_batch_dispatch_stop_and_errors() -> None:
         rt.act_batch([])
 
 
+def test_effect_receipt_appends_post_action_diff() -> None:
+    """verify=true turns the audit-backed re-observe into an Effect Receipt: the
+    single post-action snapshot diff, so the agent confirms what changed without a
+    separate desktop_snapshot round-trip. Off by default (backward compat)."""
+    import json as _json
+
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def snap(sid: str, extra: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXButton", title="Save", value=None,
+                       bounds=Bounds(0, 0, 0, 80, 30), snapshot_id=sid, clickable=True)]
+        if extra:  # a new element appears — the visible effect of the action
+            els.append(Element(ref="e2", role="AXStaticText", title="Saved ✓",
+                               value=None, bounds=Bounds(0, 0, 40, 80, 60), snapshot_id=sid))
+        return Snapshot(snapshot_id=sid, scope=Scope.WINDOW, app="com.test", pid=1,
+                        created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                        elements=tuple(els))
+
+    pre, post = snap("s0", False), snap("s1", True)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = pre
+    rt.type_text = lambda text: f"typed {text}"
+    rt.driver = type("_D", (), {"snapshot": lambda self, scope, app: post})()
+
+    # _effect_after (the helper click() uses) appends the diff and advances _current.
+    effect = rt._effect_after(pre)
+    assert effect.startswith("\n\neffect: ") and "Saved" in effect
+    assert rt._current is post
+
+    # act_batch(verify=True): one net diff for the whole batch, steps preserved.
+    rt._current = pre
+    out = _json.loads(rt.act_batch([{"do": "type", "text": "hi"}], verify=True))
+    assert out["steps"][0]["ok"] is True
+    assert "Saved" in out["effect"] and "effect:" not in out["effect"]  # unprefixed inside JSON
+
+    # Default stays a bare list — existing callers unchanged.
+    rt._current = pre
+    assert isinstance(_json.loads(rt.act_batch([{"do": "type", "text": "hi"}])), list)
+
+    # No prior snapshot → empty receipt, never an error.
+    rt._current = None
+    assert rt._effect_after(None) == ""
+
+
 def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
     """set_value: one a11y op via the driver; focus+type fallback when the app
     can't set a value; secure fields refused."""

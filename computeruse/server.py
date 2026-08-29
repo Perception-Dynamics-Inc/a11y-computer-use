@@ -553,6 +553,21 @@ class Runtime:
         )
         return result
 
+    def _effect_after(self, pre: "Snapshot | None") -> str:
+        """Effect Receipt: re-snapshot ``pre``'s app after a mutating action and
+        return the rendered diff (what changed), advancing the ref epoch. Empty
+        string when there's no prior snapshot to diff against. The re-observe is a
+        READ of an app the caller already cleared a higher tier for, so it needs
+        no separate gate."""
+        if pre is None or pre.app is None:
+            return ""
+        try:
+            snap = self.driver.snapshot(pre.scope, pre.app)
+        except Exception:
+            return ""
+        self._current = snap
+        return "\n\neffect: " + observe.render_diff(observe.diff_snapshots(pre, snap))
+
     # -- target resolution ----------------------------------------------------
 
     def _require_snapshot(self, ref: str) -> Snapshot:
@@ -711,7 +726,9 @@ class Runtime:
         count: int = 1,
         modifiers: list[str] | None = None,
         confirm: Confirmer | None = None,
+        verify: bool = False,
     ) -> str:
+        pre = self._current if verify else None
         parsed_button = MouseButton(button)
         if count not in (1, 2, 3):
             raise ValueError(f"count must be 1, 2 or 3, got {count}")
@@ -740,7 +757,7 @@ class Runtime:
         self._run_gated(
             action, app, execute, recheck=partial(_recheck_target_app, target=target), confirm=confirm
         )
-        return f"clicked {_describe(target)}"
+        return f"clicked {_describe(target)}" + self._effect_after(pre)
 
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
@@ -833,7 +850,8 @@ class Runtime:
         )
         return f"{ref} {parsed.value}: satisfied"
 
-    def act_batch(self, steps: list[dict], *, confirm: "Confirmer | None" = None) -> str:
+    def act_batch(self, steps: list[dict], *, confirm: "Confirmer | None" = None,
+                  verify: bool = False) -> str:
         """Execute act steps in ONE call — the transactional path that collapses
         N observe→act round-trips into 1 (agent speed). Each step is gated +
         audited exactly like its standalone tool; the batch STOPS at the first
@@ -849,6 +867,7 @@ class Runtime:
         """
         if not isinstance(steps, list) or not steps:
             raise ValueError("steps must be a non-empty list of step objects")
+        pre = self._current if verify else None
         out: list[dict] = []
         for i, step in enumerate(steps):
             if not isinstance(step, dict) or "do" not in step:
@@ -866,6 +885,9 @@ class Runtime:
             except (KeyError, ValueError) as exc:
                 out.append({"i": i, "do": do, "ok": False, "error": str(exc)})
                 break
+        if verify:  # Effect Receipt: one post-batch diff of what changed
+            effect = self._effect_after(pre).replace("\n\neffect: ", "", 1)
+            return json.dumps({"steps": out, "effect": effect})
         return json.dumps(out)
 
     def _dispatch_step(self, do: str, step: dict, confirm):
@@ -1187,6 +1209,7 @@ def build_server(
         button: str = "left",
         count: int = 1,
         modifiers: list[str] | None = None,
+        verify: bool = False,
     ) -> str:
         """Click an element ref from the latest desktop_snapshot (preferred;
         re-resolved against the live tree) or a raw x/y point in physical
@@ -1196,13 +1219,15 @@ def build_server(
         means the user must grant that app first; focus_changed means another
         app moved over the target — re-observe. A plausibly irreversible click
         (Delete, Move to Trash, ...) first asks you to confirm via elicitation;
-        confirmation_declined means it was not approved."""
+        confirmation_declined means it was not approved. verify=true appends an
+        'effect:' block — the post-click snapshot diff — so you can confirm what
+        the click changed without a separate desktop_snapshot round-trip."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
         return await run(
             runtime.click, ref, x, y, display_id, button, count, modifiers,
-            confirm=_confirmer_for(server.get_context()),
+            confirm=_confirmer_for(server.get_context()), verify=verify,
         )
 
     @server.tool(name="type")
@@ -1264,7 +1289,7 @@ def build_server(
         return await run(runtime.wait_for, ref, condition, timeout_s)
 
     @server.tool(name="act")
-    async def act(steps: list[dict]) -> str:
+    async def act(steps: list[dict], verify: bool = False) -> str:
         """Run a SEQUENCE of actions in ONE call (batched/transactional) — the
         fast path that collapses many observe→act round-trips into one. steps is
         a list of {"do": ...} objects executed in order; the batch STOPS at the
@@ -1279,8 +1304,11 @@ def build_server(
         per-step {i, do, ok, result | error}. Every step is gated + audited
         exactly like its standalone tool (an irreversible click still prompts for
         confirmation). Use this to run a known multi-step interaction (fill a form,
-        open a menu and pick an item) without a round-trip per action."""
-        return await run(runtime.act_batch, steps, confirm=_confirmer_for(server.get_context()))
+        open a menu and pick an item) without a round-trip per action. verify=true
+        returns {"steps":[...], "effect": "<post-batch snapshot diff>"} instead of
+        the bare step list, so one diff confirms the net change of the whole batch."""
+        return await run(runtime.act_batch, steps,
+                         confirm=_confirmer_for(server.get_context()), verify=verify)
 
     @server.tool(name="set_value")
     async def set_value(ref: str, value: str) -> str:
