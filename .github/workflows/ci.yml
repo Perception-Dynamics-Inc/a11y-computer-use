@@ -56,6 +56,40 @@ jobs:
       - name: windows backend (live UIA)
         run: pytest tests/test_windows_live.py -q -s
 
+  browser:
+    name: Browser · CDP backend (headless Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      # The [browser] extra is just websocket-client; CDP discovery uses stdlib.
+      - run: pip install -e ".[dev,browser]"
+      # Hermetic first: the transport seam means the full observe + act mapping
+      # is asserted with a scripted fake transport and NO browser.
+      - name: browser backend (hermetic, fake transport)
+        run: pytest tests/test_browser.py -q
+      # Then the real thing: a11y-first observe→act→verify against headless
+      # Chrome. This is the payoff of a coordinate-free backend — the whole loop
+      # runs in a container with no display, no window manager, no pixels.
+      - name: launch headless Chrome
+        run: |
+          CHROME=$(command -v google-chrome || command -v chromium-browser || command -v chromium)
+          echo "using $CHROME"
+          "$CHROME" --headless=new --remote-debugging-port=9222 \
+            --no-sandbox --disable-gpu about:blank >/tmp/chrome.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            sleep 0.5
+          done
+          curl -s http://127.0.0.1:9222/json/version
+      - name: browser backend (live headless Chromium)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: pytest tests/test_browser.py::test_live_observe_act_verify -q -rs
+
   linux:
     name: Linux · AT-SPI2 backend
     runs-on: ubuntu-latest

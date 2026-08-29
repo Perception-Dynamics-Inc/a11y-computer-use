@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "computeruse"
 version = "0.0.1"
-description = "Accessibility-first computer-use framework for macOS (Windows next): pruned a11y-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
+description = "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned a11y-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -43,6 +43,10 @@ linux = [
     "PyGObject; sys_platform == 'linux'",
     "python-xlib; sys_platform == 'linux'",
 ]
+# Browser backend (any OS): a11y-first control of a running Chromium over the
+# Chrome DevTools Protocol. Only a WebSocket client is needed — CDP target
+# discovery uses stdlib urllib and the AX/DOM tree comes over the socket.
+browser = ["websocket-client"]
 
 [project.scripts]
 computeruse = "computeruse.cli:main"
