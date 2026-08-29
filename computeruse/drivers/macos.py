@@ -51,6 +51,9 @@ class MacOSDriver:
     def scroll_into_view(self, element: Element) -> bool:
         return observe.scroll_into_view(element)
 
+    def set_value(self, element: Element, value: str) -> bool:
+        return observe.set_value(element, value)
+
     # -- act ----------------------------------------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,

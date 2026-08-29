@@ -144,6 +144,18 @@ class LinuxDriver:
             return False
         return _atspi.scroll_to(handle)
 
+    def set_value(self, element: Element, value: str) -> bool:
+        from computeruse import observe
+        from computeruse.drivers import _atspi
+
+        if element.secure:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        self._focused_editable = handle
+        return _atspi.set_text(handle, value)  # AT-SPI EditableText.set_text_contents
+
     # -- act (AT-SPI XTEST event generation) --------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,

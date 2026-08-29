@@ -853,6 +853,31 @@ class Runtime:
                                  step.get("timeout_s", 10.0))
         raise ValueError(f"unknown step '{do}' — use click/type/key/scroll/drag/wait_for")
 
+    def set_value(self, ref: str, value: str) -> str:
+        """Set an editable element's value directly via the a11y API (one op),
+        falling back to focus + type when the app exposes no settable value.
+        Gated at the target's app, FULL tier (a text-entry path); secure fields
+        are refused."""
+        snap, _anchor = self._anchor(ref)
+        live = self.driver.resolve_ref(snap, ref)
+        if live.secure:
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "refusing to set a secure field; secrets are entered by the human",
+                detail={"ref": ref},
+            )
+        action = TypeText(text=value)
+        app = snap.app or _frontmost_bundle()
+
+        def execute() -> None:
+            if self.driver.set_value(live, value):
+                return
+            self.driver.press_element(live)  # fallback: focus then synthesize typing
+            self.driver.type_text(value)
+
+        self._run_gated(action, app, execute, recheck=partial(_recheck_target_app, target=live))
+        return f"set {ref} = {value!r}"
+
     def app(self, action: str, name: str | None = None) -> str:
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
@@ -1181,6 +1206,16 @@ def build_server(
         confirmation). Use this to run a known multi-step interaction (fill a form,
         open a menu and pick an item) without a round-trip per action."""
         return await run(runtime.act_batch, steps, confirm=_confirmer_for(server.get_context()))
+
+    @server.tool(name="set_value")
+    async def set_value(ref: str, value: str) -> str:
+        """Set an editable field's value in ONE deterministic op via the
+        accessibility API — no per-character typing, no focus/click dance. ref is
+        an editable element from the latest desktop_snapshot/find. Falls back to
+        focus+type when the app exposes no settable value. Gated at tier 'full';
+        refuses secure/password fields (secrets are entered by the human, never
+        this tool). Ideal for filling forms fast."""
+        return await run(runtime.set_value, ref, value)
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None) -> str:

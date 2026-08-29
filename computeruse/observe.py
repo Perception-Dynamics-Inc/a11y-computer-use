@@ -370,6 +370,21 @@ def scroll_into_view(element: Element) -> bool:
     return _perform_action(handle, "AXScrollToVisible")
 
 
+def set_value(element: Element, value: str) -> bool:
+    """Set ``element``'s AXValue directly (no synthesized typing) — the macOS
+    intent-verb path. False when the element is secure, no live handle is
+    registered, or the AX call errors (caller falls back to focus + type)."""
+    if element.secure:
+        return False
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return False
+    try:
+        return _appservices().AXUIElementSetAttributeValue(handle, "AXValue", value) == 0
+    except Exception:
+        return False
+
+
 def _copy_action_names(handle: object) -> tuple[str, ...]:
     """The AX action names ``handle`` supports (empty tuple on any AX error).
 

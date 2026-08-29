@@ -39,6 +39,7 @@ EXPECTED_TOOLS = {
     "drag",
     "wait_for",
     "act",
+    "set_value",
     "app",
     "window",
     "clipboard",
@@ -729,3 +730,49 @@ def test_act_batch_dispatch_stop_and_errors() -> None:
 
     with pytest.raises(ValueError):
         rt.act_batch([])
+
+
+def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
+    """set_value: one a11y op via the driver; focus+type fallback when the app
+    can't set a value; secure fields refused."""
+    from computeruse import server
+    from computeruse.schema import Bounds, Element, ErrorCode
+
+    rt = server.Runtime.__new__(server.Runtime)
+    el = Element(ref="e1", role="AXTextField", title="Name", value="",
+                 bounds=Bounds(0, 0, 0, 10, 10), snapshot_id="s")
+    snap = type("S", (), {"app": "com.test"})()
+    rt._anchor = lambda ref: (snap, el)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    calls = {"set": [], "press": [], "type": []}
+
+    class _D:
+        set_ok = True
+
+        def resolve_ref(self, s, ref):
+            return rt._anchor(ref)[1]
+
+        def set_value(self, e, v):
+            calls["set"].append((e.ref, v))
+            return _D.set_ok
+
+        def press_element(self, e):
+            calls["press"].append(e.ref)
+            return True
+
+        def type_text(self, t):
+            calls["type"].append(t)
+
+    rt.driver = _D()
+    assert "set e1" in rt.set_value("e1", "Alice")
+    assert calls["set"] == [("e1", "Alice")] and calls["type"] == []  # driver op, no fallback
+
+    _D.set_ok = False
+    rt.set_value("e1", "Bob")
+    assert calls["press"] == ["e1"] and calls["type"] == ["Bob"]  # fell back to focus+type
+
+    secure = dataclasses.replace(el, secure=True)
+    rt._anchor = lambda ref: (snap, secure)
+    with pytest.raises(ComputerUseError) as ei:
+        rt.set_value("e1", "secret")
+    assert ei.value.code is ErrorCode.SECURE_FIELD

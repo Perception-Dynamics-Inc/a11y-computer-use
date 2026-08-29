@@ -119,6 +119,24 @@ class WindowsDriver:
         except Exception:
             return False
 
+    def set_value(self, element: Element, value: str) -> bool:
+        from computeruse import observe
+        from computeruse.drivers import _uia
+
+        if element.secure:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        pattern = _uia._safe(lambda: handle.GetValuePattern())  # UIA ValuePattern
+        if pattern is None:
+            return False
+        try:
+            pattern.SetValue(value)
+            return True
+        except Exception:
+            return False
+
     # -- act (SendInput) ----------------------------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,

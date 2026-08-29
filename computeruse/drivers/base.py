@@ -67,6 +67,14 @@ class Driver(Protocol):
         """Reveal ``element`` via the accessibility API without moving the pointer."""
         ...
 
+    def set_value(self, element: Element, value: str) -> bool:
+        """Set ``element``'s text/value directly through the accessibility API —
+        one deterministic op, no keystroke simulation and no focus dance (macOS
+        `AXValue` set / UIA `ValuePattern.SetValue` / AT-SPI `EditableText`).
+        True on success; False → caller falls back to focus + type. Secure fields
+        are refused (return False)."""
+        ...
+
     # -- act (synthesized input) -------------------------------------------
     def click(
         self,

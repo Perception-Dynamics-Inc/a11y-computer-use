@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "drag",
     "wait_for",
     "act",
+    "set_value",
     "app",
     "window",
     "clipboard",
