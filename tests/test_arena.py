@@ -91,7 +91,12 @@ def test_run_web_task_navigates_and_measures_each_round(monkeypatch) -> None:
     assert len(report.observations) == 3
     assert report.total_a11y_tokens == 3 * arena.a11y_tokens("z" * 40)
     assert report.ratio > 1  # a full 1280x800 frame dwarfs a 40-char a11y snapshot
+    # re-observations are scored as diffs of the prior snapshot (rounds-1 of them);
+    # an unchanged page diffs cheap — the non-accumulation moat.
+    assert len(report.reobserve_a11y_tokens) == 2
+    assert report.avg_reobserve_tokens <= report.observations[0].a11y_tokens
     assert "cheaper per observation" in arena.format_report(report)
+    assert "non-accumulation moat" in arena.format_report(report)
 
 
 def test_format_report_handles_empty() -> None:

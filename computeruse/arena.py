@@ -67,6 +67,10 @@ class ObsCost:
 @dataclass(slots=True)
 class Report:
     observations: list[ObsCost] = field(default_factory=list)
+    #: a11y token cost of each RE-observation as a diff of the prior snapshot —
+    #: the non-accumulation moat: ~0 when nothing changed, where a screenshot
+    #: still pays its full image cost every step.
+    reobserve_a11y_tokens: list[int] = field(default_factory=list)
 
     @property
     def total_a11y_tokens(self) -> int:
@@ -81,12 +85,42 @@ class Report:
         a = self.total_a11y_tokens
         return self.total_screenshot_tokens / a if a else 0.0
 
+    @property
+    def avg_reobserve_tokens(self) -> float:
+        r = self.reobserve_a11y_tokens
+        return sum(r) / len(r) if r else 0.0
+
 
 def _png_size(png: bytes) -> tuple[int, int]:
     """(width, height) from a PNG header — no PIL, no decode."""
     if len(png) >= 24 and png[:8] == b"\x89PNG\r\n\x1a\n":
         return int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
     return 0, 0
+
+
+def _observe(driver, app: str, scope: Scope):
+    """(snapshot, rendered text, screenshot CSS-px w/h, raw png w/h) for one look."""
+    from computeruse import observe
+
+    snap = driver.snapshot(scope, app)
+    text = observe.render_text(snap)
+    shot = driver.screenshot()
+    width, height = _png_size(getattr(shot, "png", b""))
+    # Screenshots are captured in physical px; the vision formula is CSS px, so
+    # divide out the backing scale to count the pixels the model actually bills.
+    scale = getattr(getattr(shot, "display", None), "scale", 1.0) or 1.0
+    return snap, text, (round(width / scale), round(height / scale)), (width, height)
+
+
+def _cost(snap, text: str, css_wh: tuple[int, int], raw_wh: tuple[int, int]) -> ObsCost:
+    return ObsCost(
+        a11y_tokens=a11y_tokens(text),
+        screenshot_tokens=image_tokens(*css_wh),
+        a11y_chars=len(text),
+        image_width=raw_wh[0],
+        image_height=raw_wh[1],
+        element_count=len(snap.elements),
+    )
 
 
 def measure_observation(driver, app: str | None = None, *, scope: Scope = Scope.WINDOW) -> ObsCost:
@@ -96,37 +130,33 @@ def measure_observation(driver, app: str | None = None, *, scope: Scope = Scope.
     screenshot the driver captures (dimensions → vision-token estimate) for the
     SAME state, so the comparison is apples-to-apples and un-rigged.
     """
-    from computeruse import observe
-
     if app is None:
         app, _ = driver.frontmost_app()
-    snap = driver.snapshot(scope, app)
-    text = observe.render_text(snap)
-    shot = driver.screenshot()
-    width, height = _png_size(getattr(shot, "png", b""))
-    # Screenshots are captured in physical px; the vision formula is CSS px, so
-    # divide out the backing scale to count the pixels the model actually bills.
-    scale = getattr(getattr(shot, "display", None), "scale", 1.0) or 1.0
-    return ObsCost(
-        a11y_tokens=a11y_tokens(text),
-        screenshot_tokens=image_tokens(round(width / scale), round(height / scale)),
-        a11y_chars=len(text),
-        image_width=width,
-        image_height=height,
-        element_count=len(snap.elements),
-    )
+    return _cost(*_observe(driver, app, scope))
 
 
 def run_web_task(driver, url: str, *, rounds: int = 3) -> Report:
-    """Navigate ``driver`` to ``url`` and measure the observation cost ``rounds``
-    times (the per-observation cost is the quantity of interest). Requires a
-    driver with `navigate` (the browser backend); the measurement itself is
-    backend-agnostic via `measure_observation`."""
+    """Navigate ``driver`` to ``url`` and measure observation cost ``rounds`` times.
+
+    Beyond the per-observation cost, each RE-observation is also scored as a diff
+    of the prior snapshot — the non-accumulation moat: a stable page re-observes
+    for ~0 a11y tokens, while a screenshot loop pays its full image cost again.
+    Requires a driver with `navigate` (the browser backend); the measurement is
+    backend-agnostic.
+    """
+    from computeruse import observe
+
     driver.navigate(url)
     app, _ = driver.frontmost_app()
     report = Report()
+    prev = None
     for _ in range(max(1, rounds)):
-        report.observations.append(measure_observation(driver, app))
+        snap, text, css_wh, raw_wh = _observe(driver, app, Scope.WINDOW)
+        report.observations.append(_cost(snap, text, css_wh, raw_wh))
+        if prev is not None:
+            diff_text = observe.render_diff(observe.diff_snapshots(prev, snap))
+            report.reobserve_a11y_tokens.append(a11y_tokens(diff_text))
+        prev = snap
     return report
 
 
@@ -142,9 +172,14 @@ def format_report(report: Report) -> str:
         f"({o0.a11y_tokens}/obs, {o0.a11y_chars} chars)",
         f"  screenshot (img) {report.total_screenshot_tokens:>8} tok  "
         f"({o0.screenshot_tokens}/obs, ~wxh/750)",
-        f"  → a11y-first is {report.ratio:.1f}x cheaper per observation, and diffs "
-        f"to ~0 on re-observe (a screenshot cannot).",
+        f"  → a11y-first is {report.ratio:.1f}x cheaper per observation.",
     ]
+    if report.reobserve_a11y_tokens:
+        lines.append(
+            f"  re-observe (a11y diff) {report.avg_reobserve_tokens:.0f} tok avg vs "
+            f"{o0.screenshot_tokens} tok/screenshot — the non-accumulation moat "
+            f"(a screenshot cannot diff)."
+        )
     return "\n".join(lines)
 
 
