@@ -106,3 +106,19 @@ def test_enable_a11y_status_opt_out(monkeypatch) -> None:
     monkeypatch.setattr(_atspi, "_a11y_status_forced", False)
     monkeypatch.setenv("COMPUTERUSE_NO_WEB_A11Y", "1")
     assert _atspi.enable_a11y_status() is False  # opt-out short-circuits before any D-Bus
+
+
+def test_atspi_events_gate(monkeypatch) -> None:
+    from computeruse.drivers import _atspi_events
+    monkeypatch.delenv("COMPUTERUSE_ATSPI_EVENTS", raising=False)
+    assert _atspi_events.enabled() is False
+    monkeypatch.setenv("COMPUTERUSE_ATSPI_EVENTS", "1")
+    assert _atspi_events.enabled() is True
+
+
+def test_linux_driver_run_inline_when_events_disabled(monkeypatch) -> None:
+    from computeruse.drivers import _atspi_events  # noqa: F401
+    from computeruse.drivers.linux import LinuxDriver
+    monkeypatch.delenv("COMPUTERUSE_ATSPI_EVENTS", raising=False)
+    d = LinuxDriver()
+    assert d._run(lambda: 42) == 42  # default path runs inline, no thread/gi needed

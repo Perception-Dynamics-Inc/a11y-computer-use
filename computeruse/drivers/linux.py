@@ -55,6 +55,16 @@ class LinuxDriver:
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
 
+    def _run(self, fn):
+        """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
+        in (COMPUTERUSE_ATSPI_EVENTS=1) — on the shared a11y thread so libatspi's
+        read cache is trusted (~1.8x faster snapshots) and stays single-threaded.
+        Only libatspi ops go through here; XTEST input uses a separate X
+        connection and is unaffected."""
+        from computeruse.drivers import _atspi_events
+
+        return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:
         """Linux has no per-app TCC grant; the requirement is that the AT-SPI2
@@ -66,8 +76,8 @@ class LinuxDriver:
             # Force the whole desktop's Chromium/Electron apps to expose their
             # a11y tree (org.a11y.Status flip) before we probe — turns a
             # Grok-style a11y-OFF desktop into an a11y-first one, no relaunch.
-            _atspi.enable_a11y_status()
-            desktop = _atspi._safe(lambda: _atspi._atspi().get_desktop(0))
+            _atspi.enable_a11y_status()  # Gio/session bus — not libatspi, runs inline
+            desktop = self._run(lambda: _atspi._safe(lambda: _atspi._atspi().get_desktop(0)))
         except ImportError as exc:
             raise ComputerUseError(
                 ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
@@ -90,12 +100,15 @@ class LinuxDriver:
         from computeruse import observe
         from computeruse.drivers import _atspi
 
-        root = _atspi.find_root(app, scope)  # None -> empty snapshot
-        pid = _atspi.pid_of(root) if root is not None else None
-        return observe.build_snapshot(
-            root, _atspi.ATSPIAccessor(), scope=scope, app=app, pid=pid,
-            geometry=_atspi.primary_geometry(),
-        )
+        def _do() -> Snapshot:
+            root = _atspi.find_root(app, scope)  # None -> empty snapshot
+            pid = _atspi.pid_of(root) if root is not None else None
+            return observe.build_snapshot(
+                root, _atspi.ATSPIAccessor(), scope=scope, app=app, pid=pid,
+                geometry=_atspi.primary_geometry(),
+            )
+
+        return self._run(_do)
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
@@ -131,9 +144,8 @@ class LinuxDriver:
             # it (best-effort — grab_focus is cursor-free but headless X may not
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
-            focused = _atspi.grab_focus(handle)
-            return focused or _atspi.do_press(handle) or True
-        return _atspi.do_press(handle)
+            return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
+        return self._run(lambda: _atspi.do_press(handle))
 
     def scroll_into_view(self, element: Element) -> bool:
         from computeruse import observe
@@ -142,7 +154,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
-        return _atspi.scroll_to(handle)
+        return self._run(lambda: _atspi.scroll_to(handle))
 
     def set_value(self, element: Element, value: str) -> bool:
         from computeruse import observe
@@ -154,7 +166,8 @@ class LinuxDriver:
         if handle is None:
             return False
         self._focused_editable = handle
-        return _atspi.set_text(handle, value)  # AT-SPI EditableText.set_text_contents
+        # AT-SPI EditableText.set_text_contents (marshaled onto the a11y thread)
+        return self._run(lambda: _atspi.set_text(handle, value))
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
@@ -203,11 +216,12 @@ class LinuxDriver:
             return None
         from computeruse.drivers import _atspi
 
-        if self._focused_editable is not None and _atspi.insert_text(self._focused_editable, text):
+        handle = self._focused_editable
+        if handle is not None and self._run(lambda: _atspi.insert_text(handle, text)):
             return None
         from computeruse.drivers import _linux_input
 
-        _linux_input.type_string(text)
+        _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
         return None
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,

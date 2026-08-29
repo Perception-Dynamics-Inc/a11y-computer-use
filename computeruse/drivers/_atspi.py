@@ -114,6 +114,9 @@ def _atspi():
 
     if not _inited:
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
+        # Bound per-call D-Bus wait: a hung app stalls one read ~300ms, not the
+        # libatspi default (~800ms), so one bad node can't wreck a snapshot.
+        _safe(lambda: Atspi.set_timeout(300, 15000))
         _inited = True
     return Atspi
 
