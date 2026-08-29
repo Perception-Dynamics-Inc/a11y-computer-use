@@ -633,9 +633,12 @@ class Runtime:
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
     def screenshot(
-        self, display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE
+        self, display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE,
+        marks: bool = False,
     ) -> tuple[str, capture.ScaledImage]:
         def execute() -> tuple[str, "capture.ScaledImage"]:
+            import dataclasses
+
             from computeruse import capture  # lazy: pyobjc-backed, macOS-only
 
             shot = self.driver.screenshot(display_id)
@@ -647,6 +650,16 @@ class Runtime:
                 f"(backing scale {display.scale}); multiply image coordinates by "
                 f"{display.width}/{scaled.width} to get physical pixels"
             )
+            if marks and self._current is not None:  # Set-of-Mark: draw refs on the image
+                from computeruse import marks as _marks
+
+                m = _marks.marks_for(self._current, scaled, display.display_id)
+                if m:
+                    scaled = dataclasses.replace(scaled, png=_marks.draw_marks(scaled.png, m))
+                    text += (
+                        f"; {len(m)} elements from the latest snapshot are marked with their "
+                        "ref number — click/act on a ref you see rather than guessing pixels"
+                    )
             return text, scaled
 
         app = _frontmost_bundle()
@@ -1084,14 +1097,21 @@ def build_server(
         return await run(runtime.find, app, text, role, editable, clickable, scope)
 
     @server.tool(name="screenshot")
-    async def screenshot(display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE) -> list:
+    async def screenshot(
+        display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE,
+        marks: bool = False,
+    ) -> list:
         """Capture one display (default: main) as a PNG downscaled to at most
         max_long_edge px on its long edge. The accompanying text states the
         physical resolution and how to map image coordinates back to physical
         pixels. Prefer desktop_snapshot refs; this is the vision fallback.
-        Tier 'read' against the frontmost app. Needs the Screen Recording
-        permission."""
-        text, scaled = await run(runtime.screenshot, display_id, max_long_edge)
+
+        marks=true draws each interactive element from your latest snapshot on
+        the image, labeled with its ref (Set-of-Mark) — so you can name a ref
+        ('click e7') off the picture instead of guessing pixel coordinates. Take
+        a desktop_snapshot first so there are refs to mark. Tier 'read' against
+        the frontmost app. Needs the Screen Recording permission."""
+        text, scaled = await run(runtime.screenshot, display_id, max_long_edge, marks)
         return [text, Image(data=scaled.png, format="png")]
 
     @server.tool(name="zoom")
