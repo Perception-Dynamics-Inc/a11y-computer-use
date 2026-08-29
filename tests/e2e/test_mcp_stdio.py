@@ -27,9 +27,10 @@ from tests.conftest import HAS_AX
 
 HANDSHAKE_TIMEOUT_S = 30.0
 
-#: PLAN.md §8: the ~12-tool front door, verbatim.
+#: PLAN.md §8: the ~12-tool front door, plus the `find` query tool.
 EXPECTED_TOOLS = {
     "desktop_snapshot",
+    "find",
     "screenshot",
     "zoom",
     "click",

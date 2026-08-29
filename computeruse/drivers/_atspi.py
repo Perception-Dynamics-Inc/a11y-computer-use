@@ -210,12 +210,15 @@ def _value_text(acc, role: str) -> object | None:
     return None
 
 
-def _state_flags(acc) -> tuple[bool, bool]:
-    """(enabled, focused) from the state set."""
+def _state_flags(acc):
+    """(enabled, focused, checked, selected, expanded) from the state set.
+
+    checked/expanded are None when the element is not checkable/expandable so
+    the shared schema can tell "off" apart from "not a checkbox"."""
     Atspi = _atspi()
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
-        return True, False
+        return True, False, None, False, None
     st = getattr(Atspi, "StateType", None)
 
     def has(name: str) -> bool:
@@ -224,7 +227,10 @@ def _state_flags(acc) -> tuple[bool, bool]:
 
     enabled = has("ENABLED") or has("SENSITIVE")
     focused = has("FOCUSED")
-    return enabled, focused
+    checked = has("CHECKED") if (has("CHECKABLE") or has("CHECKED")) else None
+    selected = has("SELECTED")
+    expanded = has("EXPANDED") if has("EXPANDABLE") else None
+    return enabled, focused, checked, selected, expanded
 
 
 class ATSPIAccessor:
@@ -234,7 +240,7 @@ class ATSPIAccessor:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
         position, size = _extents(node)
-        enabled, focused = _state_flags(node)
+        enabled, focused, checked, selected, expanded = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
         return RawNode(
@@ -248,6 +254,9 @@ class ATSPIAccessor:
             position=position,
             size=size,
             actions=_action_names(node),
+            checked=checked,
+            selected=selected,
+            expanded=expanded,
         )
 
     def children(self, node: object) -> Sequence[object]:

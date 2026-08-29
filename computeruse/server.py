@@ -593,6 +593,38 @@ class Runtime:
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
+    def find(
+        self,
+        app: str,
+        text: str | None = None,
+        role: str | None = None,
+        editable: bool | None = None,
+        clickable: bool | None = None,
+        scope: str = "window",
+    ) -> str:
+        """Snapshot ``app`` and return only the elements matching the filters.
+
+        Takes a fresh snapshot (so the returned refs are live and actionable, and
+        this becomes the current ref epoch), then filters via
+        `observe.find_elements`. Gated + audited at READ, exactly like
+        `desktop_snapshot`."""
+        if scope not in (Scope.WINDOW.value, Scope.APP.value):
+            raise ValueError("scope must be 'window' or 'app'")
+        if text is None and role is None and editable is None and clickable is None:
+            raise ValueError("give at least one filter: text, role, editable, or clickable")
+        self.driver.ensure_trusted()
+        _running, bundle = _running_app(app)
+
+        def execute() -> str:
+            snap = self.driver.snapshot(Scope(scope), bundle)
+            self._current = snap  # refs from this call are what the agent acts on
+            matches = observe.find_elements(
+                snap, text=text, role=role, editable=editable, clickable=clickable
+            )
+            return observe.render_matches(snap, matches)
+
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
+
     def screenshot(
         self, display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE
     ) -> tuple[str, capture.ScaledImage]:
@@ -934,6 +966,26 @@ def build_server(
         scoped app. Needs the Accessibility permission (see `computeruse
         doctor`)."""
         return await run(runtime.desktop_snapshot, app, scope)
+
+    @server.tool(name="find")
+    async def find(
+        app: str,
+        text: str | None = None,
+        role: str | None = None,
+        editable: bool | None = None,
+        clickable: bool | None = None,
+        scope: str = "window",
+    ) -> str:
+        """Find elements in an app without dumping its whole tree — the targeted
+        alternative to desktop_snapshot when you know what you're looking for.
+        text = case-insensitive substring of an element's title or value; role =
+        substring of the accessibility role (e.g. 'button', 'textfield',
+        'checkbox', 'link'); editable/clickable = keep only elements with that
+        capability. Give at least one filter. Returns each match's ref, role,
+        title, value, flags, and bounds. Takes a fresh snapshot, so the returned
+        refs (e1..eN) are the current epoch — act on them promptly and re-observe
+        after the UI changes. scope='window'|'app'. Tier 'read'."""
+        return await run(runtime.find, app, text, role, editable, clickable, scope)
 
     @server.tool(name="screenshot")
     async def screenshot(display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE) -> list:

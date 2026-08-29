@@ -134,6 +134,17 @@ class Element:
         secure: True for secure/password fields. Acting on a secure element
             raises `ErrorCode.SECURE_FIELD`; the safety layer converts that
             into a human-handoff gate.
+        checked: Toggle state for checkboxes/radios/toggles — True (on),
+            False (off), or None for elements that aren't checkable. A mixed
+            (tri-state) control reads as True.
+        selected: True if the element is currently selected (a chosen list row,
+            table cell, or tab).
+        expanded: Disclosure state for expandable controls (disclosure
+            triangles, combo boxes, outline rows) — True (open), False (closed),
+            or None when the element does not expand.
+        placeholder: Prompt text shown in an empty field (e.g. "Search"),
+            empty string when none — lets the agent identify a blank input by
+            its purpose.
     """
 
     ref: str
@@ -149,6 +160,10 @@ class Element:
     clickable: bool = False
     editable: bool = False
     secure: bool = False
+    checked: bool | None = None
+    selected: bool = False
+    expanded: bool | None = None
+    placeholder: str = ""
 
     @property
     def actionable(self) -> bool:

@@ -74,6 +74,33 @@ def _actions(node) -> tuple[str, ...]:
     return tuple(dict.fromkeys(acts))  # de-dup, preserve order
 
 
+def _checked(node) -> bool | None:
+    """Toggle state via UIA TogglePattern (ToggleState 0=off,1=on,2=indeterminate);
+    None when the control has no toggle pattern."""
+    tp = _safe(lambda: node.GetTogglePattern())
+    if tp is None:
+        return None
+    state = _safe(lambda: tp.ToggleState)
+    return None if state is None else state != 0
+
+
+def _selected(node) -> bool:
+    sip = _safe(lambda: node.GetSelectionItemPattern())
+    return bool(_safe(lambda: sip.IsSelected, False)) if sip is not None else False
+
+
+def _expanded(node) -> bool | None:
+    """Disclosure via ExpandCollapsePattern (0=collapsed,1=expanded,2=partial,
+    3=leaf-no-children); None when the control does not expand."""
+    ecp = _safe(lambda: node.GetExpandCollapsePattern())
+    if ecp is None:
+        return None
+    state = _safe(lambda: ecp.ExpandCollapseState)
+    if state is None or state == 3:  # LeafNode: not an expandable control
+        return None
+    return state in (1, 2)
+
+
 class UIAAccessor:
     """`observe.TreeAccessor` over `uiautomation.Control` handles."""
 
@@ -104,6 +131,9 @@ class UIAAccessor:
             position=position,
             size=size,
             actions=_actions(node),
+            checked=_checked(node),
+            selected=_selected(node),
+            expanded=_expanded(node),
         )
 
     def children(self, node: object) -> Sequence[object]:

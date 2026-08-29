@@ -51,6 +51,10 @@ class DictAccessor:
             position=node.get("at"),
             size=node.get("size"),
             actions=tuple(node.get("actions", ())),
+            checked=node.get("checked"),
+            selected=node.get("selected", False),
+            expanded=node.get("expanded"),
+            placeholder=node.get("placeholder", ""),
         )
 
     def children(self, node: object) -> Sequence[object]:

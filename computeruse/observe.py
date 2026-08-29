@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import time
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -124,6 +125,10 @@ class RawNode:
     position: tuple[float, float] | None = None
     size: tuple[float, float] | None = None
     actions: tuple[str, ...] = ()
+    checked: bool | None = None
+    selected: bool = False
+    expanded: bool | None = None
+    placeholder: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -201,6 +206,7 @@ def snapshot(scope: Scope = Scope.WINDOW, *, app: str | None = None) -> Snapshot
     )
     _check_responsive(ax, app_el, bundle)
     accessor = _AXAccessor(ax)
+    _maybe_enable_web_a11y(ax, app_el, accessor, pid)
     root = app_el if scope is Scope.APP else _front_window(accessor, app_el)
     return build_snapshot(
         root, accessor, scope=scope, app=bundle, pid=pid, geometry=_display_geometry()
@@ -440,6 +446,61 @@ def interactive_count(snap: Snapshot) -> int:
     return sum(1 for el in snap.elements if el.clickable or el.editable)
 
 
+def find_elements(
+    snap: Snapshot,
+    *,
+    text: str | None = None,
+    role: str | None = None,
+    editable: bool | None = None,
+    clickable: bool | None = None,
+) -> tuple[Element, ...]:
+    """Filter ``snap``'s elements by text/role/capability — the query behind the
+    `find` tool. Pure and platform-free (operates on the canonical snapshot, so
+    it works identically on every backend).
+
+    Args:
+        text: case-insensitive substring matched against an element's title or
+            value (either may contain it).
+        role: case-insensitive substring of the role, with an optional ``AX``
+            prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
+            and ``"AXTextField"`` matches exactly.
+        editable / clickable: keep only elements whose flag equals the given
+            boolean.
+
+    Returns the matches in the snapshot's pre-order, so refs read top-to-bottom.
+    """
+    needle = text.lower() if text else None
+    role_needle = role.lower().removeprefix("ax") if role else None
+    out: list[Element] = []
+    for el in snap.elements:
+        if needle is not None and needle not in f"{el.title} {el.value or ''}".lower():
+            continue
+        if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
+            continue
+        if editable is not None and el.editable is not editable:
+            continue
+        if clickable is not None and el.clickable is not clickable:
+            continue
+        out.append(el)
+    return tuple(out)
+
+
+def render_matches(snap: Snapshot, matches: Sequence[Element]) -> str:
+    """Render `find_elements` results as compact lines — one per match with its
+    ref, role, title, value, flags, and bounds (unlike the tree render, bounds
+    show on every match since results are a flat list, not a nested tree)."""
+    if not matches:
+        return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match"
+    lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
+    for el in matches:
+        line = _render_line(el)
+        if el.parent is not None:  # _render_line prints bounds only for roots
+            b = el.bounds
+            line += f" [{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]"
+        lines.append("  " + line)
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Pruning engine
 # ---------------------------------------------------------------------------
@@ -559,6 +620,21 @@ def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     return clickable, editable, secure
 
 
+_CHECKABLE_ROLES = frozenset({"AXCheckBox", "AXRadioButton"})
+
+
+def _checked_state(role: str, subrole: str, value: object) -> bool | None:
+    """Toggle state for a checkable control (checkbox / radio / toggle button)
+    from its AXValue (0=off, 1=on, 2=mixed); None when the element isn't
+    checkable. Tri-state 'mixed' reads as True (it is not 'off')."""
+    if role not in _CHECKABLE_ROLES and subrole != "AXToggle":
+        return None
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return None
+
+
 def _flatten(
     node: _PNode,
     parent_ref: str | None,
@@ -592,6 +668,10 @@ def _flatten(
             clickable=clickable,
             editable=editable,
             secure=secure,
+            checked=node.raw.checked,
+            selected=node.raw.selected,
+            expanded=node.raw.expanded,
+            placeholder=node.raw.placeholder,
         )
     )
     if node.elided:
@@ -651,12 +731,19 @@ def _render_line(el: Element) -> str:
         parts.append(f'"{el.title}"')
     if el.value is not None:
         parts.append(f'="{_clip(el.value.replace(chr(10), " "), _RENDER_VALUE_CHARS)}"')
+    elif el.placeholder and not el.title:  # blank field: show its prompt for identity
+        parts.append(f'~"{_clip(el.placeholder, _RENDER_VALUE_CHARS)}"')
     flags = [
         name
         for name, on in (
             ("click", el.clickable),
             ("edit", el.editable),
             ("secure", el.secure),
+            ("checked", el.checked is True),
+            ("unchecked", el.checked is False),
+            ("selected", el.selected),
+            ("expanded", el.expanded is True),
+            ("collapsed", el.expanded is False),
             ("focus", el.focused),
             ("disabled", not el.enabled),
         )
@@ -802,17 +889,24 @@ class _AXAccessor:
         role = self._attr(node, "AXRole")
         subrole = self._attr(node, "AXSubrole")
         enabled = self._attr(node, "AXEnabled")
+        value = self._attr(node, "AXValue")
+        selected = self._attr(node, "AXSelected")
+        expanded = self._attr(node, "AXExpanded")
         return RawNode(
             role=str(role) if role else "AXUnknown",
             subrole=str(subrole) if subrole else None,
             title=str(self._attr(node, "AXTitle") or ""),
-            value=self._attr(node, "AXValue"),
+            value=value,
             description=str(self._attr(node, "AXDescription") or ""),
             enabled=True if enabled is None else bool(enabled),
             focused=bool(self._attr(node, "AXFocused")),
             position=self._geometry(node, "AXPosition", self._point_type),
             size=self._geometry(node, "AXSize", self._size_type),
             actions=self._actions(node),
+            checked=_checked_state(str(role) if role else "", str(subrole) if subrole else "", value),
+            selected=bool(selected) if selected is not None else False,
+            expanded=bool(expanded) if expanded is not None else None,
+            placeholder=str(self._attr(node, "AXPlaceholderValue") or ""),
         )
 
     def children(self, node: object) -> Sequence[object]:
@@ -858,6 +952,63 @@ def _front_window(accessor: _AXAccessor, app_el: object) -> object | None:
             return window
     windows = accessor._attr(app_el, "AXWindows")
     return windows[0] if windows else None
+
+
+# Chromium/Electron apps (Chrome, Slack, VS Code, Discord, Spotify, Teams, …)
+# expose only an empty AXWebArea shell until a screen-reader-like client sets
+# these attributes; then they build the real render tree. We detect such an app
+# by the presence of a web area and flip the switch once per process — turning
+# "0 interactive refs, fall back to blind vision" into a full a11y tree. Opt out
+# with COMPUTERUSE_NO_WEB_A11Y=1.
+_WEB_ROLES = frozenset({"AXWebArea", "AXWebView"})
+_WEB_A11Y_SETTLE_S = 0.4  #: give Chromium a moment to build the tree after enabling
+_WEB_A11Y_ENABLED: set[int] = set()  #: pids already handled this session (probe once)
+_WEB_PROBE_MAX_NODES = 240  #: bound the shallow BFS for a web area
+_WEB_PROBE_FANOUT = 20  #: children inspected per node while probing
+
+
+def _has_web_area(accessor: "_AXAccessor", app_el: object) -> bool:
+    """Shallow, bounded BFS for an AXWebArea/AXWebView under the app — the tell
+    that this is a Chromium/Electron app (the shell exists even before the tree
+    is populated)."""
+    from collections import deque
+
+    queue = deque([app_el])
+    seen = 0
+    while queue and seen < _WEB_PROBE_MAX_NODES:
+        node = queue.popleft()
+        seen += 1
+        role = accessor._attr(node, "AXRole")
+        if role in _WEB_ROLES:
+            return True
+        children = accessor._attr(node, "AXChildren") or ()
+        for child in tuple(children)[:_WEB_PROBE_FANOUT]:
+            queue.append(child)
+    return False
+
+
+def _maybe_enable_web_a11y(ax, app_el: object, accessor: "_AXAccessor", pid: int) -> None:
+    """Force a Chromium/Electron app to expose its accessibility tree.
+
+    Sets ``AXManualAccessibility`` and ``AXEnhancedUserInterface`` on the app
+    element (both — ``AXManualAccessibility`` is unsupported on Electron 22+, and
+    the reverse on older Chrome), then lets the tree build. Idempotent and cached
+    per pid, so the set+settle cost is paid once per app per session; native apps
+    (no web area) are marked handled after one cheap probe and never re-probed."""
+    if pid in _WEB_A11Y_ENABLED or os.environ.get("COMPUTERUSE_NO_WEB_A11Y"):
+        return
+    _WEB_A11Y_ENABLED.add(pid)  # mark up front: probe/enable at most once per pid
+    if not _has_web_area(accessor, app_el):
+        return
+    enabled = False
+    for attr in ("AXManualAccessibility", "AXEnhancedUserInterface"):
+        try:
+            if ax.AXUIElementSetAttributeValue(app_el, attr, True) == 0:
+                enabled = True
+        except Exception:
+            pass
+    if enabled:
+        time.sleep(_WEB_A11Y_SETTLE_S)  # Chromium builds the render tree asynchronously
 
 
 def _find_app(app: str) -> tuple[int, str]:

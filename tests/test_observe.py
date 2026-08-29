@@ -351,3 +351,154 @@ def test_interactive_count_distinguishes_hostile_apps() -> None:
     )
     bare = build_snapshot(plain, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
     assert observe.interactive_count(bare) == 0
+
+
+# ---------------------------------------------------------------------------
+# find_elements / render_matches (the `find` tool query, platform-free)
+# ---------------------------------------------------------------------------
+
+
+def _find_window() -> dict:
+    return ax(
+        "AXWindow", title="Form", at=(100.0, 50.0), size=(1000.0, 700.0),
+        children=[
+            button("Save", (120.0, 70.0)),
+            button("Cancel", (220.0, 70.0)),
+            ax("AXTextField", title="Name", value="Alice", at=(120.0, 120.0), size=(300.0, 30.0)),
+            ax("AXStaticText", value="Welcome back", at=(120.0, 170.0), size=(300.0, 20.0)),
+        ],
+    )
+
+
+def test_find_by_text_matches_title_or_value() -> None:
+    snap = snap_of(_find_window())
+    assert {e.title for e in observe.find_elements(snap, text="save")} == {"Save"}
+    # value is searched too: "Alice" lives in the text field's value
+    assert [e.role for e in observe.find_elements(snap, text="alice")] == ["AXTextField"]
+
+
+def test_find_by_role_ignores_ax_prefix_and_is_substring() -> None:
+    snap = snap_of(_find_window())
+    assert {e.title for e in observe.find_elements(snap, role="button")} == {"Save", "Cancel"}
+    assert {e.title for e in observe.find_elements(snap, role="AXButton")} == {"Save", "Cancel"}
+    assert [e.title for e in observe.find_elements(snap, role="textfield")] == ["Name"]
+
+
+def test_find_by_capability_flags() -> None:
+    snap = snap_of(_find_window())
+    assert [e.title for e in observe.find_elements(snap, editable=True)] == ["Name"]
+    assert {e.title for e in observe.find_elements(snap, clickable=True)} == {"Save", "Cancel"}
+
+
+def test_find_combines_filters() -> None:
+    snap = snap_of(_find_window())
+    # role + text narrows to one
+    assert {e.title for e in observe.find_elements(snap, role="button", text="cancel")} == {"Cancel"}
+
+
+def test_render_matches_shows_refs_and_bounds_or_no_match() -> None:
+    snap = snap_of(_find_window())
+    matches = observe.find_elements(snap, role="button")
+    out = observe.render_matches(snap, matches)
+    assert "2 match(es)" in out
+    assert "Save" in out and "Cancel" in out
+    assert "e" in out and "@" in out  # refs + bounds
+    empty = observe.render_matches(snap, observe.find_elements(snap, text="nonesuch"))
+    assert "no elements match" in empty
+
+
+# ---------------------------------------------------------------------------
+# Rich element states (checked / selected / expanded / placeholder)
+# ---------------------------------------------------------------------------
+
+
+def test_checked_state_helper() -> None:
+    assert observe._checked_state("AXCheckBox", "", 1) is True
+    assert observe._checked_state("AXCheckBox", "", 0) is False
+    assert observe._checked_state("AXCheckBox", "", 2) is True   # mixed reads as on
+    assert observe._checked_state("AXRadioButton", "", "1") is True
+    assert observe._checked_state("AXButton", "AXToggle", 1) is True
+    assert observe._checked_state("AXButton", "", 1) is None      # not checkable
+    assert observe._checked_state("AXCheckBox", "", None) is None  # no value
+
+
+def test_states_flow_to_element_and_render() -> None:
+    tree = ax(
+        "AXWindow", title="Prefs", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax("AXCheckBox", title="Wifi", at=(10.0, 10.0), size=(120.0, 20.0),
+               actions=("AXPress",), checked=True),
+            ax("AXCheckBox", title="Bluetooth", at=(10.0, 40.0), size=(120.0, 20.0),
+               actions=("AXPress",), checked=False),
+            ax("AXRow", title="Row A", at=(10.0, 70.0), size=(300.0, 20.0), selected=True),
+            ax("AXDisclosureTriangle", title="More", at=(10.0, 100.0), size=(20.0, 20.0),
+               actions=("AXPress",), expanded=False),
+            ax("AXTextField", title="", placeholder="Search", at=(10.0, 130.0), size=(300.0, 24.0)),
+        ],
+    )
+    snap = snap_of(tree)
+    els = {el.title: el for el in snap.elements}
+    assert els["Wifi"].checked is True
+    assert els["Bluetooth"].checked is False
+    assert els["Row A"].selected is True
+    assert els["More"].expanded is False
+    text = observe.render_text(snap)
+    assert "(click,checked)" in text or "checked" in text
+    assert "unchecked" in text
+    assert "selected" in text
+    assert "collapsed" in text
+    assert '~"Search"' in text  # empty field shows its placeholder for identity
+
+
+# ---------------------------------------------------------------------------
+# Chromium/Electron a11y force-enable (AXEnhancedUserInterface)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAx:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def AXUIElementSetAttributeValue(self, el, attr, val):  # noqa: N802
+        self.calls.append((attr, val))
+        return 0
+
+
+class _FakeAcc:
+    def __init__(self, root_role: str) -> None:
+        self._role = root_role
+
+    def _attr(self, node, name):
+        if name == "AXRole":
+            return self._role
+        if name == "AXChildren":
+            return ()
+        return None
+
+
+def test_web_a11y_enabled_on_chromium_like_app(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    monkeypatch.setattr(observe.time, "sleep", lambda _s: None)
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1234)
+    assert ("AXManualAccessibility", True) in ax.calls
+    assert ("AXEnhancedUserInterface", True) in ax.calls
+    assert 1234 in observe._WEB_A11Y_ENABLED  # cached: won't re-set next snapshot
+
+
+def test_web_a11y_skipped_on_native_app_but_marked_handled(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWindow"), pid=999)
+    assert ax.calls == []  # no web area -> nothing set
+    assert 999 in observe._WEB_A11Y_ENABLED  # but never probed again
+
+
+def test_web_a11y_opt_out(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.setenv("COMPUTERUSE_NO_WEB_A11Y", "1")
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1)
+    assert ax.calls == []

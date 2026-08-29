@@ -29,6 +29,7 @@ APP = "com.apple.TextEdit"
 
 EXPECTED_TOOLS = {
     "desktop_snapshot",
+    "find",
     "screenshot",
     "zoom",
     "click",
@@ -127,7 +128,7 @@ async def test_tool_registry_matches_plan_surface(mcp_server) -> None:
     async with client_session(mcp_server) as client:
         listed = (await client.list_tools()).tools
     assert {tool.name for tool in listed} == EXPECTED_TOOLS
-    assert len(listed) == 12
+    assert len(listed) == len(EXPECTED_TOOLS)
     for tool in listed:
         assert tool.description, f"{tool.name} has no description"
 
