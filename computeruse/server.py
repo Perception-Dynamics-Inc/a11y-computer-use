@@ -1032,29 +1032,38 @@ class Runtime:
         return self._run_gated(Scroll(target=Point(0, 0, 0), dy=dy), bundle, execute)
 
     def app(self, action: str, name: str | None = None) -> str:
+        # Routed through the driver (running_apps/launch_app/activate_app), so the
+        # browser backend lists/opens/focuses TABS and Windows/Linux use their own
+        # backends — the macOS driver delegates to the same module helpers, so its
+        # behavior is unchanged.
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
-            rows = self._run_gated(AppOp(verb=verb), self._frontmost(), _list_apps)
+            rows = self._run_gated(AppOp(verb=verb), self._frontmost(), self.driver.running_apps)
             return json.dumps(rows)
         if verb is AppVerb.QUIT:
             raise ValueError("app quit is not exposed in the MVP tool surface")
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
-            try:  # gate by bundle id when resolvable, so grant keys stay unified
-                _, gate_key = self._resolve_app(name)
-            except ComputerUseError:
-                gate_key = name  # not running yet: the identifier is the best key
-            self._run_gated(AppOp(verb=verb, app=gate_key), gate_key, lambda: _launch_app(name))
+            if self._resolves_apps():
+                gate_key = self._frontmost()  # browser: launch == navigate the bound tab
+            else:
+                try:  # gate by resolved id when possible, so grant keys stay unified
+                    _, gate_key = self._resolve_app(name)
+                except ComputerUseError:
+                    gate_key = name  # not running yet: the identifier is the best key
+            self._run_gated(AppOp(verb=verb, app=gate_key), gate_key,
+                            lambda: self.driver.launch_app(name))
             return f"launched {name}"
-        running, bundle = self._resolve_app(name)  # FOCUS
-        self._run_gated(AppOp(verb=verb, app=bundle), bundle, lambda: _activate(running))
+        _running, bundle = self._resolve_app(name)  # FOCUS
+        self._run_gated(AppOp(verb=verb, app=bundle), bundle,
+                        lambda: self.driver.activate_app(name))
         return f"focused {bundle}"
 
     def window(self, action: str, window_id: int | None = None) -> str:
         verb = WindowVerb(action)
         if verb is WindowVerb.LIST:
-            rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), _window_rows)
+            rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
             return json.dumps(rows)
         if verb is not WindowVerb.RAISE:
             raise ValueError(
@@ -1081,11 +1090,12 @@ class Runtime:
         verb = ClipboardVerb(action)
         app = self._frontmost()
         if verb is ClipboardVerb.READ:
-            content = self._run_gated(ClipboardOp(verb=verb), app, _read_clipboard)
+            content = self._run_gated(ClipboardOp(verb=verb), app, self.driver.read_clipboard)
             return content if content is not None else ""
         if text is None:
             raise ValueError("clipboard write requires text")
-        self._run_gated(ClipboardOp(verb=verb, text=text), app, lambda: _write_clipboard(text))
+        self._run_gated(ClipboardOp(verb=verb, text=text), app,
+                        lambda: self.driver.write_clipboard(text))
         return f"wrote {len(text)} characters to the clipboard"
 
     # -- one-shot dispatch (CLI `run-once`) -----------------------------------

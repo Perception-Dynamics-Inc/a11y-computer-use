@@ -226,19 +226,9 @@ class BrowserDriver:
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         from computeruse import observe
 
-        anchor = snap.element(ref)
         if live is None:
             live = self.snapshot(snap.scope, snap.app)
-        match, reason = observe._match_anchor(anchor, live)
-        if match is None:
-            raise ComputerUseError(
-                ErrorCode.STALE_REF,
-                f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe",
-                detail={"ref": ref, "snapshot_id": snap.snapshot_id,
-                        "live_snapshot_id": live.snapshot_id, "reason": reason,
-                        "candidates": observe.stale_ref_candidates(anchor, live)},
-            )
-        return match
+        return observe.rematch_ref(snap, ref, live)
 
     # -- a11y-first act (coordinate-free) -----------------------------------
     def _backend_id(self, element: Element) -> int | None:

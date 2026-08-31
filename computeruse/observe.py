@@ -284,9 +284,27 @@ def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> El
             exists or the anchors no longer match unambiguously — the caller
             should re-observe.
     """
-    anchor = snap.element(ref)
     if live is None:
         live = snapshot(snap.scope, app=snap.app)
+    return rematch_ref(snap, ref, live)
+
+
+def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
+    """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
+    ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
+    of every driver's ``resolve_ref``.
+
+    Each `Driver` captures ``live`` through its own backend (macOS via
+    `observe.snapshot`, Linux/browser via ``driver.snapshot``) and calls this, so
+    the match-or-raise logic and the STALE_REF payload live in exactly one place.
+
+    Raises:
+        KeyError: if ``ref`` was never part of ``snap`` (see `Snapshot.element`).
+        ComputerUseError: `ErrorCode.STALE_REF` when the element no longer exists
+            or the anchors no longer match unambiguously — with near-miss
+            candidates so the agent can retry a likely ref without re-observing.
+    """
+    anchor = snap.element(ref)
     match, reason = _match_anchor(anchor, live)
     if match is None:
         raise ComputerUseError(

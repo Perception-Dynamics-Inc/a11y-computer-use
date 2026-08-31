@@ -549,6 +549,43 @@ def test_mcp_server_exposes_console_and_network_only_on_browser(monkeypatch) -> 
     assert "console" not in os_tools and "network" not in os_tools
 
 
+def test_browser_app_window_clipboard_tools_via_runtime(tmp_path, monkeypatch) -> None:
+    """The app/window/clipboard TOOLS run on the browser backend (tabs), routed
+    through the driver — app focus <tab> no longer crashes, list returns tabs,
+    launch navigates, clipboard degrades cleanly."""
+    import json as _json
+
+    from computeruse import safety, server
+    from computeruse.drivers import _cdp
+
+    def responder(m, p):
+        if m == "Page.navigate":
+            return {"frameId": "F"}
+        if m == "Runtime.evaluate":
+            return {"result": {"value": "complete"}}
+        if m in ("DOM.enable", "Page.enable", "Runtime.enable"):
+            return {}
+        raise AssertionError(m)
+
+    d, _ = _driver_on(responder)
+    monkeypatch.setattr(_cdp, "page_targets", lambda ep: [
+        {"id": "TAB1", "title": "Home", "url": "https://home"},
+        {"id": "TAB2", "title": "Docs", "url": "https://docs"}])
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("TAB1", safety.Tier.FULL)  # the bound/frontmost tab
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "a"), driver=d)
+
+    assert {r["id"] for r in _json.loads(rt.app("list"))} == {"TAB1", "TAB2"}  # tabs, not OS apps
+    assert any(w["app"] == "TAB1" for w in _json.loads(rt.window("list")))
+    assert rt.app("focus", "TAB1") == "focused TAB1"  # was _activate(None) AttributeError
+    assert "launched" in rt.app("launch", "data:text/html,<h1>x</h1>")  # navigates the tab
+
+    assert rt.clipboard("read") == ""  # browser exposes no clipboard -> empty, not a crash
+    with pytest.raises(ComputerUseError) as ei:
+        rt.clipboard("write", "hi")
+    assert ei.value.code is ErrorCode.UNSUPPORTED
+
+
 def test_browser_launch_app_rejects_non_url() -> None:
     d, _ = _driver_on()
     with pytest.raises(ComputerUseError) as ei:
