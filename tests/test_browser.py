@@ -69,7 +69,8 @@ def _fixture_responder(method: str, params: dict):
     if method == "Runtime.callFunctionOn":
         return {"result": {"type": "undefined"}}
     if method == "Page.getLayoutMetrics":
-        return {"cssVisualViewport": {"pageX": 0, "pageY": 0}}
+        return {"cssVisualViewport": {"pageX": 0, "pageY": 0},
+                "cssContentSize": {"width": 800, "height": 600}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
                   "DOM.enable", "Page.enable", "Runtime.enable"):
         return {}
@@ -165,7 +166,6 @@ def _driver_on(responder=_fixture_responder) -> tuple[browser.BrowserDriver, Scr
     transport = ScriptedTransport(responder)
     d._session = _cdp.CDPSession(transport)
     d._target_id = "TAB1"
-    d._enabled = True
     return d, transport
 
 

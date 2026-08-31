@@ -63,7 +63,7 @@ _NAMED_KEY = {
     "pageup": ("PageUp", "PageUp", 33),
     "pagedown": ("PageDown", "PageDown", 34),
 }
-_MODIFIERS = frozenset({"alt", "ctrl", "control", "meta", "cmd", "command", "shift"})
+_MODIFIERS = frozenset(_MOD_BIT)  # the modifier tokens, straight from the bitmask table
 
 
 def _point_of(target: Target) -> tuple[float, float]:
@@ -85,8 +85,7 @@ class BrowserDriver:
     def __init__(self, endpoint: str | None = None, *, target_id: str | None = None) -> None:
         self._endpoint = endpoint or os.environ.get("COMPUTERUSE_CDP_ENDPOINT", _DEFAULT_ENDPOINT)
         self._target_id = target_id
-        self._session = None  # lazily connected _cdp.CDPSession
-        self._enabled = False
+        self._session = None  # lazily connected _cdp.CDPSession (also = "connected")
         self._console: list[dict] = []  # accumulated console/exception entries
         self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
         self._network: list[dict] = []  # completed request outcomes (status/failure)
@@ -120,13 +119,15 @@ class BrowserDriver:
                 self._session.call(f"{domain}.enable")
             except ComputerUseError:
                 pass  # some builds gate a domain; observe/act degrade, not crash
-        self._enabled = True
         return self._session
 
-    def _reset(self) -> None:
+    def close(self) -> None:
+        """Drop the CDP connection (a fresh one opens on next use)."""
         if self._session is not None:
             self._session.close()
         self._session = None
+
+    _reset = close  # internal alias kept for existing call sites
 
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:
@@ -145,7 +146,13 @@ class BrowserDriver:
         # then offset each frame's boxes into the top document's space.
         raw_geom, secure_ids = _cdp_ax.parse_dom_snapshot(dom)
         offsets = _cdp_ax.build_frame_offsets(raw_geom, frames)
-        geometry, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
+        # Single-frame pages (the common case) offset to (0,0) everywhere, so the
+        # second parse would be identity — reuse the first instead of re-walking
+        # the whole DOMSnapshot (and re-scanning every node for password fields).
+        if any(off != (0.0, 0.0) for off in offsets.values()):
+            geometry, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
+        else:
+            geometry = raw_geom
         stitched = _cdp_ax.stitch_frames(
             [{"nodes": f["nodes"], "owner_backend": f["owner_backend"]} for f in frames]
         )
@@ -195,17 +202,26 @@ class BrowserDriver:
             self._target_id = app
         return self._connect()
 
-    def _page_geometry(self, dom: dict):
+    def _display(self, width: int, height: int):
         """One `DisplayGeometry` sized to the document (CSS px, scale 1.0) so no
         below-the-fold node is projected offscreen. Document coordinates and the
         AX/DOM box space coincide, so the engine's point->pixel map is identity."""
         from computeruse.observe import DisplayGeometry
 
-        doc = (dom.get("documents") or [{}])[0]
-        width = int(doc.get("contentWidth") or 0) or 1280
-        height = int(doc.get("contentHeight") or 0) or 800
-        display = Display(display_id=0, width=width, height=height, scale=1.0, is_main=True)
+        display = Display(display_id=0, width=width or 1280, height=height or 800,
+                         scale=1.0, is_main=True)
         return (DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+
+    def _page_geometry(self, dom: dict):
+        """Document geometry from a DOMSnapshot the caller already has."""
+        doc = (dom.get("documents") or [{}])[0]
+        return self._display(int(doc.get("contentWidth") or 0), int(doc.get("contentHeight") or 0))
+
+    def _metrics_geometry(self):
+        """Document geometry from `Page.getLayoutMetrics` — a tiny reply, for
+        capture paths that have no DOMSnapshot to piggyback on."""
+        cs = self._connect().call("Page.getLayoutMetrics").get("cssContentSize", {})
+        return self._display(int(cs.get("width") or 0), int(cs.get("height") or 0))
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         from computeruse import observe
@@ -314,8 +330,7 @@ class BrowserDriver:
             pre_check()
         x, y = self._viewport_point(*_point_of(target))
         mods = _mods_mask(modifiers)
-        btn = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right",
-               MouseButton.MIDDLE: "middle"}.get(button, "left")
+        btn = button.value  # MouseButton values are exactly "left"/"right"/"middle"
         sess = self._connect()
         for _ in range(max(1, count)):
             sess.call("Input.dispatchMouseEvent", {
@@ -332,15 +347,17 @@ class BrowserDriver:
             return None
         if pre_check is not None:
             pre_check()
-        x1, y1 = self._viewport_point(*_point_of(start))
-        x2, y2 = self._viewport_point(*_point_of(end))
+        ox, oy = self._scroll_offset()  # one metrics round-trip for the whole gesture
+        (sx, sy), (ex, ey) = _point_of(start), _point_of(end)
+        x1, y1, x2, y2 = sx - ox, sy - oy, ex - ox, ey - oy
+        btn = button.value
         sess = self._connect()
         sess.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x1, "y": y1,
-                                               "button": "left", "clickCount": 1})
+                                               "button": btn, "clickCount": 1})
         sess.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x2, "y": y2,
-                                               "button": "left"})
+                                               "button": btn})
         sess.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x2, "y": y2,
-                                               "button": "left", "clickCount": 1})
+                                               "button": btn, "clickCount": 1})
         return None
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
@@ -357,16 +374,19 @@ class BrowserDriver:
             "deltaX": -dx * step, "deltaY": -dy * step})
         return None
 
-    def _viewport_point(self, doc_x: float, doc_y: float) -> tuple[float, float]:
-        """Document coords -> viewport CSS coords (subtract the scroll offset).
-
-        Input events are viewport-relative; our geometry is document-relative.
-        """
+    def _scroll_offset(self) -> tuple[float, float]:
+        """The page scroll offset (cssVisualViewport pageX/pageY), or (0, 0)."""
         try:
             vv = self._connect().call("Page.getLayoutMetrics").get("cssVisualViewport", {})
-            return doc_x - float(vv.get("pageX", 0)), doc_y - float(vv.get("pageY", 0))
+            return float(vv.get("pageX", 0)), float(vv.get("pageY", 0))
         except ComputerUseError:
-            return doc_x, doc_y
+            return 0.0, 0.0
+
+    def _viewport_point(self, doc_x: float, doc_y: float) -> tuple[float, float]:
+        """Document coords -> viewport CSS coords (input events are viewport-relative,
+        our geometry is document-relative)."""
+        ox, oy = self._scroll_offset()
+        return doc_x - ox, doc_y - oy
 
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:
@@ -393,8 +413,9 @@ class BrowserDriver:
         sess = self._connect()
         data = sess.call("Page.captureScreenshot", {"format": "png",
                                                     "captureBeyondViewport": True})["data"]
-        dom = sess.call("DOMSnapshot.captureSnapshot", {"computedStyles": []})
-        display = self._page_geometry(dom)[0].display
+        # Page dimensions come from getLayoutMetrics (a tiny reply), not a full
+        # DOMSnapshot — the capture path needs only the size, not the tree.
+        display = self._metrics_geometry()[0].display
         return Screenshot(png=base64.b64decode(data), display=display)
 
     def zoom_region(self, region: Bounds) -> bytes:
@@ -406,16 +427,12 @@ class BrowserDriver:
         return base64.b64decode(data)
 
     # -- observation the vision path can't see ------------------------------
-    def console_messages(self, *, clear: bool = True) -> list[dict]:
-        """Console output + uncaught JS exceptions from the bound tab.
-
-        The web agent's answer to "did that click actually work?" — errors and
-        exceptions a screenshot never shows. Each entry is
-        ``{"level": log|warning|error|exception, "text": ...}``. Console events
-        arrive asynchronously, so a cheap evaluate is issued first to drain any
-        pending frames off the socket; ``clear`` empties the buffer after reading
-        (the default: an agent wants what's new since it last looked).
-        """
+    def _pump_events(self) -> None:
+        """Drain the session's buffered CDP events into BOTH the console and
+        network feeds. Events arrive asynchronously, so a cheap evaluate first
+        pumps any pending frames off the socket; routing every drained event to
+        both feeds means reading one never discards the other's events (the buffer
+        is shared and drain-clears)."""
         sess = self._connect()
         try:
             sess.call("Runtime.evaluate", {"expression": "0", "returnByValue": True})
@@ -425,6 +442,17 @@ class BrowserDriver:
             entry = _console_entry(ev)
             if entry is not None:
                 self._console.append(entry)
+            self._ingest_network(ev)
+
+    def console_messages(self, *, clear: bool = True) -> list[dict]:
+        """Console output + uncaught JS exceptions from the bound tab.
+
+        The web agent's answer to "did that click actually work?" — errors and
+        exceptions a screenshot never shows. Each entry is
+        ``{"level": log|warning|error|exception, "text": ...}``. ``clear`` empties
+        the buffer after reading (the default: an agent wants what's new since it
+        last looked)."""
+        self._pump_events()
         out = list(self._console)
         if clear:
             self._console = []
@@ -438,15 +466,8 @@ class BrowserDriver:
         ``{"method", "url", "error"}`` for a failure. Request/response events are
         joined by CDP ``requestId``; the pending-request map is bounded so a
         long-lived tab can't accumulate ids without limit. ``clear`` empties the
-        completed buffer after reading.
-        """
-        sess = self._connect()
-        try:
-            sess.call("Runtime.evaluate", {"expression": "0", "returnByValue": True})
-        except ComputerUseError:
-            pass
-        for ev in sess.drain_events():
-            self._ingest_network(ev)
+        completed buffer after reading."""
+        self._pump_events()
         out = list(self._network)
         if clear:
             self._network = []
@@ -473,7 +494,9 @@ class BrowserDriver:
 
     # -- system / windowing (tabs as apps/windows) --------------------------
     def frontmost_app(self) -> tuple[str | None, int | None]:
-        return (self._target_id or (self._connect() and self._target_id)), None
+        if self._target_id is None:
+            self._connect()  # binds a tab and sets _target_id
+        return self._target_id, None
 
     def app_at_point(self, point: Point) -> str | None:
         return self._target_id
@@ -553,8 +576,7 @@ def _console_entry(event: dict) -> dict | None:
         args = params.get("args", [])
         parts = [str(a.get("value", a.get("description", ""))) for a in args]
         # CDP levels: log|warning|error|debug|info|... — keep the model's vocab.
-        level = params.get("type", "log")
-        return {"level": "warning" if level == "warning" else level, "text": " ".join(parts)}
+        return {"level": params.get("type", "log"), "text": " ".join(parts)}
     if method == "Runtime.exceptionThrown":
         det = params.get("exceptionDetails", {})
         text = det.get("exception", {}).get("description") or det.get("text", "uncaught exception")

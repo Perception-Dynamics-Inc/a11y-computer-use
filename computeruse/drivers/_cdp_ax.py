@@ -155,11 +155,8 @@ class CDPAccessor:
 
 
 def _checked(v: object) -> bool | None:
-    if v in ("true", "mixed"):
-        return True
-    if v == "false":
-        return False
-    return None
+    # like the boolean tristate, but a checkbox's "mixed" (indeterminate) is truthy
+    return True if v == "mixed" else _tristate(v)
 
 
 def _tristate(v: object) -> bool | None:
@@ -260,6 +257,8 @@ def stitch_frames(frame_nodes: list[dict]) -> list[dict]:
     frame's owner element. Input is one dict per frame, in tree order:
     ``{"nodes": [...], "owner_backend": int|None}`` (None = the main frame).
     """
+    if len(frame_nodes) == 1:  # no child frames (the common case): nothing to graft
+        return frame_nodes[0]["nodes"]  # ids can't collide, so skip namespacing/copy
     pooled: list[dict] = []
     roots: list[tuple[int, dict]] = []  # (owner_backend, prefixed root node)
     by_backend: dict[int, dict] = {}

@@ -449,6 +449,8 @@ class ObserveVerb(str, Enum):
     SNAPSHOT = "snapshot"
     SCREENSHOT = "screenshot"
     ZOOM = "zoom"
+    CONSOLE = "console"  # browser: console output + uncaught exceptions
+    NETWORK = "network"  # browser: request outcomes (status/failure)
 
 
 @dataclass(frozen=True, slots=True)

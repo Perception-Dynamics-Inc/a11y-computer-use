@@ -98,8 +98,10 @@ def _png_size(png: bytes) -> tuple[int, int]:
     return 0, 0
 
 
-def _observe(driver, app: str, scope: Scope):
-    """(snapshot, rendered text, screenshot CSS-px w/h, raw png w/h) for one look."""
+def _measure(driver, app: str, scope: Scope) -> tuple["object", ObsCost]:
+    """(snapshot, ObsCost) for one look — the real a11y snapshot and the real
+    screenshot the driver captures for the SAME state, so the comparison is
+    apples-to-apples and un-rigged. Returns the snapshot too, for diffing."""
     from computeruse import observe
 
     snap = driver.snapshot(scope, app)
@@ -109,30 +111,22 @@ def _observe(driver, app: str, scope: Scope):
     # Screenshots are captured in physical px; the vision formula is CSS px, so
     # divide out the backing scale to count the pixels the model actually bills.
     scale = getattr(getattr(shot, "display", None), "scale", 1.0) or 1.0
-    return snap, text, (round(width / scale), round(height / scale)), (width, height)
-
-
-def _cost(snap, text: str, css_wh: tuple[int, int], raw_wh: tuple[int, int]) -> ObsCost:
-    return ObsCost(
+    cost = ObsCost(
         a11y_tokens=a11y_tokens(text),
-        screenshot_tokens=image_tokens(*css_wh),
+        screenshot_tokens=image_tokens(round(width / scale), round(height / scale)),
         a11y_chars=len(text),
-        image_width=raw_wh[0],
-        image_height=raw_wh[1],
+        image_width=width,
+        image_height=height,
         element_count=len(snap.elements),
     )
+    return snap, cost
 
 
 def measure_observation(driver, app: str | None = None, *, scope: Scope = Scope.WINDOW) -> ObsCost:
-    """Cost of observing the current UI once, both ways, on ``driver``.
-
-    Takes the real a11y snapshot (rendered → token estimate) and the real
-    screenshot the driver captures (dimensions → vision-token estimate) for the
-    SAME state, so the comparison is apples-to-apples and un-rigged.
-    """
+    """Cost of observing the current UI once, both ways, on ``driver``."""
     if app is None:
         app, _ = driver.frontmost_app()
-    return _cost(*_observe(driver, app, scope))
+    return _measure(driver, app, scope)[1]
 
 
 def run_web_task(driver, url: str, *, rounds: int = 3) -> Report:
@@ -151,8 +145,8 @@ def run_web_task(driver, url: str, *, rounds: int = 3) -> Report:
     report = Report()
     prev = None
     for _ in range(max(1, rounds)):
-        snap, text, css_wh, raw_wh = _observe(driver, app, Scope.WINDOW)
-        report.observations.append(_cost(snap, text, css_wh, raw_wh))
+        snap, cost = _measure(driver, app, Scope.WINDOW)
+        report.observations.append(cost)
         if prev is not None:
             diff_text = observe.render_diff(observe.diff_snapshots(prev, snap))
             report.reobserve_a11y_tokens.append(a11y_tokens(diff_text))

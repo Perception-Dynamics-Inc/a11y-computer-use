@@ -388,14 +388,18 @@ def _app_at_point(point: Point) -> str | None:
     return None
 
 
-def _recheck_frontmost(app: str) -> None:
+def _recheck_frontmost(app: str, front: str | None = None) -> None:
     """Abort typing/keys when the frontmost app is no longer the gated one.
+
+    ``front`` is the current frontmost app id (the caller supplies it so the
+    browser backend can pass its bound tab); defaults to the platform frontmost.
 
     Raises:
         ComputerUseError: `ErrorCode.FOCUS_CHANGED` on mismatch — the text
             would land in an app that was never granted anything.
     """
-    front = _frontmost_bundle()
+    if front is None:
+        front = _frontmost_bundle()
     if front != app:
         raise ComputerUseError(
             ErrorCode.FOCUS_CHANGED,
@@ -511,17 +515,8 @@ class Runtime:
         return _running_app(identifier)
 
     def _recheck_frontmost_app(self, app: str) -> None:
-        if self._resolves_apps():
-            front, _pid = self.driver.frontmost_app()
-            if front and front != app:
-                raise ComputerUseError(
-                    ErrorCode.FOCUS_CHANGED,
-                    f"the active target changed from {app} to {front} between the "
-                    "permission decision and injection; re-observe and retry",
-                    detail={"gated_app": app, "frontmost_app": front},
-                )
-            return
-        _recheck_frontmost(app)
+        front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
+        _recheck_frontmost(app, front or "unknown")
 
     def _recheck_target(self, app: str, target: Target) -> None:
         # A bound CDP tab does not slide under the pointer the way an OS window
@@ -598,10 +593,10 @@ class Runtime:
 
     def _effect_after(self, pre: "Snapshot | None") -> str:
         """Effect Receipt: re-snapshot ``pre``'s app after a mutating action and
-        return the rendered diff (what changed), advancing the ref epoch. Empty
-        string when there's no prior snapshot to diff against. The re-observe is a
-        READ of an app the caller already cleared a higher tier for, so it needs
-        no separate gate."""
+        return the rendered diff (what changed), advancing the ref epoch. Returns
+        the bare diff (callers format it); empty string when there's no prior
+        snapshot to diff against. The re-observe is a READ of an app the caller
+        already cleared a higher tier for, so it needs no separate gate."""
         if pre is None or pre.app is None:
             return ""
         try:
@@ -609,7 +604,7 @@ class Runtime:
         except Exception:
             return ""
         self._current = snap
-        return "\n\neffect: " + observe.render_diff(observe.diff_snapshots(pre, snap))
+        return observe.render_diff(observe.diff_snapshots(pre, snap))
 
     # -- target resolution ----------------------------------------------------
 
@@ -757,37 +752,29 @@ class Runtime:
             ),
         )
 
-    def console(self, app: str) -> str:
-        """Recent console output + uncaught exceptions from a backend that has a
-        console (the browser). Gated + audited at READ, like any observation.
-        Raises UNSUPPORTED on backends without one."""
-        if not hasattr(self.driver, "console_messages"):
+    def _browser_feed(self, app: str, method: str, verb: ObserveVerb, what: str) -> str:
+        """Read a browser-only observation feed (console/network) through the gate.
+
+        Gated + audited at READ like any observation; raises UNSUPPORTED on a
+        backend that has no such feed."""
+        fn = getattr(self.driver, method, None)
+        if fn is None:
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
-                "console is only available on the browser backend",
+                f"{what} is only available on the browser backend",
                 detail={"driver": self.driver.name},
             )
         _running, bundle = self._resolve_app(app)
-        return self._run_gated(
-            ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle,
-            lambda: json.dumps(self.driver.console_messages()),
-        )
+        return self._run_gated(ObserveOp(verb=verb, app=bundle), bundle,
+                               lambda: json.dumps(fn()))
+
+    def console(self, app: str) -> str:
+        """Recent console output + uncaught exceptions from the browser backend."""
+        return self._browser_feed(app, "console_messages", ObserveVerb.CONSOLE, "console")
 
     def network(self, app: str) -> str:
-        """Completed network outcomes (status codes + failures) from a backend
-        that has a network (the browser). Gated + audited at READ. Raises
-        UNSUPPORTED elsewhere."""
-        if not hasattr(self.driver, "network_requests"):
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "network is only available on the browser backend",
-                detail={"driver": self.driver.name},
-            )
-        _running, bundle = self._resolve_app(app)
-        return self._run_gated(
-            ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle,
-            lambda: json.dumps(self.driver.network_requests()),
-        )
+        """Completed network outcomes (status codes + failures) from the browser."""
+        return self._browser_feed(app, "network_requests", ObserveVerb.NETWORK, "network")
 
     # -- action tools -----------------------------------------------------------
 
@@ -832,7 +819,9 @@ class Runtime:
         self._run_gated(
             action, app, execute, recheck=partial(self._recheck_target, target=target), confirm=confirm
         )
-        return f"clicked {_describe(target)}" + self._effect_after(pre)
+        msg = f"clicked {_describe(target)}"
+        effect = self._effect_after(pre)
+        return f"{msg}\n\neffect: {effect}" if effect else msg
 
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
@@ -961,8 +950,7 @@ class Runtime:
                 out.append({"i": i, "do": do, "ok": False, "error": str(exc)})
                 break
         if verify:  # Effect Receipt: one post-batch diff of what changed
-            effect = self._effect_after(pre).replace("\n\neffect: ", "", 1)
-            return json.dumps({"steps": out, "effect": effect})
+            return json.dumps({"steps": out, "effect": self._effect_after(pre)})
         return json.dumps(out)
 
     def _dispatch_step(self, do: str, step: dict, confirm):

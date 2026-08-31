@@ -129,7 +129,7 @@ def _cmd_bench_web(args: argparse.Namespace) -> int:
         print(server.error_text(exc), file=sys.stderr)
         return 1
     finally:
-        driver._reset()
+        driver.close()
     print(arena.format_report(report))
     return 0
 

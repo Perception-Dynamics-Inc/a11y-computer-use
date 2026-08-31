@@ -759,9 +759,9 @@ def test_effect_receipt_appends_post_action_diff() -> None:
     rt.type_text = lambda text: f"typed {text}"
     rt.driver = type("_D", (), {"snapshot": lambda self, scope, app: post})()
 
-    # _effect_after (the helper click() uses) appends the diff and advances _current.
+    # _effect_after (the helper click() uses) returns the bare diff and advances _current.
     effect = rt._effect_after(pre)
-    assert effect.startswith("\n\neffect: ") and "Saved" in effect
+    assert "Saved" in effect and not effect.startswith("\n")  # bare diff, callers format
     assert rt._current is post
 
     # act_batch(verify=True): one net diff for the whole batch, steps preserved.
