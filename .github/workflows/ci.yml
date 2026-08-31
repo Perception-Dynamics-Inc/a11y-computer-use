@@ -78,12 +78,18 @@ jobs:
         run: |
           CHROME=$(command -v google-chrome || command -v chromium-browser || command -v chromium)
           echo "using $CHROME"
+          # --disable-dev-shm-usage: the runner's /dev/shm is tiny and headless
+          # Chrome crashes on startup without it (the classic CI flake).
           "$CHROME" --headless=new --remote-debugging-port=9222 \
-            --no-sandbox --disable-gpu about:blank >/tmp/chrome.log 2>&1 &
-          for _ in $(seq 1 30); do
-            curl -sf http://127.0.0.1:9222/json/version >/dev/null && break
+            --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --no-first-run --no-default-browser-check about:blank >/tmp/chrome.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null 2>&1 && up=1 && break
             sleep 0.5
           done
+          if [ -z "${up:-}" ]; then
+            echo "::error::headless Chrome did not expose CDP on :9222"; cat /tmp/chrome.log; exit 1
+          fi
           curl -s http://127.0.0.1:9222/json/version
       - name: browser backend (live headless Chromium)
         env:
