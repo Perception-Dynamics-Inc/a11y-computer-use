@@ -647,3 +647,187 @@ def test_stale_ref_error_carries_candidates() -> None:
     assert ei.value.code is ErrorCode.STALE_REF
     cands = ei.value.detail["candidates"]
     assert any(c["title"] == "Submit form" for c in cands)
+
+
+# ---------------------------------------------------------------------------
+# Interactive view (render mode) and budget truncation
+# ---------------------------------------------------------------------------
+
+
+def _interactive_window() -> dict:
+    """A window mixing actionable controls, static text, an untitled wrapper, a
+    titled group, a plain (selectable) row and a layout row holding a button."""
+    return ax(
+        "AXWindow", title="Editor", at=(100.0, 50.0), size=(1000.0, 700.0),
+        children=[
+            ax("AXToolbar", at=(100.0, 50.0), size=(1000.0, 40.0), children=[
+                button("Save", (110.0, 55.0)),
+                ax("AXStaticText", value="Draft", at=(200.0, 55.0), size=(60.0, 20.0)),
+            ]),
+            ax("AXGroup", at=(100.0, 100.0), size=(600.0, 500.0), children=[  # untitled: skipped
+                ax("AXStaticText", value="Welcome back, Alice", at=(110.0, 110.0), size=(300.0, 20.0)),
+                ax("AXStaticText", value="3 unread", at=(110.0, 140.0), size=(300.0, 20.0)),
+                ax("AXTextField", title="Name", value="Alice", at=(110.0, 170.0), size=(300.0, 30.0)),
+                ax("AXCheckBox", title="Remember", at=(110.0, 210.0), size=(120.0, 20.0),
+                   actions=("AXPress",), checked=False),
+            ]),
+            ax("AXGroup", title="Sidebar", at=(720.0, 100.0), size=(250.0, 500.0), children=[
+                ax("AXStaticText", value="Recent", at=(725.0, 105.0), size=(100.0, 20.0)),
+                ax("AXRow", at=(725.0, 130.0), size=(240.0, 20.0), children=[  # plain row: a target
+                    ax("AXCell", value="Report Q3", at=(725.0, 130.0), size=(240.0, 20.0)),
+                ]),
+                ax("AXRow", at=(725.0, 160.0), size=(240.0, 20.0), children=[  # layout row: folded
+                    button("Open", (730.0, 160.0)),
+                ]),
+            ]),
+            ax("AXStaticText", value="Status: saved", at=(110.0, 650.0), size=(300.0, 20.0)),
+        ],
+    )
+
+
+def test_interactive_view_keeps_actionables_with_identical_refs() -> None:
+    snap = snap_of(_interactive_window())
+    view = observe.interactive_view(snap)
+    kept = {el.title or el.value: el for el in view}
+    # every actionable element survives, as the SAME object the full snapshot issued
+    for title in ("Save", "Name", "Remember", "Open"):
+        assert title in kept, title
+        assert snap.element(kept[title].ref) is kept[title]
+    # a plain row is a selectable target; a row that merely holds a button is layout
+    assert len([el for el in view if el.role == "AXRow"]) == 1
+    assert not any(el.role == "AXCell" for el in view)
+    # structure: the root, the toolbar (structural role) and the titled group stay;
+    # the untitled wrapper group and every static text go
+    assert {el.role for el in view if el.title == "Sidebar"} == {"AXGroup"}
+    assert any(el.role == "AXToolbar" for el in view)
+    assert not any(el.role == "AXStaticText" for el in view)
+    assert not any(el.role == "AXGroup" and not el.title for el in view)
+    assert [el.ref for el in view] == sorted((el.ref for el in view), key=lambda r: int(r[1:]))
+
+
+def test_interactive_render_folds_static_text_per_container() -> None:
+    snap = snap_of(_interactive_window())
+    text = render_text(snap, mode="interactive")
+    lines = text.splitlines()
+    assert lines[0].endswith("(window) interactive")
+    # one folded text line per kept container, in tree order
+    assert '    text: "Welcome back, Alice | 3 unread | Status: saved"' in lines
+    assert '      text: "Draft"' in lines  # under the toolbar
+    assert '        text: "Report Q3"' in lines  # under the plain row
+    assert '      text: "Recent"' in lines  # under Sidebar
+    assert not any('"Draft"' in ln and "statictext" in ln for ln in lines)
+    # the click flag is implied for buttons/checkboxes; other flags remain
+    save = next(ln for ln in lines if '"Save"' in ln)
+    assert "(click" not in save
+    assert any('"Remember" (unchecked)' in ln for ln in lines)
+    assert any('"Name" ="Alice" (edit)' in ln for ln in lines)
+    # the footer says what was folded, so the agent knows how to see it
+    hidden = len(snap.elements) - len(observe.interactive_view(snap))
+    assert lines[-1] == f"… {hidden} static elements folded; mode='full' or find lists them"
+    # the full view still prints the flag and the static lines
+    full = render_text(snap)
+    assert 'button "Save" (click)' in full and 'statictext ="Draft"' in full
+
+
+def test_interactive_layout_row_children_reparent_under_nearest_kept() -> None:
+    snap = snap_of(_interactive_window())
+    lines = render_text(snap, mode="interactive").splitlines()
+    sidebar = next(i for i, ln in enumerate(lines) if '"Sidebar"' in ln)
+    open_btn = next(i for i, ln in enumerate(lines) if '"Open"' in ln)
+    assert open_btn > sidebar
+
+    def indent(ln: str) -> int:
+        return len(ln) - len(ln.lstrip(" "))
+
+    # "Open" sits exactly one level below Sidebar: its layout row was folded away
+    assert indent(lines[open_btn]) == indent(lines[sidebar]) + 2
+    # while the plain row keeps its own line, one level below Sidebar as well
+    row = next(i for i, ln in enumerate(lines) if ln.strip().split(" ")[1:2] == ["row"])
+    assert indent(lines[row]) == indent(lines[sidebar]) + 2
+
+
+def test_interactive_omits_bounds_unless_requested() -> None:
+    snap = snap_of(_interactive_window())
+    assert " @1:" not in render_text(snap, mode="interactive")  # no geometry, not even the root
+    with_bounds = render_text(snap, mode="interactive", include_bounds=True)
+    element_lines = [ln for ln in with_bounds.splitlines()[1:]
+                     if ln.strip().startswith("e") and "text:" not in ln]
+    assert element_lines and all(" @1:" in ln for ln in element_lines)
+    # full mode keeps geometry on roots only by default, everywhere on request
+    assert render_text(snap).count(" @1:") == 1
+    assert render_text(snap, include_bounds=True).count(" @1:") == len(snap.elements)
+
+
+def test_interactive_elisions_roll_up_to_the_kept_container() -> None:
+    # typical_app_window's untitled sidebar list is capped (16 rows elided); the
+    # list itself is folded, so its marker surfaces on the window it folds into.
+    snap = snap_of(typical_app_window())
+    text = render_text(snap, mode="interactive")
+    assert f"… {40 - MAX_CHILDREN} more" in text
+    assert not any(ln.strip().startswith("e") and " list" in ln for ln in text.splitlines())
+
+
+def test_budget_truncates_deterministically_and_reports_omissions() -> None:
+    snap = snap_of(_interactive_window())
+    full = render_text(snap)
+    total_lines = len(full.splitlines())
+    cut = render_text(snap, budget=30)
+    assert cut == render_text(snap, budget=30), "same snapshot, same budget, same text"
+    lines = cut.splitlines()
+    assert lines[0] == full.splitlines()[0], "the header always survives"
+    assert lines[-1].startswith("… truncated at ~30 tokens: ")
+    omitted = int(lines[-1].split(": ")[1].split(" ")[0])
+    assert omitted == total_lines - len(lines) + 1  # every dropped line here is an element line
+    assert len("\n".join(lines[:-1])) <= 30 * 4
+    assert render_text(snap, budget=10_000) == full, "a roomy budget changes nothing"
+    with pytest.raises(ValueError):
+        render_text(snap, budget=0)
+    assert estimate_tokens(snap, mode="interactive") < estimate_tokens(snap)
+
+
+def test_render_text_rejects_unknown_mode() -> None:
+    snap = snap_of(save_window())
+    with pytest.raises(ValueError):
+        render_text(snap, mode="compact")
+    with pytest.raises(ValueError):
+        observe.render_diff(observe.diff_snapshots(snap, snap), mode="compact")
+
+
+def test_interactive_diff_folds_static_changes_into_one_text_line() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXStaticText", title="status", value="Status: saving", at=(10.0, 50.0), size=(200.0, 20.0)),
+        ax("AXStaticText", title="tip", value="Tip of the day", at=(10.0, 80.0), size=(200.0, 20.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        _btn("Undo", (100.0, 10.0)),
+        ax("AXStaticText", title="status", value="Status: saved", at=(10.0, 50.0), size=(200.0, 20.0)),
+        ax("AXStaticText", title="banner", value="New!", at=(10.0, 80.0), size=(200.0, 20.0)),
+    ])
+    diff = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert len(diff.added) == 2 and len(diff.removed) == 1 and len(diff.changed) == 1
+    text = observe.render_diff(diff, mode="interactive")
+    lines = text.splitlines()
+    assert lines[0].endswith("+2 -1 ~1")  # header counts describe the whole diff
+    assert any(ln.startswith("  + ") and '"Undo"' in ln for ln in lines)
+    # the static label change is kept, folded into a single text line
+    assert sum(1 for ln in lines if ln.startswith("  ~ text: ")) == 1
+    assert "Status: saving→Status: saved" in text
+    # static elements that appeared or vanished are only counted
+    assert "(1 added, 1 removed static elements folded)" in text
+    assert "Tip of the day" not in text and "New!" not in text
+    # the full diff still lists everything (removed elements print title, not value)
+    full = observe.render_diff(diff)
+    assert '"tip" (gone)' in full and "New!" in full and '"Undo" (click)' in full
+
+
+def test_interactive_diff_empty_and_budget() -> None:
+    snap = snap_of(save_window())
+    d = observe.diff_snapshots(snap, snap_of(save_window()))
+    assert "(no change)" in observe.render_diff(d, mode="interactive")
+    big_old = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0), children=[]))
+    big_new = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0),
+                         children=[_btn(f"B{i}", (10.0, 10.0 + 30.0 * i)) for i in range(12)]))
+    cut = observe.render_diff(observe.diff_snapshots(big_old, big_new), budget=20)
+    assert cut.splitlines()[-1].startswith("… truncated at ~20 tokens")

@@ -477,6 +477,10 @@ class Runtime:
     and raise `ComputerUseError` or `ActionRefused` for structured failures.
     """
 
+    #: Class-level default of the rendering view (see ``__init__``), so a Runtime
+    #: assembled without ``__init__`` (test doubles) still renders full-mode.
+    _view: str = "full"
+
     def __init__(
         self,
         *,
@@ -490,6 +494,10 @@ class Runtime:
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
         self._current: Snapshot | None = None
+        #: The rendering view ("full" | "interactive") the agent last asked for;
+        #: diff snapshots and Effect Receipts render in it so an agent that chose
+        #: the cheap view keeps getting it.
+        self._view: str = "full"
 
     # -- app identity resolution -------------------------------------------
     # The OS backends resolve app identity through the platform system-ops
@@ -604,7 +612,7 @@ class Runtime:
         except Exception:
             return ""
         self._current = snap
-        return observe.render_diff(observe.diff_snapshots(pre, snap))
+        return observe.render_diff(observe.diff_snapshots(pre, snap), mode=self._view)
 
     # -- target resolution ----------------------------------------------------
 
@@ -652,11 +660,20 @@ class Runtime:
 
     # -- observation tools (gated at READ + audited like everything else) ------
 
-    def desktop_snapshot(self, app: str, scope: str = "window", mode: str = "full") -> str:
+    def desktop_snapshot(
+        self,
+        app: str,
+        scope: str = "window",
+        mode: str = "full",
+        budget: int | None = None,
+        include_bounds: bool = False,
+    ) -> str:
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app' (display/element land later)")
-        if mode not in ("full", "diff"):
-            raise ValueError("mode must be 'full' or 'diff'")
+        if mode not in observe.SNAPSHOT_MODES:
+            raise ValueError("mode must be 'full', 'interactive', or 'diff'")
+        if budget is not None and budget <= 0:
+            raise ValueError("budget must be a positive token count")
         # TCC before per-app gating: on an ungranted machine the actionable
         # error is the doctor hint, not a per-app permission question.
         self.driver.ensure_trusted()
@@ -666,11 +683,17 @@ class Runtime:
             prev = self._current if mode == "diff" else None
             snap = self.driver.snapshot(Scope(scope), bundle)
             self._current = snap
+            if mode != "diff":
+                self._view = mode  # diffs and Effect Receipts follow the view last asked for
             # diff only against a prior snapshot of the SAME app (else the agent
             # switched targets and a delta is meaningless — fall back to full).
             if prev is not None and prev.app == snap.app:
-                return observe.render_diff(observe.diff_snapshots(prev, snap))
-            text = observe.render_text(snap)
+                return observe.render_diff(
+                    observe.diff_snapshots(prev, snap), mode=self._view, budget=budget
+                )
+            text = observe.render_text(
+                snap, mode=self._view, budget=budget, include_bounds=include_bounds
+            )
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
                 text = f"{text}\n\n{_VISION_HANDOFF_HINT}"
             return text
@@ -1131,7 +1154,9 @@ class Runtime:
 _INSTRUCTIONS = (
     "Accessibility-first macOS control. Call desktop_snapshot first and act on "
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
-    "snapshot — a stale_ref error means the UI changed, re-observe. Actions are "
+    "snapshot — a stale_ref error means the UI changed, re-observe. Prefer "
+    "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
+    "and mode='diff' to re-observe after an action. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
     "permission_denied_* errors, run `computeruse doctor`."
@@ -1209,22 +1234,34 @@ def build_server(
         return confirm
 
     @server.tool(name="desktop_snapshot")
-    async def desktop_snapshot(app: str, scope: str = "window", mode: str = "full") -> str:
+    async def desktop_snapshot(
+        app: str,
+        scope: str = "window",
+        mode: str = "full",
+        budget: int | None = None,
+        include_bounds: bool = False,
+    ) -> str:
         """Capture a pruned accessibility-tree snapshot of one app as indented
         text with element refs (e1, e2, ...). Refs are valid ONLY against this
         latest snapshot: act on them promptly and re-observe after the UI
         changes (a stale_ref error means the tree moved). scope='window'
         covers the frontmost window, 'app' all windows.
 
-        mode='diff' returns ONLY what changed since your last snapshot of this
-        app — added / removed / changed elements — instead of the whole tree.
-        Use it to re-observe after an action: it's far fewer tokens, so your
-        context stops accumulating full trees, and '(no change)' is itself a
-        useful signal that the action had no visible effect. mode='full'
-        (default) returns the complete tree; use it for the first observation.
-        Tier 'read' for the scoped app. Needs the Accessibility permission (see
-        `computeruse doctor`)."""
-        return await run(runtime.desktop_snapshot, app, scope, mode)
+        mode='full' (default) returns the complete pruned tree. mode='interactive'
+        returns the same snapshot cut down to what you can act on (buttons,
+        fields, links, rows, tabs, checkable/expandable/selected items) plus the
+        windows, dialogs, toolbars and titled groups that keep them apart; the
+        static text under each container is folded into one 'text:' line. Same
+        refs as the full view, usually a fraction of the tokens: prefer it, and
+        use mode='full' or `find` when you need the text. mode='diff' returns
+        ONLY what changed since your last snapshot of this app (added / removed /
+        changed elements), rendered in the view you last asked for; use it to
+        re-observe after an action, and read '(no change)' as 'the action had no
+        visible effect'. budget=N caps the reply at about N tokens (the tail is
+        replaced by a marker counting the omitted elements). include_bounds=true
+        prints geometry on every line. Tier 'read' for the scoped app. Needs the
+        Accessibility permission (see `computeruse doctor`)."""
+        return await run(runtime.desktop_snapshot, app, scope, mode, budget, include_bounds)
 
     @server.tool(name="find")
     async def find(
