@@ -40,17 +40,21 @@ def home(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 # --- doctor -------------------------------------------------------------------
 
+#: The first doctor check differs per platform: TCC's responsible app on macOS,
+#: the display session on Linux, the UI Automation import on Windows.
+_FIRST_CHECK = {"darwin": "responsible_app", "win32": "uiautomation_import"}.get(
+    sys.platform, "display_session"
+)
+
 
 def test_doctor_exits_zero_and_names_responsible_app(capsys, monkeypatch) -> None:
     chain = doctor.parent_chain(500, run_ps=_canned(TERMINAL_PS))
     monkeypatch.setattr(doctor, "parent_chain", lambda pid: chain)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
+    assert _FIRST_CHECK in out
     if sys.platform == "darwin":
-        assert "responsible_app" in out
         assert "Terminal" in out
-    else:  # Linux/Windows report the display session instead of TCC grants
-        assert "display_session" in out
     assert "checks passed" in out
 
 
@@ -59,7 +63,7 @@ def test_doctor_subprocess_smoke() -> None:
         [sys.executable, "-m", "computeruse", "doctor"], capture_output=True, text=True
     )
     assert result.returncode == 0
-    assert ("responsible_app" if sys.platform == "darwin" else "display_session") in result.stdout
+    assert _FIRST_CHECK in result.stdout
     assert "checks passed" in result.stdout
 
 
