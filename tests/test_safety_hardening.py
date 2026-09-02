@@ -701,10 +701,13 @@ def test_browser_scroll_payloads_lines_and_pixels() -> None:
     d, t = _driver_on()
     d.scroll(Point(0, 10, 20), dx=1, dy=2, unit=ScrollUnit.LINES)
     wheel, = _mouse_events(t)
-    assert wheel == {"type": "mouseWheel", "x": 10, "y": 20, "deltaX": -40, "deltaY": -80}
+    # CDP wheel deltas share the tool's sign: positive dy scrolls the content
+    # down (the earlier negation made every scroll-down at the top of a list a
+    # no-op; cu-arena's long_list task caught it).
+    assert wheel == {"type": "mouseWheel", "x": 10, "y": 20, "deltaX": 40, "deltaY": 80}
     t.sent.clear()
     d.scroll(Point(0, 10, 20), dx=1, dy=2, unit=ScrollUnit.PIXELS)
-    assert _mouse_events(t)[0]["deltaX"] == -1 and _mouse_events(t)[0]["deltaY"] == -2
+    assert _mouse_events(t)[0]["deltaX"] == 1 and _mouse_events(t)[0]["deltaY"] == 2
 
 
 def test_browser_dry_run_and_pre_check_for_mouse_input() -> None:
