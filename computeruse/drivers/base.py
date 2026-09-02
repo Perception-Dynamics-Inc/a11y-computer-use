@@ -136,6 +136,19 @@ class Driver(Protocol):
 
     def windows(self) -> list[dict]: ...
 
+    def window_owner(self, window_id: int) -> str:
+        """The app id (the permission grant key) owning ``window_id``.
+
+        Raises `ErrorCode.APP_NOT_FOUND` when no such window exists, and
+        `ErrorCode.UNSUPPORTED` where windows are not addressable by an integer
+        id (the browser's windows are tabs: use ``app focus <target id>``)."""
+        ...
+
+    def raise_window(self, window_id: int) -> None:
+        """Bring ``window_id`` frontmost. Same error contract as `window_owner`;
+        never returns normally for a no-op (the Runtime reports success)."""
+        ...
+
     def read_clipboard(self) -> str | None: ...
 
     def write_clipboard(self, text: str) -> None: ...

@@ -348,6 +348,27 @@ def _window_owner(window_id: int) -> tuple[int, str]:
     )
 
 
+def _window_running(window_id: int) -> tuple[object, str]:
+    """(NSRunningApplication, app id) for the process owning an on-screen
+    window. The app id is the bundle id when the process has one, else the
+    window owner name; it is the grant key ``window raise`` gates against.
+
+    Raises:
+        ComputerUseError: `ErrorCode.APP_NOT_FOUND` when the window is gone or
+            its owning process no longer runs (a raise must never report success
+            for a no-op)."""
+    pid, owner = _window_owner(window_id)
+    running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+    if running is None:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"window {window_id}'s owning process {pid} is no longer running",
+            detail={"window_id": window_id, "pid": pid, "owner": owner},
+        )
+    bundle = (str(running.bundleIdentifier()) if running.bundleIdentifier() else None) or owner
+    return running, bundle
+
+
 def _read_clipboard() -> str | None:
     value = NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString)
     return str(value) if value is not None else None
@@ -642,8 +663,59 @@ class Runtime:
                 detail={"ref": ref, "snapshot_id": snap.snapshot_id},
             ) from None
 
+    def _audit_stale(self, kind: str, ref: str, exc: ComputerUseError) -> None:
+        """Record a ref that failed to resolve for tool ``kind``.
+
+        Resolution runs before any `Action` exists (there is no live target to
+        gate), so the row is written with `AuditLog.record_failure`: the ref,
+        the snapshot epoch it was issued against, the failure reason, and the
+        error code as ``result``. An operator reading the log sees the failed
+        attempt instead of a gap."""
+        snap = self._current
+        params: dict[str, object] = {
+            "ref": ref,
+            "snapshot_id": snap.snapshot_id if snap is not None else None,
+            "reason": exc.detail.get("reason", "not_found"),
+        }
+        app = (snap.app if snap is not None and snap.app else None) or "unknown"
+        self._record_failure(kind, app=app, params=params, result=exc.code.value)
+
+    def _record_failure(self, kind: str, *, app: str, params: dict, result: str) -> None:
+        """`AuditLog.record_failure` on this Runtime's log. Tolerates a Runtime
+        assembled without ``__init__`` (test doubles have no ``audit``), like the
+        class-level ``_view`` default above."""
+        audit = getattr(self, "audit", None)
+        if audit is not None:
+            audit.record_failure(kind, app=app, params=params, result=result)
+
+    def _anchor_audited(self, ref: str, kind: str) -> tuple[Snapshot, Element]:
+        """`_anchor`, with a `stale_ref` failure recorded in the audit log."""
+        try:
+            return self._anchor(ref)
+        except ComputerUseError as exc:
+            self._audit_stale(kind, ref, exc)
+            raise
+
+    def _resolve(self, ref: str, kind: str) -> tuple[Snapshot, Element]:
+        """Anchor ``ref`` and re-resolve it against the live tree through the
+        driver. A failure (``stale_ref`` from either step, or a driver error
+        during the re-walk) is recorded in the audit log before it propagates."""
+        try:
+            snap, _anchor = self._anchor(ref)
+            live = self.driver.resolve_ref(snap, ref)
+        except ComputerUseError as exc:
+            self._audit_stale(kind, ref, exc)
+            raise
+        return snap, live
+
     def _target(
-        self, ref: str | None, x: int | None, y: int | None, display_id: int | None
+        self,
+        ref: str | None,
+        x: int | None,
+        y: int | None,
+        display_id: int | None,
+        *,
+        kind: str = "click",
     ) -> tuple[Target, str]:
         """Resolve (ref | x,y) into an actionable target plus the gating app.
 
@@ -651,16 +723,63 @@ class Runtime:
         gate against the issuing snapshot's app; raw points gate against the
         frontmost app and default to the driver's main display (so this path is
         platform-free: Linux/Windows/browser report 0, macOS `CGMainDisplayID`).
+        ``kind`` names the calling tool in the audit row a failed resolution
+        leaves behind.
         """
         if ref is not None:
-            snap, _anchor = self._anchor(ref)
-            live = self.driver.resolve_ref(snap, ref)
+            snap, live = self._resolve(ref, kind)
             return live, snap.app or self._frontmost()
         if x is None or y is None:
             raise ValueError("target an element ref, or both x and y coordinates")
         if display_id is None:
             display_id = int(self.driver.main_display_id())  # through the seam, not Quartz
         return Point(display_id=display_id, x=x, y=y), self._frontmost()
+
+    # -- secure fields (shared across drivers) ---------------------------------
+
+    def _secure_element_under(self, point: Point) -> Element | None:
+        """The secure field under ``point`` in the latest snapshot, or None.
+
+        Picks the smallest element whose bounds contain the point on the same
+        display. No snapshot, no hit, or a non-secure hit all return None. The
+        lookup costs no driver call: it reads the snapshot the model just acted
+        from, which is also the geometry the model's coordinates refer to."""
+        snap = self._current
+        if snap is None:
+            return None
+        best: Element | None = None
+        for el in snap.elements:
+            b = el.bounds
+            if b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
+                continue
+            if b.x <= point.x < b.x + b.width and b.y <= point.y < b.y + b.height:
+                if best is None or b.width * b.height < best.bounds.width * best.bounds.height:
+                    best = el
+        return best if best is not None and best.secure else None
+
+    def _refuse_secure(self, *targets: Target) -> None:
+        """Refuse a pointer action that would land on a secure field.
+
+        A resolved element is checked directly; a raw point is hit-tested against
+        the latest snapshot (`_secure_element_under`). Called inside the gate's
+        ``execute`` so the refusal is audited, with injectable params redacted,
+        like every other ``secure_field`` outcome, and so it applies on every
+        driver (the macOS executor also refuses on its own; the browser and Linux
+        pointer paths did not until this check existed).
+
+        Raises:
+            ComputerUseError: `ErrorCode.SECURE_FIELD`.
+        """
+        for target in targets:
+            hit = (target if target.secure else None) if isinstance(target, Element) \
+                else self._secure_element_under(target)
+            if hit is not None:
+                raise ComputerUseError(
+                    ErrorCode.SECURE_FIELD,
+                    f"refusing to act on secure field {hit.ref!r} ({hit.title!r}); "
+                    "secure fields require human handoff",
+                    detail={"ref": hit.ref, "role": hit.role},
+                )
 
     # -- observation tools (gated at READ + audited like everything else) ------
 
@@ -825,10 +944,11 @@ class Runtime:
         unknown = sorted(set(mods) - MODIFIER_KEYS)
         if unknown:  # fail fast, before the gate, so no phantom audit entry
             raise ValueError(f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}")
-        target, app = self._target(ref, x, y, display_id)
+        target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
 
         def execute() -> None:
+            self._refuse_secure(target)  # audited refusal, every driver
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
             # count, or modifier semantics goes through synthesized mouse events.
@@ -880,7 +1000,7 @@ class Runtime:
         into_view: bool = False,
     ) -> str:
         parsed_unit = ScrollUnit(unit)
-        target, app = self._target(ref, x, y, display_id)
+        target, app = self._target(ref, x, y, display_id, kind="scroll")
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
 
         def execute() -> None:
@@ -894,6 +1014,7 @@ class Runtime:
                 and self.driver.scroll_into_view(target)
             ):
                 return
+            self._refuse_secure(target)  # the wheel path moves the pointer onto the target
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
@@ -913,13 +1034,18 @@ class Runtime:
         end_y: int | None = None,
         display_id: int | None = None,
     ) -> str:
-        start, start_app = self._target(start_ref, start_x, start_y, display_id)
-        end, _ = self._target(end_ref, end_x, end_y, display_id)
+        start, start_app = self._target(start_ref, start_x, start_y, display_id, kind="drag")
+        end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
         action = Drag(start=start, end=end)
+
+        def execute() -> None:
+            self._refuse_secure(start, end)  # neither endpoint may be a secure field
+            self.driver.drag(start, end)
+
         self._run_gated(
             action,
             start_app,
-            lambda: self.driver.drag(start, end),
+            execute,
             recheck=partial(self._recheck_target, target=start),
         )
         return f"dragged {_describe(start)} -> {_describe(end)}"
@@ -929,7 +1055,7 @@ class Runtime:
         # Clamp: the tool runs on a worker thread, but an unbounded poll would
         # still pin that thread (and the model's patience) for minutes.
         timeout_s = min(timeout_s, MAX_WAIT_TIMEOUT_S)
-        snap, anchor = self._anchor(ref)
+        snap, anchor = self._anchor_audited(ref, "waitfor")
         action = WaitFor(target=anchor, condition=parsed, timeout_s=timeout_s)
         self._run_gated(
             action,
@@ -1005,18 +1131,24 @@ class Runtime:
     def set_value(self, ref: str, value: str) -> str:
         """Set an editable element's value directly via the a11y API (one op),
         falling back to focus + type when the app exposes no settable value.
-        Gated at the target's app, FULL tier (a text-entry path); secure fields
-        are refused."""
-        snap, _anchor = self._anchor(ref)
-        live = self.driver.resolve_ref(snap, ref)
+        Gated at the target's app, FULL tier (a text-entry path). A secure
+        field is refused ahead of the tier gate (the answer is ``secure_field``
+        whatever the grant: a human types secrets, not this tool) and the
+        refusal is written to the audit log with the ref and role only, never
+        the value."""
+        snap, live = self._resolve(ref, "typetext")
+        app = snap.app or self._frontmost()
         if live.secure:
+            self._record_failure(
+                "typetext", app=app, params={"ref": ref, "role": live.role},
+                result=ErrorCode.SECURE_FIELD.value,
+            )
             raise ComputerUseError(
                 ErrorCode.SECURE_FIELD,
                 "refusing to set a secure field; secrets are entered by the human",
-                detail={"ref": ref},
+                detail={"ref": ref, "role": live.role},
             )
         action = TypeText(text=value)
-        app = snap.app or self._frontmost()
 
         def execute() -> None:
             if self.driver.set_value(live, value):
@@ -1098,20 +1230,15 @@ class Runtime:
             )
         if window_id is None:
             raise ValueError("window raise requires window_id")
-        pid, owner = _window_owner(window_id)
-        running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        if running is None:  # never report success for a no-op raise
-            raise ComputerUseError(
-                ErrorCode.APP_NOT_FOUND,
-                f"window {window_id}'s owning process {pid} is no longer running",
-                detail={"window_id": window_id, "pid": pid, "owner": owner},
-            )
-        bundle = (str(running.bundleIdentifier()) if running.bundleIdentifier() else None) or owner
+        # Through the driver seam: the owner (the grant key) is resolved first so
+        # the gate checks the right app, then the raise itself runs gated. macOS
+        # activates the owning app (per-window AXRaise needs the private
+        # CGWindowID<->AXUIElement bridge); Linux sends _NET_ACTIVE_WINDOW to the
+        # window; the browser and Windows return a structured `unsupported`.
+        owner = self.driver.window_owner(window_id)
         op = WindowOp(verb=verb, window_id=window_id)
-        # MVP: raising activates the owning app (per-window AXRaise needs the
-        # private CGWindowID<->AXUIElement bridge; Phase 1).
-        self._run_gated(op, bundle, lambda: _activate(running))
-        return f"raised window {window_id} ({bundle})"
+        self._run_gated(op, owner, lambda: self.driver.raise_window(window_id))
+        return f"raised window {window_id} ({owner})"
 
     def clipboard(self, action: str, text: str | None = None) -> str:
         verb = ClipboardVerb(action)

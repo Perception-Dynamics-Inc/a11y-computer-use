@@ -27,8 +27,9 @@ if IS_MACOS:
 _METHODS = (
     "ensure_trusted", "snapshot", "resolve_ref", "press_element", "scroll_into_view", "set_value",
     "click", "drag", "scroll", "type_text", "key_chord", "wait_for",
-    "screenshot", "zoom_region", "frontmost_app", "app_at_point", "running_apps",
-    "launch_app", "activate_app", "windows", "read_clipboard", "write_clipboard",
+    "screenshot", "zoom_region", "main_display_id", "frontmost_app", "app_at_point",
+    "running_apps", "launch_app", "activate_app", "windows", "window_owner", "raise_window",
+    "read_clipboard", "write_clipboard",
 )
 
 

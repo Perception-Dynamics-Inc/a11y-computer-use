@@ -106,6 +106,13 @@ class UIAAccessor:
 
     def read(self, node: object) -> RawNode:
         role = _ROLE.get(_safe(lambda: node.ControlTypeName, "") or "", "AXGroup")
+        # UIA_IsPasswordPropertyId: a password edit is a text field whose value
+        # must never be read or emitted. Mapping it onto AXSecureTextField makes
+        # the engine mark it `secure`, so press/set_value/type refuse it and the
+        # snapshot withholds its value, exactly as on the other backends.
+        # Unit-tested with a fake control; not yet live-verified on Windows.
+        if role in ("AXTextField", "AXTextArea") and bool(_safe(lambda: node.IsPassword, False)):
+            role = "AXSecureTextField"
         rect = _safe(lambda: node.BoundingRectangle)
         position = size = None
         if rect is not None:
@@ -117,9 +124,10 @@ class UIAAccessor:
                 position = (float(left), float(top))
                 size = (float(right - left), float(bottom - top))
         value = None
-        vp = _safe(lambda: node.GetValuePattern())
-        if vp is not None:
-            value = _safe(lambda: vp.Value)
+        if role != "AXSecureTextField":  # never read a password field's value
+            vp = _safe(lambda: node.GetValuePattern())
+            if vp is not None:
+                value = _safe(lambda: vp.Value)
         return RawNode(
             role=role,
             subrole=None,

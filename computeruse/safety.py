@@ -452,3 +452,26 @@ class AuditLog:
         if metrics:  # cu-meter: duration_ms, result_chars, tokens_est (see server._run_gated)
             entry["metrics"] = dict(metrics)
         return self.record(entry)
+
+    def record_failure(
+        self, kind: str, *, app: str, params: Mapping[str, object], result: str
+    ) -> Path:
+        """Record an attempt that failed before an `Action` could be built.
+
+        A ref that no longer resolves has no live target to serialize, so the
+        gate never runs and `record_action` cannot be used. The entry keeps the
+        standard shape (``ts``, ``app``, ``action``, ``params``, ``decision``,
+        ``result``) with ``decision`` set to None (no verdict was reached) and
+        ``result`` set to the `schema.ErrorCode` value. ``params`` must carry
+        no injectable content: callers pass the ref, the snapshot epoch, and the
+        failure reason, never text.
+        """
+        entry: dict[str, object] = {
+            "ts": self._now(),
+            "app": app,
+            "action": kind,
+            "params": dict(params),
+            "decision": None,
+            "result": result,
+        }
+        return self.record(entry)

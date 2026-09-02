@@ -71,6 +71,10 @@ def _fixture_responder(method: str, params: dict):
     if method == "Page.getLayoutMetrics":
         return {"cssVisualViewport": {"pageX": 0, "pageY": 0},
                 "cssContentSize": {"width": 800, "height": 600}}
+    if method == "Runtime.evaluate":
+        # The focused-password probe type_text runs; the fixture page has no
+        # focused password field. Tests that need "focused" override this.
+        return {"result": {"type": "boolean", "value": False}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
                   "DOM.enable", "Page.enable", "Runtime.enable"):
         return {}

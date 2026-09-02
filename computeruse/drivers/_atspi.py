@@ -506,6 +506,49 @@ def find_root(app: str, scope) -> object | None:
     return frames[0] if frames else app_acc
 
 
+def is_secure(acc) -> bool:
+    """Whether ``acc`` is a password field (AT-SPI role name ``password text``,
+    the role the engine maps to ``AXSecureTextField``)."""
+    return _role_name(acc) == "password text"
+
+
+def focused_secure(app: str, *, max_nodes: int = 400) -> bool:
+    """Whether the keyboard-focused node of ``app``'s active window is a
+    password field.
+
+    AT-SPI has no global "focused accessible" getter (focus arrives as events),
+    so this walks the active top-level frame breadth-first, bounded by
+    ``max_nodes``, until it finds a node with ``STATE_FOCUSED`` and reports
+    whether that node is secure. No focused node within the bound, no app, or
+    no bus all read as False (no signal), the same degradation as the macOS
+    ``AXFocusedUIElement`` probe. This is the check `LinuxDriver.type_text`
+    runs before the XTEST path, which types into whatever holds focus."""
+    from computeruse.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    Atspi = _atspi()
+    st = getattr(Atspi, "StateType", None)
+    focused_state = getattr(st, "FOCUSED", None)
+    if focused_state is None:
+        return False
+    queue = [root]
+    seen = 0
+    while queue and seen < max_nodes:
+        acc = queue.pop(0)
+        seen += 1
+        sset = _call_first(acc, ("get_state_set",))
+        if sset is not None and _safe(lambda: sset.contains(focused_state), False):
+            return is_secure(acc)
+        n = _call_first(acc, ("get_child_count",), default=0) or 0
+        for j in range(min(int(n), _MAX_CHILDREN_FETCH)):
+            child = _call_first(acc, ("get_child_at_index",), j)
+            if child is not None:
+                queue.append(child)
+    return False
+
+
 def do_press(acc) -> bool:
     """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
     action = _action_iface(acc)

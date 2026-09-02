@@ -219,6 +219,52 @@ def windows() -> list[dict]:
     return rows
 
 
+def _window_by_id(d, window_id: int):
+    """The managed window resource with X id ``window_id``, or None."""
+    for win in _managed_windows(d):
+        if int(win.id) == int(window_id):
+            return win
+    return None
+
+
+def window_owner(window_id: int) -> str | None:
+    """comm name of the process owning managed window ``window_id`` (the
+    permission-keying app id), "" when the pid is unreadable, None when no
+    managed window has that id (or X is unreachable)."""
+    try:
+        d = _display()
+        win = _window_by_id(d, window_id)
+        if win is None:
+            return None
+        return _comm_for_pid(_pid_of(win, d)) or ""
+    except Exception:
+        return None
+
+
+def _send_active_window(d, win) -> None:
+    """EWMH: ask the window manager to activate ``win`` (raise + focus)."""
+    from Xlib import X, protocol
+
+    event = protocol.event.ClientMessage(
+        window=win, client_type=_atom(d, "_NET_ACTIVE_WINDOW"),
+        data=(32, [1, X.CurrentTime, 0, 0, 0]),
+    )
+    mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
+    d.screen().root.send_event(event, event_mask=mask)
+    d.flush()
+
+
+def raise_window(window_id: int) -> bool:
+    """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
+    Returns False when no managed window has that id."""
+    d = _display()
+    win = _window_by_id(d, window_id)
+    if win is None:
+        return False
+    _send_active_window(d, win)
+    return True
+
+
 def launch_app(identifier: str) -> None:
     """Best-effort launch: run the command, else hand it to xdg-open."""
     try:
