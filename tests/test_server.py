@@ -862,3 +862,76 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     out = rt.scroll_to_find("app", text="Target")
     assert "found after 2 scroll(s)" in out and "Target" in out
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
+
+
+def test_scroll_anchor_prefers_a_scroll_container_below_the_window() -> None:
+    """The browser backend exposes an overflow <ul> as AXList (CDP has no
+    scroll-area role). Wheeling over the window scrolls nothing there, so the
+    anchor must be the list, not the webarea; AXScrollArea still wins when present."""
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def el(ref, role, x, y, w, h):
+        return Element(ref=ref, role=role, title="", value=None,
+                       bounds=Bounds(0, x, y, w, h), snapshot_id="s")
+
+    def snap(*els):
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 713, 1.0, True),), elements=tuple(els))
+
+    web = el("e1", "AXWebArea", 0, 0, 1280, 713)
+    wrapper = el("e2", "AXGroup", 0, 0, 1280, 700)       # page-sized wrapper: not a target
+    lst = el("e3", "AXList", 24, 101, 362, 382)          # the overflow list
+    small_group = el("e4", "AXGroup", 24, 500, 300, 40)
+    assert server._scroll_anchor(snap(web, wrapper, lst, small_group)).ref == "e3"
+    # no list-like container: the largest group that is not the window
+    assert server._scroll_anchor(snap(web, wrapper, small_group)).ref == "e4"
+    # nothing but the window: the window
+    assert server._scroll_anchor(snap(web)).ref == "e1"
+    # an explicit scroll area always wins, whatever its size
+    area = el("e5", "AXScrollArea", 0, 0, 1280, 713)
+    assert server._scroll_anchor(snap(web, area, lst)).ref == "e5"
+    assert server._scroll_anchor(snap()) is None
+
+
+def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def mk(has_target: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXWebArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 1280, 713), snapshot_id="s"),
+               Element(ref="e6", role="AXList", title="", value=None,
+                       bounds=Bounds(0, 24, 101, 362, 382), snapshot_id="s")]
+        if has_target:
+            els.append(Element(ref="e9", role="AXButton", title="Reykjavik", value=None,
+                               bounds=Bounds(0, 30, 300, 300, 40), snapshot_id="s", clickable=True))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 713, 1.0, True),), elements=tuple(els))
+
+    seq = [mk(False), mk(True)]
+    anchors: list = []
+
+    class _D:
+        i = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return seq[min(_D.i, len(seq) - 1)]
+
+        def scroll(self, target, **kw):
+            anchors.append(target.ref)
+            _D.i += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._current = mk(False)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="Reykjavik", ref="e6")
+    assert "found after 1 scroll(s)" in out and anchors == ["e6"]
+    with pytest.raises(server.ComputerUseError):  # a ref the current snapshot never issued
+        rt.scroll_to_find("app", text="Reykjavik", ref="e999")

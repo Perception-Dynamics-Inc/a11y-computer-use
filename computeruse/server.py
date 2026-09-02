@@ -160,16 +160,36 @@ def refusal_text(decision: safety.Decision) -> str:
     return f"{decision.verdict.value}: {decision.reason}"
 
 
-def _scroll_anchor(snap):
-    """The element to scroll over while searching: the largest scroll area, else
-    the largest element (the window). None for an empty snapshot."""
-    from computeruse.schema import Element
+#: Roles that commonly own their own scroll position, most specific first. The
+#: browser backend exposes an overflow ``<ul>`` as AXList and a scrolling
+#: ``<div>`` as AXGroup (CDP has no scroll-area role), so scroll_to_find must
+#: look past AXScrollArea or it wheels over the page and nothing moves.
+_SCROLL_CONTAINER_TIERS = (
+    ("AXScrollArea",),
+    ("AXList", "AXTable", "AXOutline", "AXGrid", "AXMenu", "AXTabGroup"),
+    ("AXGroup",),
+)
 
-    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
-    pool = areas or list(snap.elements)
-    if not pool:
+
+def _scroll_anchor(snap):
+    """The element to scroll over while searching: the largest scroll area; else
+    the largest list/table/outline-like container that is not the whole window;
+    else the largest AXGroup below the window; else the largest element (the
+    window itself). None for an empty snapshot."""
+    if not snap.elements:
         return None
-    return max(pool, key=lambda el: el.bounds.width * el.bounds.height)
+
+    def area(el) -> int:
+        return el.bounds.width * el.bounds.height
+
+    root_area = max(area(el) for el in snap.elements)
+    for roles in _SCROLL_CONTAINER_TIERS:
+        pool = [el for el in snap.elements if el.role in roles]
+        if roles != ("AXScrollArea",):  # a container the size of the window is the window
+            pool = [el for el in pool if area(el) < 0.9 * root_area]
+        if pool:
+            return max(pool, key=area)
+    return max(snap.elements, key=area)
 
 
 # ---------------------------------------------------------------------------
@@ -1001,11 +1021,15 @@ class Runtime:
         return f"set {ref} = {value!r}"
 
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
-                       direction: str = "down", max_scrolls: int = 6, scope: str = "window") -> str:
+                       direction: str = "down", max_scrolls: int = 6, scope: str = "window",
+                       ref: str | None = None) -> str:
         """Scroll a view until an element matching text/role enters it, then
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
-        CLICK tier (it scrolls); the inner READ snapshots are covered by it."""
+        CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+
+        ``ref`` names the element to wheel over (the scrolling list itself);
+        without it the largest scroll container in each snapshot is used."""
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
         if direction not in ("down", "up"):
@@ -1014,6 +1038,7 @@ class Runtime:
             raise ValueError("scope must be 'window' or 'app'")
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
+        pinned = self._anchor(ref)[1] if ref is not None else None
         dy = 5 if direction == "down" else -5
 
         def execute() -> str:
@@ -1023,7 +1048,7 @@ class Runtime:
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
                     return f"found after {i} scroll(s):\n{observe.render_matches(snap, matches)}"
-                anchor = _scroll_anchor(snap)
+                anchor = pinned if pinned is not None else _scroll_anchor(snap)
                 if i >= max_scrolls or anchor is None:
                     break
                 self.driver.scroll(anchor, dy=dy)
@@ -1437,14 +1462,17 @@ def build_server(
     async def scroll_to_find(
         app: str, text: str | None = None, role: str | None = None,
         direction: str = "down", max_scrolls: int = 6, scope: str = "window",
+        ref: str | None = None,
     ) -> str:
         """Scroll a scrollable view until an element matching text and/or role
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title/value) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. Gated at tier 'click' (it scrolls)."""
-        return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope)
+        matching ref(s) or a not-found note. Pass ref to wheel over a specific
+        scrolling element (the list itself); otherwise the largest scroll
+        container in view is used. Gated at tier 'click' (it scrolls)."""
+        return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None) -> str:
