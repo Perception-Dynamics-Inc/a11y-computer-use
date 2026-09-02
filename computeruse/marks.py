@@ -59,7 +59,7 @@ def marks_for(snap, scaled, display_id: int) -> list[tuple[str, int, int, int, i
         b = el.bounds
         if b.display_id != display_id:
             continue
-        x, y = scaled.to_scaled(b.x, b.y)
+        x, y = scaled.from_source(b.x, b.y)
         marks.append((el.ref, x, y, max(1, round(b.width * scaled.scale)),
                       max(1, round(b.height * scaled.scale))))
     return marks
