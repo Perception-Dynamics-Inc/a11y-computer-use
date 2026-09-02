@@ -862,3 +862,75 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     out = rt.scroll_to_find("app", text="Target")
     assert "found after 2 scroll(s)" in out and "Target" in out
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
+
+
+# --- interactive view + budget through the tool surface -----------------------------
+
+
+async def test_snapshot_interactive_mode_via_mcp(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "mode": "interactive"})
+    assert not result.isError
+    text = result.content[0].text
+    assert text.splitlines()[0].endswith("(window) interactive")
+    # same refs as the full view; the click flag is implied on buttons
+    assert 'e2 button "Save"' in text and 'e2 button "Save" (click)' not in text
+    assert 'e3 textarea "Document body" ="hello" (click,edit,focus)' in text
+    full = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    assert 'e2 button "Save" (click)' in full.content[0].text
+
+
+async def test_snapshot_budget_truncates_via_mcp(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "budget": 12})
+    assert not result.isError
+    assert "truncated at ~12 tokens" in result.content[0].text
+
+
+async def test_snapshot_rejects_bad_mode_and_budget(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    bad_mode = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "mode": "compact"})
+    assert bad_mode.isError and "mode must be" in bad_mode.content[0].text
+    bad_budget = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "budget": 0})
+    assert bad_budget.isError and "budget" in bad_budget.content[0].text
+
+
+def test_diff_and_effect_receipt_follow_the_last_view(tmp_path) -> None:
+    """mode='diff' and Effect Receipts render in the view the agent last asked
+    for, so a cheap-view agent keeps getting cheap re-observations."""
+
+    def snap(sid: str, status: str) -> Snapshot:
+        els = (
+            Element(ref="e1", role="AXWindow", title="W", value=None,
+                    bounds=Bounds(0, 0, 0, 800, 600), snapshot_id=sid, path=("AXWindow",)),
+            Element(ref="e2", role="AXButton", title="Save", value=None,
+                    bounds=Bounds(0, 10, 10, 80, 30), snapshot_id=sid, parent="e1",
+                    path=("AXWindow", "AXButton"), clickable=True),
+            Element(ref="e3", role="AXStaticText", title="status", value=status,
+                    bounds=Bounds(0, 10, 50, 200, 20), snapshot_id=sid, parent="e1",
+                    path=("AXWindow", "AXStaticText")),
+        )
+        return Snapshot(snapshot_id=sid, scope=Scope.WINDOW, app="com.test", pid=1,
+                        created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),), elements=els)
+
+    snaps = iter([snap("s0", "idle"), snap("s1", "saving"), snap("s2", "saved"),
+                  snap("s3", "saved"), snap("s4", "done")])
+    driver = type("_D", (), {
+        "resolves_apps": True, "name": "fake",
+        "ensure_trusted": lambda self: None,
+        "frontmost_app": lambda self: ("com.test", 1),
+        "snapshot": lambda self, scope, app: next(snaps),
+    })()
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.READ)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+    first = rt.desktop_snapshot("com.test", mode="interactive")
+    assert first.splitlines()[0].endswith("interactive") and 'text: "status: idle"' in first
+    delta = rt.desktop_snapshot("com.test", mode="diff")  # rendered in the interactive view
+    assert "~ text: e3 idle→saving" in delta and "statictext" not in delta
+    receipt = rt._effect_after(rt._current)  # Effect Receipts follow the same view
+    assert "~ text: e3 saving→saved" in receipt
+
+    rt.desktop_snapshot("com.test", mode="full")  # switching back changes the diff rendering
+    assert "~ e3 statictext [value: saved→done]" in rt.desktop_snapshot("com.test", mode="diff")

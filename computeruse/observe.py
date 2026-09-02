@@ -93,6 +93,29 @@ _EDITABLE_ROLES = frozenset(
     {"AXComboBox", "AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
 
+#: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
+#: is the same snapshot (same elements, same refs) rendered down to what an agent
+#: can act on: actionable/stateful elements, the containers needed to tell them
+#: apart, and one folded ``text:`` line per container for the static text. Both
+#: views share refs, so an agent can switch views mid-task without a stale ref.
+RENDER_MODES = ("full", "interactive")
+#: What ``desktop_snapshot(mode=...)`` accepts: a view, or ``diff`` (delta since
+#: the previous snapshot of the same app, rendered in the view last requested).
+SNAPSHOT_MODES = ("full", "interactive", "diff")
+
+#: Roles kept by the interactive view even when the platform exposes no press
+#: action on them: rows are what an agent selects in lists/tables/trees, tabs
+#: switch panes, sliders take values. Cells are folded into their row's text.
+_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXIncrementor"})
+#: Containers the interactive view keeps as structure (even untitled) so refs
+#: inside them stay disambiguated: windows/dialogs, menus, toolbars, tab groups.
+_STRUCTURAL_ROLES = frozenset(
+    {"AXWindow", "AXSheet", "AXDialog", "AXDrawer", "AXPopover", "AXMenu",
+     "AXMenuBar", "AXToolbar", "AXTabGroup", "AXWebArea"}
+)
+_COLLAPSED_TEXT_CHARS = 96  #: cap of the folded ``text:`` line per container
+_COLLAPSED_TEXT_ITEMS = 12  #: static-text items folded before "(+N)" takes over
+
 _DOCTOR_HINT = (
     "Grant Accessibility to the host app that launched this process in "
     "System Settings > Privacy & Security > Accessibility, then retry; "
@@ -435,41 +458,249 @@ def _set_focused(handle: object) -> bool:
         return False
 
 
-def render_text(snap: Snapshot) -> str:
+def render_text(
+    snap: Snapshot,
+    *,
+    mode: str = "full",
+    budget: int | None = None,
+    include_bounds: bool = False,
+) -> str:
     """Render ``snap`` as compact indented text for LLM consumption.
 
-    One line per element: ``ref role "title" ="value" (flags)``, two-space
-    indentation, geometry only on roots. Children elided by the depth or
-    fan-out caps show as ``… N more`` markers when ``snap`` was produced by
-    this module (foreign snapshots render without markers).
+    ``mode="full"`` (default): one line per element: ``ref role "title"
+    ="value" (flags)``, two-space indentation, geometry only on roots. Children
+    elided by the depth or fan-out caps show as ``… N more`` markers when
+    ``snap`` was produced by this module (foreign snapshots render without
+    markers).
+
+    ``mode="interactive"``: the same snapshot rendered down to the elements an
+    agent can act on (see `is_interactive`) plus the containers that keep them
+    apart (see `interactive_view`); each kept container gets one folded
+    ``text:`` line holding the static text beneath it. The refs are the
+    snapshot's own refs, so they re-resolve exactly like full-mode refs and an
+    agent can switch views mid-task. Geometry is omitted unless
+    ``include_bounds`` is set (which then prints bounds on every kept line).
+
+    ``budget`` is an approximate token cap (4 chars per token, the cu-meter
+    basis): the header always survives, lines are kept in order until the next
+    one would overflow, and a final marker states how many element lines were
+    omitted so the agent knows to use ``find``/``scroll_to_find`` or raise it.
+    Deterministic for a given snapshot.
     """
-    elisions = _EPOCHS.get(snap.snapshot_id, {})
+    if mode not in RENDER_MODES:
+        raise ValueError(f"mode must be one of {RENDER_MODES}")
+    if mode == "interactive":
+        entries = _interactive_entries(snap, include_bounds)
+    else:
+        entries = _full_entries(snap, include_bounds)
+    return "\n".join(_apply_budget(entries, budget))
+
+
+def _children_map(snap: Snapshot) -> dict[str | None, list[Element]]:
     children: dict[str | None, list[Element]] = {}
     for el in snap.elements:
         children.setdefault(el.parent, []).append(el)
-    lines = [f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})"]
+    return children
+
+
+def _full_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str, bool]]:
+    """(line, is_element_line) pairs for the full view."""
+    elisions = _EPOCHS.get(snap.snapshot_id, {})
+    children = _children_map(snap)
+    bounds: bool | None = True if include_bounds else None
+    entries = [(f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})", False)]
 
     def emit(el: Element, depth: int) -> None:
-        lines.append("  " * depth + _render_line(el))
+        entries.append(("  " * depth + _render_line(el, bounds=bounds), True))
         for child in children.get(el.ref, ()):
             emit(child, depth + 1)
         elided = elisions.get(el.ref, 0)
         if elided:
-            lines.append("  " * (depth + 1) + f"… {elided} more")
+            entries.append(("  " * (depth + 1) + f"… {elided} more", False))
 
     for root in children.get(None, ()):
         emit(root, 1)
-    return "\n".join(lines)
+    return entries
 
 
-def estimate_tokens(snap: Snapshot) -> int:
+def is_interactive(el: Element) -> bool:
+    """Whether the interactive view keeps ``el`` on its own line.
+
+    True for elements that take input (clickable or editable, disabled ones
+    included so the agent sees what is greyed out), carry actionable state
+    (checked / expanded / selected / focused), or have a role an agent selects
+    even when the platform exposes no press action on it (rows, tabs, sliders).
+    `interactive_view` refines the role-only case: a row that merely contains
+    links or buttons is layout, not a target, and is folded instead.
+    """
+    return _takes_input(el) or el.role in _INTERACTIVE_ROLES
+
+
+def _takes_input(el: Element) -> bool:
+    return (
+        el.clickable
+        or el.editable
+        or el.checked is not None
+        or el.expanded is not None
+        or el.selected
+        or el.focused
+    )
+
+
+#: Grid geometry: a titled row/cell is table layout, not a semantic group, so it
+#: never earns a structural line of its own in the interactive view.
+_GRID_ROLES = frozenset({"AXRow", "AXCell", "AXColumn"})
+
+
+def _is_structural(el: Element) -> bool:
+    if el.parent is None or el.role in _STRUCTURAL_ROLES:
+        return True
+    return bool(el.title) and el.role not in _GRID_ROLES
+
+
+def interactive_view(snap: Snapshot) -> tuple[Element, ...]:
+    """The elements the interactive view shows, in the snapshot's pre-order.
+
+    Every `is_interactive` element, plus the ancestors needed to keep them
+    apart: roots, structural containers (windows, dialogs, menus, toolbars, tab
+    groups) and any titled container. Untitled wrapper groups/lists/scroll
+    areas between them are skipped; their static text folds into the nearest
+    kept ancestor's ``text:`` line. Rows/tabs/sliders kept for their role alone
+    are dropped when an interactive element lives inside them (a layout-table
+    row holding links is not itself a target). Pure and platform-free.
+    """
+    by_ref = {el.ref: el for el in snap.elements}
+    # Roles kept only for what they are (rows, tabs, sliders) count as targets
+    # only when nothing inside them takes input; propagate that fact upward
+    # over the reversed pre-order so parents see their descendants first.
+    has_input_below: set[str] = set()
+    for el in reversed(snap.elements):
+        if el.parent is not None and (_takes_input(el) or el.ref in has_input_below):
+            has_input_below.add(el.parent)
+    keep: set[str] = {el.ref for el in snap.elements if el.parent is None}
+    for el in snap.elements:
+        if not (_takes_input(el) or (el.role in _INTERACTIVE_ROLES and el.ref not in has_input_below)):
+            continue
+        keep.add(el.ref)
+        parent = el.parent
+        while parent is not None and parent not in keep:
+            node = by_ref[parent]
+            if _is_structural(node):
+                keep.add(parent)
+            parent = node.parent
+    return tuple(el for el in snap.elements if el.ref in keep)
+
+
+def _interactive_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str, bool]]:
+    """(line, is_element_line) pairs for the interactive view."""
+    elisions = _EPOCHS.get(snap.snapshot_id, {})
+    children = _children_map(snap)
+    by_ref = {el.ref: el for el in snap.elements}
+    kept = interactive_view(snap)
+    kept_refs = {el.ref for el in kept}
+    entries = [
+        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value}) interactive", False)
+    ]
+
+    def folded_text(el: Element) -> tuple[list[str], int, int]:
+        """(text items, total text items, elided children) of the dropped
+        descendants of ``el``, stopping at kept elements. The elision counts of
+        skipped wrappers roll up so the agent still learns that a list holds
+        more rows than the snapshot walked."""
+        items: list[str] = []
+        total = 0
+        elided = 0
+        stack = list(reversed(children.get(el.ref, ())))
+        while stack:
+            node = stack.pop()
+            if node.ref in kept_refs:
+                continue
+            text = _folded_label(node)
+            # A folded container's elided children are hidden rows the agent may
+            # need to scroll to; a folded text node's are its own text fragments.
+            if not text:
+                elided += elisions.get(node.ref, 0)
+            # blank text, the container's own title, and a run of duplicates (a
+            # cell repeating its text node) carry nothing worth a token
+            if text and text != el.title and (not items or items[-1] != text):
+                total += 1
+                if len(items) < _COLLAPSED_TEXT_ITEMS:
+                    items.append(text.replace("\n", " "))
+            stack.extend(reversed(children.get(node.ref, ())))
+        return items, total, elided
+
+    depth_of: dict[str, int] = {}
+    for el in kept:
+        parent = el.parent
+        while parent is not None and parent not in kept_refs:
+            parent = by_ref[parent].parent
+        depth = depth_of[parent] + 1 if parent is not None else 1
+        depth_of[el.ref] = depth
+        entries.append(("  " * depth + _render_line(el, bounds=include_bounds, compact=True), True))
+        items, total, folded_elided = folded_text(el)
+        if items:
+            joined = _clip(" | ".join(items), _COLLAPSED_TEXT_CHARS)
+            extra = total - len(items)
+            suffix = f" (+{extra})" if extra > 0 else ""
+            entries.append(("  " * (depth + 1) + f'text: "{joined}"{suffix}', False))
+        # Elision markers stay on containers; an input-taking element's elided
+        # children are the text it already shows as its title or value.
+        elided = 0 if _takes_input(el) else elisions.get(el.ref, 0) + folded_elided
+        if elided:
+            entries.append(("  " * (depth + 1) + f"… {elided} more", False))
+    hidden = len(snap.elements) - len(kept)
+    if hidden:
+        entries.append((f"… {hidden} static elements folded; mode='full' or find lists them", False))
+    return entries
+
+
+def _folded_label(el: Element) -> str:
+    """The text a folded (non-interactive) element contributes to its container's
+    ``text:`` line: a labelled value reads ``label: value``, otherwise whichever of
+    title/value the platform filled in. Secure fields carry no value by
+    construction, so nothing secret can fold in."""
+    title = el.title.strip()
+    value = "" if el.value is None else str(el.value).strip()
+    if title and value and title != value:
+        return f"{title}: {value}"
+    return title or value
+
+
+def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> list[str]:
+    """Cut ``entries`` to roughly ``budget`` tokens (4 chars each); the header
+    always survives and a trailing marker reports the omitted element lines."""
+    if budget is None:
+        return [line for line, _ in entries]
+    if budget <= 0:
+        raise ValueError("budget must be a positive token count")
+    limit = budget * 4
+    out = [entries[0][0]]
+    used = len(out[0])
+    omitted = 0
+    cut = False
+    for line, is_element in entries[1:]:
+        if not cut and used + 1 + len(line) <= limit:
+            out.append(line)
+            used += 1 + len(line)
+        else:
+            cut = True
+            omitted += int(is_element)
+    if cut:
+        out.append(
+            f"… truncated at ~{budget} tokens: {omitted} element lines omitted; "
+            "use find / scroll_to_find for the rest, or raise budget"
+        )
+    return out
+
+
+def estimate_tokens(snap: Snapshot, *, mode: str = "full") -> int:
     """Estimate the LLM token footprint of ``snap``'s serialized form.
 
     Used to enforce the per-snapshot budget (~1k tokens) and to publish the
     per-app coverage table from Phase 0. Heuristic: ``chars / 4`` over the
-    `render_text` form, rounded up.
+    `render_text` form (in ``mode``), rounded up.
     """
-    return (len(render_text(snap)) + 3) // 4
+    return (len(render_text(snap, mode=mode)) + 3) // 4
 
 
 def interactive_count(snap: Snapshot) -> int:
@@ -608,26 +839,61 @@ def diff_snapshots(old: Snapshot, new: Snapshot) -> SnapshotDiff:
     return SnapshotDiff(old.snapshot_id, new.snapshot_id, added, removed, changed)
 
 
-def render_diff(diff: SnapshotDiff) -> str:
+def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = None) -> str:
     """Render a `SnapshotDiff` as compact text: a header line then +added,
     -removed, ~changed. Empty diff says so explicitly (a real, useful signal:
-    'the action produced no observable tree change')."""
+    'the action produced no observable tree change').
+
+    ``mode="interactive"`` keeps the +/-/~ lines of `is_interactive` elements
+    only; static-text changes fold into one ``~ text:`` line (a status label
+    flipping to "Saved" still shows) and added/removed static elements are
+    reported as counts. The header counts always describe the whole diff.
+    ``budget`` truncates like `render_text`.
+    """
+    if mode not in RENDER_MODES:
+        raise ValueError(f"mode must be one of {RENDER_MODES}")
     head = f"[{diff.new_id} ← {diff.old_id}] +{len(diff.added)} -{len(diff.removed)} ~{len(diff.changed)}"
     if diff.empty:
         return head + "\n  (no change)"
-    lines = [head]
-    for el in diff.added:
-        lines.append("  + " + _render_line(el))
-    for el in diff.removed:
+    added, removed, changed = diff.added, diff.removed, diff.changed
+    text_changes: list[str] = []
+    hidden_added = hidden_removed = 0
+    if mode == "interactive":
+        added = tuple(el for el in diff.added if is_interactive(el))
+        removed = tuple(el for el in diff.removed if is_interactive(el))
+        kept_changes = []
+        for old, new, ch in diff.changed:
+            if is_interactive(old) or is_interactive(new):
+                kept_changes.append((old, new, ch))
+            elif "value" in ch or "title" in ch:
+                a, b = ch.get("value") or ch["title"]
+                text_changes.append(f"{new.ref} {_clip(str(a), 24)}→{_clip(str(b), 24)}")
+        changed = tuple(kept_changes)
+        hidden_added = len(diff.added) - len(added)
+        hidden_removed = len(diff.removed) - len(removed)
+    entries: list[tuple[str, bool]] = [(head, False)]
+    for el in added:
+        entries.append(("  + " + _render_line(el), True))
+    for el in removed:
         role = el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
         title = f' "{el.title}"' if el.title else ""
-        lines.append(f"  - {el.ref} {role}{title} (gone)")
-    for _old, new, changes in diff.changed:
+        entries.append((f"  - {el.ref} {role}{title} (gone)", True))
+    for _old, new, changes in changed:
         parts = ", ".join(
             f"{attr}: {_clip(str(a), 24)}→{_clip(str(b), 24)}" for attr, (a, b) in changes.items()
         )
-        lines.append(f"  ~ {new.ref} {new.role[2:].lower() if new.role.startswith('AX') else new.role.lower()} [{parts}]")
-    return "\n".join(lines)
+        role = new.role[2:].lower() if new.role.startswith("AX") else new.role.lower()
+        entries.append((f"  ~ {new.ref} {role} [{parts}]", True))
+    if text_changes:
+        shown = text_changes[:_COLLAPSED_TEXT_ITEMS]
+        extra = len(text_changes) - len(shown)
+        suffix = f" (+{extra})" if extra > 0 else ""
+        entries.append((f"  ~ text: {_clip(' | '.join(shown), _COLLAPSED_TEXT_CHARS)}{suffix}", True))
+    if hidden_added or hidden_removed:
+        entries.append(
+            (f"  ({hidden_added} added, {hidden_removed} removed static elements folded)", False)
+        )
+    return "\n".join(_apply_budget(entries, budget))
 
 
 # ---------------------------------------------------------------------------
@@ -854,7 +1120,19 @@ def _project(
     )
 
 
-def _render_line(el: Element) -> str:
+#: Roles whose lines the interactive view prints without the ``click`` flag: the
+#: role already says the element is pressable, so the flag is pure token cost.
+_IMPLICIT_CLICK_ROLES = frozenset(
+    {"AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXMenuButton", "AXPopUpButton",
+     "AXCheckBox", "AXRadioButton", "AXTab", "AXDisclosureTriangle"}
+)
+
+
+def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = False) -> str:
+    """One element line. ``bounds``: None prints geometry on roots only (the
+    full view's rule), True on every line, False never. ``compact`` (the
+    interactive view) leaves the ``click`` flag implicit on roles that are
+    pressable by definition (buttons, links, menu items, checkboxes, tabs)."""
     role = el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
     parts = [el.ref, role]
     if el.title:
@@ -863,10 +1141,11 @@ def _render_line(el: Element) -> str:
         parts.append(f'="{_clip(el.value.replace(chr(10), " "), _RENDER_VALUE_CHARS)}"')
     elif el.placeholder and not el.title:  # blank field: show its prompt for identity
         parts.append(f'~"{_clip(el.placeholder, _RENDER_VALUE_CHARS)}"')
+    show_click = el.clickable and not (compact and el.role in _IMPLICIT_CLICK_ROLES)
     flags = [
         name
         for name, on in (
-            ("click", el.clickable),
+            ("click", show_click),
             ("edit", el.editable),
             ("secure", el.secure),
             ("checked", el.checked is True),
@@ -881,7 +1160,7 @@ def _render_line(el: Element) -> str:
     ]
     if flags:
         parts.append(f"({','.join(flags)})")
-    if el.parent is None:
+    if bounds is True or (bounds is None and el.parent is None):
         b = el.bounds
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
     return " ".join(parts)

@@ -59,6 +59,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--scope", choices=("window", "app"), default="window",
         help="frontmost window only, or all windows (default: window)",
     )
+    snapshot.add_argument(
+        "--mode", choices=("full", "interactive"), default="full",
+        help="'full' prints the whole pruned tree; 'interactive' prints only actionable "
+             "elements plus their containers, static text folded into one line each "
+             "(same refs, far fewer tokens). Default: full",
+    )
+    snapshot.add_argument(
+        "--budget", type=int, metavar="TOKENS",
+        help="cap the output at about TOKENS tokens (4 chars each); the tail is replaced "
+             "by a marker counting the omitted elements",
+    )
+    snapshot.add_argument(
+        "--bounds", action="store_true",
+        help="print geometry on every element line (default: roots only in full mode, "
+             "none in interactive mode)",
+    )
     snapshot.set_defaults(handler=_cmd_snapshot)
 
     run_once = sub.add_parser(
@@ -82,7 +98,10 @@ def _build_parser() -> argparse.ArgumentParser:
         description="'audit' aggregates the JSONL audit log (per-action latency + "
                     "tokens). 'web' runs the a11y-vs-vision observation-cost benchmark "
                     "on the browser backend (needs a running Chromium; see "
-                    "docs/browser-backend.md).",
+                    "docs/browser-backend.md). 'desktop' runs the same benchmark on the "
+                    "current platform's driver (or $COMPUTERUSE_DRIVER) against a running "
+                    "app, costing every snapshot view against one screenshot (see "
+                    "docs/observation-cost.md).",
     )
     bench_sub = bench.add_subparsers(required=True)
     bench_audit = bench_sub.add_parser("audit", help="aggregate the audit log (cu-meter)")
@@ -93,7 +112,20 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_web.add_argument("--rounds", type=int, default=3, help="observations to measure")
     bench_web.add_argument("--endpoint", help="CDP endpoint (default: $COMPUTERUSE_CDP_ENDPOINT "
                            "or http://127.0.0.1:9222)")
+    bench_web.add_argument("--mode", choices=("full", "interactive"), default="full",
+                           help="snapshot view to cost (default: full)")
+    bench_web.add_argument("--json", action="store_true", help="print the report as JSON")
     bench_web.set_defaults(handler=_cmd_bench_web)
+    bench_desktop = bench_sub.add_parser(
+        "desktop", help="a11y-vs-vision observation cost of a running app, every view (cu-arena)",
+    )
+    bench_desktop.add_argument("--app", help="bundle id / app name / tab id to observe "
+                               "(default: the driver's frontmost app)")
+    bench_desktop.add_argument("--scope", choices=("window", "app"), default="window",
+                               help="frontmost window only, or all windows (default: window)")
+    bench_desktop.add_argument("--rounds", type=int, default=3, help="observations to measure")
+    bench_desktop.add_argument("--json", action="store_true", help="print the report as JSON")
+    bench_desktop.set_defaults(handler=_cmd_bench_desktop)
 
     agent = sub.add_parser(
         "agent",
@@ -156,13 +188,34 @@ def _cmd_bench_web(args: argparse.Namespace) -> int:
 
     driver = BrowserDriver(endpoint=args.endpoint)
     try:
-        report = arena.run_web_task(driver, args.url, rounds=args.rounds)
+        report = arena.run_web_task(driver, args.url, rounds=args.rounds, mode=args.mode)
     except ComputerUseError as exc:
         print(server.error_text(exc), file=sys.stderr)
         return 1
     finally:
         driver.close()
-    print(arena.format_report(report))
+    print(json.dumps(report.to_dict(), indent=2) if args.json else arena.format_report(report))
+    return 0
+
+
+def _cmd_bench_desktop(args: argparse.Namespace) -> int:
+    from computeruse import arena, drivers, server
+    from computeruse.schema import ComputerUseError, Scope
+
+    driver = drivers.get_driver()
+    try:
+        driver.ensure_trusted()
+        report = arena.run_desktop_task(
+            driver, args.app, rounds=args.rounds, scope=Scope(args.scope)
+        )
+    except ComputerUseError as exc:
+        print(server.error_text(exc), file=sys.stderr)
+        return 1
+    finally:
+        close = getattr(driver, "close", None)
+        if callable(close):
+            close()
+    print(json.dumps(report.to_dict(), indent=2) if args.json else arena.format_desktop_report(report))
     return 0
 
 
@@ -236,7 +289,7 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
     except ComputerUseError as exc:
         print(server.error_text(exc), file=sys.stderr)
         return 1
-    print(observe.render_text(snap))
+    print(observe.render_text(snap, mode=args.mode, budget=args.budget, include_bounds=args.bounds))
     return 0
 
 
