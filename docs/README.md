@@ -35,7 +35,7 @@ Everything under `docs/` in one place: the Phase-0 decision records, the per-bac
 
 ## Brand assets (`docs/assets/`)
 
-All seven are PNGs on the same dark navy ground unless noted.
+All ten are PNGs on the same dark navy ground unless noted.
 
 | File | Dimensions | What it shows and where to use it |
 |---|---|---|
@@ -45,6 +45,9 @@ All seven are PNGs on the same dark navy ground unless noted.
 | [assets/logo-alt.png](./assets/logo-alt.png) | 512x512 | Alternate mark: a window frame with a node graph and a blue cursor. |
 | [assets/logo-transparent.png](./assets/logo-transparent.png) | 1024x1024 | The primary mark on a transparent background, for placement over any color. |
 | [assets/observe-act.png](./assets/observe-act.png) | 1600x893 | Diagram of the observe-then-act loop: an app window with refs `e1` to `e4` on its controls, the matching accessibility tree on the right, and the Submit button (`e3`) as the node being acted on. Explainer figure. |
+| [assets/alternatives.png](./assets/alternatives.png) | 1600x893 | The "Why not the alternatives?" comparison table as a graphic (Claude Desktop built-in, browser-use / Playwright MCP, UI-TARS-desktop, Windows-MCP / Terminator, computerUse). Shown in the root README above the markdown table, which stays the source of truth. |
+| [assets/backends.png](./assets/backends.png) | 1600x893 | The shared core over the four drivers (macOS AXUIElement, Windows UI Automation, Linux AT-SPI2, Browser CDP). Shown at the top of Platform support. |
+| [assets/safety-gate.png](./assets/safety-gate.png) | 1600x678 | The gate every action passes: permission tier, confirmation gate, same-window recheck, execute, audit log. Shown at the top of Safety model. |
 | [assets/social-preview.png](./assets/social-preview.png) | 1280x714 | The GitHub social card: logo, "computerUse", the tagline, the four backends, and a ref graph. Upload this file under the repository's Settings > Social preview; committing it does not apply it. |
 
 ## Examples (`../examples/`)
