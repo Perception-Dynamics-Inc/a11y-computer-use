@@ -108,7 +108,7 @@ elements over AT-SPI on this build. Chrome's window chrome is not exposed to
 AT-SPI here; drive pages through the CDP browser backend instead, which is what
 it is for.
 
-## Two coordinate-input bugs found (both invisible to Xvfb CI)
+## Coordinate-input bugs found (all invisible to Xvfb CI)
 
 ### 1. The Linux coordinate click uses a relative pointer warp as if absolute
 
@@ -223,6 +223,54 @@ sync, two verification passes, stop); 42.5 minutes of the 25 trial hours are
 used in total. The old box `bx_fh2cm8n2` was deleted afterwards (its box-scoped
 token had appeared in a command output); `bx_ngdszs3k` is stopped and carries
 the `computeruse-linux-testbed` template, which is what `box new --from` restores.
+
+## Whole suite and keyboard input on the desktop
+
+A later run on a box created from the `computeruse-linux-testbed` template
+(after the fixes above) ran the complete test suite inside the desktop session,
+not just the driver seam:
+
+```
+461 passed, 41 skipped, 0 failed
+```
+
+The skips are the macOS TCC live tests, the Windows UIA live test, and the
+desktop-live tests when the step runs headless. `computeruse doctor` reported 8
+of 8 on the box:
+
+```
+[ OK ] display_session   XDG_SESSION_TYPE=x11 DISPLAY=:0
+[ OK ] window_manager    EWMH window manager: Mutter(Budgie)
+[ OK ] atspi_bindings    gi + Atspi 2.0 typelib import cleanly
+[ OK ] a11y_bus          org.a11y.Bus reachable; 15 application(s) on the desktop
+[ OK ] coordinate_input  XTEST available (python-xlib)
+[ OK ] clipboard_tool    xclip on PATH
+[ OK ] python_version    Python 3.12.3
+[ OK ] mcp_import        mcp 1.29.1 imports cleanly
+```
+
+`tests/test_linux_desktop_live.py` drives a real GTK3 window under the window
+manager and covers the input surface a user has (10 tests, all passing on the
+box): a coordinate click lands at the absolute target and triggers the button
+there; XTEST typing into the focused field round-trips punctuation, symbols,
+and characters the keymap lacks (`"Hello, World! 42 <a/b> ünïcödé 日本"` comes
+back exactly); key chords work, including `ctrl+a` then replace, `end`,
+`backspace`, and chords on punctuation keys (`ctrl+/`, `ctrl+minus`, `alt+.`,
+`shift+tab`, `f13`); the scroll wheel changes a spin button and a drag moves a
+slider; app list, window list, activate, frontmost, and the clipboard
+round-trip (non-ASCII included); and the gated Runtime path that `run-once`
+and the MCP tools use (`click(x, y)` with no display id, `key`, `type`,
+`desktop_snapshot`) passes through the safety tiers.
+
+That run surfaced a fourth desktop-only bug, also fixed: XTEST typing dropped
+characters not on the active keymap (accented Latin, CJK) and control
+characters (newline, tab). The fix binds spare keycodes to the missing keysyms
+for the duration of the operation, the way xdotool does, and maps control
+characters to their key keysyms; chords now accept punctuation names, F13 to
+F24, and shift-level keys (`computeruse/drivers/_linux_input.py`, commit
+5267da2). The same pass gave `doctor` real Linux and Windows checks instead of
+reporting macOS grants that do not exist there, and made `computeruse snapshot`
+resolve its backend through the driver seam.
 
 ## Recommended CI follow-up
 
