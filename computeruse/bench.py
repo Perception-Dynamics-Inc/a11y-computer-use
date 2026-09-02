@@ -50,6 +50,9 @@ def report(audit_dir: Path | str) -> dict:
     per_action: dict[str, dict] = {}
     total_tokens = 0
     observe_tokens = 0
+    planner_in = 0
+    planner_out = 0
+    agent_runs = 0
     durations_all: list[float] = []
     for e in entries:
         m = e.get("metrics") or {}
@@ -65,6 +68,14 @@ def report(audit_dir: Path | str) -> dict:
         total_tokens += toks
         if act == "observeop":
             observe_tokens += toks
+        # The agent loop (computeruse agent) records the planner's own token
+        # usage per step; summed here so one report covers observation cost
+        # (tokens_est) and planner cost side by side.
+        if act == "agent_step":
+            planner_in += int(m.get("planner_input_tokens", 0) or 0)
+            planner_out += int(m.get("planner_output_tokens", 0) or 0)
+        elif act == "agent_run":
+            agent_runs += 1
     by_action = {
         act: {
             "count": a["count"],
@@ -81,6 +92,9 @@ def report(audit_dir: Path | str) -> dict:
         "p50_ms": round(median(durations_all), 1) if durations_all else None,
         "p95_ms": round(_percentile(durations_all, 0.95), 1) if durations_all else None,
         "by_action": by_action,
+        "agent_runs": agent_runs,
+        "planner_input_tokens": planner_in,
+        "planner_output_tokens": planner_out,
     }
 
 
@@ -91,6 +105,11 @@ def format_report(rep: dict) -> str:
         f"observe_tokens={rep['observe_tokens_est']}  latency p50={rep['p50_ms']}ms "
         f"p95={rep['p95_ms']}ms",
     ]
+    if rep.get("agent_runs"):
+        lines.append(
+            f"agent runs={rep['agent_runs']}  planner tokens in={rep['planner_input_tokens']} "
+            f"out={rep['planner_output_tokens']}"
+        )
     for act, a in rep["by_action"].items():
         lines.append(f"  {act:<14} n={a['count']:<4} p50={a['p50_ms']}ms p95={a['p95_ms']}ms "
                      f"tokens={a['tokens_est']}")

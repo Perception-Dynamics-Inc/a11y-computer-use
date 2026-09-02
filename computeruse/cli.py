@@ -8,6 +8,9 @@ Subcommands (PLAN.md §9, Phase 1):
     snapshot  Print a pruned a11y snapshot for an app (debugging aid).
     run-once  Execute one JSON action through the safety layer, e.g.
               ``computeruse run-once '{"tool": "key", "chord": "cmd+s"}'``.
+    bench     cu-meter (``audit``) and cu-arena (``web``) numbers.
+    agent     Run a task end to end with a model (`agent.run_task`): the
+              reference observe -> plan -> act -> verify loop.
 
 Exit codes: 0 success; 1 structured failure (a `schema.ComputerUseError` or
 a safety refusal, rendered on stderr); 2 usage errors (argparse, malformed
@@ -92,6 +95,35 @@ def _build_parser() -> argparse.ArgumentParser:
                            "or http://127.0.0.1:9222)")
     bench_web.set_defaults(handler=_cmd_bench_web)
 
+    agent = sub.add_parser(
+        "agent",
+        help="run a task end to end with a model (the reference agent loop)",
+        description=(
+            "Observe -> plan -> act -> verify until the model calls done. The planner "
+            "sees the pruned accessibility snapshot and acts on element refs; every "
+            "action goes through the same gated Runtime as the MCP server (tiers, "
+            "recheck, confirmation gate, Effect Receipts, audit). Provider: anthropic "
+            "(ANTHROPIC_API_KEY), openai (OPENAI_API_KEY, OPENAI_BASE_URL for Ollama/"
+            "vLLM), or claude-cli (the local `claude` command, no key). Honours "
+            "COMPUTERUSE_DRIVER=browser like every other command."
+        ),
+    )
+    agent.add_argument("--task", required=True, help="what to accomplish, in plain language")
+    agent.add_argument("--app", help="target app (bundle id or name; a tab id on the browser "
+                                     "backend). Default: the frontmost app / bound tab")
+    agent.add_argument("--provider", choices=("anthropic", "openai", "claude-cli"),
+                       help="planner backend (default: $COMPUTERUSE_PROVIDER, else the first "
+                            "one the environment supports)")
+    agent.add_argument("--model", help="model id for the provider (required for openai)")
+    agent.add_argument("--max-steps", type=int, default=25, help="maximum planner turns (default 25)")
+    agent.add_argument("--no-verify", action="store_true",
+                       help="do not request Effect Receipts on click/act")
+    agent.add_argument("--grant", choices=("read", "click", "full"),
+                       help="grant the target app this permission tier before running "
+                            "(persisted in the permission store, like any grant)")
+    agent.add_argument("--json", action="store_true", help="print the result as JSON")
+    agent.set_defaults(handler=_cmd_agent)
+
     return parser
 
 
@@ -132,6 +164,54 @@ def _cmd_bench_web(args: argparse.Namespace) -> int:
         driver.close()
     print(arena.format_report(report))
     return 0
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    from computeruse import agent, providers, safety, server
+    from computeruse.schema import ComputerUseError
+
+    try:
+        provider = providers.get_provider(args.provider, model=args.model)
+    except providers.ProviderError as exc:
+        print(f"provider: {exc}", file=sys.stderr)
+        return 2
+    runtime = server.Runtime()
+    app = args.app
+    if args.grant:
+        try:
+            target = app if app is not None else runtime._frontmost()
+            _running, target = runtime._resolve_app(target)
+        except ComputerUseError as exc:
+            print(server.error_text(exc), file=sys.stderr)
+            return 1
+        runtime.store.set_tier(target, safety.Tier(args.grant))
+        print(f"granted {target} tier {args.grant}", file=sys.stderr)
+
+    def on_step(step: agent.Step) -> None:
+        status = "ok" if step.ok else step.error_code
+        tokens = f"{step.usage.input_tokens} in/{step.usage.output_tokens} out tok" if step.usage.total else ""
+        first_line = step.result.splitlines()[0] if step.result else ""
+        print(f"[step {step.index}] {step.tool} {json.dumps(step.params)[:160]} -> {status}: "
+              f"{first_line[:160]} ({step.duration_ms:.0f} ms{', ' + tokens if tokens else ''})",
+              file=sys.stderr)
+
+    confirm = None
+    if sys.stdin.isatty():  # a human at the terminal can approve irreversible actions
+        def confirm(prompt: str) -> bool:
+            answer = input(f"{prompt} [y/N] ")
+            return answer.strip().lower() in ("y", "yes")
+
+    result = agent.run_task(args.task, runtime, provider, app=app, max_steps=args.max_steps,
+                            verify=not args.no_verify, on_step=on_step, confirm=confirm)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        verdict = "success" if result.success else f"not completed ({result.stopped})"
+        print(f"{verdict}: {result.summary}")
+        print(f"steps={len(result.steps)} planner tokens in={result.usage.input_tokens} "
+              f"out={result.usage.output_tokens} wall={result.wall_time_s:.1f}s "
+              f"audit={result.audit_dir}")
+    return 0 if result.success else 1
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:
