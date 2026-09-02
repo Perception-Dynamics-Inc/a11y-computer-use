@@ -1,14 +1,19 @@
 # Changelog
 
 All notable changes to computerUse are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Nothing has been
-tagged and nothing is published on PyPI, so every entry sits under Unreleased.
-The version in `pyproject.toml` and `computeruse/__init__.py` is 0.0.1.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). 0.1.0 is the first
+tagged release; it is installed from git, and nothing is published on PyPI.
 
-Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). The six branch-integration merge commits (1810174, ff4b9dd, d033e83, 8ca9461, f5bef72, 81d5ede) carry no changes of their own and are not listed.
+Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.1.0] - 2026-09-02
+
+The first tagged release. Everything the project has shipped so far lands here, since nothing was tagged before it. Install from a clone of the tag; the package is not on PyPI.
 
 ### Added
 
@@ -31,10 +36,12 @@ Within a group, lines are ordered by theme, then by date.
 - `scroll_to_find` tool: scrolls a view and re-observes after each step until a text or role match appears, up to `max_scrolls` (default 6) (61f7fc0, 2026-08-29).
 - Effect Receipts: `verify=true` on `click` and `act` re-snapshots the app after the action and appends the diff (0ec4c70, 2026-08-29).
 - Interactive snapshot view and token budget: `desktop_snapshot(mode="interactive", budget=N, include_bounds=...)` renders the same snapshot down to input-taking and stateful elements, rows/tabs/sliders that are targets themselves, and the containers that keep them apart (roots, windows, dialogs, menus, toolbars, tab groups, titled groups), with static text folded into one `text:` line per container; refs are unchanged, so acting and re-resolving work across views. `mode="diff"` and Effect Receipts render in the view last asked for, and the interactive diff keeps static-text changes as one `~ text:` line. `budget` cuts any rendering deterministically after the header and reports the omitted element lines. Full-mode output is byte-identical to before (99b8d0b, 2026-09-02).
+- `scroll_to_find` takes an optional `ref` that pins the container to scroll (d6c19d9, 2026-09-02).
 
 #### Safety
 
 - Confirmation gate for clicks on destructive labels (delete, trash, discard, erase, and similar) through MCP elicitation. Without an elicitation channel the click is blocked; `COMPUTERUSE_CONFIRM=0` disables the gate (ca5adba, 2026-07-12).
+- `type` probes for a focused password field on every driver: the browser evaluates `document.activeElement` through open shadow roots and same-origin iframes, Linux walks the active window's AT-SPI tree for the focused node (bounded to 400 nodes), Windows asks UIA for the focused control's `IsPassword`; UIA password edits are marked `AXSecureTextField` and their value is never read. `tests/test_safety_hardening.py` (57 tests) covers the new paths (efd9d81, 2026-09-02).
 
 #### macOS backend
 
@@ -58,6 +65,8 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - ARIA `xml-roles` mapping for web roles, with a single attribute fetch per node (f3c997c, 2026-08-29).
 - Wayland-native screen capture through `grim`, and `capture.py` now imports cleanly off macOS (615e939, 2026-08-29).
 - Structured `unsupported` error for coordinate and key injection on native Wayland, where XTEST is unavailable. The AT-SPI path (press, `set_value`, typing into a field focused through the driver) keeps working (e0d48e3, 2026-08-29).
+- `doctor` gains Linux and Windows sections (display session, window manager, AT-SPI bindings and bus, XTEST availability, clipboard tool; the UI Automation import on Windows) instead of reporting macOS grants that do not exist there. AT-SPI application lookup matches by PID as well as name and ranks the active top-level frame first, so a windowless registrant with the same comm never shadows the real app. XTEST typing maps F13 to F24, named punctuation, and control characters, and binds spare keycodes for characters the layout lacks (the xdotool approach), so off-keymap Unicode round-trips. `tests/test_linux_desktop_live.py` adds ten real-desktop tests (coordinate click, scroll, drag, chords, typing, apps, windows, clipboard, the gated Runtime) that run under a window manager and skip without one (5267da2, 2026-09-02).
+- `scripts/box/`: `bootstrap.sh`, `run-live.sh`, `verify-pointer.sh`, and `pointer_probe.py` stand up a Box (box.ascii.dev) Ubuntu desktop VM and run the live suites, the browser suite against a non-headless Chrome, and the pointer probe there; `docs/box-testbed.md` records the runs (fada77e, 2026-09-02; 6240b56, 2026-09-02).
 
 #### Browser backend (CDP)
 
@@ -80,7 +89,12 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - cu-arena: measures the a11y snapshot cost (chars/4) against the screenshot cost (width*height/750) for the same UI state on the same driver. Adds the `computeruse bench` CLI with `bench audit` (cu-meter report) and `bench web URL`, and a live step in the browser CI job (6df365e, 2026-08-29).
 - cu-arena also scores the re-observe diff cost for every round after the first (9d8d4ae, 2026-08-29).
 - `computeruse bench desktop [--app] [--scope] [--rounds] [--json]` costs every snapshot view (full, interactive) of a running app against the screenshot captured at the same moment, plus the re-observe diff per view, with the same estimator as `bench web`; `bench web` gains `--mode` and `--json`; `snapshot` gains `--mode`, `--budget`, and `--bounds`. A capture the backend cannot deliver is reported as such, never zeroed into a ratio. `docs/observation-cost.md` records the method and the live numbers (example.com 95/72 vs 473 tokens for full/interactive vs screenshot; Hacker News 4,509/758 vs 1,301; re-observe diff 10 tokens on both; Finder not measured, no Accessibility grant in that shell) (910a530, 2026-09-02).
-- cu-arena head-to-head: `computeruse bench h2h` runs a 12-task browser suite (`computeruse/arena_tasks/`, instrumented pages that record clicks, inputs, and a state digest) through three loops with the same planner: the reference agent loop on accessibility refs, a screenshot-only coordinate loop executed by the Anthropic computer-use adapter, and the same loop with snap-to-ref. It scores completion, planner turns, actions, misclicks (counted by the page), wasted actions, tokens, reported and estimated cost, and wall time, writes markdown and JSON reports, and serves the fixtures over local HTTP so iframes work. `ClaudeCLIProvider` gains `view_images` (the newest screenshot written to a temporary PNG, Read tool only), runs with `--strict-mcp-config`, and reports the CLI's per-call cost in `Usage.cost_usd`. `docs/benchmark.md` describes the method; no dated result is recorded in the repo (6ee97b9, 2026-09-02).
+- cu-arena head-to-head: `computeruse bench h2h` runs a browser task suite (12 tasks at first, 13 with `dropdown_custom`) (`computeruse/arena_tasks/`, instrumented pages that record clicks, inputs, and a state digest) through three loops with the same planner: the reference agent loop on accessibility refs, a screenshot-only coordinate loop executed by the Anthropic computer-use adapter, and the same loop with snap-to-ref. It scores completion, planner turns, actions, misclicks (counted by the page), wasted actions, tokens, reported and estimated cost, and wall time, writes markdown and JSON reports, and serves the fixtures over local HTTP so iframes work. `ClaudeCLIProvider` gains `view_images` (the newest screenshot written to a temporary PNG, Read tool only), runs with `--strict-mcp-config`, and reports the CLI's per-call cost in `Usage.cost_usd`. `docs/benchmark.md` describes the method (6ee97b9, 2026-09-02).
+- Head-to-head comparability: task manifests can flag a mode as not comparable (the native `select` popup is not painted in headless Chrome), the report shows completion rates with and without flagged tasks, `--render` re-renders saved `h2h.json` files with the current manifests, and the `dropdown_custom` task (a DOM-rendered listbox) gives the dropdown a fair three-way comparison (7078709, 2026-09-02).
+- The head-to-head state digest counts focus changes, so a click that only focuses a field is no longer scored as wasted (9e27bdc, 2026-09-02).
+- Both head-to-head loops receive the same approving confirmation callback, so the destructive-label gate cannot decide the comparison (a ref click on a button titled Delete trips it; a coordinate click carries no title) (7618d05, 2026-09-02).
+- The live `scroll_to_find` check gives the loop enough scroll steps to reach a list item 3,200 px down (d11d407, 2026-09-02).
+- `docs/benchmarks/h2h-2026-09-02.md` and `.json`: the first dated head-to-head result. One planner (`claude-fable-5-1` through the Claude Code CLI), 13 tasks, one round: refs 13/13 with 0 misclicks at $7.04 reported cost; pixels 7/13 with 27 misclicks at $11.74; pixels+snap 6/13 with 31 misclicks at $12.07; on the 12 comparable tasks 12/12 vs 7/12; pixels won `search_filter`. Superseded pre-fix rows are kept alongside (35ac0f6, 2026-09-02).
 
 ### Changed
 
@@ -88,6 +102,9 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - `server.py` no longer imports pyobjc at module import, so `build_server()` runs on Windows; the Windows CI job gained a build smoke step (cbf7904, 2026-07-13).
 - Simplification pass over the browser driver, arena, and Runtime: duplicate code removed and fewer CDP round-trips per operation (2bdce2d, 2026-09-01).
 - One shared `observe.rematch_ref` handles ref re-resolution for the macOS, Linux, and browser drivers, and the `app`, `window`, and `clipboard` tools route through the driver. `window raise` still calls `NSRunningApplication` directly and is macOS-only code (bcce4fa, 2026-09-01).
+- `computeruse snapshot` resolves its backend through `drivers.get_driver()` like `run-once` and `mcp`, so it works on every OS and honours `COMPUTERUSE_DRIVER`; `doctor` help text names the per-platform checks (5f7766a, 2026-09-02).
+- `window raise` runs through the new `Driver.window_owner` / `raise_window` seam: macOS behaviour unchanged, Linux raises by X window id via `_NET_ACTIVE_WINDOW`, browser and Windows answer a structured `unsupported` (efd9d81, 2026-09-02).
+- `scroll_to_find` anchors its wheel on the largest list, table, or outline container below the window rather than the window itself; the browser backend exposes an overflow list as `AXList`, so the previous anchor scrolled the page (d6c19d9, 2026-09-02).
 
 ### Fixed
 
@@ -97,6 +114,12 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - CLI description, package and server module docstrings, and the MCP `_INSTRUCTIONS` no longer describe a macOS-only 12-tool server; they describe the cross-platform surface without a hard-coded count. The adapter examples printed `Result.error` and `Result.text` together, which rendered `app_not_found: app_not_found: ...`; they print the text alone, with a test pinning that the code appears exactly once (b4ece8a, 2026-09-02).
 - `Runtime.click(x, y)` with no `display_id` filled it from `Quartz.CGMainDisplayID()` unconditionally, so it raised `NameError` on Linux and would have on Windows (found on a real Ubuntu desktop, `docs/box-testbed.md`). The `Driver` protocol gains `main_display_id()`: macOS returns `CGMainDisplayID`, the Linux, Windows, and browser drivers return 0 (the id their `primary_geometry` stamps on snapshots and screenshots). Hermetic tests cover the seam and every backend (838165d, 2026-09-02).
 - Linux coordinate input: `_linux_input.click`/`drag`/`scroll` positioned the pointer with `Display.warp_pointer(x, y)`, which X treats as a move relative to the current pointer, so clicks landed at pointer + (x, y); they now queue an absolute XTEST `MotionNotify` before the button events. `_linux_system._geometry_on_root` translated the root origin into window coordinates, so the act-time hit-test never matched a window away from the origin and every `Runtime.click` ended in `focus_changed`; it now translates the window origin into root coordinates, which also fixes window-list bounds. Both bugs were invisible to the Xvfb CI job (every window and the pointer sit at 0,0 there) and were found on a real Budgie/Xorg desktop (`docs/box-testbed.md`). Adds fake-Xlib synthetic tests (`tests/test_linux_synthetic.py`, `tests/test_linux_system_synthetic.py`), two live tests that park the pointer off-origin before a coordinate click, and `scripts/box/verify-pointer.sh` with `pointer_probe.py` (6240b56, 2026-09-02).
+- Pre-gate refusals are audited: a ref that fails to resolve (`stale_ref`) and `set_value` on a secure field (`secure_field`) now write an audit row with `decision: null`, with the ref and role only and never the value (efd9d81, 2026-09-02).
+- Pointer actions refuse secure fields on every driver: a resolved secure element, or a raw point inside one in the latest snapshot, for `click`, `drag` (either endpoint), and wheel `scroll`. Previously a ref click on a password field fell back to a raw pointer click on the browser and Linux backends (efd9d81, 2026-09-02).
+- Browser wheel scroll direction was inverted: `drivers/browser.py` negated `dy` the way the macOS driver does, but CDP already uses the tool contract's sign, so every scroll down at the top of a list was a no-op. Found by the head-to-head `long_list` task, which all three modes failed before the fix (b7cd8db, 2026-09-02; test pinned in b31f477, 2026-09-02).
+- `computeruse.act` imports on Linux and Windows (the CGEvent tables are built only when Quartz imported), so the full suite collects and passes off macOS: `tests/test_server.py` builds its Runtime on the macOS driver seam it mocks, doctor assertions are platform-aware, Linux live tests skip without a display, and `h2h.load_tasks` ignores dot-prefixed sidecar files such as AppleDouble `._*.json` (00d2ea2, 2026-09-02).
+- The suite passes on Windows runners: `doctor`'s first check is `uiautomation_import` there, and an autouse conftest shim makes `Path.home()` honour `HOME` on win32 so tests that redirect `HOME` to a temp dir no longer read and write the runner's real `~/.computeruse` (0c5eba7, 2026-09-02).
+- `scripts/box/bootstrap.sh` installs `dbus-x11`; without `dbus-launch` the `org.a11y.Status` flip cannot autolaunch a session bus after a box resume (9ff0167, 2026-09-02).
 
 ### Performance
 
@@ -110,6 +133,7 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 
 - First GitHub Actions workflow: cross-platform install plus a Windows validation job on `windows-latest` (driver selection smoke, core tests) next to the macOS job (2a02599, 2026-07-13).
 - The Linux job (apt AT-SPI2, GTK, and Xvfb packages; live GTK3 test under `xvfb-run` and `dbus-run-session`) arrived with 445dd60, and the live cu-arena step with 6df365e; both are listed under Added.
+- Every runner runs the full hermetic suite with `pytest -q -rs`; the Linux live step runs under the openbox window manager so the real-desktop coordinate tests execute in CI; the browser job adds live adapter, agent-loop, head-to-head, and `bench desktop` steps; a `package` job builds with uv, runs the console script through uvx, and checks that the sdist excludes brand media (`[tool.hatch.build.targets.sdist]`, 4.6 MB to 454 KB); `concurrency` cancels superseded runs and the token is read-only. `docs/ci.md` describes each job (eace75c, 2026-09-02).
 
 ### Docs
 
@@ -123,7 +147,10 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - Hero demo GIF (`docs/hero-demo.gif`) and a measured-results section in the README (bad6136, 2026-07-13).
 - `docs/linux-port.md`: Wayland support matrix (a11y and capture native; coordinate input gated) (c7ebfa7, 2026-08-29).
 - `computeruse/drivers/linux.py`: the `_grab_wayland` docstring now says the grim capture path was exercised manually under headless sway (2026-08-29) and has no automated test, instead of "verified live" (42491a7, 2026-09-02).
+- README rewritten from an evidence-cited fact check of the code (four drivers, the 16+2 tool surface, a platform matrix with the exact gates, measured numbers with provenance, embedding shapes, safety model, architecture), plus CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, CITATION.cff, issue forms, a PR template, dependabot, CODEOWNERS, `.editorconfig`, a docs index, brand assets under `docs/assets/`, pyproject metadata, and corrections to stale statements in the existing docs and CI comments (b59cc09, 2026-09-02).
+- `docs/box-testbed.md`: the real-desktop Linux run, the four bugs Xvfb hid, the whole-suite desktop run, `doctor` 8 of 8, and the keyboard round-trip; `scripts/box/README.md` syncs with `COPYFILE_DISABLE=1` so macOS tar ships no AppleDouble sidecars (fada77e, 2f9fa73, 8e431e3, 2026-09-02).
 
-Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. No tag exists, and the 0.0.1 in `pyproject.toml` has not been published anywhere.
+Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag; nothing is published on PyPI.
 
-[Unreleased]: https://github.com/Perception-Dynamics-Inc/computerUse/commits/computeruse-mvp
+[Unreleased]: https://github.com/Perception-Dynamics-Inc/computerUse/compare/v0.1.0...computeruse-mvp
+[0.1.0]: https://github.com/Perception-Dynamics-Inc/computerUse/releases/tag/v0.1.0

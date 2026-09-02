@@ -62,7 +62,7 @@ The scripted replays still execute real actions (a click at 100,100, typing, Ret
 
 ## The same examples on the other backends
 
-`server.Runtime()` takes its driver from `drivers.get_driver()`, which reads `COMPUTERUSE_DRIVER` (`macos`, `windows`, `linux`, `browser`) and falls back to the current OS (`computeruse/drivers/__init__.py:40`). `computeruse mcp` builds its `Runtime` the same way, so both integration shapes follow the variable. Two things do not: `web_a11y_demo.py` (it calls the macOS `observe.snapshot` directly) and the `computeruse snapshot` CLI subcommand (same direct call in `_cmd_snapshot`, `computeruse/cli.py:377`).
+`server.Runtime()` takes its driver from `drivers.get_driver()`, which reads `COMPUTERUSE_DRIVER` (`macos`, `windows`, `linux`, `browser`) and falls back to the current OS (`computeruse/drivers/__init__.py:40`). `computeruse mcp` builds its `Runtime` the same way, so both integration shapes follow the variable. One thing does not: `web_a11y_demo.py`, which calls the macOS `observe.snapshot` directly. The `computeruse snapshot` subcommand goes through `get_driver()` as well.
 
 The `app` argument and the permission-grant key are platform identifiers, so the hard-coded `com.apple.finder` has to change per backend:
 
@@ -113,12 +113,12 @@ export COMPUTERUSE_DRIVER=linux                   # optional; linux is the defau
 python examples/inprocess_python.py               # with APP set to e.g. "gedit"
 ```
 
-CI takes the distro route instead of building PyGObject: `apt-get install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi xvfb dbus dbus-x11 xclip`, then a venv created with `--system-site-packages` and `pip install -e ".[dev]" python-xlib` (the "install AT-SPI2 / GTK / X11 system deps" and "venv with system gi" steps in `.github/workflows/ci.yml`).
+CI takes the distro route instead of building PyGObject: `apt-get install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi xvfb dbus dbus-x11 openbox xdotool x11-utils xclip`, then a venv created with `--system-site-packages` and `pip install -e ".[dev,browser]" python-xlib` (the "install AT-SPI2 / GTK / X11 system deps" and "venv with system gi" steps in `.github/workflows/ci.yml`).
 
 - No per-app grant. The requirement is a reachable AT-SPI2 bus: `ensure_trusted()` flips `org.a11y.Status` on the session bus and probes the desktop; missing bindings or an unreachable bus return `permission_denied_accessibility` with the apt and `gsettings` hints (`computeruse/drivers/linux.py:88-115`).
 - Clipboard needs one of `xclip`, `xsel`, or `wl-clipboard`. Headless hosts run under `xvfb-run` plus `dbus-run-session`, the way the "linux backend (live AT-SPI2)" step in `.github/workflows/ci.yml` does.
 - Wayland (`WAYLAND_DISPLAY` set, no `DISPLAY`): snapshot, `find`, ref press, `set_value`, and typing into a field focused through the driver work over D-Bus; coordinate `click`, `drag`, `scroll`, and `key_chord` return `unsupported` with a hint to use ref-based actions (`computeruse/drivers/linux.py:48-63`). Screenshots there go through `grim`. The Wayland matrix in `docs/linux-port.md` has no test in this repo behind it.
-- Live in CI under Xvfb against a GTK3 window: snapshot, an accessibility press with an observable effect, and accessibility typing (`tests/test_linux_live.py`). Coordinate input, screenshots, windowing, and clipboard are implemented but not asserted live.
+- Live in CI under Xvfb with the openbox window manager against a GTK3 window: snapshot, an accessibility press with an observable effect, and accessibility typing (`tests/test_linux_live.py`), plus coordinate clicks, wheel scrolls, drags, key chords, XTEST typing including off-keymap Unicode, and the app, window, and clipboard tools (`tests/test_linux_desktop_live.py`). The same suites ran on a real Ubuntu desktop (`docs/box-testbed.md`). Screenshots are implemented and were checked by hand there, not asserted by a test.
 
 ## Your integration checklist (macOS)
 

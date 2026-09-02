@@ -3,8 +3,8 @@
 First real-desktop Linux run of computerUse on a [Box](https://box.ascii.dev)
 VM, on 2026-09-02. The value of this over the Xvfb CI job is a real window
 manager with real pointer and focus semantics, a real (non-headless) Chrome, and
-an Electron app. That combination surfaced two coordinate-input bugs that Xvfb
-hides. See [scripts/box/README.md](../scripts/box/README.md) for how to
+an Electron app. That combination surfaced four bugs that Xvfb hides (three in
+coordinate input, one in keyboard input), all fixed and re-verified below. See [scripts/box/README.md](../scripts/box/README.md) for how to
 reproduce.
 
 ## The machine

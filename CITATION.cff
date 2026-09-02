@@ -2,7 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata from this file."
 type: software
 title: computerUse
-version: 0.0.1
+version: 0.1.0
+date-released: 2026-09-02
 authors:
   - name: "Perception Dynamics, Inc."
 license: Apache-2.0
