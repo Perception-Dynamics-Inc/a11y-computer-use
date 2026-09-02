@@ -9,6 +9,7 @@ an assertion, so the benchmark stays honest.
 
 from __future__ import annotations
 
+import json
 import os
 import types
 
@@ -16,7 +17,10 @@ import pytest
 
 import computeruse.observe as _observe
 from computeruse import arena
-from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+from computeruse.schema import (
+    Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot,
+)
+from tests.conftest import HAS_AX, HAS_SCREEN
 
 
 def _png(width: int, height: int) -> bytes:
@@ -73,7 +77,7 @@ class _FakeDriver:
 
 def test_measure_observation_records_both_costs(monkeypatch) -> None:
     # Pin the a11y text length so the token math is exact, independent of render().
-    monkeypatch.setattr(_observe, "render_text", lambda snap: "y" * 400)
+    monkeypatch.setattr(_observe, "render_text", lambda snap, **kw: "y" * 400)
     d = _FakeDriver(elements=12, render_chars=400, png=_png(1600, 1200), scale=2.0)
     cost = arena.measure_observation(d, "TAB")
     assert cost.a11y_tokens == 100  # 400 chars / 4
@@ -84,7 +88,7 @@ def test_measure_observation_records_both_costs(monkeypatch) -> None:
 
 
 def test_run_web_task_navigates_and_measures_each_round(monkeypatch) -> None:
-    monkeypatch.setattr(_observe, "render_text", lambda snap: "z" * 40)
+    monkeypatch.setattr(_observe, "render_text", lambda snap, **kw: "z" * 40)
     d = _FakeDriver(elements=3, render_chars=40, png=_png(1280, 800))
     report = arena.run_web_task(d, "https://example.com", rounds=3)
     assert d.navigated == ["https://example.com"]
@@ -133,3 +137,140 @@ def test_live_arena_measures_real_costs() -> None:
     # both costs are real and positive; the ratio is reported, never asserted
     assert o.a11y_tokens > 0 and o.screenshot_tokens > 0 and o.element_count > 0
     print("\n" + arena.format_report(report))
+
+
+# --------------------------------------------------------------------------- #
+# desktop: every view of one snapshot against one screenshot
+# --------------------------------------------------------------------------- #
+def _mixed_snapshot(app: str, status: str = "Ready") -> Snapshot:
+    """A window with two buttons and three titled static texts (``status`` is
+    the value of one of them, so a second round can flip it)."""
+    def el(ref, role, title, value, bounds, **kw):
+        return Element(ref=ref, role=role, title=title, value=value, bounds=bounds,
+                       snapshot_id="s", parent="e1", path=("AXWindow", role), **kw)
+    els = (
+        Element(ref="e1", role="AXWindow", title="W", value=None, bounds=Bounds(0, 0, 0, 800, 600),
+                snapshot_id="s", path=("AXWindow",)),
+        el("e2", "AXButton", "Save", None, Bounds(0, 10, 10, 80, 30), clickable=True),
+        el("e3", "AXStaticText", "greeting",
+           "Welcome to the app. Your workspace synced 4 minutes ago and nothing needs attention.",
+           Bounds(0, 10, 50, 300, 20)),
+        el("e4", "AXStaticText", "status", status, Bounds(0, 10, 80, 300, 20)),
+        el("e5", "AXButton", "Cancel", None, Bounds(0, 100, 10, 80, 30), clickable=True),
+        el("e6", "AXStaticText", "footer",
+           "Copyright notice, version 1.2.3, build 4567, licensed under Apache-2.0 to you.",
+           Bounds(0, 10, 500, 300, 20)),
+    )
+    return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app=app, pid=1, created_at=0.0,
+                    displays=(Display(0, 800, 600, 1.0, True),), elements=els)
+
+
+class _ModesDriver:
+    """A Driver stand-in whose second snapshot flips one static label."""
+
+    def __init__(self, *, fail_shot: bool = False) -> None:
+        self._fail = fail_shot
+        self.calls = 0
+
+    def frontmost_app(self):
+        return "APP", None
+
+    def ensure_trusted(self) -> None:
+        pass
+
+    def snapshot(self, scope, app):
+        self.calls += 1
+        return _mixed_snapshot(app, status="Ready" if self.calls == 1 else "Saved")
+
+    def screenshot(self, display_id=None):
+        if self._fail:
+            raise ComputerUseError(ErrorCode.PERMISSION_DENIED_SCREEN, "no Screen Recording grant")
+        return types.SimpleNamespace(png=_png(1600, 1200), display=Display(0, 1600, 1200, 2.0, True))
+
+
+def test_run_desktop_task_costs_every_view_of_the_same_snapshot() -> None:
+    rep = arena.run_desktop_task(_ModesDriver(), rounds=2)  # app defaults to frontmost
+    assert rep.app == "APP" and rep.rounds == 2 and rep.element_count == 6
+    assert set(rep.modes) == {"full", "interactive"}
+    full, inter = rep.modes["full"], rep.modes["interactive"]
+    assert full.shown == 6 and inter.shown == 3  # root + the two buttons
+    assert inter.avg_tokens < full.avg_tokens
+    assert full.avg_tokens == arena.a11y_tokens(_observe.render_text(_mixed_snapshot("APP")))
+    assert rep.avg_screenshot_tokens == arena.image_tokens(800, 600)  # 1600x1200 at 2x
+    assert rep.ratio("interactive") > rep.ratio("full") > 0
+    # the label flip between rounds is a text change: the full diff lists it, the
+    # interactive diff folds it; both cost far less than a fresh observation
+    assert len(full.reobserve_tokens) == len(inter.reobserve_tokens) == 1
+    assert full.reobserve_tokens[0] < full.avg_tokens
+    assert inter.reobserve_tokens[0] <= full.reobserve_tokens[0]
+    data = rep.to_dict()
+    json.dumps(data)
+    assert data["modes"]["interactive"]["element_lines"] == 3
+    assert data["screenshot"]["error"] == "" and data["rounds"] == 2
+    out = arena.format_desktop_report(rep)
+    assert "a11y full" in out and "a11y interactive" in out
+    assert "re-observe diff" in out and "cheaper than a screenshot" in out
+
+
+def test_desktop_report_reports_missing_screenshot_honestly() -> None:
+    rep = arena.run_desktop_task(_ModesDriver(fail_shot=True), "APP", rounds=1)
+    assert rep.screenshot_error == "permission_denied_screen"
+    assert rep.avg_screenshot_tokens == 0 and rep.ratio("full") == 0.0
+    assert rep.modes["full"].avg_tokens > 0  # the a11y side is still measured
+    out = arena.format_desktop_report(rep)
+    assert "unavailable (permission_denied_screen)" in out and "no ratio" in out
+    assert "cheaper" not in out
+
+
+def test_run_web_task_passes_mode_through(monkeypatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(_observe, "render_text",
+                        lambda snap, **kw: seen.append(kw.get("mode")) or "q" * 8)
+    d = _FakeDriver(elements=2, render_chars=8, png=_png(800, 600))
+    rep = arena.run_web_task(d, "https://x", rounds=2, mode="interactive")
+    assert seen == ["interactive", "interactive"] and rep.mode == "interactive"
+    assert "interactive" in arena.format_report(rep)
+    assert rep.to_dict()["mode"] == "interactive"
+    assert rep.to_dict()["screenshot_error"] == ""
+
+
+def test_web_report_states_missing_screenshot(monkeypatch) -> None:
+    class _NoShot(_FakeDriver):
+        def screenshot(self, display_id=None):
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, "no capture here")
+    monkeypatch.setattr(_observe, "render_text", lambda snap, **kw: "q" * 8)
+    rep = arena.run_web_task(_NoShot(elements=2, render_chars=8, png=b""), "https://x", rounds=1)
+    assert rep.screenshot_error == "unsupported" and rep.ratio == 0.0
+    out = arena.format_report(rep)
+    assert "unavailable (unsupported)" in out and "cheaper" not in out
+
+
+def test_format_desktop_report_handles_empty() -> None:
+    assert "no observations" in arena.format_desktop_report(arena.DesktopReport(app="x"))
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_desktop_task_on_browser_costs_all_views() -> None:
+    from computeruse.drivers.browser import BrowserDriver
+
+    d = BrowserDriver(endpoint=_live_endpoint())
+    d.navigate("data:text/html,<h1>Title</h1><p>Some prose to fold</p><button>A</button>"
+               "<a href=x>link</a><input placeholder=Name>")
+    rep = arena.run_desktop_task(d, rounds=2)
+    d._reset()
+    full, inter = rep.modes["full"], rep.modes["interactive"]
+    assert rep.rounds == 2 and full.avg_tokens > 0 and inter.avg_tokens > 0
+    assert inter.avg_tokens <= full.avg_tokens and inter.shown <= full.shown
+    print("\n" + arena.format_desktop_report(rep))
+
+
+@pytest.mark.skipif(not (HAS_AX and HAS_SCREEN),
+                    reason="needs the Accessibility and Screen Recording grants")
+def test_live_desktop_task_on_finder_costs_all_views() -> None:
+    from computeruse.drivers import get_driver
+
+    rep = arena.run_desktop_task(get_driver("macos"), "com.apple.finder", rounds=2, scope=Scope.APP)
+    assert rep.modes["full"].avg_tokens > 0 and rep.modes["interactive"].avg_tokens > 0
+    print("\n" + arena.format_desktop_report(rep))
