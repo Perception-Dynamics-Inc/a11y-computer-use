@@ -84,3 +84,15 @@ def test_windows_backend_stubs_name_their_native_api() -> None:
     assert "DXGI" in str(ei.value)
     # the permission probe is a benign no-op (Windows uses integrity, not TCC)
     assert d.ensure_trusted() is None
+
+
+@pytest.mark.parametrize("cls", _BACKENDS)
+def test_backend_reports_a_main_display_id(cls) -> None:
+    """Raw x/y targets default to the driver's main display (the seam the
+    Runtime uses instead of Quartz), so every backend must answer with an int
+    that matches the display id it stamps on its own geometry."""
+    d = cls()
+    main = d.main_display_id()
+    assert isinstance(main, int)
+    if cls in (WindowsDriver, LinuxDriver):
+        assert main == 0  # single-display backends: id 0, as in primary_geometry()

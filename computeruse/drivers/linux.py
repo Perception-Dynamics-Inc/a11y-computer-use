@@ -306,6 +306,10 @@ class LinuxDriver:
             display_id=base.display_id, width=w, height=h, scale=base.scale, is_main=True)
         return capture.Screenshot(png=png, display=display)
 
+    def main_display_id(self) -> int:
+        # One display, id 0: the single X screen `_atspi.primary_geometry()` reports.
+        return 0
+
     def zoom_region(self, region: Bounds) -> bytes:
         import io
 

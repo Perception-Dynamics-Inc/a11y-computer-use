@@ -408,6 +408,10 @@ class BrowserDriver:
         display = self._metrics_geometry()[0].display
         return Screenshot(png=base64.b64decode(data), display=display)
 
+    def main_display_id(self) -> int:
+        # One display, id 0: the bound tab's document, see `_display()`.
+        return 0
+
     def zoom_region(self, region: Bounds) -> bytes:
         data = self._connect().call("Page.captureScreenshot", {
             "format": "png", "captureBeyondViewport": True,

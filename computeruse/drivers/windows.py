@@ -180,6 +180,10 @@ class WindowsDriver:
     def screenshot(self, display_id: int | None = None) -> object:
         raise _todo("DXGI Desktop Duplication (BitBlt/PrintWindow fallback)")
 
+    def main_display_id(self) -> int:
+        # One display, id 0: the primary monitor `_uia.primary_geometry()` reports.
+        return 0
+
     def zoom_region(self, region: Bounds) -> bytes:
         raise _todo("crop the DXGI frame")
 
