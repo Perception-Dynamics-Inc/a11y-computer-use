@@ -13,7 +13,7 @@ The Phase-0 MVP is evidence that changes the question from *"where's the Rust/Sw
 
 ## The evidence: the Python MVP already does all of it
 
-The MVP is Python + PyObjC and is **live-verified end-to-end** (see COM-9, COM-5): observe/act/safety/audit, the 12-tool MCP server, the CLI, the a11y hero workflow on Calendar, and the **vision fallback on Telegram** — including screen capture.
+The MVP is Python + PyObjC and is **live-verified end-to-end** (see COM-9, COM-5): observe/act/safety/audit, the MCP server (12 tools at the time; 16 today, plus `console` and `network` on the browser backend), the CLI, the a11y hero workflow on Calendar, and the **vision fallback on Telegram**, including screen capture.
 
 Crucially for this ticket:
 

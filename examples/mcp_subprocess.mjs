@@ -1,6 +1,8 @@
 // MCP-subprocess embed (non-Python host): spawn `computeruse mcp` and drive it
 // over stdio with the Model Context Protocol. This is the integration shape for
-// ANY language — Node is shown here, but Go / Rust / Swift / etc. are identical.
+// ANY language. Node is shown here; any language with an MCP stdio client
+// follows the same shape, though only the Python client is exercised in this
+// repo (tests/e2e/test_mcp_stdio.py).
 //
 // The child runs under YOUR app: TCC/Gatekeeper attribute to the responsible
 // process (your signed app), so computerUse inherits your grants. You ship no
@@ -27,18 +29,18 @@ await client.connect(transport);
 const { tools } = await client.listTools();
 console.log("tools:", tools.map((t) => t.name).join(", "));
 
-// 2) observe — a pruned accessibility tree with element refs, no pixels
+// 2) observe: a pruned accessibility tree with element refs, no pixels
 const snap = await client.callTool({
   name: "desktop_snapshot",
   arguments: { app: "com.apple.finder", scope: "window" },
 });
 console.log(snap.content[0].text);
 
-// 3) act — target a ref from the tree (requires a CLICK/FULL grant for the app)
+// 3) act: target a ref from the tree (requires a CLICK/FULL grant for the app)
 // await client.callTool({ name: "click", arguments: { ref: "e14" } });
 // await client.callTool({ name: "type",  arguments: { text: "hello world" } });
 //
 // If desktop_snapshot returns "no interactive elements", the app is custom-drawn
-// (e.g. Telegram) — fall back to the `screenshot` tool + coordinate clicks.
+// (e.g. Telegram), fall back to the `screenshot` tool + coordinate clicks.
 
 await client.close();

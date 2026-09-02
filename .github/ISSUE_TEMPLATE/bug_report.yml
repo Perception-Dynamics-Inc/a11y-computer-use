@@ -1,0 +1,188 @@
+name: Bug report
+description: A tool call, CLI command or Runtime method did the wrong thing. Include the doctor report, the snapshot excerpt and the audit line.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two things before you start.
+
+        Redact secrets. The audit log keeps typed text and key chords in the clear unless the field was secure; clipboard writes and secure fields are already written as `[REDACTED]`. Read every paste before you submit.
+
+        Known gaps are not bugs. Raw coordinate input (click, drag, scroll, key chords) returns `unsupported` on native Wayland by design; ref-based press, `set_value` and typing into a focused field still work there (docs/linux-port.md). A `NotImplementedError` raised from `computeruse/drivers/windows.py` names the native API that primitive will use and marks a known gap. `window` supports `list` and `raise` only, and `app quit` is not exposed; both raise `ValueError`. For any of these, open a feature request instead.
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: The driver the server ran on. The default is the current OS; `COMPUTERUSE_DRIVER=browser` selects the browser backend explicitly.
+      options:
+        - macOS (AXUIElement, CGEvent)
+        - Windows (UI Automation, SendInput)
+        - Linux X11 or XWayland (AT-SPI2, XTEST)
+        - Linux native Wayland (AT-SPI2 only, WAYLAND_DISPLAY set and no DISPLAY)
+        - Browser (Chromium over CDP)
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: OS and version
+      description: For the browser backend, also give the Chromium version and whether it ran headless.
+      placeholder: macOS 15.5 / Windows 11 / Ubuntu 24.04 with GNOME on Wayland / Chrome 128 headless
+    validations:
+      required: true
+
+  - type: input
+    id: app
+    attributes:
+      label: App under control
+      description: The identifier the permission gate keys on. macOS uses the bundle id, Windows the process image name, Linux the process comm name, the browser backend the CDP tab id (paste the page URL as well).
+      placeholder: com.apple.finder / notepad.exe / gedit / https://example.com
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool or command
+      description: The MCP tool, CLI subcommand or Python entry point that misbehaved.
+      options:
+        - desktop_snapshot
+        - find
+        - screenshot
+        - zoom
+        - click
+        - type
+        - key
+        - scroll
+        - drag
+        - wait_for
+        - act
+        - set_value
+        - scroll_to_find
+        - app
+        - window
+        - clipboard
+        - console (browser backend only)
+        - network (browser backend only)
+        - computeruse mcp (server startup or handshake)
+        - computeruse doctor
+        - computeruse snapshot
+        - computeruse run-once
+        - computeruse bench
+        - computeruse agent (the reference agent loop)
+        - Python API (server.Runtime, safety, drivers)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: error_code
+    attributes:
+      label: Error code
+      description: >-
+        The code at the start of the error string, if there was one. Structured errors arrive as
+        `<code>: <message> | detail: {...} | hint: ...`; safety refusals as `<verdict>: <reason>`.
+      options:
+        - stale_ref
+        - permission_denied_accessibility
+        - permission_denied_screen
+        - secure_field
+        - focus_changed
+        - app_not_found
+        - timeout
+        - confirmation_declined
+        - unsupported
+        - needs_permission (a safety verdict, the app has no grant)
+        - deny (a safety verdict, deny list or insufficient tier)
+        - NotImplementedError
+        - ValueError
+        - Another traceback (paste it below)
+        - No error, the behaviour was wrong
+
+  - type: input
+    id: version
+    attributes:
+      label: computeruse version and commit
+      description: computeruse is not published on PyPI, so name the commit you installed from (`git rev-parse --short HEAD`) and the extras you installed.
+      placeholder: 0.0.1 at <short sha>, pip install -e '.[dev,browser]'
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of computeruse doctor
+      description: Run `computeruse doctor` (from a clone, `.venv/bin/computeruse doctor`) in the same host context that runs the server. On macOS the grants attach to the responsible app, and the report names it. Paste the whole output. If doctor itself fails on your platform, paste that traceback instead.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: snapshot
+    attributes:
+      label: Snapshot excerpt
+      description: >-
+        The relevant lines of the `desktop_snapshot` or `find` output. Keep the header line
+        `[snap-N] <app> (<scope>)` and the element lines around the target ref. If the snapshot ended
+        with a line beginning `note: no interactive elements were found`, use the app compatibility
+        template instead.
+      render: text
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The tool calls in order, with their arguments. For `act`, paste the steps list. For the CLI, paste the exact command line.
+      placeholder: |
+        1. desktop_snapshot(app="com.apple.TextEdit", scope="window")
+        2. click(ref="e7", verify=true)
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Paste the full error string or traceback, and the `effect:` diff if you used `verify=true`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: audit
+    attributes:
+      label: Audit log entry
+      description: The JSONL line(s) for the failing action. The log is at `~/.computeruse/audit/<YYYY-MM-DD>.jsonl`, one file per UTC day, and every gated call is written, including refusals. Redact `params.text` and `params.chord` if they contain anything private.
+      render: json
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment variables and host
+      description: Any `COMPUTERUSE_*` variables in effect and the MCP host that started the server (Claude Code via `claude mcp add`, a Node client, an in-process `server.Runtime`, `computeruse run-once`, `computeruse agent`). `COMPUTERUSE_AX_CLICKS` and `COMPUTERUSE_CONFIRM` are read once when `computeruse.server` is imported, so they must be set in the host process before it spawns the server.
+      placeholder: |
+        COMPUTERUSE_DRIVER=browser
+        COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222
+        host = Claude Code
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the open and closed issues for this problem.
+          required: true
+        - label: The pastes above contain no passwords, tokens or private text.
+          required: true
+        - label: I reproduced this on the current head of the branch I installed from.

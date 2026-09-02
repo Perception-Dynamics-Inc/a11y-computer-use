@@ -1,0 +1,78 @@
+name: Feature request
+description: Propose a new tool, a driver primitive, a safety behavior or an integration surface.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        computerUse is an embeddable Driver plus an MCP surface: pruned accessibility snapshots, element refs, and a safety layer. PLAN.md section 4 lists what the project deliberately does not build and section 9 lists the roadmap phases. Skim both first so the proposal lands in the right place.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to make an agent do that computerUse cannot do today? Name the app and the platform.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Pick every part this touches.
+      multiple: true
+      options:
+        - Observation (desktop_snapshot, find, diff mode, refs and re-resolution)
+        - Action (click, type, key, scroll, drag, act, set_value, scroll_to_find, wait_for)
+        - Vision path (screenshot, zoom, Set-of-Mark)
+        - Safety (tiers, grants, confirmation gate, audit log, secure fields)
+        - macOS driver
+        - Windows driver
+        - Linux driver (AT-SPI2, X11, Wayland)
+        - Browser driver (CDP, console, network)
+        - MCP surface and host integration
+        - CLI (mcp, doctor, snapshot, run-once, bench, agent)
+        - Python API (server.Runtime, safety, drivers)
+        - Docs and examples
+        - Packaging and release
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: For a new MCP tool, give the signature and the safety tier you expect it to gate at (`read`, `click` or `full`). For a driver primitive, name the native API on each backend you know. For a safety change, say what the audit entry should record.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workarounds
+    attributes:
+      label: Workarounds you tried
+      description: Which existing tools you combined (for example `find` followed by `act`, or `screenshot` followed by a coordinate `click`) and where they fell short.
+
+  - type: dropdown
+    id: backends
+    attributes:
+      label: Backends this should cover
+      multiple: true
+      options:
+        - macOS
+        - Windows
+        - Linux (X11 or XWayland)
+        - Linux (native Wayland)
+        - Browser (CDP)
+        - Platform-free core (observe, act, safety, server)
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked PLAN.md and the open issues for this idea.
+          required: true
+        - label: I can help implement it.
+        - label: I can test it on the backends selected above.
