@@ -568,7 +568,8 @@ def test_live_scroll_to_find_reaches_an_item_deep_in_an_overflow_list(tmp_path) 
             store.set_tier(tab, safety.Tier.FULL)
             rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=d)
             assert "Reykjavik" not in rt.desktop_snapshot(tab)
-            found = rt.scroll_to_find(tab, text="Reykjavik", role="button", max_scrolls=12)
+            # Reykjavik sits about 3,200 px down; each scroll step is 5 wheel lines (200 px)
+            found = rt.scroll_to_find(tab, text="Reykjavik", role="button", max_scrolls=20)
             assert found.startswith("found after"), found
             ref = re.search(r"(e\d+) button \"Reykjavik\"", found).group(1)
             top = sess.call("Runtime.evaluate", {"expression": "document.getElementById('cities').scrollTop",
