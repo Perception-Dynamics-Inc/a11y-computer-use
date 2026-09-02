@@ -72,7 +72,20 @@ def live(adapter: OpenAIComputerAdapter, task: str) -> None:
             return
         outputs = []
         for call in calls:
-            output_item, results = adapter.handle_call(call.model_dump())
+            acknowledge = False
+            pending = getattr(call, "pending_safety_checks", None) or []
+            if pending:
+                # The model flagged this call (malicious_instructions, irrelevant_domain,
+                # sensitive_domain). The adapter runs nothing until the host acknowledges;
+                # here a human decides, and declining ends the loop.
+                for check in pending:
+                    print(f"safety check {getattr(check, 'code', '?')}: {getattr(check, 'message', '')}")
+                if input("run this flagged call? [y/N] ").strip().lower() != "y":
+                    print("stopped: pending safety checks were not acknowledged")
+                    return
+                acknowledge = True
+            output_item, results = adapter.handle_call(
+                call.model_dump(), acknowledge_safety_checks=acknowledge)
             for result in results:
                 print(f"{result.action:12} -> {'ok: ' + result.text if result.ok else result.text}")
             outputs.append(output_item)

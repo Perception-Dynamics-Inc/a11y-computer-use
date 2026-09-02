@@ -92,3 +92,36 @@ def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
     monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {300: "gedit", 400: "dialog"}.get(pid))
     assert _linux_system.app_at_point_id(350, 250) == "dialog"  # inside both: topmost wins
     assert _linux_system.app_at_point_id(150, 150) == "gedit"  # only the lower window
+
+
+def test_pids_matching_matches_the_owner_comm_but_never_a_window_title(monkeypatch) -> None:
+    """find_root ranks a PID match like a name match and takes the ACTIVE frame, so a
+    Chrome tab titled "gedit - Google Search" must not put Chrome's PID in gedit's
+    set, or Runtime.snapshot("gedit") would return Chrome's tree under gedit's grant.
+    The title -> comm mapping lives one layer up, in resolve_app."""
+
+    class _TitledWin(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 800, 600, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    editor = _TitledWin(0x50, pid=1, title="doc - gedit")
+    chrome = _TitledWin(0x60, pid=2, title="gedit - Google Search - Google Chrome")
+    root = _FakeXRoot([editor, chrome])
+    by_id = {w.id: w for w in (editor, chrome)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {1: "gedit", 2: "chrome"}.get(pid))
+    assert _linux_system.pids_matching("gedit") == {1}
+    assert _linux_system.pids_matching("chrome") == {2}
+    assert _linux_system.pids_matching("") == set()
+    assert _linux_system.resolve_app("Google Search") == "chrome"  # titles resolve here, by design

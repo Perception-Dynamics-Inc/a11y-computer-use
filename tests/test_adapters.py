@@ -11,6 +11,7 @@ transport. A live headless-Chromium check runs only when a CDP endpoint is up.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import io
 import json
 import os
@@ -259,12 +260,40 @@ def test_snap_ignores_disabled_elements(anthropic, fake) -> None:
     assert fake.calls["click"][0][0] == Point(1, 1300, 830)
 
 
-def test_snap_keeps_button_and_count_semantics(anthropic, fake) -> None:
+def test_only_a_plain_left_click_snaps(anthropic, fake) -> None:
+    # button, count and modifiers carry pointer semantics (context menu, word or
+    # paragraph selection at the pointer): the model's exact point is kept and no
+    # snapshot is taken for the click.
     r = anthropic.handle({"action": "double_click", "coordinate": [160, 104]})
-    assert r.ok and r.snapped_ref == "e3"
-    # a double click is not an AX press: the Runtime clicks the resolved element
-    target, button, count, _ = fake.calls["click"][0]
-    assert target.ref == "e3" and count == 2 and fake.calls["press"] == []
+    assert r.ok and r.snapped_ref is None
+    assert fake.calls["click"][0] == (Point(1, 200, 130), "left", 2, ())
+    r = anthropic.handle({"action": "right_click", "coordinate": [160, 104]})
+    assert r.ok and r.snapped_ref is None and fake.calls["click"][1][:2] == (Point(1, 200, 130), "right")
+    r = anthropic.handle({"action": "left_click", "coordinate": [160, 104], "text": "shift"})
+    assert r.ok and r.snapped_ref is None and fake.calls["click"][2][3] == ("shift",)
+    assert fake.calls["press"] == [] and fake.snapshots == 0
+
+
+def test_clicks_inside_a_populated_field_or_a_slider_keep_the_point(runtime, fake) -> None:
+    a = AnthropicComputerAdapter(runtime, app=APP)
+    # an EMPTY field still snaps (coordinate-free focus-then-type stays available)
+    assert a.handle({"action": "left_click", "coordinate": [160, 260]}).snapped_ref == "e4"
+    assert fake.calls["press"] == ["e4"]
+    # the same field with content: the point is a caret position, an AX focus
+    # would select-all and a following type would replace what the model meant to append to
+    base = _snapshot()
+    slider = Element("e7", "AXSlider", "Volume", "50", Bounds(1, 600, 100, 300, 20), base.snapshot_id,
+                     parent="e1", path=("AXWindow", "AXSlider"), clickable=True)
+    populated = dataclasses.replace(base, elements=tuple(
+        dataclasses.replace(e, value="Alice") if e.ref == "e4" else e for e in base.elements) + (slider,))
+    fake.snapshot = lambda scope, app: populated
+    # (380, 260) image -> (475, 325) physical: near the right end of the Name field
+    r = a.handle({"action": "left_click", "coordinate": [380, 260]})
+    assert r.ok and r.snapped_ref is None and fake.calls["click"][0][0] == Point(1, 475, 325)
+    # a slider thumb: the position IS the value
+    r = a.handle({"action": "left_click", "coordinate": [600, 88]})
+    assert r.ok and r.snapped_ref is None and fake.calls["click"][1][0] == Point(1, 750, 110)
+    assert fake.calls["press"] == ["e4"]  # no further AX presses
 
 
 def test_snap_disabled_uses_raw_coordinates(runtime, fake) -> None:
@@ -272,6 +301,50 @@ def test_snap_disabled_uses_raw_coordinates(runtime, fake) -> None:
     r = a.handle({"action": "left_click", "coordinate": [160, 104]})
     assert r.ok and r.snapped_ref is None and fake.calls["press"] == []
     assert fake.snapshots == 0  # no snapshot is taken when snapping is off
+
+
+def test_click_does_not_snap_against_a_stale_snapshot_when_the_refresh_fails(tmp_path, fake, monkeypatch) -> None:
+    """app=None gates against the frontmost app. When an ungranted dialog becomes
+    frontmost the refresh is refused; the Editor's old snapshot must not redirect
+    the click into an AX press on the Editor's button hidden under the dialog."""
+    fake.resolves_apps = False  # OS-driver path: module-level frontmost / hit-test
+    front = {"app": APP}
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: front["app"])
+    monkeypatch.setattr(server, "_running_app", lambda ident: (None, ident))
+    monkeypatch.setattr(server, "_app_at_point", lambda point: APP)
+    store = safety.PermissionStore(tmp_path / "perm.json")
+    store.set_tier(APP, safety.Tier.FULL)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=fake)
+    a = AnthropicComputerAdapter(rt, app=None)
+    assert a.handle({"action": "left_click", "coordinate": [160, 104]}).snapped_ref == "e3"
+    front["app"] = "com.example.Dialog"  # ungranted app now frontmost; the refresh is refused
+    r = a.handle({"action": "left_click", "coordinate": [160, 104]})
+    assert fake.snapshots == 1 and rt._current.snapshot_id == "snap-1"  # still the Editor's tree
+    assert r.snapped_ref is None and fake.calls["press"] == ["e3"]  # no second AX press
+    assert r.error == "refused"  # the raw coordinate click is gated against the frontmost app
+    # Set-of-Mark labels are likewise only drawn from a fresh tree: an adapter bound
+    # to an ungranted app cannot refresh, so no labels from the Editor's stale tree
+    front["app"] = APP  # screenshots gate against the frontmost app again
+    marked = AnthropicComputerAdapter(rt, app="com.example.Other", marks=True).handle({"action": "screenshot"})
+    assert marked.ok and fake.snapshots == 1 and rt._current.snapshot_id == "snap-1"
+    plain = AnthropicComputerAdapter(rt, app="com.example.Other").handle({"action": "screenshot"})
+    assert marked.png == plain.png
+
+
+def test_screenshot_mapping_is_normalised_to_the_display_not_the_png(runtime, fake) -> None:
+    """A driver whose PNG is larger than its Display (a DPR-2 browser capture) must
+    not shift every click by that ratio: the coordinate contract is the Display,
+    which is what the Runtime's screenshot text tells the model to multiply by."""
+    fake.screenshot = lambda display_id=None: capture.Screenshot(png=_png(3200, 2000), display=DISPLAY)
+    a = AnthropicComputerAdapter(runtime, app=APP)
+    shot = a.handle({"action": "screenshot"})
+    assert shot.ok and _image_size(shot.png) == (1280, 800)
+    assert (a.screen.source_width, a.screen.source_height) == (1600, 1000)
+    r = a.handle({"action": "left_click", "coordinate": [160, 104]})
+    assert r.snapped_ref == "e3" and fake.calls["press"] == ["e3"]
+    a.snap_to_refs = False
+    a.handle({"action": "left_click", "coordinate": [160, 104]})
+    assert fake.calls["click"][0][0] == Point(1, 200, 130)  # not (400, 260)
 
 
 def test_marks_draw_refs_on_the_screenshot(runtime) -> None:
@@ -594,17 +667,23 @@ def test_openai_handle_call_builds_the_output_item(openai, fake) -> None:
         "pending_safety_checks": [{"id": "cu_sc_1", "code": "malicious_instructions",
                                    "message": "check"}],
     }
+    # flagged and not acknowledged: NOTHING runs, every action is a refused Result,
+    # the model still gets its screenshot and no acknowledgement is echoed
     output, results = openai.handle_call(call)
     assert output["type"] == "computer_call_output" and output["call_id"] == "call_1"
     assert output["output"]["type"] == "computer_screenshot"
     assert output["output"]["image_url"].startswith("data:image/png;base64,")
-    assert "acknowledged_safety_checks" not in output  # opt-in only
+    assert "acknowledged_safety_checks" not in output
     assert [r.action for r in results] == ["click", "type", "screenshot"]
-    assert results[0].snapped_ref == "e3" and fake.calls["type"] == ["penguin"]
+    assert [r.error for r in results[:-1]] == ["refused", "refused"]
+    assert "malicious_instructions" in results[0].text and results[0].snapped_ref is None
+    assert fake.calls["press"] == [] and fake.calls["click"] == [] and fake.calls["type"] == []
 
+    # acknowledging (after a human confirmed) authorises the run and is echoed back
     output, results = openai.handle_call(call, acknowledge_safety_checks=True, preview=True)
     assert output["acknowledged_safety_checks"] == call["pending_safety_checks"]
     assert output["output"]["type"] == "input_image"
+    assert results[0].snapped_ref == "e3" and fake.calls["type"] == ["penguin"]
 
 
 def test_openai_handle_call_stops_at_the_first_failure_and_still_screenshots(openai, fake) -> None:

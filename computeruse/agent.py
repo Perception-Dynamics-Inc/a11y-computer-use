@@ -37,7 +37,8 @@ DONE_TOOL = {
     "description": (
         "Finish the task. Call this exactly once, when the task is complete or "
         "cannot be completed. success=true only when an observation confirmed the "
-        "outcome; summary is one or two sentences for the human."
+        "outcome; summary is one or two sentences for the human. Call it alone, in "
+        "its own turn, after reading the results of every other call."
     ),
     "input_schema": {
         "type": "object",
@@ -120,7 +121,7 @@ def system_prompt(runtime: server.Runtime, app: str | None) -> str:
         "steps into one call.\n"
         "When the task is complete, or cannot be completed, call done with a one-sentence "
         "summary and success true or false. Never claim success without evidence from an "
-        "observation."
+        "observation. Call done by itself in its own turn, never alongside other tool calls."
     )
 
 
@@ -303,6 +304,9 @@ def run_task(
         except ProviderError as exc:
             stopped, summary = "provider_error", f"planner error: {exc}"
             break
+        except Exception as exc:  # a transport bug must not lose the agent_run audit row
+            stopped, summary = "provider_error", f"planner error: {type(exc).__name__}: {exc}"
+            break
         usage = usage + turn.usage
         messages.append(turn.assistant_message())
 
@@ -320,23 +324,49 @@ def run_task(
 
         results: list[dict] = []
         finished = False
-        for i, call in enumerate(turn.tool_calls):
-            step_usage = turn.usage if i == 0 else Usage()  # count a turn's tokens once
+        charged = False  # a turn's planner tokens are counted once, on its first recorded row
+        sole = len(turn.tool_calls) == 1
+        for call in turn.tool_calls:
+            step_usage = Usage() if charged else turn.usage
+            if call.name == "done" and not sole:
+                # Planned before the other calls' results existed: there can be no
+                # evidence for it. Run the others, return their results, ask again.
+                results.append({"type": "tool_result", "tool_use_id": call.id, "name": "done",
+                                "is_error": True, "content": [{"type": "text", "text": (
+                                    "done_not_sole: done must be the only call in its turn. Read the "
+                                    "results of the other calls, then call done by itself.")}]})
+                _audit(runtime, app, "agent_step", {"step": len(steps) + 1, "tool": "done",
+                                                    "provider": provider.name},
+                       "done_not_sole", 0.0, step_usage)
+                charged = True
+                continue
             if call.name == "done":
-                success = bool(call.arguments.get("success", False))
+                # The schema says boolean; a string "true"/"false" (OpenAI-compatible
+                # local models, the CLI's free-text JSON) is honoured as intent but
+                # flagged, anything else is a failed run. Never truthiness: "false" is
+                # a non-empty string.
+                raw = call.arguments.get("success")
+                if isinstance(raw, bool):
+                    success, done_error = raw, None
+                elif isinstance(raw, str) and raw.strip().lower() in ("true", "false"):
+                    success, done_error = raw.strip().lower() == "true", "invalid_done_arguments"
+                else:
+                    success, done_error = False, "invalid_done_arguments"
                 summary = str(call.arguments.get("summary", "")).strip()
-                step = Step(index=len(steps) + 1, tool="done", params=dict(call.arguments), ok=True,
-                            result=summary, error_code=None, duration_ms=0.0, usage=step_usage)
+                step = Step(index=len(steps) + 1, tool="done", params=dict(call.arguments),
+                            ok=done_error is None, result=summary, error_code=done_error,
+                            duration_ms=0.0, usage=step_usage)
                 steps.append(step)
                 _audit(runtime, app, "agent_step", {"step": step.index, "tool": "done",
                                                     "provider": provider.name},
-                       "ok", 0.0, step_usage)
+                       "ok" if step.ok else done_error, 0.0, step_usage)
                 if on_step is not None:
                     on_step(step)
                 finished, stopped = True, "done"
                 break
             step, result = _execute(runtime, app, call, verify=verify, confirm=confirm,
                                     index=len(steps) + 1, usage=step_usage)
+            charged = True
             steps.append(step)
             _audit(runtime, app, "agent_step", {"step": step.index, "tool": step.tool,
                                                 "provider": provider.name},

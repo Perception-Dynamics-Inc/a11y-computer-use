@@ -9,7 +9,9 @@ a transport swap.
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
+import threading
 
 import pytest
 
@@ -66,6 +68,87 @@ class FakePost:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+# --- transport failures ------------------------------------------------------------
+
+
+class _RawServer:
+    """Accepts connections on 127.0.0.1 and hands each socket to ``handler`` on
+    its own thread: the misbehaving upstreams urllib does NOT wrap in URLError
+    (they surface raw from ``HTTPConnection.getresponse()`` / ``read()``)."""
+
+    def __init__(self, handler) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.sock.settimeout(0.05)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/v1/messages"
+        self.connections = 0
+        self.stopping = threading.Event()
+        self._thread = threading.Thread(target=self._serve, args=(handler,), daemon=True)
+        self._thread.start()
+
+    def _serve(self, handler) -> None:
+        while not self.stopping.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:  # accept timeout: re-check the stop flag
+                continue
+            self.connections += 1
+            threading.Thread(target=self._handle, args=(handler, conn), daemon=True).start()
+
+    @staticmethod
+    def _handle(handler, conn) -> None:
+        with conn:
+            try:
+                handler(conn)
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self.stopping.set()
+        self._thread.join(timeout=2)
+        self.sock.close()
+
+
+def _read_request_head(conn) -> bytes:
+    conn.settimeout(1.0)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+@pytest.mark.parametrize("failure", ["timeout", "reset", "truncated"])
+def test_post_json_turns_raw_transport_failures_into_provider_errors(monkeypatch, failure) -> None:
+    """A read timeout, a peer that closes without a status line, and a body shorter
+    than its Content-Length reach urlopen's caller as TimeoutError, RemoteDisconnected
+    and IncompleteRead: none is a URLError, so an ``except URLError`` let them escape
+    plan() and crash the agent loop. They must be retried and end in ProviderError."""
+    monkeypatch.setattr(providers.time, "sleep", lambda s: None)  # no backoff wait
+
+    def handler(conn) -> None:
+        if failure == "reset":
+            return  # accept, then close without sending a byte
+        _read_request_head(conn)
+        if failure == "timeout":
+            server.stopping.wait(2.0)  # hold the connection open past timeout_s
+        else:
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: 100\r\n\r\n{\"id\": \"msg")
+
+    server = _RawServer(handler)
+    try:
+        with pytest.raises(ProviderError) as ei:
+            providers._post_json(server.url, {}, {"x": 1}, timeout_s=0.2, retries=2)
+        assert server.connections == 2  # every retry reached the server before giving up
+    finally:
+        server.close()
+    assert "connection error" in str(ei.value)
 
 
 # --- Anthropic ---------------------------------------------------------------------

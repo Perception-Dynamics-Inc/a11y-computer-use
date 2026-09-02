@@ -423,13 +423,28 @@ class ComputerAdapter:
                 best, best_area = el, area
         return best
 
+    #: Controls whose exact click position is the input (a slider thumb, a
+    #: scrollbar track): snapping to the element centre would change the value.
+    _POSITION_SENSITIVE_ROLES = frozenset({
+        "AXSlider", "AXScrollBar", "AXColorWell", "AXIncrementor", "AXValueIndicator",
+        "slider", "scroll bar", "scrollbar", "spin button", "color chooser",
+    })
+
+    def _point_matters(self, el: Element) -> bool:
+        """True when a click's exact coordinate is meaningful inside ``el``: an
+        editable element that already has content (caret placement) or a
+        position-sensitive control. Empty fields still snap, so the
+        coordinate-free focus-then-type path (browser/Wayland) is kept."""
+        if el.role in self._POSITION_SENSITIVE_ROLES:
+            return True
+        return el.editable and bool((el.value or "").strip())
+
     # -- primitives (each returns a Result) ------------------------------------
 
     def screenshot(self, *, action: str = "screenshot") -> Result:
         def run() -> Result:
-            if self.marks:
-                self.refresh_snapshot()  # Set-of-Mark labels come from the latest tree
-            text, scaled = self.runtime.screenshot(self._display_id, self.max_long_edge, self.marks)
+            marks = self.marks and self.refresh_snapshot()  # labels must come from a fresh tree
+            text, scaled = self.runtime.screenshot(self._display_id, self.max_long_edge, marks)
             m = _SCREENSHOT_TEXT.match(text)
             if m is not None and self._display_id is None:
                 self._display_id = int(m.group(1))
@@ -455,10 +470,19 @@ class ComputerAdapter:
             px, py, did = self.to_physical(x, y)
             self._cursor = (int(x), int(y))
             mods = list(modifiers)
-            if self.snap_to_refs:
-                self.refresh_snapshot()
+            # Only a plain left single-click can be re-expressed as an element
+            # action without losing information: button, count and modifiers
+            # carry pointer semantics (context menu, word/paragraph selection),
+            # and inside a field with content or a position-sensitive control
+            # the exact point is the intent (caret, slider thumb). And only a
+            # snapshot taken in THIS call may redirect the click: a refused or
+            # failed refresh leaves runtime._current pointing at a different app
+            # or an old layout, and snapping against it would AX-press an element
+            # that is no longer under the model's point.
+            if (self.snap_to_refs and button == "left" and count == 1 and not mods
+                    and self.refresh_snapshot()):
                 el = self.snap_to_ref(px, py, did)
-                if el is not None:
+                if el is not None and not self._point_matters(el):
                     try:
                         msg = self.runtime.click(
                             ref=el.ref, button=button, count=count, modifiers=mods, confirm=self.confirm

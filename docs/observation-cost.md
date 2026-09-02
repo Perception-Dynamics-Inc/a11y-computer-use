@@ -126,10 +126,12 @@ Before the fix, 209 of the 540 lines of the Hacker News full render were
 depth cap in `observe.build_snapshot`: `MAX_DEPTH` counted raw tree depth,
 including the generic wrappers that later collapse into their only child, and
 the page's DOM is deeper than 12 levels, so the walk stopped one level short
-under most rows. The engine now counts depth over kept ancestors only
-(`_prune_inner` carries a lower bound while walking, `_enforce_depth` applies
-the exact cap afterwards, and a separate `_MAX_RAW_DEPTH` still bounds
-pathological trees).
+under most rows. The engine now counts depth over kept ancestors only:
+`_prune_inner` reads a node's children before recursing, so it knows whether a
+wrapper will collapse and carries the exact pruned depth down the walk; the cap
+fires during the walk, which is what bounds its cost on deep wrapper soup and
+on cyclic trees with fan-out. A separate `_MAX_RAW_DEPTH` backstops the one
+shape the cap cannot see, a fan-out-1 cycle of collapsing wrappers.
 
 The measurement corrected the expectation this page used to state. The markers
 were not removable cost: they were hiding real nodes. On the same page and

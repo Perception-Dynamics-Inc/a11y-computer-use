@@ -93,17 +93,25 @@ docs describe. Coordinates stay in full-screenshot space afterwards.
 For a click at image point (x, y):
 
 1. The point maps to physical pixels.
-2. A fresh snapshot of `app` is taken through the gate (a missing READ grant
-   or an app without a tree just disables snapping for that click).
-3. The smallest actionable element (enabled, clickable or editable, on the same
+2. Only a plain left single-click is a snap candidate. Right, middle, double,
+   and triple clicks and clicks with modifiers carry pointer semantics (a
+   context menu, word/paragraph selection) and always keep the model's
+   coordinate.
+3. A fresh snapshot of `app` is taken through the gate. A missing READ grant, an
+   app without a tree, or any other failed refresh disables snapping for that
+   click: an older snapshot (possibly of a different app or layout) is never
+   used to redirect a click.
+4. The smallest actionable element (enabled, clickable or editable, on the same
    display) whose bounds contain the point is chosen. Elements larger than
    `max_snap_fraction` of the display are skipped, so a click inside a text
-   area, a canvas, or the window keeps its exact coordinate.
-4. The Runtime clicks the ref: a plain left click becomes an accessibility
-   press when the driver supports it (`press_element`), and the pointer never
-   moves. Right, middle, double, and triple clicks and clicks with modifiers go
-   to the element's live position as synthetic mouse events. A `stale_ref`
-   during re-resolution falls back to the coordinate click.
+   area, a canvas, or the window keeps its exact coordinate. So does a click
+   inside an editable element that already has content (the point is a caret
+   position) or on a position-sensitive control (slider, scrollbar, stepper,
+   colour well); empty fields still snap, keeping the coordinate-free
+   focus-then-type path.
+5. The Runtime clicks the ref: the click becomes an accessibility press when the
+   driver supports it (`press_element`), and the pointer never moves. A
+   `stale_ref` during re-resolution falls back to the coordinate click.
 
 Snapping is a hybrid, not a guarantee: the model's own coordinate is still the
 input, and the audit log records the ref action that actually ran. Set
@@ -175,9 +183,12 @@ whether to send it or stop.
 OpenAI's uppercase key names (`ENTER`, `ESCAPE`, `ARROWUP`, `PAGEDOWN`, `CTRL`,
 `META`, ...) go through the same alias table as the xdotool names.
 
-`pending_safety_checks` are echoed back as `acknowledged_safety_checks` only
-when `handle_call(..., acknowledge_safety_checks=True)`. Acknowledging is a
-policy decision the host owns; the default leaves them unacknowledged.
+A call carrying `pending_safety_checks` (`malicious_instructions`,
+`irrelevant_domain`, `sensitive_domain`) runs only when
+`handle_call(..., acknowledge_safety_checks=True)`; otherwise every action is
+returned as a `refused` Result with a fresh screenshot and nothing executes.
+Acknowledging authorises execution (the host surfaces the check to a human
+first) and is echoed back as `acknowledged_safety_checks`.
 
 ## Approximations and limits
 

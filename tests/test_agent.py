@@ -353,6 +353,60 @@ def test_several_tool_calls_in_one_turn_count_tokens_once(tmp_path) -> None:
     assert len(tool_results(provider.seen[1])) == 2
 
 
+def test_done_alongside_other_calls_is_deferred_until_their_results_are_seen(tmp_path) -> None:
+    # [click, done(success=True)] in one turn against a READ-only app: the click is
+    # denied, so the planner's claimed success (made before it could see that) must
+    # not end the run. The click runs, both results go back, and done is asked again.
+    rt = make_runtime(tmp_path, tier=safety.Tier.READ)
+    turn = PlannerTurn(tool_calls=[ToolCall("a", "click", {"ref": "e2"}),
+                                   ToolCall("b", "done", {"summary": "clicked", "success": True})],
+                       usage=Usage(50, 5))
+    provider = ScriptedProvider([turn, done_turn("could not click", success=False)])
+    result = agent.run_task("Click Save", rt, provider, app=APP)
+    assert result.success is False and result.stopped == "done"
+    assert [s.tool for s in result.steps] == ["click", "done"]
+    assert result.steps[0].error_code == "deny" and result.summary == "could not click"
+    click_res, done_res = tool_results(provider.seen[1])
+    assert click_res["name"] == "click" and click_res["is_error"]
+    assert done_res["tool_use_id"] == "b" and done_res["name"] == "done" and done_res["is_error"]
+    assert done_res["content"][0]["text"].startswith("done_not_sole")
+    assert result.usage == Usage(50, 5)  # the turn's tokens are still counted exactly once
+    rows = [r for r in audit_rows(tmp_path) if r["action"] == "agent_step"]
+    assert [r["result"] for r in rows] == ["deny", "done_not_sole", "ok"]
+
+
+def test_calls_listed_after_done_in_the_same_turn_still_run(tmp_path) -> None:
+    rt = make_runtime(tmp_path)
+    turn = PlannerTurn(tool_calls=[ToolCall("a", "done", {"summary": "early", "success": True}),
+                                   ToolCall("b", "click", {"ref": "e2"}),
+                                   ToolCall("c", "type", {"text": "hi"})], usage=Usage(30, 3))
+    provider = ScriptedProvider([turn, done_turn("ok")])
+    result = agent.run_task("Do both", rt, provider, app=APP)
+    assert result.success and [s.tool for s in result.steps] == ["click", "type", "done"]
+    assert rt.driver.pressed == ["e2"] and rt.driver.typed == ["hi"]  # trailing calls ran
+    assert [r["name"] for r in tool_results(provider.seen[1])] == ["done", "click", "type"]
+    assert result.usage == Usage(30, 3)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("false", False), ("False", False), ("true", True), (0, False), (1, False), (None, False),
+    ("yes", False),
+])
+def test_done_success_is_not_truthiness(tmp_path, raw, expected) -> None:
+    # OpenAI-compatible local models and the CLI's free-text JSON emit string
+    # booleans: "false" must not be recorded as a successful run.
+    rt = make_runtime(tmp_path)
+    provider = ScriptedProvider([tool_turn("done", {"summary": "x", "success": raw})])
+    result = agent.run_task("t", rt, provider, app=APP, max_steps=2)
+    assert result.success is expected and result.stopped == "done"
+    done = result.steps[-1]
+    assert done.error_code == "invalid_done_arguments" and not done.ok and done.params["success"] == raw
+    rows = [r for r in audit_rows(tmp_path) if r["action"] == "agent_step"]
+    assert rows[-1]["result"] == "invalid_done_arguments"
+    run = next(r for r in audit_rows(tmp_path) if r["action"] == "agent_run")
+    assert run["result"] == ("ok" if expected else "done")
+
+
 def test_verify_false_skips_effect_receipts(tmp_path) -> None:
     rt = make_runtime(tmp_path)
     provider = ScriptedProvider([tool_turn("click", {"ref": "e2"}), done_turn("ok")])
@@ -384,6 +438,25 @@ def test_provider_refusal_and_errors_stop_the_loop(tmp_path) -> None:
     failed = agent.run_task("x", rt, Broken(), app=APP)
     assert failed.stopped == "provider_error" and "HTTP 401" in failed.summary
     assert audit_rows(tmp_path)[-1]["action"] == "agent_run"
+
+
+def test_non_provider_exceptions_from_plan_still_end_the_run_with_an_audit_row(tmp_path) -> None:
+    # A raw transport error (a read timeout is a builtins.TimeoutError, not a
+    # ProviderError) must stop the run as provider_error, not crash out of run_task
+    # before the agent_run audit row is written.
+    class Exploding:
+        name = "exploding"
+        history_edits_ok = True
+
+        def plan(self, messages, tools, *, system):
+            raise TimeoutError("timed out")
+
+    rt = make_runtime(tmp_path)
+    result = agent.run_task("x", rt, Exploding(), app=APP, max_steps=2)
+    assert result.stopped == "provider_error" and not result.success
+    assert result.summary == "planner error: TimeoutError: timed out"
+    run = next(r for r in audit_rows(tmp_path) if r["action"] == "agent_run")
+    assert run["result"] == "provider_error" and run["params"]["steps"] == 0
 
 
 def test_default_app_is_the_frontmost_and_on_step_sees_every_step(tmp_path) -> None:

@@ -35,6 +35,7 @@ Providers:
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import shutil
@@ -152,8 +153,12 @@ def _post_json(url: str, headers: dict[str, str], body: dict, *, timeout_s: floa
             last = f"HTTP {exc.code}: {text[:2000]}"
             if exc.code not in _RETRY_STATUSES:
                 raise ProviderError(last) from exc
-        except urllib.error.URLError as exc:
-            last = f"connection error: {exc.reason}"
+        except (OSError, http.client.HTTPException) as exc:
+            # URLError is an OSError, but a read timeout (TimeoutError), a reset
+            # (ConnectionResetError / RemoteDisconnected) and a truncated body
+            # (IncompleteRead, an HTTPException) come raw from http.client, not
+            # wrapped in URLError; all of them are retryable transport failures.
+            last = f"connection error: {getattr(exc, 'reason', exc)}"
         except json.JSONDecodeError as exc:
             raise ProviderError(f"non-JSON response from {url}: {exc}") from exc
         if attempt < retries - 1:

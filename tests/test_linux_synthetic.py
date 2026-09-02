@@ -9,6 +9,8 @@ map. These catch mapping regressions on every developer's machine.
 
 from __future__ import annotations
 
+from types import SimpleNamespace as _NS
+
 import pytest
 
 from computeruse.drivers import _atspi, _linux_input
@@ -212,3 +214,62 @@ def test_scroll_positions_before_wheel_notches(xtest_recorder) -> None:
     assert events[1:5] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)] * 2  # wheel down x2
     assert events[5:] == [(_X_BPRESS, 6, 0, 0), (_X_BRELEASE, 6, 0, 0)]  # horizontal
     assert display.warps == []
+
+
+class _GermanLayoutDisplay(_FakeXDisplay):
+    """The keymap python-xlib reports for a de layout: '@' lives on AltGr+q
+    (``keycode 24 = q Q q Q at Greek_OMEGA``), so keysym_to_keycode(0x40) finds
+    keycode 24 although neither its base nor its Shift level produces '@'. Records
+    keymap changes so a test can see the spare-keycode path being taken."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.keymap = {
+            24: [0x71, 0x51, 0x71, 0x51, 0x40, 0x7D9],  # q Q q Q at Greek_OMEGA
+            37: [0xFFE3, 0, 0, 0, 0, 0],  # Control_L
+            50: [0xFFE1, 0, 0, 0, 0, 0],  # Shift_L
+        }
+        self.remapped: list[tuple[int, int]] = []  # (keycode, new base keysym)
+        self.display = _NS(info=_NS(min_keycode=8, max_keycode=255))
+
+    def keysym_to_keycode(self, keysym):
+        return next((kc for kc, syms in self.keymap.items() if keysym in syms), 0)
+
+    def keycode_to_keysym(self, keycode, index):
+        syms = self.keymap.get(keycode, [])
+        return syms[index] if index < len(syms) else 0
+
+    def get_keyboard_mapping(self, first, count):
+        return [self.keymap.get(first + i, [0] * 6) for i in range(count)]
+
+    def change_keyboard_mapping(self, first, keysyms):
+        self.remapped.append((first, keysyms[0][0]))
+        self.keymap[first] = list(keysyms[0])
+
+
+def test_altgr_only_keysym_is_typed_through_a_spare_keycode(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    key_press, key_release = 2, 3  # the fake Xlib.X constants installed by the fixture
+
+    # base and Shift levels still map directly; the AltGr-only '@' does not
+    assert _linux_input._keycode_and_shift(0x71) == (24, False)
+    assert _linux_input._keycode_and_shift(0x51) == (24, True)
+    assert _linux_input._keycode_and_shift(0x40) == (None, False)
+
+    _linux_input.type_string("@")
+    keys = [(t, d) for t, d, _x, _y in events]
+    assert (key_press, 24) not in keys, "typing '@' must not press the q key"
+    (spare, bound), (restored, orig) = display.remapped  # bound for the string, then restored
+    assert bound == 0x40 and restored == spare and orig == 0 and spare not in (24, 37, 50)
+    assert keys == [(key_press, spare), (key_release, spare)]
+
+    events.clear()
+    display.remapped.clear()
+    _linux_input.press_chord("ctrl+@")
+    keys = [(t, d) for t, d, _x, _y in events]
+    assert (key_press, 24) not in keys, "ctrl+@ must not become ctrl+q"
+    spare = display.remapped[0][0]
+    assert keys == [(key_press, 37), (key_press, spare), (key_release, spare), (key_release, 37)]
+    assert display.remapped[-1] == (spare, 0)  # the keymap is restored after the chord

@@ -428,15 +428,34 @@ class BrowserDriver:
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
     # -- capture ------------------------------------------------------------
+    def _device_pixel_ratio(self) -> float:
+        """``window.devicePixelRatio`` of the bound tab, 1.0 when unreadable."""
+        try:
+            reply = self._connect().call("Runtime.evaluate", {
+                "expression": "window.devicePixelRatio", "returnByValue": True})
+            dpr = float((reply.get("result") or {}).get("value") or 1.0)
+        except (ComputerUseError, TypeError, ValueError, AttributeError):
+            return 1.0
+        return dpr if dpr > 0 else 1.0
+
     def screenshot(self, display_id: int | None = None) -> object:
         from computeruse.capture import Screenshot
 
         sess = self._connect()
-        data = sess.call("Page.captureScreenshot", {"format": "png",
-                                                    "captureBeyondViewport": True})["data"]
         # Page dimensions come from getLayoutMetrics (a tiny reply), not a full
         # DOMSnapshot — the capture path needs only the size, not the tree.
         display = self._metrics_geometry()[0].display
+        params: dict = {"format": "png", "captureBeyondViewport": True}
+        dpr = self._device_pixel_ratio()
+        if dpr != 1.0:
+            # Chrome paints captureScreenshot at devicePixelRatio, while our
+            # geometry (Element bounds, Points, marks, snap_to_ref) is CSS px at
+            # scale 1.0 and capture.Screenshot requires PNG dims == display dims.
+            # clip.scale = 1/dpr brings the PNG back to CSS px (live: DPR 2 gave
+            # 1600x1026 without the clip, 800x513 with it; clip.scale 1.0 does not).
+            params["clip"] = {"x": 0.0, "y": 0.0, "width": float(display.width),
+                              "height": float(display.height), "scale": 1.0 / dpr}
+        data = sess.call("Page.captureScreenshot", params)["data"]
         return Screenshot(png=base64.b64decode(data), display=display)
 
     def main_display_id(self) -> int:

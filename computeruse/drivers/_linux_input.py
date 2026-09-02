@@ -95,18 +95,21 @@ def _char_keysym(ch: str) -> int:
 
 
 def _keycode_and_shift(keysym: int):
-    """(keycode, needs_shift) for ``keysym`` from the live keymap, or (None, False)
-    when the keysym is not mapped to any key."""
-    from Xlib import X
-
+    """(keycode, needs_shift) for ``keysym`` when it sits on the base or Shift
+    level of some key in the live keymap, else (None, False). python-xlib's
+    keysym_to_keycode also matches the AltGr/level-3 and second-group columns
+    (de: ``keycode 24 = q Q q Q at Greek_OMEGA ...``); a plain or Shift-bracketed
+    tap of such a keycode emits the base character ('q' for '@'), so those
+    keysyms are reported as unmapped and callers route them through _TempKeymap."""
     d = _disp()
     keycode = d.keysym_to_keycode(keysym)
     if not keycode:
         return None, False
-    lvl0 = d.keycode_to_keysym(keycode, 0)
-    lvl1 = d.keycode_to_keysym(keycode, 1)
-    needs_shift = keysym == lvl1 and keysym != lvl0
-    return keycode, needs_shift
+    if keysym == d.keycode_to_keysym(keycode, 0):
+        return keycode, False
+    if keysym == d.keycode_to_keysym(keycode, 1):
+        return keycode, True
+    return None, False  # only reachable via AltGr / another group
 
 
 def _tap_keysym(keysym: int) -> bool:

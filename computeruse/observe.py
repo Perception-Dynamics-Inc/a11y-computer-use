@@ -47,12 +47,14 @@ AX_MESSAGING_TIMEOUT_S = 2.0
 #: Depth cap, counted over KEPT ancestors: nodes whose pruned depth reaches this
 #: are elided (with a marker on the parent). Single-child wrappers that collapse
 #: (`_WRAPPER_ROLES`) do not consume a level, so a link's text node under a
-#: dozen generic web wrappers is still shown. Raw recursion is bounded
-#: separately by `_MAX_RAW_DEPTH`.
+#: dozen generic web wrappers is still shown. The kept depth is exact during
+#: the walk (a wrapper adds a level unless it will collapse), so this cap also
+#: bounds the walk cost on cyclic trees with fan-out, as it always did.
 MAX_DEPTH = 12
 
-#: Hard cap on RAW recursion depth, independent of collapsing: bounds walk cost
-#: on pathological/cyclic trees the way `MAX_DEPTH` alone used to.
+#: Backstop on RAW recursion depth for the one shape `MAX_DEPTH` cannot bound:
+#: a fan-out-1 cycle of collapsing wrappers (a group whose only child is itself),
+#: which costs O(_MAX_RAW_DEPTH) reads.
 _MAX_RAW_DEPTH = 64
 
 #: Kept-children cap per node. Overflow is elided with a "… N more" marker,
@@ -918,7 +920,6 @@ class _PNode:
     elided: int  #: direct children hidden by the depth/fan-out caps
     has_interactive: bool  #: self or any kept descendant is interactive
     node: object | None = None  #: accessor handle (live AXUIElementRef), for act-time AX actions
-    raw_children: int = 0  #: direct raw children, for the exact depth cap's marker count
 
 
 def _prune_root(
@@ -930,7 +931,6 @@ def _prune_root(
     raw = accessor.read(node)
     pruned = _prune_inner(node, raw, accessor, geometry, depth=0, kept_depth=0)
     if pruned is not None:
-        _enforce_depth(pruned, 0)
         return pruned
     # Roots survive even without usable geometry (AXApplication has none):
     # project against the main display, or cover it entirely.
@@ -965,11 +965,11 @@ def _prune_inner(
     depth: int,
     kept_depth: int,
 ) -> _PNode | None:
-    """``depth`` is the raw tree depth; ``kept_depth`` is a lower bound on the
-    pruned depth (ancestors that cannot collapse). Wrapper candidates do not add
-    a level for their children, so the walk never elides a node whose pruned
-    depth is under `MAX_DEPTH`; `_enforce_depth` then applies the exact cap for
-    the candidates that ended up not collapsing."""
+    """``depth`` is the raw tree depth; ``kept_depth`` is the exact pruned depth
+    of this node. A wrapper candidate adds a level for its children only when it
+    will NOT collapse, which is decided from the children's raw attributes before
+    recursing, so `MAX_DEPTH` is applied during the walk (bounding its cost) and
+    a node whose pruned depth is under the cap is never elided."""
     bounds = _to_bounds(raw.position, raw.size, geometry)
     if bounds is None or _is_decorative(raw):
         return None  # zero-size, fully offscreen, or decorative: drop subtree
@@ -983,11 +983,24 @@ def _prune_inner(
     else:
         walked = raw_children[:_MAX_WALK_CHILDREN]
         elided = len(raw_children) - len(walked)
-        child_kept_depth = kept_depth if candidate else kept_depth + 1
-        for child in walked:
-            pruned = _prune_inner(
-                child, accessor.read(child), accessor, geometry, depth + 1, child_kept_depth
-            )
+        # Read the children first: a child is kept iff it has bounds and is not
+        # decorative (the only None return below), so the collapse decision --
+        # exactly one survivor, nothing elided -- is known before recursing and
+        # the kept depth passed down is exact, not a lower bound. This is what
+        # bounds walk cost on deep wrapper soup and on cyclic trees: a wrapper
+        # that keeps >1 child consumes a level, so MAX_DEPTH fires during the
+        # walk. The reads happen here anyway.
+        read_children = [(child, accessor.read(child)) for child in walked]
+        survivors = sum(
+            1
+            for _, child_raw in read_children
+            if _to_bounds(child_raw.position, child_raw.size, geometry) is not None
+            and not _is_decorative(child_raw)
+        )
+        collapses = candidate and survivors == 1 and elided == 0
+        child_kept_depth = kept_depth if collapses else kept_depth + 1
+        for child, child_raw in read_children:
+            pruned = _prune_inner(child, child_raw, accessor, geometry, depth + 1, child_kept_depth)
             if pruned is not None:
                 kept.append(pruned)
         cap = DENSE_MAX_CHILDREN if raw.role in _DENSE_CONTAINER_ROLES else MAX_CHILDREN
@@ -1006,24 +1019,7 @@ def _prune_inner(
         elided=elided,
         has_interactive=interactive or any(c.has_interactive for c in kept),
         node=node,
-        raw_children=len(raw_children),
     )
-
-
-def _enforce_depth(node: _PNode, depth: int) -> None:
-    """Apply `MAX_DEPTH` exactly, over the pruned tree. `_prune_inner` only
-    knows a lower bound on pruned depth while walking (a wrapper candidate may
-    or may not collapse), so a node under candidates that kept several children
-    can sit deeper than the cap; here its children are elided with the same
-    marker semantics the walk uses at the cap (all raw children hidden), and
-    ``has_interactive`` is recomputed over what is actually kept."""
-    if depth >= MAX_DEPTH and node.children:
-        node.children = []
-        node.elided = node.raw_children
-    for child in node.children:
-        _enforce_depth(child, depth + 1)
-    clickable, editable, _ = _flags(node.raw)
-    node.has_interactive = clickable or editable or any(c.has_interactive for c in node.children)
 
 
 def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:

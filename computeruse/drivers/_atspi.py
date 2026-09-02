@@ -512,17 +512,40 @@ def is_secure(acc) -> bool:
     return _role_name(acc) == "password text"
 
 
-def focused_secure(app: str, *, max_nodes: int = 400) -> bool:
-    """Whether the keyboard-focused node of ``app``'s active window is a
-    password field.
+def _focused_via_collection(root, Atspi, focused_state):
+    """The FOCUSED descendant of ``root`` through org.a11y.atspi.Collection
+    (one round-trip; served by the at-spi2-atk bridge for GTK3/Chromium/Firefox/
+    Electron/LibreOffice). Returns (found, acc): found=False when the interface
+    is absent or the call fails, so the caller falls back to the walk."""
+    coll = _call_first(root, ("get_collection_iface", "get_collection"))
+    if coll is None:
+        return False, None
+    try:
+        states = Atspi.StateSet.new([focused_state])
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(states, mt.ALL, {}, mt.NONE, [], mt.NONE, [], mt.NONE, False)
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 1, True)
+    except Exception:  # noqa: BLE001 - GTK4/Qt expose no Collection; fall back to the walk
+        return False, None
+    return True, (hits[0] if hits else None)
 
-    AT-SPI has no global "focused accessible" getter (focus arrives as events),
-    so this walks the active top-level frame breadth-first, bounded by
-    ``max_nodes``, until it finds a node with ``STATE_FOCUSED`` and reports
-    whether that node is secure. No focused node within the bound, no app, or
-    no bus all read as False (no signal), the same degradation as the macOS
-    ``AXFocusedUIElement`` probe. This is the check `LinuxDriver.type_text`
-    runs before the XTEST path, which types into whatever holds focus."""
+
+def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
+    """Whether the keyboard-focused node of ``app``'s active window is a
+    password field: True / False / None.
+
+    True: the focused node is a password field. False: a focused non-secure
+    node was found, or the whole frame was walked and nothing is focused, or the
+    app is not on the bus (no signal, the same degradation as the macOS
+    ``AXFocusedUIElement`` probe). None: the frame is larger than the walk bound
+    (or a node had more than `_MAX_CHILDREN_FETCH` children) and no focused node
+    was met, so focus is UNKNOWN; the caller must not type blind on None.
+
+    AT-SPI has no global "focused accessible" getter (focus arrives as events).
+    The Collection interface answers in one round-trip where the toolkit
+    exposes it; otherwise the active top-level frame is walked breadth-first,
+    bounded by ``max_nodes``. This is the check `LinuxDriver.type_text` runs
+    before the XTEST path, which types into whatever holds focus."""
     from computeruse.schema import Scope
 
     root = find_root(app, Scope.WINDOW)
@@ -533,19 +556,27 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool:
     focused_state = getattr(st, "FOCUSED", None)
     if focused_state is None:
         return False
+    found, acc = _focused_via_collection(root, Atspi, focused_state)
+    if found:
+        return is_secure(acc) if acc is not None else False
     queue = [root]
     seen = 0
+    truncated = False
     while queue and seen < max_nodes:
         acc = queue.pop(0)
         seen += 1
         sset = _call_first(acc, ("get_state_set",))
         if sset is not None and _safe(lambda: sset.contains(focused_state), False):
             return is_secure(acc)
-        n = _call_first(acc, ("get_child_count",), default=0) or 0
-        for j in range(min(int(n), _MAX_CHILDREN_FETCH)):
+        n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
+        if n > _MAX_CHILDREN_FETCH:
+            truncated = True
+        for j in range(min(n, _MAX_CHILDREN_FETCH)):
             child = _call_first(acc, ("get_child_at_index",), j)
             if child is not None:
                 queue.append(child)
+    if queue or truncated:
+        return None  # bound exhausted: focus unknown, not "not secure"
     return False
 
 

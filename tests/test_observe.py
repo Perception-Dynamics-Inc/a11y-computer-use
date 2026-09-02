@@ -150,6 +150,54 @@ def test_depth_cap_applies_to_kept_depth_after_collapse() -> None:
     assert render_text(snap).count("more") == 1
 
 
+class _CountingAccessor(DictAccessor):
+    """Counts accessor reads, the cost unit of a live walk (several IPC attribute
+    copies per node on AX, D-Bus round-trips on AT-SPI). ``cap`` turns an
+    unbounded walk into a failure instead of a hang."""
+
+    def __init__(self, cap: int = 100_000) -> None:
+        self.reads, self.cap = 0, cap
+
+    def read(self, node):
+        self.reads += 1
+        assert self.reads <= self.cap, "the walk is not bounded by MAX_DEPTH"
+        return super().read(node)
+
+
+def _binary_wrapper_tree(depth: int) -> dict:
+    """Web div soup: a complete binary tree of untitled AXGroup wrappers with a
+    button at every leaf. No wrapper can collapse (each keeps two children)."""
+    def node(d: int) -> dict:
+        if d == 0:
+            return button("Leaf", (120.0, 60.0))
+        return ax("AXGroup", at=(100.0, 50.0), size=(500.0, 500.0), children=[node(d - 1), node(d - 1)])
+
+    return ax("AXWindow", title="W", at=(100.0, 50.0), size=(1000.0, 700.0), children=[node(depth)])
+
+
+def test_depth_cap_bounds_the_walk_not_just_the_output() -> None:
+    # 2^17-1 raw nodes, but the cap must fire DURING the walk: only raw levels
+    # 0..MAX_DEPTH are read (1 + 2^12 - 1 = 4096 reads, the count at 3b331ba), not
+    # the whole tree followed by a post-pass that throws the deep part away.
+    acc = _CountingAccessor()
+    snap = build_snapshot(_binary_wrapper_tree(16), acc, scope=Scope.WINDOW, app="x", pid=1,
+                          geometry=GEOMETRY)
+    assert acc.reads == 4096
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+
+
+def test_cyclic_wrapper_with_fanout_is_bounded_by_max_depth() -> None:
+    # An untitled group that lists itself twice (a fan-out-2 AX cycle) must be
+    # capped by MAX_DEPTH during the walk, not by _MAX_RAW_DEPTH after ~2^64 reads.
+    g = ax("AXGroup", at=(100.0, 50.0), size=(500.0, 500.0), children=[])
+    g["children"] = [button("B", (120.0, 60.0)), g, g]
+    root = ax("AXWindow", title="W", at=(100.0, 50.0), size=(1000.0, 700.0), children=[g])
+    acc = _CountingAccessor()
+    snap = build_snapshot(root, acc, scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+    assert acc.reads == 6143  # the 3b331ba count
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+
+
 def test_refs_are_sequential_and_preorder() -> None:
     snap = snap_of(typical_app_window())
     assert [el.ref for el in snap.elements] == [f"e{i}" for i in range(1, len(snap.elements) + 1)]

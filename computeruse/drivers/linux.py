@@ -250,8 +250,18 @@ class LinuxDriver:
         # focused node of the frontmost app first (the Linux analog of macOS's
         # AXFocusedUIElement check): a password field there refuses the typing.
         app_id, _pid = self.frontmost_app()
-        if app_id and self._run(lambda: _atspi.focused_secure(app_id)):
+        verdict = self._run(lambda: _atspi.focused_secure(app_id)) if app_id else False
+        if verdict is True:
             raise _secure_focus_error("AT-SPI STATE_FOCUSED on a 'password text' node")
+        if verdict is None:
+            # The probe ran out of its node bound without meeting the focused
+            # node: typing blind here could land the text in a password field.
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "cannot verify the focused element (accessibility tree larger than the "
+                "focus probe bound); focus a field through a ref (click/set_value) before typing",
+                detail={"api": "AT-SPI focus walk exhausted", "app": app_id},
+            )
         from computeruse.drivers import _linux_input
 
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled

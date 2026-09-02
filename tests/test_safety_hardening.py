@@ -391,8 +391,56 @@ def test_atspi_focused_secure_respects_the_node_bound(fake_atspi, monkeypatch) -
     deep = _FakeAcc("password text", focused=True)
     root = _FakeAcc("frame", children=[_FakeAcc("panel", children=[_FakeAcc("panel", children=[deep])])])
     monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
-    assert _atspi.focused_secure("app", max_nodes=2) is False
+    # bound exhausted without meeting the focused node: UNKNOWN, never "not secure"
+    assert _atspi.focused_secure("app", max_nodes=2) is None
     assert _atspi.focused_secure("app", max_nodes=10) is True
+    # a node with more children than the walk fetches leaves part of the frame unseen
+    wide = _FakeAcc("frame", children=[_FakeAcc("panel")] * (_atspi._MAX_CHILDREN_FETCH + 1))
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: wide)
+    assert _atspi.focused_secure("app", max_nodes=10_000) is None
+
+
+def test_atspi_focused_secure_asks_the_collection_interface_first(fake_atspi, monkeypatch) -> None:
+    """GTK3/Chromium/Firefox/Electron frames expose org.a11y.atspi.Collection: one
+    round-trip finds the FOCUSED node wherever it sits, so a login form behind a
+    400-node header is still refused, and the walk (400 x D-Bus) is skipped."""
+    fake_atspi.StateSet = types.SimpleNamespace(new=lambda states: ("states", tuple(states)))
+    fake_atspi.CollectionMatchType = types.SimpleNamespace(ALL="ALL", NONE="NONE")
+    fake_atspi.MatchRule = types.SimpleNamespace(new=lambda *args: ("rule", args))
+    fake_atspi.CollectionSortOrder = types.SimpleNamespace(CANONICAL="CANONICAL")
+    asked: list = []
+
+    class _Frame(_FakeAcc):
+        def __init__(self, hits):
+            super().__init__("frame", children=[_FakeAcc("panel")] * 600)  # far past max_nodes
+            self.hits, self.walked = hits, 0
+
+        def get_collection_iface(self):
+            frame = self
+
+            class _Coll:
+                def get_matches(self, rule, order, count, traverse):
+                    asked.append((rule, order, count, traverse))
+                    return list(frame.hits)
+
+            return _Coll()
+
+        def get_child_count(self):
+            self.walked += 1
+            return super().get_child_count()
+
+    password = _FakeAcc("password text", focused=True)
+    frame = _Frame([password])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: frame)
+    assert _atspi.focused_secure("app") is True and frame.walked == 0
+    assert asked == [(("rule", (("states", ("FOCUSED",)), "ALL", {}, "NONE", [], "NONE", [], "NONE", False)),
+                      "CANONICAL", 1, True)]
+    frame = _Frame([_FakeAcc("entry", focused=True)])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: frame)
+    assert _atspi.focused_secure("app") is False and frame.walked == 0
+    frame = _Frame([])  # Collection answered: nothing is focused, a definite False
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: frame)
+    assert _atspi.focused_secure("app") is False and frame.walked == 0
 
 
 @pytest.fixture
@@ -422,6 +470,17 @@ def test_linux_type_refuses_when_the_focused_node_is_a_password(linux_x11, monke
     monkeypatch.setattr(_atspi, "focused_secure", lambda app, **kw: False)
     d.type_text("hello")
     assert typed == ["hello"]
+
+
+def test_linux_type_refuses_when_the_focus_probe_cannot_decide(linux_x11, monkeypatch) -> None:
+    # None = the walk ran out of its bound without meeting the focused node; typing
+    # blind could land the secret in a password field, so it is a refusal too.
+    d, typed = linux_x11
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app, **kw: None)
+    with pytest.raises(ComputerUseError) as ei:
+        d.type_text("hunter2")
+    assert ei.value.code is ErrorCode.SECURE_FIELD and "exhausted" in ei.value.detail["api"]
+    assert ei.value.detail["app"] == "gedit" and typed == []
 
 
 def test_linux_type_refuses_a_driver_focused_password_editable(linux_x11, monkeypatch) -> None:

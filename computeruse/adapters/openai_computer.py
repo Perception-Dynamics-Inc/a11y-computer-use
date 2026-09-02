@@ -13,8 +13,11 @@ Wire shapes (platform.openai.com/docs/guides/computer-use):
 
 Actions: ``click {x, y, button, keys?}``, ``double_click {x, y}``, ``drag {path}``,
 ``keypress {keys}``, ``move {x, y}``, ``screenshot``, ``scroll {x, y, scroll_x,
-scroll_y}``, ``type {text}``, ``wait``. ``pending_safety_checks`` on a call are
-echoed as ``acknowledged_safety_checks`` only when the host opts in.
+scroll_y}``, ``type {text}``, ``wait``. A call carrying ``pending_safety_checks``
+runs only when the host passes ``acknowledge_safety_checks=True``; otherwise every
+action comes back as a ``refused`` Result with a fresh screenshot and nothing
+executes. Acknowledging authorises execution and is echoed back as
+``acknowledged_safety_checks``.
 """
 
 from __future__ import annotations
@@ -138,9 +141,13 @@ class OpenAIComputerAdapter(ComputerAdapter):
         item plus every per-action `Result` (the host decides what to do with a
         failure; the wire item has no error slot).
 
-        ``pending_safety_checks`` are echoed as ``acknowledged_safety_checks``
-        only when ``acknowledge_safety_checks`` is True; acknowledging is a
-        policy decision the host owns, so the default leaves them unacknowledged.
+        A call carrying ``pending_safety_checks`` (malicious_instructions,
+        irrelevant_domain, sensitive_domain) runs only when
+        ``acknowledge_safety_checks`` is True: otherwise nothing executes and every
+        action is returned as a ``refused`` Result, with the screenshot the model
+        expects. Acknowledging is the host's authorisation to run the flagged call
+        (after a human confirmed) and is echoed back as
+        ``acknowledged_safety_checks``.
         """
         actions: Sequence[Mapping[str, object]]
         if isinstance(call.get("actions"), list):
@@ -149,12 +156,29 @@ class OpenAIComputerAdapter(ComputerAdapter):
             actions = [call["action"]]  # type: ignore[list-item]
         else:
             actions = []
+        pending_raw = call.get("pending_safety_checks")
+        pending: list[Mapping[str, object]] = [
+            c for c in pending_raw if isinstance(c, Mapping)
+        ] if isinstance(pending_raw, list) else []
         results: list[Result] = []
-        for action in actions:
-            result = self.handle(action)
-            results.append(result)
-            if not result.ok:
-                break
+        if pending and not acknowledge_safety_checks:
+            # The model flagged this call; the check must reach a human BEFORE
+            # anything runs, not after. Every action is refused, nothing executes.
+            codes = ", ".join(str(c.get("code", "?")) for c in pending)
+            for action in actions:
+                kind = action.get("type") if isinstance(action, Mapping) else None
+                results.append(Result(
+                    str(kind or "?"),
+                    f"refused: pending_safety_checks not acknowledged ({codes}); "
+                    "re-run handle_call(call, acknowledge_safety_checks=True) after a human confirms",
+                    error="refused",
+                ))
+        else:
+            for action in actions:
+                result = self.handle(action)
+                results.append(result)
+                if not result.ok:
+                    break
         last_png = results[-1].png if results and results[-1].ok else None
         if last_png is None:
             shot = self.screenshot()
@@ -172,11 +196,9 @@ class OpenAIComputerAdapter(ComputerAdapter):
         url = self.current_url()
         if url:
             output["output"]["current_url"] = url
-        pending = call.get("pending_safety_checks")
-        if acknowledge_safety_checks and isinstance(pending, list) and pending:
+        if acknowledge_safety_checks and pending:
             output["acknowledged_safety_checks"] = [
                 {k: c.get(k) for k in ("id", "code", "message") if k in c} for c in pending
-                if isinstance(c, Mapping)
             ]
         return output, results
 

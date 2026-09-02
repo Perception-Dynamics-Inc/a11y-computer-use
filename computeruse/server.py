@@ -887,6 +887,12 @@ class Runtime:
             shot = self.driver.screenshot(display_id)
             scaled = capture.downscale(shot.png, max_long_edge)
             display = shot.display
+            if (scaled.source_width, scaled.source_height) != (display.width, display.height):
+                # The driver's PNG is not in display space (e.g. a DPR>1 capture);
+                # the coordinate contract is the Display, which is what the text
+                # below tells the model to multiply by and what marks/snap use.
+                scaled = dataclasses.replace(
+                    scaled, source_width=display.width, source_height=display.height)
             text = (
                 f"display {display.display_id}: {scaled.width}x{scaled.height} px image, "
                 f"downscaled from {display.width}x{display.height} physical px "

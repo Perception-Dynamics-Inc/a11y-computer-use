@@ -151,11 +151,15 @@ def resolve_app(identifier: str) -> str:
 
 
 def pids_matching(identifier: str) -> set[int]:
-    """PIDs of the managed windows whose owner comm or title contains
-    ``identifier`` (case-insensitive). Bridges the two Linux identities: the
-    permission-keying app id is the process comm ("python3"), while an AT-SPI
-    application registers under its program name ("cuatestapp"), so a
-    comm-based lookup must find the a11y application by PID, not by name."""
+    """PIDs of the managed windows whose owner comm contains ``identifier``
+    (case-insensitive). Bridges the two Linux identities: the permission-keying
+    app id is the process comm ("python3"), while an AT-SPI application registers
+    under its program name ("cuatestapp"), so a comm-based lookup must find the
+    a11y application by PID, not by name. Titles are deliberately NOT matched
+    here: Runtime already maps a title to its comm via `resolve_app`, and a title
+    match at this layer would let any window whose title merely mentions the app
+    id (a browser tab "gedit - Google Search") hand find_root a foreign
+    application's tree."""
     needle = (identifier or "").lower()
     pids: set[int] = set()
     if not needle:
@@ -167,7 +171,7 @@ def pids_matching(identifier: str) -> set[int]:
             if not pid:
                 continue
             comm = (_comm_for_pid(pid) or "").lower()
-            if needle in comm or needle in _win_title(win, d).lower():
+            if needle in comm:
                 pids.add(pid)
     except Exception:
         pass

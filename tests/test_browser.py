@@ -621,6 +621,30 @@ def test_browser_screenshot_returns_png_and_display() -> None:
     assert shot.display.width == 800 and shot.display.scale == 1.0
 
 
+def test_browser_screenshot_requests_a_css_sized_bitmap_on_a_hidpi_tab() -> None:
+    """Chrome paints captureScreenshot at devicePixelRatio while the driver's Display
+    is CSS px at scale 1.0; on a DPR-2 tab the clip must scale by 1/2 or every
+    coordinate derived from the PNG lands at twice the intended CSS point."""
+    def responder(method, params):
+        if method == "Runtime.evaluate" and "devicePixelRatio" in params.get("expression", ""):
+            return {"result": {"type": "number", "value": 2}}
+        return _fixture_responder(method, params)
+
+    d, t = _driver_on(responder)
+    shot = d.screenshot()
+    assert shot.display.width == 800 and shot.display.height == 600 and shot.display.scale == 1.0
+    (params,) = [p for m, p in t.sent if m == "Page.captureScreenshot"]
+    assert params["clip"] == {"x": 0.0, "y": 0.0, "width": 800.0, "height": 600.0, "scale": 0.5}
+    assert params["captureBeyondViewport"] is True
+
+
+def test_browser_screenshot_sends_no_clip_at_dpr_1() -> None:
+    d, t = _driver_on()  # the fixture's Runtime.evaluate reads as DPR 1 (headless CI)
+    d.screenshot()
+    (params,) = [p for m, p in t.sent if m == "Page.captureScreenshot"]
+    assert "clip" not in params and params["captureBeyondViewport"] is True
+
+
 def test_browser_missing_websocket_client_is_structured(monkeypatch) -> None:
     import builtins
     real_import = builtins.__import__
