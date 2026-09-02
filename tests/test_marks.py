@@ -31,7 +31,7 @@ def test_draw_marks_empty_is_noop() -> None:
 class _Scaled:
     scale = 0.5
 
-    def to_scaled(self, x: int, y: int) -> tuple[int, int]:
+    def from_source(self, x: int, y: int) -> tuple[int, int]:
         return round(x * 0.5), round(y * 0.5)
 
 
