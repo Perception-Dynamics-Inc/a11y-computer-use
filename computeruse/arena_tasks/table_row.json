@@ -1,0 +1,9 @@
+{
+  "id": "table_row",
+  "title": "Select a table row by its checkbox, then act",
+  "page": "table_row.html",
+  "instruction": "In the invoices table, tick the checkbox of the row for invoice INV-2031 (and no other row), then press 'Mark paid'.",
+  "success": "document.title === 'PAID:INV-2031'",
+  "allowed_targets": ["row-INV-2031", "tr-INV-2031", "mark-paid"],
+  "max_steps": 8
+}

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cities</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+#cities { height: 380px; width: 360px; overflow-y: auto; border: 1px solid #888; padding: 0; margin: 0; list-style: none; }
+#cities li { margin: 0; }
+#cities button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid #eee; border-radius: 0; margin: 0; background: #fff; }
+#cities button:hover { background: #eef; }
+</style>
+</head>
+<body>
+<h1>Choose a destination city</h1>
+<p>Scroll the list and click a city to select it. 111 cities, alphabetical.</p>
+<ul id="cities" data-cu-scroll>
+  <li><button id="city-amsterdam">Amsterdam</button></li>
+  <li><button id="city-ankara">Ankara</button></li>
+  <li><button id="city-athens">Athens</button></li>
+  <li><button id="city-baku">Baku</button></li>
+  <li><button id="city-barcelona">Barcelona</button></li>
+  <li><button id="city-belgrade">Belgrade</button></li>
+  <li><button id="city-berlin">Berlin</button></li>
+  <li><button id="city-bern">Bern</button></li>
+  <li><button id="city-bilbao">Bilbao</button></li>
+  <li><button id="city-bologna">Bologna</button></li>
+  <li><button id="city-bordeaux">Bordeaux</button></li>
+  <li><button id="city-bratislava">Bratislava</button></li>
+  <li><button id="city-bremen">Bremen</button></li>
+  <li><button id="city-bristol">Bristol</button></li>
+  <li><button id="city-brno">Brno</button></li>
+  <li><button id="city-brussels">Brussels</button></li>
+  <li><button id="city-bucharest">Bucharest</button></li>
+  <li><button id="city-budapest">Budapest</button></li>
+  <li><button id="city-cardiff">Cardiff</button></li>
+  <li><button id="city-chisinau">Chisinau</button></li>
+  <li><button id="city-cologne">Cologne</button></li>
+  <li><button id="city-copenhagen">Copenhagen</button></li>
+  <li><button id="city-cork">Cork</button></li>
+  <li><button id="city-dresden">Dresden</button></li>
+  <li><button id="city-dublin">Dublin</button></li>
+  <li><button id="city-dusseldorf">Dusseldorf</button></li>
+  <li><button id="city-edinburgh">Edinburgh</button></li>
+  <li><button id="city-florence">Florence</button></li>
+  <li><button id="city-frankfurt">Frankfurt</button></li>
+  <li><button id="city-gdansk">Gdansk</button></li>
+  <li><button id="city-geneva">Geneva</button></li>
+  <li><button id="city-genoa">Genoa</button></li>
+  <li><button id="city-ghent">Ghent</button></li>
+  <li><button id="city-glasgow">Glasgow</button></li>
+  <li><button id="city-gothenburg">Gothenburg</button></li>
+  <li><button id="city-graz">Graz</button></li>
+  <li><button id="city-hamburg">Hamburg</button></li>
+  <li><button id="city-hanover">Hanover</button></li>
+  <li><button id="city-helsinki">Helsinki</button></li>
+  <li><button id="city-istanbul">Istanbul</button></li>
+  <li><button id="city-kaunas">Kaunas</button></li>
+  <li><button id="city-kiel">Kiel</button></li>
+  <li><button id="city-krakow">Krakow</button></li>
+  <li><button id="city-lausanne">Lausanne</button></li>
+  <li><button id="city-leeds">Leeds</button></li>
+  <li><button id="city-leipzig">Leipzig</button></li>
+  <li><button id="city-lille">Lille</button></li>
+  <li><button id="city-lisbon">Lisbon</button></li>
+  <li><button id="city-liverpool">Liverpool</button></li>
+  <li><button id="city-ljubljana">Ljubljana</button></li>
+  <li><button id="city-lodz">Lodz</button></li>
+  <li><button id="city-london">London</button></li>
+  <li><button id="city-lublin">Lublin</button></li>
+  <li><button id="city-luxembourg">Luxembourg</button></li>
+  <li><button id="city-lyon">Lyon</button></li>
+  <li><button id="city-madrid">Madrid</button></li>
+  <li><button id="city-malaga">Malaga</button></li>
+  <li><button id="city-malmo">Malmo</button></li>
+  <li><button id="city-manchester">Manchester</button></li>
+  <li><button id="city-marseille">Marseille</button></li>
+  <li><button id="city-milan">Milan</button></li>
+  <li><button id="city-minsk">Minsk</button></li>
+  <li><button id="city-munich">Munich</button></li>
+  <li><button id="city-nantes">Nantes</button></li>
+  <li><button id="city-naples">Naples</button></li>
+  <li><button id="city-nice">Nice</button></li>
+  <li><button id="city-nicosia">Nicosia</button></li>
+  <li><button id="city-nuremberg">Nuremberg</button></li>
+  <li><button id="city-odense">Odense</button></li>
+  <li><button id="city-oslo">Oslo</button></li>
+  <li><button id="city-oxford">Oxford</button></li>
+  <li><button id="city-palermo">Palermo</button></li>
+  <li><button id="city-paris">Paris</button></li>
+  <li><button id="city-pisa">Pisa</button></li>
+  <li><button id="city-podgorica">Podgorica</button></li>
+  <li><button id="city-porto">Porto</button></li>
+  <li><button id="city-poznan">Poznan</button></li>
+  <li><button id="city-prague">Prague</button></li>
+  <li><button id="city-riga">Riga</button></li>
+  <li><button id="city-reykjavik">Reykjavik</button></li>
+  <li><button id="city-rome">Rome</button></li>
+  <li><button id="city-rotterdam">Rotterdam</button></li>
+  <li><button id="city-salzburg">Salzburg</button></li>
+  <li><button id="city-sarajevo">Sarajevo</button></li>
+  <li><button id="city-seville">Seville</button></li>
+  <li><button id="city-skopje">Skopje</button></li>
+  <li><button id="city-sofia">Sofia</button></li>
+  <li><button id="city-split">Split</button></li>
+  <li><button id="city-stockholm">Stockholm</button></li>
+  <li><button id="city-strasbourg">Strasbourg</button></li>
+  <li><button id="city-stuttgart">Stuttgart</button></li>
+  <li><button id="city-tallinn">Tallinn</button></li>
+  <li><button id="city-tampere">Tampere</button></li>
+  <li><button id="city-tbilisi">Tbilisi</button></li>
+  <li><button id="city-thessaloniki">Thessaloniki</button></li>
+  <li><button id="city-tirana">Tirana</button></li>
+  <li><button id="city-toulouse">Toulouse</button></li>
+  <li><button id="city-trieste">Trieste</button></li>
+  <li><button id="city-turin">Turin</button></li>
+  <li><button id="city-turku">Turku</button></li>
+  <li><button id="city-utrecht">Utrecht</button></li>
+  <li><button id="city-valencia">Valencia</button></li>
+  <li><button id="city-valletta">Valletta</button></li>
+  <li><button id="city-vienna">Vienna</button></li>
+  <li><button id="city-vilnius">Vilnius</button></li>
+  <li><button id="city-warsaw">Warsaw</button></li>
+  <li><button id="city-wroclaw">Wroclaw</button></li>
+  <li><button id="city-yerevan">Yerevan</button></li>
+  <li><button id="city-zagreb">Zagreb</button></li>
+  <li><button id="city-zaragoza">Zaragoza</button></li>
+  <li><button id="city-zurich">Zurich</button></li>
+</ul>
+<div class="status" id="status">No city selected.</div>
+<script>
+Array.prototype.forEach.call(document.querySelectorAll('#cities button'), function (b) {
+  b.addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Selected ' + b.textContent;
+    document.title = 'CITY:' + b.textContent;
+  });
+});
+</script>
+</body>
+</html>

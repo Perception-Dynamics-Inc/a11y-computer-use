@@ -1,0 +1,9 @@
+{
+  "id": "long_list",
+  "title": "Find and click an item deep in a scrolling list",
+  "page": "long_list.html",
+  "instruction": "In the list of cities, select 'Reykjavik'.",
+  "success": "document.title === 'CITY:Reykjavik'",
+  "allowed_targets": ["city-reykjavik"],
+  "max_steps": 10
+}

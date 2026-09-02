@@ -1,0 +1,9 @@
+{
+  "id": "dropdown",
+  "title": "Select from a native dropdown",
+  "page": "dropdown.html",
+  "instruction": "Set the shipping country to Norway and press Apply.",
+  "success": "document.title === 'SHIP:Norway' && document.getElementById('status').textContent === 'Shipping to Norway'",
+  "allowed_targets": ["country", "apply", "label-country"],
+  "max_steps": 8
+}

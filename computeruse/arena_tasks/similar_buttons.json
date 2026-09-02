@@ -1,0 +1,9 @@
+{
+  "id": "similar_buttons",
+  "title": "Disambiguate visually similar buttons",
+  "page": "similar_buttons.html",
+  "instruction": "Press the toolbar button labelled 'Archive' (not 'Unarchive', not 'Delete').",
+  "success": "document.title === 'PRESSED:Archive'",
+  "allowed_targets": ["btn-archive"],
+  "max_steps": 5
+}

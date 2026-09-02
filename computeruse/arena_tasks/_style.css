@@ -1,0 +1,15 @@
+/* cu-arena fixture style: plain, high contrast, every target at least 24x24 CSS px.
+   Deliberately unremarkable so the screenshot planner is not handicapped by
+   decoration and the accessibility planner is not helped by extra labels. */
+body { font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; margin: 24px; color: #111; background: #fff; }
+h1 { font-size: 22px; margin: 0 0 16px; }
+p { margin: 8px 0; }
+label { display: inline-block; margin: 6px 0; }
+input[type=text], input[type=email], select, textarea { font: inherit; padding: 6px 8px; border: 1px solid #888; border-radius: 4px; min-height: 24px; }
+input[type=checkbox] { width: 20px; height: 20px; margin: 4px 8px 4px 0; vertical-align: middle; }
+button { font: inherit; padding: 8px 16px; min-height: 36px; min-width: 64px; border: 1px solid #555; border-radius: 4px; background: #f3f3f3; color: #111; cursor: pointer; margin: 4px 8px 4px 0; }
+button:hover { background: #e6e6e6; }
+.row { margin: 12px 0; }
+.status { margin-top: 16px; padding: 8px; border: 1px dashed #aaa; min-height: 24px; }
+table { border-collapse: collapse; }
+td, th { border: 1px solid #bbb; padding: 8px 12px; text-align: left; }

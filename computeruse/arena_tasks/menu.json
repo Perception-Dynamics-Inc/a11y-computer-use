@@ -1,0 +1,9 @@
+{
+  "id": "menu",
+  "title": "Navigate a nested menu",
+  "page": "menu.html",
+  "instruction": "Using the menu bar, export the document as PDF (File, then Export, then PDF).",
+  "success": "document.title === 'EXPORTED:PDF'",
+  "allowed_targets": ["menu-file", "item-export", "item-pdf"],
+  "max_steps": 8
+}

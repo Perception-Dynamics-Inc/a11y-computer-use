@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Newsletters</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+</head>
+<body>
+<h1>Newsletter preferences</h1>
+<p>Choose the emails you want to receive.</p>
+<div class="row"><input type="checkbox" id="news"><label id="label-news" for="news">Company news</label></div>
+<div class="row"><input type="checkbox" id="promo"><label id="label-promo" for="promo">Promotions and offers</label></div>
+<div class="row"><input type="checkbox" id="sec"><label id="label-sec" for="sec">Security advisories</label></div>
+<div class="row"><input type="checkbox" id="beta"><label id="label-beta" for="beta">Beta program invitations</label></div>
+<div class="row"><input type="checkbox" id="rel"><label id="label-rel" for="rel">Release notes</label></div>
+<div class="row"><input type="checkbox" id="events"><label id="label-events" for="events">Events and webinars</label></div>
+<div class="row"><input type="checkbox" id="digest"><label id="label-digest" for="digest">Weekly digest</label></div>
+<div class="row"><input type="checkbox" id="jobs"><label id="label-jobs" for="jobs">Job openings</label></div>
+<div class="row"><button id="save">Save preferences</button> <button id="none">Unsubscribe from all</button></div>
+<div class="status" id="status">Preferences not saved.</div>
+<script>
+function selected() {
+  return Array.prototype.filter.call(document.querySelectorAll('input[type=checkbox]'), function (b) { return b.checked; })
+    .map(function (b) { return b.id; }).sort();
+}
+document.getElementById('save').addEventListener('click', function () {
+  var s = selected();
+  document.getElementById('status').textContent = s.length ? 'Saved: ' + s.join(', ') : 'Saved: none';
+  document.title = 'SAVED:' + s.join(',');
+});
+document.getElementById('none').addEventListener('click', function () {
+  Array.prototype.forEach.call(document.querySelectorAll('input[type=checkbox]'), function (b) { b.checked = false; });
+  document.getElementById('status').textContent = 'Preferences not saved.';
+  document.title = 'Newsletters';
+});
+</script>
+</body>
+</html>

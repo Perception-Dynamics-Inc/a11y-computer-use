@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Contact</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+</head>
+<body>
+<h1>Contact us</h1>
+<div class="row"><label id="label-name" for="name">Full name</label><br><input type="text" id="name" size="32"></div>
+<div class="row"><label id="label-email" for="email">Email address</label><br><input type="email" id="email" size="32"></div>
+<div class="row"><label id="label-topic" for="topic">Topic</label><br><input type="text" id="topic" size="32" placeholder="optional"></div>
+<div class="row"><button id="send">Send</button> <button id="reset">Reset</button></div>
+<div class="status" id="result">Nothing sent yet.</div>
+<script>
+document.getElementById('send').addEventListener('click', function () {
+  var name = document.getElementById('name').value.trim();
+  var email = document.getElementById('email').value.trim();
+  if (!name || !email) { document.getElementById('result').textContent = 'Name and email are required.'; return; }
+  document.getElementById('result').textContent = 'Sent: ' + name + ' <' + email + '>';
+  document.title = 'SENT';
+});
+document.getElementById('reset').addEventListener('click', function () {
+  ['name', 'email', 'topic'].forEach(function (id) { document.getElementById(id).value = ''; });
+  document.getElementById('result').textContent = 'Nothing sent yet.';
+  document.title = 'Contact';
+});
+</script>
+</body>
+</html>

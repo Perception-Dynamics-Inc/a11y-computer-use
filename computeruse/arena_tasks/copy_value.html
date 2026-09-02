@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Support</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.summary { border: 1px solid #ccc; padding: 12px; max-width: 420px; margin-bottom: 20px; }
+.summary dt { font-weight: 600; margin-top: 6px; }
+.summary dd { margin: 0; }
+</style>
+</head>
+<body>
+<h1>Support request</h1>
+<div class="summary" id="order-summary">
+  <dl>
+    <dt>Customer</dt><dd>Grace Hopper</dd>
+    <dt>Order number</dt><dd id="order-number">A7-4412</dd>
+    <dt>Placed</dt><dd>2026-08-30</dd>
+    <dt>Reference</dt><dd>B3-9901</dd>
+  </dl>
+</div>
+<div class="row"><label id="label-order" for="order-input">Order number to look up</label><br><input type="text" id="order-input" size="20"></div>
+<div class="row"><label id="label-reason" for="reason">Reason</label><br><input type="text" id="reason" size="32" placeholder="optional"></div>
+<div class="row"><button id="lookup">Look up</button> <button id="clear">Clear</button></div>
+<div class="status" id="status">Enter an order number.</div>
+<script>
+document.getElementById('lookup').addEventListener('click', function () {
+  var v = document.getElementById('order-input').value.trim();
+  document.getElementById('status').textContent = v ? 'Looking up order ' + v : 'Enter an order number.';
+  document.title = v ? 'LOOKUP:' + v : 'Support';
+});
+document.getElementById('clear').addEventListener('click', function () {
+  document.getElementById('order-input').value = '';
+  document.getElementById('status').textContent = 'Enter an order number.';
+  document.title = 'Support';
+});
+</script>
+</body>
+</html>

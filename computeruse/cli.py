@@ -94,6 +94,25 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_web.add_argument("--endpoint", help="CDP endpoint (default: $COMPUTERUSE_CDP_ENDPOINT "
                            "or http://127.0.0.1:9222)")
     bench_web.set_defaults(handler=_cmd_bench_web)
+    bench_h2h = bench_sub.add_parser(
+        "h2h", help="head-to-head: same planner, refs vs pixels, on the built-in task suite")
+    bench_h2h.add_argument("--tasks", default="all",
+                           help="'all' or comma-separated task ids (see --list)")
+    bench_h2h.add_argument("--modes", default="refs,pixels,pixels+snap",
+                           help="comma-separated subset of refs,pixels,pixels+snap")
+    bench_h2h.add_argument("--provider", choices=("anthropic", "openai", "claude-cli"),
+                           help="planner (default: $COMPUTERUSE_PROVIDER, else auto)")
+    bench_h2h.add_argument("--model", help="model id for the provider")
+    bench_h2h.add_argument("--rounds", type=int, default=1, help="repeat the whole suite N times")
+    bench_h2h.add_argument("--max-steps", type=int, help="override every task's planner-turn budget")
+    bench_h2h.add_argument("--price-in", type=float, help="USD per million input tokens (cost estimate)")
+    bench_h2h.add_argument("--price-out", type=float, help="USD per million output tokens")
+    bench_h2h.add_argument("--endpoint", help="CDP endpoint (default: $COMPUTERUSE_CDP_ENDPOINT "
+                                              "or http://127.0.0.1:9222)")
+    bench_h2h.add_argument("--out", help="directory to write h2h.md and h2h.json into")
+    bench_h2h.add_argument("--json", action="store_true", help="print the JSON report instead of markdown")
+    bench_h2h.add_argument("--list", action="store_true", help="list the task suite and exit")
+    bench_h2h.set_defaults(handler=_cmd_bench_h2h)
 
     agent = sub.add_parser(
         "agent",
@@ -164,6 +183,72 @@ def _cmd_bench_web(args: argparse.Namespace) -> int:
         driver.close()
     print(arena.format_report(report))
     return 0
+
+
+def _cmd_bench_h2h(args: argparse.Namespace) -> int:
+    import os
+    from pathlib import Path
+
+    from computeruse import h2h, providers
+
+    tasks = h2h.load_tasks()
+    if args.list:
+        for t in tasks:
+            print(f"{t.id:16} {t.title}  (max_steps={t.max_steps})")
+        return 0
+    if args.tasks != "all":
+        try:
+            tasks = h2h.load_tasks([t.strip() for t in args.tasks.split(",") if t.strip()])
+        except KeyError as exc:
+            print(f"unknown task {exc}; --list shows the suite", file=sys.stderr)
+            return 2
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    bad = [m for m in modes if m not in h2h.MODES]
+    if bad:
+        print(f"unknown mode(s) {bad}; expected a subset of {list(h2h.MODES)}", file=sys.stderr)
+        return 2
+    name = args.provider or os.environ.get("COMPUTERUSE_PROVIDER")
+
+    def factory(mode: str):
+        if name == "claude-cli" or (name is None and not os.environ.get("ANTHROPIC_API_KEY")
+                                    and not os.environ.get("OPENAI_API_KEY")):
+            return providers.ClaudeCLIProvider(args.model, view_images=(mode != "refs"))
+        return providers.get_provider(name, model=args.model)
+
+    try:
+        factory(modes[0])  # fail early on a misconfigured provider
+    except providers.ProviderError as exc:
+        print(f"provider: {exc}", file=sys.stderr)
+        return 2
+    endpoint = args.endpoint or os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+
+    def on_event(kind: str, payload: dict) -> None:
+        if kind == "start":
+            print(f"== {payload['task']} / {payload['mode']} (round {payload['round']})", file=sys.stderr)
+        elif kind == "step":
+            s = payload["step"]
+            first = s.result.splitlines()[0] if s.result else ""
+            print(f"   [{s.index}] {s.tool} {json.dumps(s.params)[:100]} -> "
+                  f"{'ok' if s.ok else s.error_code}: {first[:100]}", file=sys.stderr)
+        elif kind == "run":
+            r = payload["record"]
+            print(f"   => {'done' if r.success else 'NOT done'} turns={r.turns} misclicks={r.misclicks} "
+                  f"wasted={r.wasted} tokens={r.input_tokens}/{r.output_tokens} wall={r.wall_s:.0f}s",
+                  file=sys.stderr)
+
+    report = h2h.run_h2h(endpoint, factory, tasks=tasks, modes=modes, rounds=args.rounds,
+                         max_steps=args.max_steps, price_in=args.price_in, price_out=args.price_out,
+                         on_event=on_event, meta={"planner": name or "auto"})
+    text = h2h.format_report(report)
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "h2h.md").write_text(text + "\n", encoding="utf-8")
+        (out / "h2h.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        print(f"wrote {out / 'h2h.md'} and {out / 'h2h.json'}", file=sys.stderr)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else text)
+    agg = report.aggregate()
+    return 0 if agg and all(v["completed"] > 0 for v in agg.values()) else 1
 
 
 def _cmd_agent(args: argparse.Namespace) -> int:
