@@ -79,10 +79,20 @@ def _managed_windows(d):
 
 
 def _geometry_on_root(win, d):
-    """(x, y, w, h) of ``win`` in root (screen) coordinates, or None."""
+    """(x, y, w, h) of ``win`` in root (screen) coordinates, or None.
+
+    The window's own origin is translated INTO root coordinates:
+    ``root.translate_coords(win, 0, 0)`` (XTranslateCoordinates src=win,
+    dst=root). The other direction, ``win.translate_coords(root, 0, 0)``,
+    returns root's origin in window coordinates, i.e. the NEGATED position.
+    Under Xvfb with no window manager every window sits at (0, 0), where the
+    two are equal, which is how the inverted form shipped; on a real desktop
+    it made the act-time hit-test attribute every point to the full-screen
+    desktop window (docs/box-testbed.md).
+    """
     try:
         g = win.get_geometry()
-        coords = win.translate_coords(d.screen().root, 0, 0)
+        coords = d.screen().root.translate_coords(win, 0, 0)
         return int(coords.x), int(coords.y), int(g.width), int(g.height)
     except Exception:
         return None
