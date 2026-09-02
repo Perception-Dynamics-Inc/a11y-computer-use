@@ -1,0 +1,852 @@
+[
+  {
+    "task_id": "long_list",
+    "mode": "refs",
+    "round": 1,
+    "success": false,
+    "stopped": "max_steps",
+    "turns": 10,
+    "actions": 2,
+    "misclicks": 0,
+    "wasted": 1,
+    "input_tokens": 89269,
+    "output_tokens": 1694,
+    "cost_reported_usd": 1.86988,
+    "wall_s": 94.6161004579626,
+    "summary": "stopped after 10 planner turns without a done call",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "scroll_to_find",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "text": "Reykjavik",
+          "role": "button",
+          "direction": "down",
+          "max_scrolls": 20
+        },
+        "ok": true,
+        "result": "not found after 20 scroll(s): no element matches text='Reykjavik' role='button'",
+        "error_code": null,
+        "duration_ms": 692.2046670224518,
+        "usage": {
+          "input_tokens": 8365,
+          "output_tokens": 81
+        }
+      },
+      {
+        "index": 2,
+        "tool": "find",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "text": "Reykjavik"
+        },
+        "ok": true,
+        "result": "[snap-77] 418BCD00897B3025BD097682B2E0C82C: no elements match",
+        "error_code": null,
+        "duration_ms": 28.076000045984983,
+        "usage": {
+          "input_tokens": 7948,
+          "output_tokens": 126
+        }
+      },
+      {
+        "index": 3,
+        "tool": "desktop_snapshot",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "mode": "full"
+        },
+        "ok": true,
+        "result": "[snap-78] 418BCD00897B3025BD097682B2E0C82C (window)\n  e1 webarea \"Cities\" (focus) [1280x713 @0:0,0]\n    e2 group\n      e3 heading \"Choose a destination city\"\n        e4 statictext \"Choose a destination city\"\n      e5 statictext \"Scroll the list and click a city to select it. 111 cities, alphabetical.\"\n      e6 list\n        e7 button \"Amsterdam\" (click)\n          e8 statictext \"Amsterdam\"\n        e9 button \"Ankara\" (click)\n          e10 statictext \"Ankara\"\n        e11 button \"Athens\" (click)\n          e12 statictext \"Athens\"\n        e13 button \"Baku\" (click)\n          e14 statictext \"Baku\"\n    ",
+        "error_code": null,
+        "duration_ms": 34.03270896524191,
+        "usage": {
+          "input_tokens": 8099,
+          "output_tokens": 89
+        }
+      },
+      {
+        "index": 4,
+        "tool": "scroll",
+        "params": {
+          "ref": "e6",
+          "dy": -20,
+          "unit": "lines"
+        },
+        "ok": true,
+        "result": "scrolled e6 (AXList) by (dx=0, dy=-20) lines",
+        "error_code": null,
+        "duration_ms": 33.462207997217774,
+        "usage": {
+          "input_tokens": 8848,
+          "output_tokens": 202
+        }
+      },
+      {
+        "index": 5,
+        "tool": "find",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "text": "Reykjavik"
+        },
+        "ok": true,
+        "result": "[snap-80] 418BCD00897B3025BD097682B2E0C82C: no elements match",
+        "error_code": null,
+        "duration_ms": 33.251209068112075,
+        "usage": {
+          "input_tokens": 9136,
+          "output_tokens": 87
+        }
+      },
+      {
+        "index": 6,
+        "tool": "desktop_snapshot",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "mode": "full"
+        },
+        "ok": true,
+        "result": "[snap-81] 418BCD00897B3025BD097682B2E0C82C (window)\n  e1 webarea \"Cities\" (focus) [1280x713 @0:0,0]\n    e2 group\n      e3 heading \"Choose a destination city\"\n        e4 statictext \"Choose a destination city\"\n      e5 statictext \"Scroll the list and click a city to select it. 111 cities, alphabetical.\"\n      e6 list\n        e7 button \"Budapest\" (click)\n        e8 button \"Cardiff\" (click)\n          e9 statictext \"Cardiff\"\n        e10 button \"Chisinau\" (click)\n          e11 statictext \"Chisinau\"\n        e12 button \"Cologne\" (click)\n          e13 statictext \"Cologne\"\n        e14 button \"Copenhagen",
+        "error_code": null,
+        "duration_ms": 31.511834007687867,
+        "usage": {
+          "input_tokens": 8692,
+          "output_tokens": 126
+        }
+      },
+      {
+        "index": 7,
+        "tool": "scroll",
+        "params": {
+          "ref": "e6",
+          "dy": 30,
+          "unit": "lines"
+        },
+        "ok": true,
+        "result": "scrolled e6 (AXList) by (dx=0, dy=30) lines",
+        "error_code": null,
+        "duration_ms": 25.179750053212047,
+        "usage": {
+          "input_tokens": 9530,
+          "output_tokens": 309
+        }
+      },
+      {
+        "index": 8,
+        "tool": "find",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "text": "Reykjavik"
+        },
+        "ok": true,
+        "result": "[snap-83] 418BCD00897B3025BD097682B2E0C82C: no elements match",
+        "error_code": null,
+        "duration_ms": 34.21470895409584,
+        "usage": {
+          "input_tokens": 9656,
+          "output_tokens": 182
+        }
+      },
+      {
+        "index": 9,
+        "tool": "desktop_snapshot",
+        "params": {
+          "app": "418BCD00897B3025BD097682B2E0C82C",
+          "mode": "full"
+        },
+        "ok": true,
+        "result": "[snap-84] 418BCD00897B3025BD097682B2E0C82C (window)\n  e1 webarea \"Cities\" (focus) [1280x713 @0:0,0]\n    e2 group\n      e3 heading \"Choose a destination city\"\n        e4 statictext \"Choose a destination city\"\n      e5 statictext \"Scroll the list and click a city to select it. 111 cities, alphabetical.\"\n      e6 list\n        e7 button \"Amsterdam\" (click)\n          e8 statictext \"Amsterdam\"\n        e9 button \"Ankara\" (click)\n          e10 statictext \"Ankara\"\n        e11 button \"Athens\" (click)\n          e12 statictext \"Athens\"\n        e13 button \"Baku\" (click)\n          e14 statictext \"Baku\"\n    ",
+        "error_code": null,
+        "duration_ms": 28.178042033687234,
+        "usage": {
+          "input_tokens": 9123,
+          "output_tokens": 88
+        }
+      },
+      {
+        "index": 10,
+        "tool": "screenshot",
+        "params": {
+          "max_long_edge": 1280
+        },
+        "ok": true,
+        "result": "display 0: 1280x713 px image, downscaled from 1280x713 physical px (backing scale 1.0); multiply image coordinates by 1280/1280 to get physical pixels",
+        "error_code": null,
+        "duration_ms": 48.48433402366936,
+        "usage": {
+          "input_tokens": 9872,
+          "output_tokens": 404
+        }
+      }
+    ],
+    "clicks": []
+  },
+  {
+    "task_id": "long_list",
+    "mode": "pixels",
+    "round": 1,
+    "success": false,
+    "stopped": "max_steps",
+    "turns": 10,
+    "actions": 10,
+    "misclicks": 1,
+    "wasted": 5,
+    "input_tokens": 180498,
+    "output_tokens": 5751,
+    "cost_reported_usd": 1.6723082500000002,
+    "wall_s": 211.63441133406013,
+    "summary": "stopped after 10 planner turns without a done call",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 350,
+          "direction": "down",
+          "amount": 60
+        },
+        "ok": true,
+        "result": "scrolled (200, 350) on display 0 by (dx=0, dy=60) lines [at image point (200, 350)]",
+        "error_code": null,
+        "duration_ms": 96.87479201238602,
+        "usage": {
+          "input_tokens": 12757,
+          "output_tokens": 236
+        }
+      },
+      {
+        "index": 2,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 300,
+          "direction": "down",
+          "amount": 10
+        },
+        "ok": true,
+        "result": "scrolled (200, 300) on display 0 by (dx=0, dy=10) lines [at image point (200, 300)]",
+        "error_code": null,
+        "duration_ms": 93.11174997128546,
+        "usage": {
+          "input_tokens": 20646,
+          "output_tokens": 421
+        }
+      },
+      {
+        "index": 3,
+        "tool": "key",
+        "params": {
+          "text": "Tab"
+        },
+        "ok": true,
+        "result": "pressed tab",
+        "error_code": null,
+        "duration_ms": 53.59358305577189,
+        "usage": {
+          "input_tokens": 13339,
+          "output_tokens": 505
+        }
+      },
+      {
+        "index": 4,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 260,
+          "direction": "down",
+          "amount": 20
+        },
+        "ok": true,
+        "result": "scrolled (200, 260) on display 0 by (dx=0, dy=20) lines [at image point (200, 260)]",
+        "error_code": null,
+        "duration_ms": 68.71825002599508,
+        "usage": {
+          "input_tokens": 21312,
+          "output_tokens": 544
+        }
+      },
+      {
+        "index": 5,
+        "tool": "key",
+        "params": {
+          "text": "End"
+        },
+        "ok": true,
+        "result": "pressed end",
+        "error_code": null,
+        "duration_ms": 73.70804192032665,
+        "usage": {
+          "input_tokens": 13781,
+          "output_tokens": 353
+        }
+      },
+      {
+        "index": 6,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 300,
+          "direction": "down",
+          "amount": 100
+        },
+        "ok": true,
+        "result": "scrolled (200, 300) on display 0 by (dx=0, dy=100) lines [at image point (200, 300)]",
+        "error_code": null,
+        "duration_ms": 66.39954203274101,
+        "usage": {
+          "input_tokens": 13878,
+          "output_tokens": 275
+        }
+      },
+      {
+        "index": 7,
+        "tool": "left_click",
+        "params": {
+          "x": 378,
+          "y": 440
+        },
+        "ok": true,
+        "result": "clicked (378, 440) on display 0 [image point (378, 440) -> physical (378, 440)]",
+        "error_code": null,
+        "duration_ms": 55.1132089458406,
+        "usage": {
+          "input_tokens": 14218,
+          "output_tokens": 426
+        }
+      },
+      {
+        "index": 8,
+        "tool": "scroll",
+        "params": {
+          "x": 190,
+          "y": 250,
+          "direction": "down",
+          "amount": 5
+        },
+        "ok": true,
+        "result": "scrolled (190, 250) on display 0 by (dx=0, dy=5) lines [at image point (190, 250)]",
+        "error_code": null,
+        "duration_ms": 80.45712497550994,
+        "usage": {
+          "input_tokens": 24001,
+          "output_tokens": 1802
+        }
+      },
+      {
+        "index": 9,
+        "tool": "type",
+        "params": {
+          "text": "Reykjavik"
+        },
+        "ok": true,
+        "result": "typed 9 characters",
+        "error_code": null,
+        "duration_ms": 48.6135829705745,
+        "usage": {
+          "input_tokens": 23115,
+          "output_tokens": 521
+        }
+      },
+      {
+        "index": 10,
+        "tool": "key",
+        "params": {
+          "text": "Down"
+        },
+        "ok": true,
+        "result": "pressed down",
+        "error_code": null,
+        "duration_ms": 73.30937508959323,
+        "usage": {
+          "input_tokens": 23451,
+          "output_tokens": 668
+        }
+      }
+    ],
+    "clicks": [
+      {
+        "target": "city-bilbao",
+        "x": 378,
+        "y": 440
+      }
+    ]
+  },
+  {
+    "task_id": "long_list",
+    "mode": "pixels+snap",
+    "round": 1,
+    "success": false,
+    "stopped": "max_steps",
+    "turns": 10,
+    "actions": 10,
+    "misclicks": 1,
+    "wasted": 5,
+    "input_tokens": 180136,
+    "output_tokens": 5045,
+    "cost_reported_usd": 1.626391,
+    "wall_s": 216.15279766591266,
+    "summary": "stopped after 10 planner turns without a done call",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 350,
+          "direction": "down",
+          "amount": 60
+        },
+        "ok": true,
+        "result": "scrolled (200, 350) on display 0 by (dx=0, dy=60) lines [at image point (200, 350)]",
+        "error_code": null,
+        "duration_ms": 99.97075004503131,
+        "usage": {
+          "input_tokens": 12757,
+          "output_tokens": 225
+        }
+      },
+      {
+        "index": 2,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 300,
+          "direction": "down",
+          "amount": 30
+        },
+        "ok": true,
+        "result": "scrolled (200, 300) on display 0 by (dx=0, dy=30) lines [at image point (200, 300)]",
+        "error_code": null,
+        "duration_ms": 90.71320807561278,
+        "usage": {
+          "input_tokens": 13119,
+          "output_tokens": 183
+        }
+      },
+      {
+        "index": 3,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 400,
+          "direction": "down",
+          "amount": 5
+        },
+        "ok": true,
+        "result": "scrolled (200, 400) on display 0 by (dx=0, dy=5) lines [at image point (200, 400)]",
+        "error_code": null,
+        "duration_ms": 62.948625069111586,
+        "usage": {
+          "input_tokens": 21074,
+          "output_tokens": 465
+        }
+      },
+      {
+        "index": 4,
+        "tool": "key",
+        "params": {
+          "text": "Tab"
+        },
+        "ok": true,
+        "result": "pressed tab",
+        "error_code": null,
+        "duration_ms": 36.16087499540299,
+        "usage": {
+          "input_tokens": 13595,
+          "output_tokens": 571
+        }
+      },
+      {
+        "index": 5,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 250,
+          "direction": "down",
+          "amount": 10
+        },
+        "ok": true,
+        "result": "scrolled (200, 250) on display 0 by (dx=0, dy=10) lines [at image point (200, 250)]",
+        "error_code": null,
+        "duration_ms": 83.86024995706975,
+        "usage": {
+          "input_tokens": 21778,
+          "output_tokens": 611
+        }
+      },
+      {
+        "index": 6,
+        "tool": "key",
+        "params": {
+          "text": "End"
+        },
+        "ok": true,
+        "result": "pressed end",
+        "error_code": null,
+        "duration_ms": 59.1615840094164,
+        "usage": {
+          "input_tokens": 14023,
+          "output_tokens": 303
+        }
+      },
+      {
+        "index": 7,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 300,
+          "direction": "down",
+          "amount": 100
+        },
+        "ok": true,
+        "result": "scrolled (200, 300) on display 0 by (dx=0, dy=100) lines [at image point (200, 300)]",
+        "error_code": null,
+        "duration_ms": 60.99870800971985,
+        "usage": {
+          "input_tokens": 22224,
+          "output_tokens": 431
+        }
+      },
+      {
+        "index": 8,
+        "tool": "key",
+        "params": {
+          "text": "End"
+        },
+        "ok": true,
+        "result": "pressed end",
+        "error_code": null,
+        "duration_ms": 62.58662510663271,
+        "usage": {
+          "input_tokens": 14457,
+          "output_tokens": 672
+        }
+      },
+      {
+        "index": 9,
+        "tool": "left_click",
+        "params": {
+          "x": 378,
+          "y": 560
+        },
+        "ok": true,
+        "result": "clicked (378, 560) on display 0 [image point (378, 560) -> physical (378, 560)]",
+        "error_code": null,
+        "duration_ms": 100.74670799076557,
+        "usage": {
+          "input_tokens": 23771,
+          "output_tokens": 1056
+        }
+      },
+      {
+        "index": 10,
+        "tool": "scroll",
+        "params": {
+          "x": 200,
+          "y": 250,
+          "direction": "up",
+          "amount": 7
+        },
+        "ok": true,
+        "result": "scrolled (200, 250) on display 0 by (dx=0, dy=-7) lines [at image point (200, 250)]",
+        "error_code": null,
+        "duration_ms": 164.79862504638731,
+        "usage": {
+          "input_tokens": 23338,
+          "output_tokens": 528
+        }
+      }
+    ],
+    "clicks": [
+      {
+        "target": "html",
+        "x": 378,
+        "y": 560
+      }
+    ]
+  },
+  {
+    "task_id": "modal_confirm",
+    "mode": "refs",
+    "round": 1,
+    "success": false,
+    "stopped": "done",
+    "turns": 2,
+    "actions": 1,
+    "misclicks": 0,
+    "wasted": 1,
+    "input_tokens": 16610,
+    "output_tokens": 278,
+    "cost_reported_usd": 0.34606000000000003,
+    "wall_s": 17.096346875070594,
+    "summary": "Could not delete project 'Orion': the irreversible-action gate blocked the Delete click because no confirmation channel is available in this host, so the deletion was not performed.",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "click",
+        "params": {
+          "ref": "e15",
+          "verify": true
+        },
+        "ok": false,
+        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set COMPUTERUSE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
+        "error_code": "confirmation_declined",
+        "duration_ms": 6.336875027045608,
+        "usage": {
+          "input_tokens": 8191,
+          "output_tokens": 87
+        }
+      },
+      {
+        "index": 2,
+        "tool": "done",
+        "params": {
+          "summary": "Could not delete project 'Orion': the irreversible-action gate blocked the Delete click because no confirmation channel is available in this host, so the deletion was not performed.",
+          "success": false
+        },
+        "ok": true,
+        "result": "Could not delete project 'Orion': the irreversible-action gate blocked the Delete click because no confirmation channel is available in this host, so the deletion was not performed.",
+        "error_code": null,
+        "duration_ms": 0.0,
+        "usage": {
+          "input_tokens": 8419,
+          "output_tokens": 191
+        }
+      }
+    ],
+    "clicks": []
+  },
+  {
+    "task_id": "modal_confirm",
+    "mode": "pixels",
+    "round": 1,
+    "success": false,
+    "stopped": "max_steps",
+    "turns": 8,
+    "actions": 7,
+    "misclicks": 5,
+    "wasted": 7,
+    "input_tokens": 139108,
+    "output_tokens": 3310,
+    "cost_reported_usd": 1.2193699999999998,
+    "wall_s": 165.68606916593853,
+    "summary": "stopped after 8 planner turns without a done call",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 199
+        },
+        "ok": true,
+        "result": "clicked (552, 199) on display 0 [image point (552, 199) -> physical (552, 199)]",
+        "error_code": null,
+        "duration_ms": 33.61895901616663,
+        "usage": {
+          "input_tokens": 12701,
+          "output_tokens": 133
+        }
+      },
+      {
+        "index": 2,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 199
+        },
+        "ok": true,
+        "result": "clicked (552, 199) on display 0 [image point (552, 199) -> physical (552, 199)]",
+        "error_code": null,
+        "duration_ms": 49.3939999723807,
+        "usage": {
+          "input_tokens": 12973,
+          "output_tokens": 244
+        }
+      },
+      {
+        "index": 3,
+        "tool": "key",
+        "params": {
+          "text": "Return"
+        },
+        "ok": true,
+        "result": "pressed return",
+        "error_code": null,
+        "duration_ms": 41.13462509121746,
+        "usage": {
+          "input_tokens": 13173,
+          "output_tokens": 287
+        }
+      },
+      {
+        "index": 4,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 199
+        },
+        "ok": true,
+        "result": "clicked (552, 199) on display 0 [image point (552, 199) -> physical (552, 199)]",
+        "error_code": null,
+        "duration_ms": 226.16616706363857,
+        "usage": {
+          "input_tokens": 20914,
+          "output_tokens": 393
+        }
+      },
+      {
+        "index": 5,
+        "tool": "screenshot",
+        "params": {},
+        "ok": true,
+        "result": "",
+        "error_code": null,
+        "duration_ms": 52.00154194608331,
+        "usage": {
+          "input_tokens": 21485,
+          "output_tokens": 552
+        }
+      },
+      {
+        "index": 6,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 199
+        },
+        "ok": true,
+        "result": "clicked (552, 199) on display 0 [image point (552, 199) -> physical (552, 199)]",
+        "error_code": null,
+        "duration_ms": 43.03170903585851,
+        "usage": {
+          "input_tokens": 21821,
+          "output_tokens": 752
+        }
+      },
+      {
+        "index": 7,
+        "tool": "key",
+        "params": {
+          "text": "Return"
+        },
+        "ok": true,
+        "result": "pressed return",
+        "error_code": null,
+        "duration_ms": 39.048834005370736,
+        "usage": {
+          "input_tokens": 13910,
+          "output_tokens": 464
+        }
+      },
+      {
+        "index": 8,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 199
+        },
+        "ok": true,
+        "result": "clicked (552, 199) on display 0 [image point (552, 199) -> physical (552, 199)]",
+        "error_code": null,
+        "duration_ms": 40.58370797429234,
+        "usage": {
+          "input_tokens": 22131,
+          "output_tokens": 485
+        }
+      }
+    ],
+    "clicks": [
+      {
+        "target": "div",
+        "x": 552,
+        "y": 199
+      },
+      {
+        "target": "div",
+        "x": 552,
+        "y": 199
+      },
+      {
+        "target": "div",
+        "x": 552,
+        "y": 199
+      },
+      {
+        "target": "div",
+        "x": 552,
+        "y": 199
+      },
+      {
+        "target": "div",
+        "x": 552,
+        "y": 199
+      }
+    ]
+  },
+  {
+    "task_id": "modal_confirm",
+    "mode": "pixels+snap",
+    "round": 1,
+    "success": false,
+    "stopped": "done",
+    "turns": 2,
+    "actions": 1,
+    "misclicks": 0,
+    "wasted": 1,
+    "input_tokens": 25994,
+    "output_tokens": 460,
+    "cost_reported_usd": 0.26725425,
+    "wall_s": 31.209883999894373,
+    "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+    "model": "claude-fable-5-1",
+    "error": null,
+    "steps": [
+      {
+        "index": 1,
+        "tool": "left_click",
+        "params": {
+          "x": 552,
+          "y": 183
+        },
+        "ok": false,
+        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set COMPUTERUSE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
+        "error_code": "confirmation_declined",
+        "duration_ms": 52.349249948747456,
+        "usage": {
+          "input_tokens": 12765,
+          "output_tokens": 199
+        }
+      },
+      {
+        "index": 2,
+        "tool": "done",
+        "params": {
+          "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+          "success": false
+        },
+        "ok": true,
+        "result": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+        "error_code": null,
+        "duration_ms": 0.0,
+        "usage": {
+          "input_tokens": 13229,
+          "output_tokens": 261
+        }
+      }
+    ],
+    "clicks": []
+  }
+]
