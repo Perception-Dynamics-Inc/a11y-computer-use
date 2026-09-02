@@ -51,7 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
     mcp.set_defaults(handler=_cmd_mcp)
 
-    doctor = sub.add_parser("doctor", help="diagnose TCC grants and environment")
+    doctor = sub.add_parser(
+        "doctor", help="diagnose OS permissions (macOS TCC), the a11y bus (Linux), and the environment"
+    )
     doctor.set_defaults(handler=_cmd_doctor)
 
     snapshot = sub.add_parser("snapshot", help="print a pruned a11y snapshot for an app")
@@ -364,17 +366,22 @@ def _cmd_doctor(_args: argparse.Namespace) -> int:
 
 
 def _cmd_snapshot(args: argparse.Namespace) -> int:
-    from computeruse import observe, safety, server
+    from computeruse import observe, server
+    from computeruse.drivers import get_driver
     from computeruse.schema import ComputerUseError, Scope
 
+    # Through the platform Driver seam, so `computeruse snapshot` works on
+    # macOS (AX), Windows (UIA), Linux (AT-SPI2) and the browser alike. The
+    # macOS driver delegates to observe.snapshot / safety.frontmost_app.
+    driver = get_driver()
     app = args.app
     if app is None:
-        app, _pid = safety.frontmost_app()
+        app, _pid = driver.frontmost_app()
         if app is None:
             print("no frontmost application detected; pass --app NAME", file=sys.stderr)
             return 2
     try:
-        snap = observe.snapshot(Scope(args.scope), app=app)
+        snap = driver.snapshot(Scope(args.scope), app)
     except ComputerUseError as exc:
         print(server.error_text(exc), file=sys.stderr)
         return 1
