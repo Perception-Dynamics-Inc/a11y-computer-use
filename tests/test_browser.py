@@ -374,6 +374,23 @@ def test_key_events_named_printable_and_chord() -> None:
             browser._key_events(bad)
 
 
+def test_browser_scroll_wheel_sign_follows_the_tool_contract() -> None:
+    """Positive dy scrolls content up (reader moves down): CDP wants a POSITIVE
+    deltaY for that, so the driver must not negate. cu-arena's long_list task
+    caught the inverted sign (every scroll down at the top of a list did nothing)."""
+    from computeruse.schema import ScrollUnit
+
+    d, t = _driver_on()
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    button = next(e for e in snap.elements if e.role == "AXButton")
+    d.scroll(button, dy=3, unit=ScrollUnit.LINES)
+    wheel = next(p for m, p in t.sent if m == "Input.dispatchMouseEvent" and p.get("type") == "mouseWheel")
+    assert wheel["deltaY"] == 120 and wheel["deltaX"] == 0  # 3 lines * 40 px, scrolls down
+    d.scroll(button, dx=-2, dy=-1, unit=ScrollUnit.PIXELS)
+    wheel = [p for m, p in t.sent if m == "Input.dispatchMouseEvent" and p.get("type") == "mouseWheel"][-1]
+    assert wheel["deltaX"] == -2 and wheel["deltaY"] == -1
+
+
 def test_browser_key_chord_dispatches_key_events() -> None:
     d, t = _driver_on()
     d.key_chord("cmd+a")

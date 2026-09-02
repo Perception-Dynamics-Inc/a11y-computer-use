@@ -551,6 +551,38 @@ def test_live_h2h_scripted_planners_in_both_modes(tmp_path) -> None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None, reason="no live CDP endpoint")
+def test_live_scroll_to_find_reaches_an_item_deep_in_an_overflow_list(tmp_path) -> None:
+    """The long_list fixture: Reykjavik is 3,000 px down inside a 380 px scroll box,
+    so it is pruned from the first snapshot; scroll_to_find must scroll the LIST
+    (wheel over it, positive dy = down) until the item is observable, then a ref
+    click selects it."""
+    from computeruse.drivers.browser import BrowserDriver
+
+    d = BrowserDriver(endpoint=_live_endpoint())
+    sess = d._connect()
+    try:
+        with h2h.FixtureServer() as srv:
+            d.navigate(srv.url_for("long_list.html"))
+            tab = d.frontmost_app()[0]
+            store = safety.PermissionStore(tmp_path / "perm.json")
+            store.set_tier(tab, safety.Tier.FULL)
+            rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=d)
+            assert "Reykjavik" not in rt.desktop_snapshot(tab)
+            found = rt.scroll_to_find(tab, text="Reykjavik", role="button", max_scrolls=12)
+            assert found.startswith("found after"), found
+            ref = re.search(r"(e\d+) button \"Reykjavik\"", found).group(1)
+            top = sess.call("Runtime.evaluate", {"expression": "document.getElementById('cities').scrollTop",
+                                                 "returnByValue": True})["result"]["value"]
+            assert top > 0
+            rt.click(ref=ref)
+            title = sess.call("Runtime.evaluate", {"expression": "document.title",
+                                                   "returnByValue": True})["result"]["value"]
+            assert title == "CITY:Reykjavik"
+    finally:
+        d.close()
+
+
+@pytest.mark.skipif(_live_endpoint() is None, reason="no live CDP endpoint")
 def test_live_every_fixture_loads_and_success_predicate_is_false_initially() -> None:
     from computeruse.drivers.browser import BrowserDriver
 
