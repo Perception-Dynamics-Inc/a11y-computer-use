@@ -93,6 +93,7 @@ def test_tools_list_exposes_full_v1_surface(tmp_path: Path) -> None:
     assert all(t.inputSchema.get("type") == "object" for t in tools.tools)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS TCC path")
 @pytest.mark.skipif(HAS_AX, reason="AX grant present; this asserts the ungranted path")
 def test_desktop_snapshot_permission_error_is_a_tool_result(tmp_path: Path) -> None:
     """Missing TCC grant surfaces as a structured tool error, not a crash."""

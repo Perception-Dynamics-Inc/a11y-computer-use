@@ -63,6 +63,24 @@ def test_doctor_subprocess_smoke() -> None:
 # --- snapshot -------------------------------------------------------------------
 
 
+class _SnapshotDriver:
+    """Stand-in for `drivers.get_driver()`: the CLI goes through the Driver seam,
+    so these tests exercise the CLI on every platform, not the macOS observe path."""
+
+    def __init__(self, build, front=("com.apple.TextEdit", 42)) -> None:
+        self._build = build
+        self._front = front
+        self.seen: list[str] = []
+
+    def frontmost_app(self):
+        return self._front
+
+    def snapshot(self, scope, app):
+        self.seen.append(app)
+        return self._build()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="exercises the macOS observe trust probe")
 def test_snapshot_without_ax_exits_nonzero_with_structured_message(
     capsys, monkeypatch
 ) -> None:
@@ -73,6 +91,7 @@ def test_snapshot_without_ax_exits_nonzero_with_structured_message(
     assert "doctor" in err
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS TCC path")
 @pytest.mark.skipif(HAS_AX, reason="machine holds the AX grant; ungranted path unreachable")
 def test_snapshot_without_ax_live_permission_path(capsys) -> None:
     """The real (unmocked) ungranted call degrades to the same structured error."""
@@ -81,7 +100,7 @@ def test_snapshot_without_ax_live_permission_path(capsys) -> None:
 
 
 def test_snapshot_prints_pruned_tree(capsys, monkeypatch, snapshot_builder) -> None:
-    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snapshot_builder())
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _SnapshotDriver(snapshot_builder))
     assert cli.main(["snapshot", "--app", "TextEdit"]) == 0
     out = capsys.readouterr().out
     assert "[snap-test-1]" in out
@@ -89,13 +108,10 @@ def test_snapshot_prints_pruned_tree(capsys, monkeypatch, snapshot_builder) -> N
 
 
 def test_snapshot_defaults_to_frontmost_app(capsys, monkeypatch, snapshot_builder) -> None:
-    seen: list[str] = []
-    monkeypatch.setattr(safety, "frontmost_app", lambda: ("com.apple.TextEdit", 42))
-    monkeypatch.setattr(
-        observe, "snapshot", lambda scope, *, app: seen.append(app) or snapshot_builder()
-    )
+    fake = _SnapshotDriver(snapshot_builder, front=("com.apple.TextEdit", 42))
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: fake)
     assert cli.main(["snapshot"]) == 0
-    assert seen == ["com.apple.TextEdit"]
+    assert fake.seen == ["com.apple.TextEdit"]
 
 
 # --- run-once -------------------------------------------------------------------
@@ -159,7 +175,7 @@ def test_mcp_subcommand_runs_server_over_stdio(monkeypatch) -> None:
 
 
 def test_snapshot_mode_budget_and_bounds_flags(capsys, monkeypatch, snapshot_builder) -> None:
-    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snapshot_builder())
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _SnapshotDriver(snapshot_builder))
     assert cli.main(["snapshot", "--app", "TextEdit", "--mode", "interactive"]) == 0
     out = capsys.readouterr().out
     assert out.splitlines()[0].endswith("interactive") and 'e2 button "Save"' in out

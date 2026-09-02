@@ -29,13 +29,20 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import math
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
-import Quartz
-from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
+if sys.platform == "darwin":
+    import Quartz
+    from AppKit import NSPasteboard, NSPasteboardItem, NSPasteboardTypeString
+else:  # pragma: no cover - the CGEvent executor is macOS-only; the pure helpers
+    # (chord parsing, event building types) must still import on Linux/Windows
+    # so the shared test modules and `server.py`'s lazy imports collect there.
+    Quartz = None  # type: ignore[assignment]
+    NSPasteboard = NSPasteboardItem = NSPasteboardTypeString = None  # type: ignore[assignment]
 
 from computeruse.schema import (
     MODIFIER_KEYS,

@@ -11,6 +11,8 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 
+import sys
+
 import pytest
 
 from computeruse import doctor
@@ -24,6 +26,10 @@ from computeruse.doctor import (
     run_doctor,
 )
 from tests.conftest import HAS_AX, HAS_SCREEN
+
+#: The TCC report shape and the live TCC probes only exist on macOS; Linux and
+#: Windows get their own report (covered by the *_report_shape tests below).
+darwin_only = pytest.mark.skipif(sys.platform != "darwin", reason="macOS TCC doctor checks")
 
 # --- canned `ps -o ppid=,comm=` tables: pid -> raw ps output ----------------
 
@@ -139,6 +145,7 @@ def _patch_environment(
     monkeypatch.setattr(doctor.os, "getpid", lambda: 500)
 
 
+@darwin_only
 def test_run_doctor_all_green(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_environment(monkeypatch, ax=True, screen=True, ps_table=TERMINAL_PS)
     report = run_doctor()
@@ -148,6 +155,7 @@ def test_run_doctor_all_green(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all(result["fix"] is None for result in report)
 
 
+@darwin_only
 def test_run_doctor_missing_grants_name_the_host_app(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_environment(monkeypatch, ax=False, screen=False, ps_table=TERMINAL_PS)
     report = run_doctor()
@@ -166,6 +174,7 @@ def test_run_doctor_missing_grants_name_the_host_app(monkeypatch: pytest.MonkeyP
     assert SCREEN_RECORDING_SETTINGS_URL in screen["fix"]
 
 
+@darwin_only
 def test_run_doctor_claude_chain_names_claude(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_environment(monkeypatch, ax=False, screen=False, ps_table=CLAUDE_PS)
     report = run_doctor()
@@ -174,6 +183,7 @@ def test_run_doctor_claude_chain_names_claude(monkeypatch: pytest.MonkeyPatch) -
     assert "Grant Accessibility to Claude" in ax["fix"]
 
 
+@darwin_only
 def test_run_doctor_orphan_chain_falls_back_gracefully(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_environment(monkeypatch, ax=False, screen=False, ps_table=ORPHAN_PS)
     report = run_doctor()
@@ -188,12 +198,14 @@ def test_run_doctor_orphan_chain_falls_back_gracefully(monkeypatch: pytest.Monke
     assert ACCESSIBILITY_SETTINGS_URL in ax["fix"]
 
 
+@darwin_only
 def test_run_doctor_never_raises_when_ps_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(doctor, "_run_ps", lambda pid: "")
     report = run_doctor()  # failures are data, not exceptions
     assert _by_check(report, "responsible_app")["ok"] is False
 
 
+@darwin_only
 def test_environment_checks_pass_in_this_venv() -> None:
     # pyproject pins python>=3.11 and installs pyobjc + mcp; all three hold here.
     report = run_doctor()
@@ -239,6 +251,7 @@ def test_render_text_lists_checks_fixes_and_summary(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.skipif(HAS_AX, reason="AX grant present; this asserts the ungranted path")
+@darwin_only
 def test_live_accessibility_missing_grant_is_structured_not_raised() -> None:
     ax = _by_check(run_doctor(), "accessibility_grant")
     assert ax["ok"] is False
@@ -255,6 +268,7 @@ def test_live_accessibility_grant_detected() -> None:
 
 
 @pytest.mark.skipif(HAS_SCREEN, reason="Screen Recording grant present; asserts the ungranted path")
+@darwin_only
 def test_live_screen_recording_missing_grant_is_structured_not_raised() -> None:
     screen = _by_check(run_doctor(), "screen_recording_grant")
     assert screen["ok"] is False
@@ -267,3 +281,23 @@ def test_live_screen_recording_grant_detected() -> None:
     screen = _by_check(run_doctor(), "screen_recording_grant")
     assert screen["ok"] is True
     assert screen["fix"] is None
+
+
+# --- Linux / Windows report shapes (hermetic: the probes fail as data off-platform) ---
+
+
+def test_run_doctor_linux_report_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    report = run_doctor()  # never raises, even where gi / Xlib are absent
+    assert [r["check"] for r in report] == [
+        "display_session", "window_manager", "atspi_bindings", "a11y_bus",
+        "coordinate_input", "clipboard_tool", "python_version", "mcp_import",
+    ]
+    for r in report:
+        assert isinstance(r["ok"], bool) and r["detail"]
+        assert r["ok"] or r["fix"], f"{r['check']} failed without a fix hint"
+
+
+def test_run_doctor_windows_report_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert [r["check"] for r in run_doctor()] == ["uiautomation_import", "python_version", "mcp_import"]

@@ -150,6 +150,30 @@ def resolve_app(identifier: str) -> str:
     return identifier
 
 
+def pids_matching(identifier: str) -> set[int]:
+    """PIDs of the managed windows whose owner comm or title contains
+    ``identifier`` (case-insensitive). Bridges the two Linux identities: the
+    permission-keying app id is the process comm ("python3"), while an AT-SPI
+    application registers under its program name ("cuatestapp"), so a
+    comm-based lookup must find the a11y application by PID, not by name."""
+    needle = (identifier or "").lower()
+    pids: set[int] = set()
+    if not needle:
+        return pids
+    try:
+        d = _display()
+        for win in _managed_windows(d):
+            pid = _pid_of(win, d)
+            if not pid:
+                continue
+            comm = (_comm_for_pid(pid) or "").lower()
+            if needle in comm or needle in _win_title(win, d).lower():
+                pids.add(pid)
+    except Exception:
+        pass
+    return pids
+
+
 def running_apps() -> list[dict]:
     """Distinct apps with managed windows: {name, pid, frontmost}."""
     out: list[dict] = []

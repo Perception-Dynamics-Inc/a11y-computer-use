@@ -67,12 +67,29 @@ _KEYSYM_KEYS.update({
     "home": 0xFF50, "end": 0xFF57, "pageup": 0xFF55, "pagedown": 0xFF56,
     "insert": 0xFF63,
 })
-_KEYSYM_KEYS.update({f"f{i}": 0xFFBD + i for i in range(1, 13)})  # F1=0xFFBE .. F12=0xFFC9
+_KEYSYM_KEYS.update({f"f{i}": 0xFFBD + i for i in range(1, 25)})  # F1=0xFFBE .. F24=0xFFD5
+# Named punctuation (so "ctrl+plus" / "ctrl+minus" work — "+" is the chord
+# separator) and the remaining keyboard keys a user can press.
+_KEYSYM_KEYS.update({
+    "minus": 0x002D, "equal": 0x003D, "plus": 0x002B, "comma": 0x002C, "period": 0x002E,
+    "slash": 0x002F, "backslash": 0x005C, "semicolon": 0x003B, "apostrophe": 0x0027,
+    "quote": 0x0027, "grave": 0x0060, "backtick": 0x0060, "bracketleft": 0x005B,
+    "bracketright": 0x005D, "less": 0x003C, "greater": 0x003E,
+    "capslock": 0xFFE5, "numlock": 0xFF7F, "scrolllock": 0xFF14, "print": 0xFF61,
+    "printscreen": 0xFF61, "pause": 0xFF13, "menu": 0xFF67,
+})
+
+
+_CONTROL_CHARS = {"\n": 0xFF0D, "\r": 0xFF0D, "\t": 0xFF09, "\b": 0xFF08, "\x1b": 0xFF1B}
 
 
 def _char_keysym(ch: str) -> int:
     """X keysym for a character: the codepoint for Latin-1, else the X Unicode
-    keysym convention (0x01000000 | codepoint)."""
+    keysym convention (0x01000000 | codepoint). Newline/tab/backspace/escape map
+    to their key keysyms so ``type_text("a\\nb")`` presses Return, not a
+    non-existent control keysym."""
+    if ch in _CONTROL_CHARS:
+        return _CONTROL_CHARS[ch]
     cp = ord(ch)
     return cp if cp < 0x100 else (0x01000000 | cp)
 
@@ -110,6 +127,66 @@ def _tap_keysym(keysym: int) -> bool:
     return True
 
 
+def _spare_keycodes(d) -> list[int]:
+    """Keycodes with no keysyms bound in the current map (layouts leave gaps at
+    the top of the range), lowest first; callers pop from the end."""
+    info = d.display.info
+    lo, hi = info.min_keycode, info.max_keycode
+    mapping = d.get_keyboard_mapping(lo, hi - lo + 1)
+    return [lo + i for i, syms in enumerate(mapping) if all(int(s) == 0 for s in syms)]
+
+
+class _TempKeymap:
+    """Spare keycodes temporarily bound to keysyms the current layout lacks
+    (CJK, emoji, symbols, accented letters on a US layout), so they can be
+    typed through XTEST like any other key. The same trick xdotool uses.
+
+    Each distinct keysym gets its own keycode for the whole operation and the
+    map is restored once at the end. Remap-press-restore per character does
+    NOT work: toolkits translate keycodes lazily from a cached keymap, so a
+    keycode rebound before the client processed the key comes out as whichever
+    character it held at translation time (verified on a Budgie/Xorg desktop:
+    'ü' arrived as the 'ï' typed two characters later)."""
+
+    def __init__(self) -> None:
+        self._d = _disp()
+        self._bound: dict[int, int] = {}  # keysym -> keycode
+        self._saved: dict[int, list[int]] = {}  # keycode -> original keysyms
+        self._spare = _spare_keycodes(self._d)
+
+    def bind(self, keysym: int) -> int | None:
+        """Keycode currently producing ``keysym`` (binding a spare one on first
+        use), or None when the map has no spare keycode left."""
+        import time
+
+        kc = self._bound.get(keysym)
+        if kc is not None:
+            return kc
+        if not self._spare:
+            return None
+        kc = self._spare.pop()
+        self._saved[kc] = list(self._d.get_keyboard_mapping(kc, 1)[0])
+        _flush()  # anything queued under the old map goes out first
+        self._d.change_keyboard_mapping(kc, [[keysym] * len(self._saved[kc])])
+        self._d.sync()
+        time.sleep(0.03)  # clients refresh their keymap on MappingNotify before the key arrives
+        self._bound[keysym] = kc
+        return kc
+
+    def restore(self) -> None:
+        import time
+
+        if not self._saved:
+            return
+        _flush()
+        time.sleep(0.05)  # let clients translate the last keys under the temporary map
+        for kc, syms in self._saved.items():
+            self._d.change_keyboard_mapping(kc, [syms])
+        self._d.sync()
+        self._saved.clear()
+        self._bound.clear()
+
+
 # --- text ------------------------------------------------------------------
 
 
@@ -119,9 +196,26 @@ def type_string(text: str) -> None:
     not two per character)."""
     if not text:
         return
-    for ch in text:
-        _tap_keysym(_char_keysym(ch))
-    _flush()
+    import time
+
+    from Xlib import X
+
+    pool = _TempKeymap()
+    try:
+        for ch in text:
+            keysym = _char_keysym(ch)
+            if _tap_keysym(keysym):
+                continue
+            kc = pool.bind(keysym)  # not on the layout: type it through a spare keycode
+            if kc is None:
+                continue  # no spare keycode left; skip rather than mistype
+            _fake(X.KeyPress, kc)
+            _fake(X.KeyRelease, kc)
+            _flush()
+            time.sleep(0.012)  # keep the client's lazy translation in step with the map
+        _flush()
+    finally:
+        pool.restore()
 
 
 # --- key chords ------------------------------------------------------------
@@ -141,9 +235,11 @@ def _parse_chord(chord: str) -> tuple[list[int], int]:
         msyms.append(_KEYSYM_MODS[m])
     if key in _KEYSYM_MODS:
         raise ValueError(f"chord {chord!r} has no non-modifier key")
-    if key not in _KEYSYM_KEYS:
-        raise ValueError(f"unknown key {key!r} in {chord!r}")
-    return msyms, _KEYSYM_KEYS[key]
+    if key in _KEYSYM_KEYS:
+        return msyms, _KEYSYM_KEYS[key]
+    if len(key) == 1 and key.isprintable():
+        return msyms, _char_keysym(key)  # any single printable key: "ctrl+/", "ctrl+-", "alt+."
+    raise ValueError(f"unknown key {key!r} in {chord!r}")
 
 
 def validate_chord(chord: str) -> None:
@@ -158,9 +254,17 @@ def press_chord(chord: str) -> None:
 
     msyms, ksym = _parse_chord(chord)
     mod_kcs = [_disp().keysym_to_keycode(s) for s in msyms]
-    key_kc, _ = _keycode_and_shift(ksym)
-    if key_kc is None:
-        raise ValueError(f"key in {chord!r} is not on the current keymap")
+    key_kc, needs_shift = _keycode_and_shift(ksym)
+    pool = None
+    if key_kc is None:  # e.g. "ctrl+ü" on a US layout: bind it for this chord
+        pool = _TempKeymap()
+        key_kc = pool.bind(ksym)
+        if key_kc is None:
+            raise ValueError(f"key in {chord!r} is not on the current keymap and no spare keycode is free")
+    if needs_shift and _KEYSYM_MODS["shift"] not in msyms:
+        # The key lives on the shifted level (e.g. "ctrl+_" or "ctrl+:"): hold
+        # Shift too, otherwise the base-level character is sent instead.
+        mod_kcs.append(_disp().keysym_to_keycode(_KEYSYM_MODS["shift"]))
     for kc in mod_kcs:
         if kc:
             _fake(X.KeyPress, kc)
@@ -170,6 +274,8 @@ def press_chord(chord: str) -> None:
         if kc:
             _fake(X.KeyRelease, kc)
     _flush()
+    if pool is not None:
+        pool.restore()
 
 
 @contextmanager

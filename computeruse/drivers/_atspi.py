@@ -73,6 +73,7 @@ _ROLE = {
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
     "scroll bar": "AXScrollBar",
+    "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
@@ -447,32 +448,62 @@ def find_root(app: str, scope) -> object | None:
     if desktop is None:
         return None
     count = _call_first(desktop, ("get_child_count",), default=0) or 0
-    app_acc = None
+    st = getattr(Atspi, "StateType", None)
+    active = getattr(st, "ACTIVE", None)
+
+    def _frames(acc):
+        n = _call_first(acc, ("get_child_count",), default=0) or 0
+        out = []
+        for j in range(int(n)):
+            frame = _call_first(acc, ("get_child_at_index",), j)
+            if frame is not None:
+                out.append(frame)
+        return out
+
+    def _is_active(frame) -> bool:
+        sset = _call_first(frame, ("get_state_set",))
+        return bool(active is not None and sset is not None and _safe(lambda: sset.contains(active), False))
+
+    # Several applications can share a name: on Linux the permission-keying app
+    # id is the process comm ("python3"), and every Python process that touched
+    # AT-SPI (this one included) registers on the bus with that name and no
+    # windows. Rank matches so a windowless registrant never shadows the real
+    # app: active top-level frame first, then any app that owns frames, then
+    # the first name match.
+    # The a11y application name is the program name (GLib prgname, e.g.
+    # "cuatestapp"), while the Linux app id used for permissions is the window
+    # owner's comm (e.g. "python3"); match by PID as well as by name so an id
+    # resolved from X11 finds the same application on the a11y bus.
+    try:
+        from computeruse.drivers import _linux_system
+
+        pids = _linux_system.pids_matching(app)
+    except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
+        pids = set()
+    best = None
+    best_rank = -1
     for i in range(int(count)):
         candidate = _call_first(desktop, ("get_child_at_index",), i)
         if candidate is None:
             continue
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        if needle in name:
-            app_acc = candidate
-            break
+        if needle not in name and not (pids and pid_of(candidate) in pids):
+            continue
+        frames = _frames(candidate)
+        rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
+        if rank > best_rank:
+            best, best_rank = candidate, rank
+            if rank == 2:
+                break
+    app_acc = best
     if app_acc is None or scope is Scope.APP:
         return app_acc
     # WINDOW scope: prefer the ACTIVE top-level frame, else the first child.
-    st = getattr(Atspi, "StateType", None)
-    active = getattr(st, "ACTIVE", None)
-    n = _call_first(app_acc, ("get_child_count",), default=0) or 0
-    first = None
-    for j in range(int(n)):
-        frame = _call_first(app_acc, ("get_child_at_index",), j)
-        if frame is None:
-            continue
-        if first is None:
-            first = frame
-        sset = _call_first(frame, ("get_state_set",))
-        if active is not None and sset is not None and _safe(lambda: sset.contains(active), False):
+    frames = _frames(app_acc)
+    for frame in frames:
+        if _is_active(frame):
             return frame
-    return first or app_acc
+    return frames[0] if frames else app_acc
 
 
 def do_press(acc) -> bool:
