@@ -289,12 +289,38 @@ class BrowserDriver:
         # listeners). One deterministic op, no keystrokes.
         return self._call_on(backend, _SET_VALUE_FN, [value])
 
+    def _focused_is_password(self) -> bool:
+        """Whether the page's focused element is ``<input type=password>``.
+
+        One ``Runtime.evaluate`` that follows ``document.activeElement`` through
+        open shadow roots and same-origin iframes. Degrades to False when the
+        evaluate itself fails (a gated domain), mirroring the macOS probe, which
+        also reports "no signal" as not secure."""
+        try:
+            reply = self._connect().call("Runtime.evaluate", {
+                "expression": _FOCUSED_PASSWORD_JS, "returnByValue": True})
+        except ComputerUseError:
+            return False
+        return reply.get("result", {}).get("value") is True
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
+        """Insert ``text`` at the focused element (``Input.insertText``).
+
+        Refuses with `ErrorCode.SECURE_FIELD` when the focused element is a
+        password input: the browser analog of the macOS focused-secure-field
+        probe, so a model cannot type a secret into a field it focused by
+        coordinates or that the user left focused."""
         if dry_run or not text:
             return None
         if pre_check is not None:
             pre_check()
+        if self._focused_is_password():
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "the focused element is a password field; secrets are typed by the human",
+                detail={"api": "document.activeElement"},
+            )
         self._connect().call("Input.insertText", {"text": text})
         return None
 
@@ -548,6 +574,12 @@ class BrowserDriver:
     def windows(self) -> list[dict]:
         return [{"app": a["id"], "title": a["name"], "url": a["url"]} for a in self.running_apps()]
 
+    def window_owner(self, window_id: int) -> str:
+        raise _no_window_ids(window_id)
+
+    def raise_window(self, window_id: int) -> None:
+        raise _no_window_ids(window_id)
+
     def read_clipboard(self) -> str | None:
         return None  # navigator.clipboard needs a user gesture/permission; not exposed via CDP
 
@@ -560,6 +592,30 @@ class BrowserDriver:
 
 def _looks_like_url(s: str) -> bool:
     return "://" in s or s.startswith(("about:", "data:", "file:", "chrome:"))
+
+
+def _no_window_ids(window_id: int) -> ComputerUseError:
+    """The browser's windows are tabs addressed by target id, not integers."""
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the browser backend has no integer window ids; its windows are tabs",
+        detail={"window_id": window_id,
+                "hint": "use `app list` for the tab ids and `app focus <id>` to raise one."},
+    )
+
+
+#: Follows document.activeElement through open shadow roots and same-origin
+#: iframes (cross-origin frames throw and stop the descent), then answers
+#: whether the focused element is a password input.
+_FOCUSED_PASSWORD_JS = (
+    "(()=>{let e=document.activeElement;"
+    "for(let i=0;i<8&&e;i++){"
+    "if(e.shadowRoot&&e.shadowRoot.activeElement){e=e.shadowRoot.activeElement;continue;}"
+    "try{if(e.contentDocument&&e.contentDocument.activeElement){"
+    "e=e.contentDocument.activeElement;continue;}}catch(_){}"
+    "break;}"
+    "return !!(e&&e.tagName==='INPUT'&&String(e.type).toLowerCase()==='password');})()"
+)
 
 
 def _console_entry(event: dict) -> dict | None:

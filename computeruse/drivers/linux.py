@@ -64,6 +64,14 @@ def _wayland_input_error(op: str) -> ComputerUseError:
     )
 
 
+def _secure_focus_error(api: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.SECURE_FIELD,
+        "the focused element is a password field; secrets are typed by the human",
+        detail={"api": api},
+    )
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -232,10 +240,18 @@ class LinuxDriver:
         from computeruse.drivers import _atspi
 
         handle = self._focused_editable
+        if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
+            raise _secure_focus_error("AT-SPI role 'password text' on the focused editable")
         if handle is not None and self._run(lambda: _atspi.insert_text(handle, text)):
             return None
         if _on_wayland():  # a11y path unavailable and XTEST can't reach Wayland apps
             raise _wayland_input_error("type_text (no focused editable for the a11y path)")
+        # The XTEST path types into whatever holds keyboard focus, so probe the
+        # focused node of the frontmost app first (the Linux analog of macOS's
+        # AXFocusedUIElement check): a password field there refuses the typing.
+        app_id, _pid = self.frontmost_app()
+        if app_id and self._run(lambda: _atspi.focused_secure(app_id)):
+            raise _secure_focus_error("AT-SPI STATE_FOCUSED on a 'password text' node")
         from computeruse.drivers import _linux_input
 
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
@@ -353,6 +369,26 @@ class LinuxDriver:
 
         return _linux_system.windows()
 
+    def window_owner(self, window_id: int) -> str:
+        """comm name of the process owning X window ``window_id`` (the grant key)."""
+        if _on_wayland():
+            raise _wayland_window_error("window_owner")
+        from computeruse.drivers import _linux_system
+
+        owner = _linux_system.window_owner(window_id)
+        if owner is None:
+            raise _no_such_window(window_id)
+        return owner
+
+    def raise_window(self, window_id: int) -> None:
+        """EWMH ``_NET_ACTIVE_WINDOW`` client message for that window."""
+        if _on_wayland():
+            raise _wayland_window_error("raise_window")
+        from computeruse.drivers import _linux_system
+
+        if not _linux_system.raise_window(window_id):
+            raise _no_such_window(window_id)
+
     def read_clipboard(self) -> str | None:
         from computeruse.drivers import _linux_system
 
@@ -362,6 +398,22 @@ class LinuxDriver:
         from computeruse.drivers import _linux_system
 
         _linux_system.write_clipboard(text)
+
+
+def _wayland_window_error(op: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{op}: X window ids and EWMH are unavailable on native Wayland",
+        detail={"hint": "use `app focus <name>` (AT-SPI/portal based) or run under XWayland."},
+    )
+
+
+def _no_such_window(window_id: int) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.APP_NOT_FOUND,
+        f"no managed X window with id {window_id}",
+        detail={"window_id": window_id},
+    )
 
 
 def _grab_wayland() -> bytes | None:

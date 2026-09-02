@@ -121,6 +121,18 @@ class MacOSDriver:
         from computeruse import server
         return server._window_rows()
 
+    def window_owner(self, window_id: int) -> str:
+        from computeruse import server
+        _running, bundle = server._window_running(window_id)
+        return bundle
+
+    def raise_window(self, window_id: int) -> None:
+        # MVP: raising activates the owning app (per-window AXRaise needs the
+        # private CGWindowID<->AXUIElement bridge).
+        from computeruse import server
+        running, _bundle = server._window_running(window_id)
+        server._activate(running)
+
     def read_clipboard(self) -> str | None:
         from computeruse import server
         return server._read_clipboard()
