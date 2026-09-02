@@ -307,6 +307,7 @@ def run_pixel_task(
     snap_to_refs: bool,
     max_steps: int = 25,
     on_step: Callable[[Step], None] | None = None,
+    confirm: Callable[[str], bool] | None = None,
 ) -> AgentResult:
     """The screenshot-and-coordinates loop, the incumbent computer-use shape.
 
@@ -314,9 +315,11 @@ def run_pixel_task(
     `PIXEL_TOOLS`, and every action is executed by the Anthropic computer-use
     adapter as the provider's own action shape would be. ``snap_to_refs``
     selects the pure-coordinate incumbent (False) or the hybrid (True).
+    ``confirm`` is the Runtime's confirmation-gate callback for plausibly
+    irreversible clicks (the harness auto-approves it, see `Harness`).
     """
     started = time.perf_counter()
-    adapter = AnthropicComputerAdapter(runtime, app=app, snap_to_refs=snap_to_refs)
+    adapter = AnthropicComputerAdapter(runtime, app=app, snap_to_refs=snap_to_refs, confirm=confirm)
     shot = adapter.handle({"action": "screenshot"})
     if not shot.ok or shot.png is None:
         return AgentResult(task=task, app=app, provider=provider.name,
@@ -607,6 +610,20 @@ def browser_version(endpoint: str) -> str:
         return ""
 
 
+def auto_confirm(prompt: str) -> bool:
+    """The benchmark's confirmation-gate answer: always yes.
+
+    The Runtime asks before plausibly irreversible clicks (a button titled
+    "Delete", for example). A ref click carries the element title, so the
+    classifier fires on it; a raw coordinate click carries no title, so it does
+    not. Without an approving callback the refs loop would be blocked on such a
+    task while the pixel loop sails through, which is not a comparison of
+    observation strategies. The fixtures are throwaway pages, so approving is
+    safe here; a real agent should route the prompt to a human.
+    """
+    return True
+
+
 class Harness:
     """Runs tasks against one browser tab and scores each run.
 
@@ -618,15 +635,19 @@ class Harness:
             (a temporary directory by default), so a benchmark never touches
             the user's own ``~/.computeruse``.
         on_event: Progress callback ``(kind, payload)``.
+        confirm: Confirmation-gate callback handed to both loops; defaults to
+            `auto_confirm` (see its docstring for why).
     """
 
     def __init__(self, driver, provider_factory: Callable[[str], Provider], *,
                  workdir: Path | None = None,
-                 on_event: Callable[[str, dict], None] | None = None) -> None:
+                 on_event: Callable[[str, dict], None] | None = None,
+                 confirm: Callable[[str], bool] | None = auto_confirm) -> None:
         self.driver = driver
         self.provider_factory = provider_factory
         self.workdir = workdir or Path(tempfile.mkdtemp(prefix="cu-h2h-"))
         self.on_event = on_event or (lambda kind, payload: None)
+        self.confirm = confirm
         self.store = safety.PermissionStore(self.workdir / "permissions.json")
         self.audit = safety.AuditLog(self.workdir / "audit")
 
@@ -662,11 +683,12 @@ class Harness:
         try:
             if mode == "refs":
                 result = agent.run_task(spec.instruction, runtime, provider, app=tab,
-                                        max_steps=budget, verify=True, on_step=on_step)
+                                        max_steps=budget, verify=True, on_step=on_step,
+                                        confirm=self.confirm)
             else:
                 result = run_pixel_task(spec.instruction, runtime, provider, app=tab,
                                         snap_to_refs=(mode == "pixels+snap"),
-                                        max_steps=budget, on_step=on_step)
+                                        max_steps=budget, on_step=on_step, confirm=self.confirm)
         except (ComputerUseError, server.ActionRefused, ProviderError, OSError) as exc:
             error = f"{type(exc).__name__}: {exc}"
             result = AgentResult(task=spec.instruction, app=tab, provider=provider.name,
@@ -745,7 +767,7 @@ def run_h2h(endpoint: str, provider_factory: Callable[[str], Provider], *,
 
 __all__ = [
     "ACTION_TOOLS", "MODES", "PIXEL_TOOLS", "TASKS_DIR", "CountingProvider", "FixtureServer",
-    "H2HReport", "Harness", "RunRecord", "TaskSpec", "aggregate", "browser_version",
-    "count_misclicks", "estimate_cost", "format_report", "load_tasks", "pixel_system_prompt",
-    "run_h2h", "run_pixel_task", "validate_task",
+    "H2HReport", "Harness", "RunRecord", "TaskSpec", "aggregate", "auto_confirm",
+    "browser_version", "count_misclicks", "estimate_cost", "format_report", "load_tasks",
+    "pixel_system_prompt", "run_h2h", "run_pixel_task", "validate_task",
 ]

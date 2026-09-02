@@ -119,6 +119,14 @@ planner's context.
 The benchmark uses its own permission store and audit log under a temporary
 directory (the `workdir` in the JSON meta). It never touches `~/.computeruse`.
 
+The Runtime's confirmation gate (the prompt before a plausibly irreversible
+click, such as a button titled "Delete") is auto-approved in both loops. A ref
+click carries the element title, so the classifier fires on it; a raw coordinate
+click carries no title, so it does not. Leaving the gate armed would block the
+refs loop on `modal_confirm` while the pixel loop proceeds, which measures the
+gate, not the observation strategy. The fixtures are throwaway pages, so
+approving is safe here. A real agent should route that prompt to a human.
+
 ## Adding a task
 
 1. Write `computeruse/arena_tasks/<id>.html`: include `<link rel="stylesheet"

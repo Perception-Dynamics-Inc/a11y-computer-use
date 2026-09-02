@@ -363,6 +363,63 @@ def _ref_for(messages, needle: str) -> str:
     return re.search(r"(e\d+) " + re.escape(needle), text).group(1)
 
 
+def test_harness_auto_approves_the_confirmation_gate_in_both_loops(tmp_path, monkeypatch) -> None:
+    """A ref click on a "Delete" button trips the Runtime's irreversible-action
+    classifier; a coordinate click carries no title and does not. The harness
+    hands the same approving callback to both loops so the gate cannot decide
+    the comparison."""
+    captured: dict[str, object] = {}
+
+    def fake_run_task(task, runtime, provider, **kw):
+        captured["refs"] = kw.get("confirm")
+        return h2h.AgentResult(task=task, app="TAB1", provider="scripted", model=None, success=True,
+                               summary="", stopped="done")
+
+    def fake_pixel(task, runtime, provider, **kw):
+        captured["pixels"] = kw.get("confirm")
+        return h2h.AgentResult(task=task, app="TAB1", provider="scripted", model=None, success=True,
+                               summary="", stopped="done")
+
+    real_pixel = h2h.run_pixel_task
+    monkeypatch.setattr(h2h.agent, "run_task", fake_run_task)
+    monkeypatch.setattr(h2h, "run_pixel_task", fake_pixel)
+
+    def responder(method, params):
+        if method == "Page.navigate":
+            return {"frameId": "MAIN"}
+        if method == "Runtime.evaluate":
+            expr = params.get("expression", "")
+            if "readyState" in expr:
+                return {"result": {"value": "complete"}}
+            if "__cu.clicks" in expr:
+                return {"result": {"value": "[]"}}
+            return {"result": {"value": "x"}}
+        return _pixel_responder(method, params)
+
+    d, _ = _driver_on(responder)
+    spec = h2h.load_tasks(["modal_confirm"])[0]
+    harness = h2h.Harness(d, lambda mode: ScriptedProvider([]), workdir=tmp_path)
+    harness.run_one(spec, "refs", "http://fixture/modal_confirm.html")
+    harness.run_one(spec, "pixels", "http://fixture/modal_confirm.html")
+    assert captured["refs"] is h2h.auto_confirm and captured["pixels"] is h2h.auto_confirm
+    assert h2h.auto_confirm('Confirm a potentially irreversible action: click "Delete"') is True
+    # and the pixel loop threads it into the adapter
+    rt, _ = _pixel_runtime(tmp_path)
+    provider = ScriptedProvider([done_turn("ok")])
+    sentinel = lambda prompt: False  # noqa: E731
+    real_adapter = h2h.AnthropicComputerAdapter
+    seen: dict[str, object] = {}
+
+    class Spy(real_adapter):
+        def __init__(self, runtime, **kw):
+            seen["confirm"] = kw.get("confirm")
+            super().__init__(runtime, **kw)
+
+    monkeypatch.setattr(h2h, "AnthropicComputerAdapter", Spy)
+    real_pixel("x", rt, provider, app="TAB1", snap_to_refs=False, confirm=sentinel)
+    assert seen["confirm"] is sentinel
+
+
 def test_harness_rejects_unknown_mode(tmp_path) -> None:
     d, _ = _driver_on(_pixel_responder)
     harness = h2h.Harness(d, lambda mode: ScriptedProvider([]), workdir=tmp_path)
