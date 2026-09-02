@@ -17,7 +17,11 @@ echo "== system deps (AT-SPI2 bus + GI typelibs + apt PyGObject + X11 helpers)"
 sudo apt-get update -qq
 sudo apt-get install -y -qq --no-install-recommends \
   at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi python3-venv \
-  xclip xdotool x11-utils
+  xclip xdotool x11-utils dbus-x11
+# dbus-x11 provides dbus-launch: without it, Gio.bus_get_sync(SESSION) cannot
+# autolaunch a session bus if the inherited DBUS_SESSION_BUS_ADDRESS is stale
+# (which happens after a box resume), and test_linux_forces_a11y_status errors.
+# The CI Linux job installs it for the same reason.
 
 if [[ "${INSTALL_VSCODE:-0}" == "1" ]] && ! command -v code >/dev/null; then
   echo "== VS Code (Electron probe target)"
