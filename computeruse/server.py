@@ -1098,23 +1098,43 @@ class Runtime:
                         lambda: self.driver.write_clipboard(text))
         return f"wrote {len(text)} characters to the clipboard"
 
-    # -- one-shot dispatch (CLI `run-once`) -----------------------------------
+    # -- named dispatch (the agent loop, CLI `run-once`) ------------------------
 
-    def dispatch(self, tool: str, params: dict[str, object]) -> str:
-        """Execute one action tool by name (the ``run-once`` entry point).
+    #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
+    #: need a live snapshot epoch, which a one-shot process never has.
+    RUN_ONCE_TOOLS = frozenset(
+        {"click", "type", "key", "scroll", "drag", "app", "window", "clipboard"}
+    )
 
-        Only the string-returning action tools are dispatchable; observation
-        tools have their own CLI subcommands / return image payloads. Refs
-        (and therefore ``wait_for``) are unavailable: each ``run-once``
-        invocation is a fresh process with no snapshot epoch, so click/
-        scroll/drag take x/y coordinate targets only.
+    def call_tool(
+        self, tool: str, params: dict[str, object], *, confirm: "Confirmer | None" = None
+    ):
+        """Execute any tool of the MCP surface by name, ``params`` being the
+        tool's keyword arguments (the agent loop's entry point).
+
+        Returns what the Runtime method returns: a string for every tool except
+        ``screenshot`` (``(text, ScaledImage)``) and ``zoom`` (PNG bytes).
+        ``confirm`` is the human-confirmation callback threaded into ``click``
+        and ``act``; without one, plausibly irreversible actions fail safe.
+        Unknown names raise ``ValueError``; the tools themselves raise
+        `ComputerUseError` / `ActionRefused` exactly as under the MCP server.
         """
-        methods = {
-            "click": self.click,
+        methods: dict[str, Callable] = {
+            "desktop_snapshot": self.desktop_snapshot,
+            "find": self.find,
+            "screenshot": self.screenshot,
+            "zoom": self.zoom,
+            "console": self.console,
+            "network": self.network,
+            "click": partial(self.click, confirm=confirm),
             "type": self.type_text,
             "key": self.key,
             "scroll": self.scroll,
             "drag": self.drag,
+            "wait_for": self.wait_for,
+            "act": partial(self.act_batch, confirm=confirm),
+            "set_value": self.set_value,
+            "scroll_to_find": self.scroll_to_find,
             "app": self.app,
             "window": self.window,
             "clipboard": self.clipboard,
@@ -1122,6 +1142,22 @@ class Runtime:
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
         return methods[tool](**params)  # type: ignore[arg-type]
+
+    def dispatch(self, tool: str, params: dict[str, object]) -> str:
+        """Execute one action tool by name (the ``run-once`` entry point).
+
+        Only the string-returning action tools are dispatchable here;
+        observation tools have their own CLI subcommands / return image
+        payloads, and refs (and therefore ``wait_for``) are unavailable: each
+        ``run-once`` invocation is a fresh process with no snapshot epoch, so
+        click/scroll/drag take x/y coordinate targets only. `call_tool` is the
+        unrestricted sibling the agent loop uses.
+        """
+        if tool not in self.RUN_ONCE_TOOLS:
+            raise ValueError(
+                f"unknown tool {tool!r}; expected one of {sorted(self.RUN_ONCE_TOOLS)}"
+            )
+        return self.call_tool(tool, params)
 
 
 # ---------------------------------------------------------------------------
@@ -1142,12 +1178,16 @@ def build_server(
     *,
     store: safety.PermissionStore | None = None,
     audit: safety.AuditLog | None = None,
+    runtime: "Runtime | None" = None,
 ) -> "FastMCP":
     """Construct the MCP server with the v1 tool surface registered.
 
     Args:
         store: Permission grant store (default: the standard config path).
         audit: Audit log (default: the standard log directory).
+        runtime: An existing Runtime to expose (default: a new one built from
+            ``store``/``audit``). The agent loop passes its own so the tool
+            list matches the driver it acts through.
 
     Returns:
         The configured server; the CLI runs it over stdio
@@ -1159,7 +1199,7 @@ def build_server(
     from mcp.server.fastmcp.exceptions import ToolError
     from pydantic import BaseModel
 
-    runtime = Runtime(store=store, audit=audit)
+    runtime = runtime if runtime is not None else Runtime(store=store, audit=audit)
     server = FastMCP("computeruse", instructions=_INSTRUCTIONS)
 
     async def run(fn, /, *args, **kwargs):
@@ -1456,3 +1496,39 @@ def build_server(
             return await run(runtime.network, app)
 
     return server
+
+
+def _strip_titles(schema, *, in_properties: bool = False):
+    """Drop pydantic's ``title`` decorations from a JSON schema (fewer tokens for
+    a planner); a property that is itself named ``title`` is preserved."""
+    if isinstance(schema, dict):
+        out = {}
+        for key, value in schema.items():
+            if key == "title" and not in_properties:
+                continue
+            out[key] = _strip_titles(value, in_properties=(key == "properties"))
+        return out
+    if isinstance(schema, list):
+        return [_strip_titles(v) for v in schema]
+    return schema
+
+
+def tool_specs(runtime: Runtime) -> list[dict]:
+    """The MCP tool surface as plain ``{name, description, input_schema}`` dicts.
+
+    Derived from the very registrations `build_server` makes for ``runtime``
+    (so browser-only tools appear exactly when the driver serves them, and the
+    schemas are the tools' real signatures, never a hand-maintained copy). The
+    agent loop hands these to a planner.
+    """
+    srv = build_server(runtime=runtime)
+    manager = getattr(srv, "_tool_manager", None)
+    tools = manager.list_tools() if manager is not None else []
+    return [
+        {
+            "name": tool.name,
+            "description": (tool.description or "").strip(),
+            "input_schema": _strip_titles(dict(tool.parameters)),
+        }
+        for tool in tools
+    ]

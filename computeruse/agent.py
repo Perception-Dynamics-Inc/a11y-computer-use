@@ -1,0 +1,366 @@
+"""Reference agent loop: observe -> plan -> act -> verify, end to end.
+
+``computeruse agent --task "..."`` is the one-command demonstration of the
+whole stack. A planner (any `computeruse.providers.Provider`) reads the
+pruned accessibility snapshot, picks tools by element ref, and the loop runs
+each call through the gated `server.Runtime`, so permission tiers, the
+frontmost recheck, secure-field refusal, the confirmation gate, Effect
+Receipts, and the JSONL audit log all apply exactly as they do under the MCP
+server. The same loop is the planner harness cu-arena uses to compare
+observation strategies.
+
+The loop keeps the conversation small: the planner always sees the latest
+observation in full, and earlier observations are replaced with one-line
+placeholders once a newer one exists (for providers whose API allows history
+edits; the Anthropic provider bounds context server-side instead).
+"""
+
+from __future__ import annotations
+
+import base64
+import time
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
+
+from computeruse import server
+from computeruse.providers import PlannerTurn, Provider, ProviderError, ToolCall, Usage
+from computeruse.schema import ComputerUseError, ErrorCode
+
+#: Tools whose result is a fresh observation the planner acts on next.
+OBSERVATION_TOOLS = frozenset(
+    {"desktop_snapshot", "find", "screenshot", "zoom", "scroll_to_find", "console", "network"}
+)
+
+#: The terminal tool the loop adds to the MCP surface.
+DONE_TOOL = {
+    "name": "done",
+    "description": (
+        "Finish the task. Call this exactly once, when the task is complete or "
+        "cannot be completed. success=true only when an observation confirmed the "
+        "outcome; summary is one or two sentences for the human."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string", "description": "What was done, or why it stopped."},
+            "success": {"type": "boolean", "description": "Whether the task was completed."},
+        },
+        "required": ["summary", "success"],
+    },
+}
+
+_EXCERPT_CHARS = 600
+
+
+@dataclass(slots=True)
+class Step:
+    """One executed tool call (or the terminal ``done``)."""
+
+    index: int
+    tool: str
+    params: dict
+    ok: bool
+    result: str  #: excerpt of the tool result the planner saw
+    error_code: str | None
+    duration_ms: float
+    usage: Usage  #: planner tokens of the turn that produced this call (first call only)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["usage"] = {"input_tokens": self.usage.input_tokens, "output_tokens": self.usage.output_tokens}
+        return d
+
+
+@dataclass(slots=True)
+class AgentResult:
+    task: str
+    app: str | None
+    provider: str
+    model: str | None
+    success: bool
+    summary: str
+    stopped: str  #: done | max_steps | provider_error | no_action
+    steps: list[Step] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    wall_time_s: float = 0.0
+    audit_dir: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "task": self.task, "app": self.app, "provider": self.provider, "model": self.model,
+            "success": self.success, "summary": self.summary, "stopped": self.stopped,
+            "steps": [s.to_dict() for s in self.steps],
+            "usage": {"input_tokens": self.usage.input_tokens,
+                      "output_tokens": self.usage.output_tokens},
+            "wall_time_s": round(self.wall_time_s, 2),
+            "audit_dir": self.audit_dir,
+        }
+
+
+def tool_specs(runtime: server.Runtime) -> list[dict]:
+    """The planner's tool list: the MCP surface for ``runtime``'s driver plus ``done``."""
+    return server.tool_specs(runtime) + [DONE_TOOL]
+
+
+def system_prompt(runtime: server.Runtime, app: str | None) -> str:
+    return (
+        "You control a computer through computerUse tools. Work in a loop: read the latest "
+        "observation, call one or more tools, read their results, repeat.\n"
+        "Observations are pruned accessibility trees, one line per element: "
+        "eN role \"title\" =\"value\" (flags). Act on element refs (click ref='e14', "
+        "set_value ref='e3'). Refs are valid only against the latest snapshot or find result.\n"
+        "After an action, check the effect block or call desktop_snapshot with mode='diff'. "
+        "A stale_ref error means the UI changed; a fresh snapshot is attached to the error, "
+        "use its refs. needs_permission or deny means the human must grant the app first: "
+        "do not retry, call done with success=false. secure_field means a password field: "
+        "stop and report.\n"
+        f"The target app is {app!r} on the {runtime.driver.name} backend; pass it as the app "
+        "argument where a tool takes one. Prefer refs over x/y coordinates; use screenshot "
+        "only when the tree exposes no interactive elements. Use act to batch several known "
+        "steps into one call.\n"
+        "When the task is complete, or cannot be completed, call done with a one-sentence "
+        "summary and success true or false. Never claim success without evidence from an "
+        "observation."
+    )
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+
+def _text_of(blocks: list[dict]) -> str:
+    return "\n".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")
+
+
+def _image_block(png: bytes) -> dict:
+    return {"type": "image", "media_type": "image/png",
+            "data": base64.b64encode(bytes(png)).decode("ascii")}
+
+
+def _blocks_for(raw: object) -> list[dict]:
+    """Tool results as neutral content blocks: text, or text plus an image."""
+    if isinstance(raw, tuple) and len(raw) == 2 and hasattr(raw[1], "png"):
+        text, image = raw
+        return [{"type": "text", "text": str(text)}, _image_block(image.png)]
+    if isinstance(raw, (bytes, bytearray)):
+        return [_image_block(raw)]
+    return [{"type": "text", "text": str(raw)}]
+
+
+def _observe(runtime: server.Runtime, app: str) -> tuple[str, bool]:
+    """A full snapshot of ``app`` through the gate, or the structured error text."""
+    try:
+        return str(runtime.call_tool("desktop_snapshot", {"app": app})), True
+    except ComputerUseError as exc:
+        return server.error_text(exc), False
+    except server.ActionRefused as exc:
+        return server.refusal_text(exc.decision), False
+
+
+def _execute(runtime: server.Runtime, app: str, call: ToolCall, *, verify: bool,
+             confirm, index: int, usage: Usage) -> tuple[Step, dict]:
+    """Run one planner tool call through the Runtime; never raises to the planner.
+
+    Returns the `Step` record and the tool_result block for the history.
+    """
+    params = dict(call.arguments)
+    if verify and call.name in ("click", "act") and "verify" not in params:
+        params["verify"] = True  # Effect Receipt: the post-action diff rides along
+    started = time.perf_counter()
+    ok, code, observation = True, None, call.name in OBSERVATION_TOOLS
+    try:
+        blocks = _blocks_for(runtime.call_tool(call.name, params, confirm=confirm))
+    except ComputerUseError as exc:
+        ok, code = False, exc.code.value
+        text = server.error_text(exc)
+        if exc.code is ErrorCode.STALE_REF:  # self-correct: attach the fresh tree
+            fresh, _ = _observe(runtime, app)
+            text += f"\n\nre-observed {app}; these refs are current:\n{fresh}"
+            observation = True
+        blocks = [{"type": "text", "text": text}]
+    except server.ActionRefused as exc:
+        ok, code = False, exc.decision.verdict.value
+        blocks = [{"type": "text", "text": server.refusal_text(exc.decision)}]
+    except (TypeError, ValueError, KeyError) as exc:
+        ok = False
+        code = "unknown_tool" if "unknown tool" in str(exc) else "invalid_arguments"
+        blocks = [{"type": "text", "text": f"{code}: {call.name}: {exc}"}]
+    duration_ms = (time.perf_counter() - started) * 1000.0
+    step = Step(index=index, tool=call.name, params=params, ok=ok,
+                result=_text_of(blocks)[:_EXCERPT_CHARS], error_code=code,
+                duration_ms=duration_ms, usage=usage)
+    result = {"type": "tool_result", "tool_use_id": call.id, "name": call.name,
+              "content": blocks, "is_error": not ok}
+    if observation:
+        result["observation"] = True
+    return step, result
+
+
+def _bound_history(messages: list[dict]) -> None:
+    """Keep only the newest observation in full.
+
+    Older observation blocks (initial snapshot, observation-tool results, the
+    re-observe attached to a stale_ref error) collapse to a one-line
+    placeholder, and images outside the newest observation are dropped, so the
+    planner's context stops growing with every look at the screen.
+    """
+    observations = [b for m in messages if m["role"] == "user"
+                    for b in m["content"] if b.get("observation")]
+    for block in observations[:-1]:
+        if block.get("elided"):
+            continue
+        if block.get("type") == "tool_result":
+            chars = len(_text_of(block.get("content", [])))
+            block["content"] = [{"type": "text",
+                                 "text": f"[{block.get('name', 'observation')} result elided: "
+                                         f"{chars} chars, superseded by a newer observation]"}]
+        else:
+            chars = len(str(block.get("text", "")))
+            block["text"] = f"[earlier observation elided: {chars} chars, superseded]"
+        block["elided"] = True
+    newest = observations[-1] if observations else None
+    for message in messages:
+        if message["role"] != "user":
+            continue
+        for block in message["content"]:
+            if block is newest or block.get("type") != "tool_result":
+                continue
+            if any(b.get("type") == "image" for b in block.get("content", [])):
+                block["content"] = [b for b in block["content"] if b.get("type") != "image"]
+                block["content"].append({"type": "text", "text": "[image dropped: superseded]"})
+
+
+def _audit(runtime: server.Runtime, app: str, action: str, params: dict, result: str,
+           duration_ms: float, usage: Usage) -> None:
+    """cu-meter row for the planner side: `computeruse bench audit` sums
+    ``planner_*_tokens`` next to the per-action metrics the gate records."""
+    runtime.audit.record({
+        "app": app, "action": action, "params": params, "result": result,
+        "metrics": {"duration_ms": round(duration_ms, 1),
+                    "planner_input_tokens": usage.input_tokens,
+                    "planner_output_tokens": usage.output_tokens},
+    })
+
+
+# ---------------------------------------------------------------------------
+# the loop
+# ---------------------------------------------------------------------------
+
+
+def run_task(
+    task: str,
+    runtime: server.Runtime,
+    provider: Provider,
+    *,
+    app: str | None = None,
+    max_steps: int = 25,
+    verify: bool = True,
+    on_step: Callable[[Step], None] | None = None,
+    confirm: Callable[[str], bool] | None = None,
+) -> AgentResult:
+    """Drive ``task`` to completion (or a bounded stop) with ``provider`` as the planner.
+
+    Args:
+        task: What to accomplish, in plain language.
+        runtime: The gated Runtime to act through (its driver decides the backend).
+        provider: The planner.
+        app: Target app (bundle id or name; a tab id on the browser backend).
+            Defaults to the frontmost app / bound tab.
+        max_steps: Maximum planner turns. Each turn may run several tool calls.
+        verify: Ask for Effect Receipts on click/act so the planner sees the
+            post-action diff without a separate observation.
+        on_step: Called after every executed step (progress logging).
+        confirm: Human-confirmation callback for plausibly irreversible actions;
+            without one they fail safe (``confirmation_declined``).
+    """
+    started = time.perf_counter()
+    if app is None:
+        app = runtime._frontmost()
+    else:
+        try:
+            app = runtime._resolve_app(app)[1]
+        except ComputerUseError:
+            pass  # keep the identifier; the first snapshot reports app_not_found
+    tools = tool_specs(runtime)
+    system = system_prompt(runtime, app)
+    model = getattr(provider, "model", None)
+
+    steps: list[Step] = []
+    usage = Usage()
+    stopped, success, summary = "max_steps", False, ""
+    nudges = 0
+
+    observation, _ok = _observe(runtime, app)
+    messages: list[dict] = [{"role": "user", "content": [
+        {"type": "text", "text": f"Task: {task}"},
+        {"type": "text", "text": f"Current observation of {app}:\n{observation}", "observation": True},
+    ]}]
+
+    for _turn in range(max_steps):
+        try:
+            turn: PlannerTurn = provider.plan(messages, tools, system=system)
+        except ProviderError as exc:
+            stopped, summary = "provider_error", f"planner error: {exc}"
+            break
+        usage = usage + turn.usage
+        messages.append(turn.assistant_message())
+
+        if not turn.tool_calls:
+            if turn.stop_reason == "refusal":
+                stopped, summary = "provider_error", turn.text
+                break
+            nudges += 1
+            if nudges >= 2:
+                stopped, summary = "no_action", turn.text or "the planner produced no tool call"
+                break
+            messages.append({"role": "user", "content": [
+                {"type": "text", "text": "Reply with a tool call, or call done."}]})
+            continue
+
+        results: list[dict] = []
+        finished = False
+        for i, call in enumerate(turn.tool_calls):
+            step_usage = turn.usage if i == 0 else Usage()  # count a turn's tokens once
+            if call.name == "done":
+                success = bool(call.arguments.get("success", False))
+                summary = str(call.arguments.get("summary", "")).strip()
+                step = Step(index=len(steps) + 1, tool="done", params=dict(call.arguments), ok=True,
+                            result=summary, error_code=None, duration_ms=0.0, usage=step_usage)
+                steps.append(step)
+                _audit(runtime, app, "agent_step", {"step": step.index, "tool": "done",
+                                                    "provider": provider.name},
+                       "ok", 0.0, step_usage)
+                if on_step is not None:
+                    on_step(step)
+                finished, stopped = True, "done"
+                break
+            step, result = _execute(runtime, app, call, verify=verify, confirm=confirm,
+                                    index=len(steps) + 1, usage=step_usage)
+            steps.append(step)
+            _audit(runtime, app, "agent_step", {"step": step.index, "tool": step.tool,
+                                                "provider": provider.name},
+                   "ok" if step.ok else (step.error_code or "error"), step.duration_ms, step_usage)
+            if on_step is not None:
+                on_step(step)
+            results.append(result)
+        if finished:
+            break
+        messages.append({"role": "user", "content": results})
+        if provider.history_edits_ok:
+            _bound_history(messages)
+
+    if stopped == "max_steps" and not summary:
+        summary = f"stopped after {max_steps} planner turns without a done call"
+    wall = time.perf_counter() - started
+    _audit(runtime, app, "agent_run",
+           {"task": task, "provider": provider.name, "model": model, "steps": len(steps),
+            "stopped": stopped, "success": success},
+           "ok" if success else stopped, wall * 1000.0, usage)
+    return AgentResult(task=task, app=app, provider=provider.name, model=model,
+                       success=success, summary=summary, stopped=stopped, steps=steps,
+                       usage=usage, wall_time_s=wall, audit_dir=str(runtime.audit.dir_path))
+
+
+__all__ = ["AgentResult", "DONE_TOOL", "OBSERVATION_TOOLS", "Step", "run_task",
+           "system_prompt", "tool_specs"]
