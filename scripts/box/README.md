@@ -32,11 +32,12 @@ box limits                                    # hours used so far
 
 ```bash
 cd /path/to/computerUse
-tar czf - --exclude='./.venv' --exclude='./.git' --exclude='./scratch' \
+COPYFILE_DISABLE=1 tar czf - --exclude='./.venv' --exclude='./.git' --exclude='./scratch' \
     --exclude='./.pytest_cache' --exclude='./.remember' --exclude='./.claude' \
     --exclude='./docs/assets' --exclude='./*.txt' --exclude='__pycache__' . \
   | box ssh <id> 'mkdir -p ~/computerUse && tar xzf - -C ~/computerUse'
 box scp scripts/box/bootstrap.sh <id>:/tmp/bootstrap.sh   # or rely on the synced copy
+# COPYFILE_DISABLE=1 stops macOS tar from adding AppleDouble ._* sidecar files to the archive.
 ```
 
 ## 3. Bootstrap (on the box)
