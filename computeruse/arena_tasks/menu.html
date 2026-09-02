@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editor</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.menubar { display: flex; gap: 4px; border-bottom: 1px solid #ccc; padding-bottom: 6px; position: relative; }
+.menubar > button { min-width: 72px; }
+.menu { position: absolute; top: 46px; background: #fff; border: 1px solid #888; padding: 4px 0; min-width: 180px; z-index: 2; }
+.menu button { display: block; width: 100%; text-align: left; border: 0; background: #fff; margin: 0; border-radius: 0; }
+.menu button:hover { background: #e6e6e6; }
+#menu-file-list { left: 0; }
+#submenu-export { left: 182px; top: 0; position: absolute; }
+.hidden { display: none; }
+.doc { margin-top: 20px; height: 260px; border: 1px solid #ddd; padding: 12px; color: #444; }
+</style>
+</head>
+<body>
+<h1>Untitled document</h1>
+<div class="menubar" id="menubar">
+  <button id="menu-file" aria-haspopup="menu" aria-expanded="false">File</button>
+  <button id="menu-edit" aria-haspopup="menu" aria-expanded="false">Edit</button>
+  <button id="menu-view" aria-haspopup="menu" aria-expanded="false">View</button>
+  <button id="menu-help" aria-haspopup="menu" aria-expanded="false">Help</button>
+  <div class="menu hidden" id="menu-file-list" role="menu">
+    <button role="menuitem" id="item-new">New</button>
+    <button role="menuitem" id="item-open">Open...</button>
+    <button role="menuitem" id="item-save">Save</button>
+    <button role="menuitem" id="item-export" aria-haspopup="menu" aria-expanded="false">Export &#9656;</button>
+    <button role="menuitem" id="item-print">Print...</button>
+    <div class="menu hidden" id="submenu-export" role="menu">
+      <button role="menuitem" id="item-html">HTML</button>
+      <button role="menuitem" id="item-markdown">Markdown</button>
+      <button role="menuitem" id="item-pdf">PDF</button>
+      <button role="menuitem" id="item-docx">Word (.docx)</button>
+    </div>
+  </div>
+  <div class="menu hidden" id="menu-edit-list" role="menu" style="left: 80px">
+    <button role="menuitem" id="item-undo">Undo</button>
+    <button role="menuitem" id="item-redo">Redo</button>
+  </div>
+</div>
+<div class="doc">The quick brown fox jumps over the lazy dog.</div>
+<div class="status" id="status">Ready.</div>
+<script>
+function show(id, on) {
+  var el = document.getElementById(id);
+  el.classList.toggle('hidden', !on);
+}
+function closeAll() {
+  show('menu-file-list', false); show('submenu-export', false); show('menu-edit-list', false);
+  ['menu-file', 'menu-edit', 'item-export'].forEach(function (id) { document.getElementById(id).setAttribute('aria-expanded', 'false'); });
+}
+document.getElementById('menu-file').addEventListener('click', function () {
+  var open = document.getElementById('menu-file-list').classList.contains('hidden');
+  closeAll(); show('menu-file-list', open);
+  this.setAttribute('aria-expanded', String(open));
+});
+document.getElementById('menu-edit').addEventListener('click', function () {
+  var open = document.getElementById('menu-edit-list').classList.contains('hidden');
+  closeAll(); show('menu-edit-list', open);
+  this.setAttribute('aria-expanded', String(open));
+});
+document.getElementById('item-export').addEventListener('click', function () {
+  var open = document.getElementById('submenu-export').classList.contains('hidden');
+  show('submenu-export', open);
+  this.setAttribute('aria-expanded', String(open));
+});
+['html', 'markdown', 'pdf', 'docx'].forEach(function (fmt) {
+  document.getElementById('item-' + fmt).addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Exported as ' + fmt.toUpperCase();
+    document.title = 'EXPORTED:' + fmt.toUpperCase();
+    closeAll();
+  });
+});
+['new', 'open', 'save', 'print', 'undo', 'redo'].forEach(function (name) {
+  document.getElementById('item-' + name).addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Chose ' + name;
+    closeAll();
+  });
+});
+</script>
+</body>
+</html>

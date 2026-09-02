@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invoices</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+tr[aria-selected=true] { background: #eef; }
+td:first-child { width: 32px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>Invoices</h1>
+<table id="invoices">
+  <thead><tr><th>Select</th><th>Invoice</th><th>Customer</th><th>Amount</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr id="tr-INV-2027"><td><input type="checkbox" id="row-INV-2027" aria-label="Select INV-2027"></td><td>INV-2027</td><td>Northwind</td><td>120.00</td><td>open</td></tr>
+    <tr id="tr-INV-2028"><td><input type="checkbox" id="row-INV-2028" aria-label="Select INV-2028"></td><td>INV-2028</td><td>Contoso</td><td>980.00</td><td>open</td></tr>
+    <tr id="tr-INV-2029"><td><input type="checkbox" id="row-INV-2029" aria-label="Select INV-2029"></td><td>INV-2029</td><td>Fabrikam</td><td>75.50</td><td>open</td></tr>
+    <tr id="tr-INV-2030"><td><input type="checkbox" id="row-INV-2030" aria-label="Select INV-2030"></td><td>INV-2030</td><td>Tailspin</td><td>310.00</td><td>open</td></tr>
+    <tr id="tr-INV-2031"><td><input type="checkbox" id="row-INV-2031" aria-label="Select INV-2031"></td><td>INV-2031</td><td>Adventure Works</td><td>1,240.00</td><td>open</td></tr>
+    <tr id="tr-INV-2032"><td><input type="checkbox" id="row-INV-2032" aria-label="Select INV-2032"></td><td>INV-2032</td><td>Litware</td><td>64.00</td><td>open</td></tr>
+    <tr id="tr-INV-2033"><td><input type="checkbox" id="row-INV-2033" aria-label="Select INV-2033"></td><td>INV-2033</td><td>Wingtip</td><td>410.00</td><td>open</td></tr>
+    <tr id="tr-INV-2034"><td><input type="checkbox" id="row-INV-2034" aria-label="Select INV-2034"></td><td>INV-2034</td><td>Proseware</td><td>220.00</td><td>open</td></tr>
+  </tbody>
+</table>
+<div class="row"><button id="mark-paid">Mark paid</button> <button id="send-reminder">Send reminder</button></div>
+<div class="status" id="status">No rows selected.</div>
+<script>
+var boxes = document.querySelectorAll('tbody input[type=checkbox]');
+Array.prototype.forEach.call(boxes, function (b) {
+  b.addEventListener('change', function () { b.closest('tr').setAttribute('aria-selected', String(b.checked)); });
+});
+function selected() {
+  return Array.prototype.filter.call(boxes, function (b) { return b.checked; }).map(function (b) { return b.id.replace('row-', ''); });
+}
+document.getElementById('mark-paid').addEventListener('click', function () {
+  var s = selected();
+  document.getElementById('status').textContent = s.length ? 'Marked paid: ' + s.join(', ') : 'Select a row first.';
+  document.title = s.length ? 'PAID:' + s.join(',') : 'Invoices';
+});
+document.getElementById('send-reminder').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Reminder sent for ' + (selected().join(', ') || 'nothing');
+});
+</script>
+</body>
+</html>

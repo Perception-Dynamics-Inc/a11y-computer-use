@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mailbox</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.toolbar button { min-width: 110px; }
+.mail { border: 1px solid #ddd; padding: 12px; margin-top: 12px; max-width: 640px; }
+</style>
+</head>
+<body>
+<h1>Mailbox</h1>
+<div class="toolbar">
+  <button id="btn-delete">Delete</button>
+  <button id="btn-unarchive">Unarchive</button>
+  <button id="btn-archive">Archive</button>
+  <button id="btn-restore">Restore</button>
+  <button id="btn-duplicate">Duplicate</button>
+  <button id="btn-move">Move to...</button>
+</div>
+<div class="mail">
+  <p><strong>Subject:</strong> Quarterly planning notes</p>
+  <p>Please review the attached notes before Thursday.</p>
+</div>
+<div class="status" id="status">No action taken.</div>
+<script>
+['delete', 'unarchive', 'archive', 'restore', 'duplicate', 'move'].forEach(function (name) {
+  document.getElementById('btn-' + name).addEventListener('click', function () {
+    var label = this.textContent.replace('...', '');
+    document.getElementById('status').textContent = 'Action: ' + label;
+    document.title = 'PRESSED:' + label;
+  });
+});
+</script>
+</body>
+</html>

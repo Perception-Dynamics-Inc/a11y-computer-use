@@ -1,0 +1,9 @@
+{
+  "id": "search_filter",
+  "title": "Type a filter, then act on a result",
+  "page": "search_filter.html",
+  "instruction": "Type 'lamp' into the product search box to filter the list, then add the 'Desk Lamp' to the cart.",
+  "success": "document.title === 'CART:Desk Lamp' && document.getElementById('search').value.toLowerCase().indexOf('lamp') !== -1",
+  "allowed_targets": ["search", "add-desk-lamp", "label-search"],
+  "max_steps": 8
+}

@@ -1,0 +1,9 @@
+{
+  "id": "modal_confirm",
+  "title": "Confirm an action in an in-page dialog",
+  "page": "modal_confirm.html",
+  "instruction": "Delete the project named 'Orion' and confirm the deletion in the dialog that appears.",
+  "success": "document.title === 'DELETED:Orion'",
+  "allowed_targets": ["delete-orion", "confirm-delete"],
+  "max_steps": 8
+}

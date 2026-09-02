@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shipping</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+</head>
+<body>
+<h1>Shipping options</h1>
+<div class="row">
+  <label id="label-country" for="country">Country</label><br>
+  <select id="country">
+    <option value="">Choose a country</option>
+    <option value="Austria">Austria</option>
+    <option value="Belgium">Belgium</option>
+    <option value="Denmark">Denmark</option>
+    <option value="Finland">Finland</option>
+    <option value="France">France</option>
+    <option value="Germany">Germany</option>
+    <option value="Netherlands">Netherlands</option>
+    <option value="Norway">Norway</option>
+    <option value="Poland">Poland</option>
+    <option value="Portugal">Portugal</option>
+    <option value="Spain">Spain</option>
+    <option value="Sweden">Sweden</option>
+  </select>
+</div>
+<div class="row">
+  <label id="label-speed" for="speed">Speed</label><br>
+  <select id="speed">
+    <option value="standard">Standard (5 days)</option>
+    <option value="express">Express (2 days)</option>
+  </select>
+</div>
+<div class="row"><button id="apply">Apply</button> <button id="clear">Clear</button></div>
+<div class="status" id="status">No shipping country set.</div>
+<script>
+document.getElementById('apply').addEventListener('click', function () {
+  var c = document.getElementById('country').value;
+  document.getElementById('status').textContent = c ? 'Shipping to ' + c : 'Choose a country first.';
+  document.title = c ? 'SHIP:' + c : 'Shipping';
+});
+document.getElementById('clear').addEventListener('click', function () {
+  document.getElementById('country').value = '';
+  document.getElementById('status').textContent = 'No shipping country set.';
+  document.title = 'Shipping';
+});
+</script>
+</body>
+</html>

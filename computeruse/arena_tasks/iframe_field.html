@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Checkout</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+iframe { border: 1px solid #888; width: 480px; height: 220px; display: block; }
+</style>
+</head>
+<body>
+<h1>Checkout</h1>
+<p>Order total: 84.00 EUR</p>
+<p>Payment panel (embedded):</p>
+<iframe id="payment-panel" title="Payment panel" src="iframe_field_inner.html"></iframe>
+<div class="row"><button id="pay">Pay now</button> <button id="back">Back to cart</button></div>
+<div class="status" id="status">No coupon applied.</div>
+<script>
+document.getElementById('pay').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Payment attempted without a coupon.';
+});
+document.getElementById('back').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Went back to the cart.';
+});
+window.addEventListener('message', function (e) {
+  if (e.data && e.data.type === 'redeemed') {
+    document.getElementById('status').textContent = 'Coupon ' + e.data.code + ' applied.';
+    document.title = 'REDEEMED:' + e.data.code;
+  }
+  if (e.data && e.data.type === 'cu-click') { window.__cu.clicks.push(e.data.click); }
+  if (e.data && e.data.type === 'cu-input') { window.__cu.inputs.push(e.data.input); }
+});
+</script>
+</body>
+</html>

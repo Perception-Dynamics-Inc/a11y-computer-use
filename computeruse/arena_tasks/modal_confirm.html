@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Projects</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.project { display: flex; align-items: center; gap: 16px; padding: 8px 0; border-bottom: 1px solid #eee; max-width: 560px; }
+.project span { flex: 1; }
+#backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.35); }
+#modal { position: fixed; top: 160px; left: 50%; transform: translateX(-50%); width: 420px; background: #fff; border: 1px solid #555; padding: 20px; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>Projects</h1>
+<div class="project"><span>Apollo</span><button id="open-apollo">Open</button><button id="delete-apollo">Delete</button></div>
+<div class="project"><span>Orion</span><button id="open-orion">Open</button><button id="delete-orion">Delete</button></div>
+<div class="project"><span>Vega</span><button id="open-vega">Open</button><button id="delete-vega">Delete</button></div>
+<div class="status" id="status">3 projects.</div>
+<div id="backdrop" class="hidden"></div>
+<div id="modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <h2 id="modal-title">Delete project?</h2>
+  <p id="modal-text">This cannot be undone.</p>
+  <div class="row"><button id="cancel-delete">Cancel</button> <button id="confirm-delete">Delete permanently</button></div>
+</div>
+<script>
+var pending = null;
+function openModal(name) {
+  pending = name;
+  document.getElementById('modal-text').textContent = 'Delete the project "' + name + '"? This cannot be undone.';
+  document.getElementById('modal').classList.remove('hidden');
+  document.getElementById('backdrop').classList.remove('hidden');
+}
+function closeModal() {
+  pending = null;
+  document.getElementById('modal').classList.add('hidden');
+  document.getElementById('backdrop').classList.add('hidden');
+}
+['apollo', 'orion', 'vega'].forEach(function (slug) {
+  var name = slug.charAt(0).toUpperCase() + slug.slice(1);
+  document.getElementById('delete-' + slug).addEventListener('click', function () { openModal(name); });
+  document.getElementById('open-' + slug).addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Opened ' + name;
+  });
+});
+document.getElementById('cancel-delete').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Deletion cancelled.';
+  closeModal();
+});
+document.getElementById('confirm-delete').addEventListener('click', function () {
+  var name = pending;
+  document.getElementById('status').textContent = 'Deleted ' + name + '.';
+  document.title = 'DELETED:' + name;
+  closeModal();
+});
+</script>
+</body>
+</html>

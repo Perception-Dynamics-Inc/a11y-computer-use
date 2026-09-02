@@ -1,0 +1,9 @@
+{
+  "id": "tabs",
+  "title": "Switch tabs, then act inside the new panel",
+  "page": "tabs.html",
+  "instruction": "Open the 'Billing' tab and press 'Download invoice'.",
+  "success": "document.title === 'INVOICE:downloaded'",
+  "allowed_targets": ["tab-billing", "download-invoice"],
+  "max_steps": 8
+}

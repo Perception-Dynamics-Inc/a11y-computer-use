@@ -1,0 +1,9 @@
+{
+  "id": "form_fill",
+  "title": "Fill a form and submit",
+  "page": "form_fill.html",
+  "instruction": "Fill the contact form with the full name 'Ada Lovelace' and the email address 'ada@example.com', then press Send.",
+  "success": "document.title === 'SENT' && document.getElementById('result').textContent === 'Sent: Ada Lovelace <ada@example.com>'",
+  "allowed_targets": ["name", "email", "send", "label-name", "label-email"],
+  "max_steps": 8
+}

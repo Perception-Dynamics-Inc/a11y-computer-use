@@ -1,0 +1,9 @@
+{
+  "id": "checkboxes",
+  "title": "Toggle two specific checkboxes among many",
+  "page": "checkboxes.html",
+  "instruction": "Subscribe to exactly two newsletters, 'Security advisories' and 'Release notes', and then press 'Save preferences'.",
+  "success": "document.title === 'SAVED:rel,sec'",
+  "allowed_targets": ["sec", "rel", "label-sec", "label-rel", "save"],
+  "max_steps": 8
+}

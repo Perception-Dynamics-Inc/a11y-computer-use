@@ -70,10 +70,15 @@ class Usage:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    #: Cost the provider itself reported for the turn, in USD (0.0 when the
+    #: API reports none). The Claude Code CLI reports ``total_cost_usd`` at
+    #: list price; the HTTP APIs report tokens only.
+    cost_usd: float = 0.0
 
     def __add__(self, other: "Usage") -> "Usage":
         return Usage(self.input_tokens + other.input_tokens,
-                     self.output_tokens + other.output_tokens)
+                     self.output_tokens + other.output_tokens,
+                     self.cost_usd + other.cost_usd)
 
     @property
     def total(self) -> int:
@@ -426,20 +431,33 @@ class ClaudeCLIProvider:
 
     Each turn is one stateless ``claude -p`` call: the conversation is flattened
     into the prompt, built-in tools are disabled, and the model answers with
-    one JSON action object. Images cannot be shown to the model this way, so
-    screenshot results are described, not viewed.
+    one JSON action object. MCP servers from the user's Claude Code settings
+    are never loaded (``--strict-mcp-config``), which keeps each call's system
+    prompt small.
+
+    Images: by default screenshot results are described, not viewed. With
+    ``view_images=True`` the newest image in the history is written to a
+    temporary PNG and the call enables only the CLI's ``Read`` tool so the
+    model can look at it (this is how the pixel mode of ``bench h2h`` shows
+    the planner its screenshots). The CLI reports ``total_cost_usd`` per call,
+    which lands in `Usage.cost_usd`.
     """
 
     name = "claude-cli"
     history_edits_ok = True
 
     def __init__(self, model: str | None = None, *, binary: str = "claude", timeout_s: float = 600.0,
+                 view_images: bool = False,
                  run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> None:
         self.model = model
         self.binary = binary
         self.timeout_s = timeout_s
+        self.view_images = view_images
+        #: Model id the CLI reported for the last call (``modelUsage`` key).
+        self.reported_model: str | None = None
         self._run = run
         self._counter = 0
+        self._image_dir: str | None = None
 
     @staticmethod
     def _tool_lines(tools: Sequence[dict]) -> str:
@@ -456,32 +474,85 @@ class ClaudeCLIProvider:
             lines.append(f"- {tool['name']}({params}): {desc}")
         return "\n".join(lines)
 
-    @staticmethod
-    def _transcript(messages: Sequence[dict]) -> str:
+    def _image_path(self, block: dict) -> str | None:
+        """Write one image block to a PNG the CLI's Read tool can open; None
+        when images are not being viewed."""
+        if not self.view_images:
+            return None
+        import base64
+        import tempfile
+
+        if self._image_dir is None:
+            self._image_dir = tempfile.mkdtemp(prefix="computeruse-cli-")
+        self._counter += 1
+        path = os.path.join(self._image_dir, f"screenshot-{self._counter}.png")
+        with open(path, "wb") as fh:
+            fh.write(base64.b64decode(block["data"]))
+        return path
+
+    def _transcript(self, messages: Sequence[dict]) -> tuple[str, list[str]]:
+        """Flatten the history into prompt text. Returns the text and the paths
+        of the images written for viewing (empty unless ``view_images``).
+
+        Only the newest image is written: the loop already elides older
+        observations, and one screenshot per turn is what the model needs.
+        """
         parts: list[str] = []
+        images: list[str] = []
+        newest: dict | None = None
+        for message in messages:
+            for block in message["content"]:
+                if block.get("type") == "image":
+                    newest = block
+                elif block.get("type") == "tool_result":
+                    for inner in block.get("content", []):
+                        if inner.get("type") == "image":
+                            newest = inner
+
+        def describe(block: dict, role: str) -> str:
+            if block is newest and self.view_images:
+                path = self._image_path(block)
+                if path:
+                    images.append(path)
+                    return (f"[{role}] (screenshot saved at {path}; view it with the Read tool "
+                            "before deciding)")
+            if self.view_images:
+                return f"[{role}] (an earlier screenshot, superseded)"
+            return (f"[{role}] (an image was returned here; this planner cannot view images, "
+                    "use accessibility refs instead)")
+
         for message in messages:
             for block in message["content"]:
                 kind = block.get("type")
                 if kind == "text":
                     parts.append(f"[{message['role']}] {block.get('text', '')}")
                 elif kind == "image":
-                    parts.append(f"[{message['role']}] (an image was returned here; this planner "
-                                 "cannot view images, use accessibility refs instead)")
+                    parts.append(describe(block, message["role"]))
                 elif kind == "tool_use":
                     parts.append(f"[assistant] {json.dumps({'tool': block['name'], 'args': block.get('input', {})})}")
                 elif kind == "tool_result":
                     text = _text_of(block.get("content", []))
-                    if any(b.get("type") == "image" for b in block.get("content", [])):
-                        text += "\n(image omitted: this planner cannot view images)"
+                    imgs = [b for b in block.get("content", []) if b.get("type") == "image"]
+                    if imgs:
+                        if self.view_images:
+                            text += "\n" + describe(imgs[-1], "tool")
+                        else:
+                            text += "\n(image omitted: this planner cannot view images)"
                     status = "error" if block.get("is_error") else "result"
                     parts.append(f"[tool {status}: {block.get('name', '?')}] {text}")
-        return "\n\n".join(parts)
+        return "\n\n".join(parts), images
 
     def plan(self, messages: list[dict], tools: list[dict], *, system: str) -> PlannerTurn:
-        prompt = (f"TOOLS\n{self._tool_lines(tools)}\n\nCONVERSATION\n{self._transcript(messages)}\n\n"
+        transcript, images = self._transcript(messages)
+        prompt = (f"TOOLS\n{self._tool_lines(tools)}\n\nCONVERSATION\n{transcript}\n\n"
                   "Reply with the next single JSON action object.")
         cmd = [self.binary, "-p", "--output-format", "json", "--no-session-persistence",
-               "--tools", "", "--system-prompt", f"{system}\n\n{_CLI_PROTOCOL}"]
+               "--strict-mcp-config"]
+        if images:
+            cmd += ["--tools", "Read", "--allowedTools", "Read"]
+        else:
+            cmd += ["--tools", ""]
+        cmd += ["--system-prompt", f"{system}\n\n{_CLI_PROTOCOL}"]
         if self.model:
             cmd += ["--model", self.model]
         cmd.append(prompt)
@@ -505,7 +576,11 @@ class ClaudeCLIProvider:
             + int(usage.get("cache_creation_input_tokens", 0) or 0)
             + int(usage.get("cache_read_input_tokens", 0) or 0),
             output_tokens=int(usage.get("output_tokens", 0) or 0),
+            cost_usd=float(data.get("total_cost_usd", 0.0) or 0.0),
         )
+        models = data.get("modelUsage")
+        if isinstance(models, dict) and models:
+            self.reported_model = str(next(iter(models)))
         calls: list[ToolCall] = []
         obj = first_json_object(text)
         if obj and isinstance(obj.get("tool"), str):
