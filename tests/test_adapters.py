@@ -423,6 +423,16 @@ def test_missing_grant_is_a_refusal_not_an_exception(tmp_path, fake) -> None:
     assert r.error == "refused"
 
 
+def test_structured_error_text_carries_the_code_exactly_once(anthropic) -> None:
+    def boom() -> None:
+        raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "no page targets at the CDP endpoint")
+
+    r = anthropic._guard("screenshot", boom)
+    assert r.error == "app_not_found"
+    assert r.text.startswith("app_not_found: no page targets")
+    assert r.text.count("app_not_found") == 1  # `Result.text` is the full line; never re-prefix it
+
+
 def test_irreversible_click_without_confirmer_is_blocked(runtime, fake, monkeypatch) -> None:
     monkeypatch.setattr(server, "CONFIRMATION_GATE", True)
 

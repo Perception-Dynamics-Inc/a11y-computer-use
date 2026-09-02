@@ -50,8 +50,8 @@ def scripted(adapter: AnthropicComputerAdapter) -> None:
     print("no ANTHROPIC_API_KEY / anthropic package: replaying a scripted sequence\n")
     for name, payload in _SCRIPTED:
         result = adapter.handle(payload, name=name)
-        status = "ok" if result.ok else result.error
-        print(f"{name:12} {json.dumps(payload):58} -> {status}: {_describe(result)}")
+        # Result.text already starts with the error code on failure; don't prefix it twice.
+        print(f"{name:12} {json.dumps(payload):58} -> {'ok: ' if result.ok else ''}{_describe(result)}")
 
 
 def live(adapter: AnthropicComputerAdapter, task: str) -> None:

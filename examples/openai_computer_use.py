@@ -46,9 +46,9 @@ def scripted(adapter: OpenAIComputerAdapter) -> None:
     print("no OPENAI_API_KEY / openai package: replaying a scripted computer_call\n")
     output, results = adapter.handle_call(_SCRIPTED_CALL)
     for result in results:
-        status = "ok" if result.ok else result.error
+        # Result.text already starts with the error code on failure; don't prefix it twice.
         text = result.text or (f"<png {len(result.png)} bytes>" if result.png else "")
-        print(f"{result.action:12} -> {status}: {text}")
+        print(f"{result.action:12} -> {'ok: ' + text if result.ok else text}")
     print("\ncomputer_call_output:", json.dumps({
         **output, "output": {**output["output"], "image_url": "data:image/png;base64,..."},
     }, indent=2))
@@ -74,7 +74,7 @@ def live(adapter: OpenAIComputerAdapter, task: str) -> None:
         for call in calls:
             output_item, results = adapter.handle_call(call.model_dump())
             for result in results:
-                print(f"{result.action:12} -> {'ok' if result.ok else result.error}: {result.text}")
+                print(f"{result.action:12} -> {'ok: ' + result.text if result.ok else result.text}")
             outputs.append(output_item)
         response = client.responses.create(
             model=model, tools=tools, truncation="auto",
