@@ -49,6 +49,24 @@ def test_load_tasks_subset_and_unknown_id() -> None:
         h2h.load_tasks(["nope"])
 
 
+def test_native_dropdown_is_flagged_not_comparable_for_pixel_modes_only() -> None:
+    native, custom = h2h.load_tasks(["dropdown", "dropdown_custom"])
+    assert native.comparability("refs") is None
+    assert "select popup" in (native.comparability("pixels") or "")
+    assert native.comparability("pixels+snap")
+    assert custom.not_comparable == () and custom.comparability("pixels") is None
+    assert custom.instruction == native.instruction  # same task, DOM-rendered options
+
+
+def test_validate_task_rejects_bad_not_comparable(tmp_path) -> None:
+    (tmp_path / "p.html").write_text('<script src="_cu.js"></script><button id="b"></button>', encoding="utf-8")
+    spec = h2h.TaskSpec(id="p", title="p", page="p.html", instruction="do", success="1",
+                        allowed_targets=("b",), max_steps=3, directory=tmp_path,
+                        not_comparable=(("telepathy", "x"), ("pixels", "  ")))
+    joined = " ".join(h2h.validate_task(spec))
+    assert "unknown mode 'telepathy'" in joined and "needs a reason" in joined
+
+
 def test_validate_task_reports_problems(tmp_path) -> None:
     page = tmp_path / "t.html"
     page.write_text("<html><body><button id='ok'>x</button>"
@@ -93,11 +111,41 @@ def test_estimate_cost_needs_both_prices() -> None:
     assert h2h.estimate_cost(10, 10, None, 15.0) is None
 
 
-def _rec(task, mode, success, turns, misclicks=0, wasted=0, tin=100, tout=10, cost=0.0):
+def _rec(task, mode, success, turns, misclicks=0, wasted=0, tin=100, tout=10, cost=0.0,
+         comparable=True, note=""):
     return h2h.RunRecord(task_id=task, mode=mode, round=1, success=success, stopped="done",
                          turns=turns, actions=turns - 1, misclicks=misclicks, wasted=wasted,
                          input_tokens=tin, output_tokens=tout, cost_reported_usd=cost,
-                         wall_s=2.0, summary="s")
+                         wall_s=2.0, summary="s", comparable=comparable, note=note)
+
+
+def test_aggregate_reports_completion_with_and_without_non_comparable_tasks() -> None:
+    records = [
+        _rec("a", "refs", True, 2), _rec("d", "refs", True, 3),
+        _rec("a", "pixels", True, 4), _rec("d", "pixels", False, 8, comparable=False, note="popup not painted"),
+    ]
+    agg = h2h.aggregate(records)
+    # raw rates keep every run; the comparable rate drops task "d" for BOTH modes
+    assert agg["refs"]["completion_rate"] == 1.0 and agg["pixels"]["completion_rate"] == 0.5
+    assert agg["refs"]["comparable_runs"] == 1 and agg["pixels"]["comparable_runs"] == 1
+    assert agg["refs"]["comparable_rate"] == 1.0 and agg["pixels"]["comparable_rate"] == 1.0
+    assert agg["refs"]["excluded_tasks"] == ["d"]
+    text = h2h.format_report(h2h.H2HReport(records=records))
+    assert "rate (comparable tasks)" in text and "leaves out d" in text
+    assert "| d | pixels | 1 | no | done | 8 | 7 | 0 | 0 | 100/10 | 2s | not comparable: popup not painted |" in text
+    assert "- d / pixels (round 1) [not comparable]:" in text
+
+
+def test_report_round_trips_through_json() -> None:
+    records = [_rec("a", "refs", True, 2, cost=0.1), _rec("a", "pixels", False, 5, comparable=False, note="n")]
+    report = h2h.H2HReport(records=records, meta={"planner": "x", "date": "2026-09-02"})
+    again = h2h.H2HReport.from_dict(json.loads(json.dumps(report.to_dict())))
+    assert again.meta == report.meta
+    assert [r.to_dict() for r in again.records] == [r.to_dict() for r in records]
+    assert h2h.format_report(again) == h2h.format_report(report)
+    # unknown keys in a saved record are ignored, not fatal
+    loose = {**records[0].to_dict(), "future_field": 1}
+    assert h2h.RunRecord.from_dict(loose).task_id == "a"
 
 
 def test_aggregate_and_report_render_both_modes() -> None:
@@ -327,10 +375,29 @@ def test_harness_rejects_unknown_mode(tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_cli_bench_h2h_render_merges_saved_json_and_applies_current_notes(tmp_path, capsys) -> None:
+    a = h2h.H2HReport(records=[_rec("dropdown", "refs", True, 2), _rec("dropdown", "pixels", False, 8)],
+                      meta={"planner": "claude-cli", "date": "2026-09-02"})
+    b = h2h.H2HReport(records=[_rec("tabs", "refs", True, 2), _rec("tabs", "pixels", True, 3)],
+                      meta={"planner": "claude-cli", "date": "2026-09-02"})
+    (tmp_path / "a.json").write_text(json.dumps(a.to_dict()), encoding="utf-8")
+    (tmp_path / "b.json").write_text(json.dumps(b.to_dict()), encoding="utf-8")
+    assert cli.main(["bench", "h2h", "--render", str(tmp_path / "a.json"), str(tmp_path / "b.json"),
+                     "--out", str(tmp_path / "out")]) == 0
+    out = capsys.readouterr().out
+    # the saved pixels run had no note; the current dropdown manifest flags it
+    assert "not comparable: headless Chrome does not paint the native select popup" in out
+    assert "| refs | 2/2 | 100% | 1/1 (100%) |" in out and "| pixels | 1/2 | 50% | 1/1 (100%) |" in out
+    merged = json.loads((tmp_path / "out" / "h2h.json").read_text(encoding="utf-8"))
+    assert len(merged["records"]) == 4 and merged["meta"]["merged_from"]
+    assert cli.main(["bench", "h2h", "--render", str(tmp_path / "missing.json")]) == 2
+
+
 def test_cli_bench_h2h_list_and_bad_arguments(capsys) -> None:
     assert cli.main(["bench", "h2h", "--list"]) == 0
     out = capsys.readouterr().out
     assert "form_fill" in out and "similar_buttons" in out
+    assert "dropdown         Select from a native dropdown" in out and "[pixels: not comparable]" in out
     assert cli.main(["bench", "h2h", "--tasks", "nope", "--provider", "claude-cli"]) == 2
     assert "unknown task" in capsys.readouterr().err
     assert cli.main(["bench", "h2h", "--modes", "refs,telepathy", "--provider", "claude-cli"]) == 2

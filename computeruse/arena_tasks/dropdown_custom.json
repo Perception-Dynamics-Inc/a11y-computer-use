@@ -1,0 +1,10 @@
+{
+  "id": "dropdown_custom",
+  "title": "Select from a custom (DOM-rendered) listbox",
+  "page": "dropdown_custom.html",
+  "instruction": "Set the shipping country to Norway and press Apply.",
+  "success": "document.title === 'SHIP:Norway' && document.getElementById('status').textContent === 'Shipping to Norway'",
+  "allowed_targets": ["country-toggle", "opt-norway", "apply", "label-country"],
+  "max_steps": 8,
+  "notes": "The same task as dropdown, but the options are ordinary DOM elements painted into the page, so screenshots show them and all three modes are comparable."
+}

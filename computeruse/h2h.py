@@ -79,10 +79,22 @@ class TaskSpec:
     max_steps: int
     notes: str = ""
     directory: Path = TASKS_DIR  #: where ``page`` (and its assets) live
+    #: mode -> reason a run in that mode is NOT a fair comparison (for example a
+    #: native ``select`` popup that headless Chrome never paints into a
+    #: screenshot). Such runs are still executed and reported, but flagged, and
+    #: the aggregate shows completion with and without them.
+    not_comparable: tuple[tuple[str, str], ...] = ()
 
     @property
     def html_path(self) -> Path:
         return self.directory / self.page
+
+    def comparability(self, mode: str) -> str | None:
+        """The reason ``mode`` is not comparable on this task, or None when it is."""
+        for m, reason in self.not_comparable:
+            if m == mode:
+                return reason
+        return None
 
 
 def load_tasks(ids: list[str] | None = None, *, directory: Path = TASKS_DIR) -> list[TaskSpec]:
@@ -97,6 +109,8 @@ def load_tasks(ids: list[str] | None = None, *, directory: Path = TASKS_DIR) -> 
             allowed_targets=tuple(str(t) for t in data.get("allowed_targets", [])),
             max_steps=int(data.get("max_steps", 8)), notes=str(data.get("notes", "")),
             directory=directory,
+            not_comparable=tuple((str(m), str(r)) for m, r in
+                                 (data.get("not_comparable") or {}).items()),
         )
         specs[spec.id] = spec
     if ids is None:
@@ -136,6 +150,11 @@ def validate_task(spec: TaskSpec) -> list[str]:
         problems.append(f"{spec.id}: max_steps must be positive")
     if not spec.instruction.strip():
         problems.append(f"{spec.id}: empty instruction")
+    for mode, reason in spec.not_comparable:
+        if mode not in MODES:
+            problems.append(f"{spec.id}: not_comparable names unknown mode {mode!r}")
+        if not reason.strip():
+            problems.append(f"{spec.id}: not_comparable[{mode!r}] needs a reason")
     return problems
 
 
@@ -407,11 +426,20 @@ class RunRecord:
     summary: str
     model: str | None = None
     error: str | None = None
+    #: False when the task manifest marks this mode as not a fair comparison;
+    #: ``note`` carries the reason. The run still happened and is reported.
+    comparable: bool = True
+    note: str = ""
     steps: list[dict] = field(default_factory=list)
     clicks: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RunRecord":
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 def count_misclicks(clicks: list[dict], allowed: tuple[str, ...] | list[str]) -> int:
@@ -439,10 +467,19 @@ def aggregate(records: list[RunRecord], *, price_in: float | None = None,
         tin = sum(r.input_tokens for r in rows)
         tout = sum(r.output_tokens for r in rows)
         reported = sum(r.cost_reported_usd for r in rows)
+        # "comparable" excludes every task that ANY mode flags as not comparable,
+        # so the with/without rates are computed over the same task set per mode.
+        flagged_tasks = {r.task_id for r in records if not r.comparable}
+        comp = [r for r in rows if r.task_id not in flagged_tasks]
+        comp_done = sum(1 for r in comp if r.success)
         out[mode] = {
             "runs": len(rows),
             "completed": completed,
             "completion_rate": completed / len(rows) if rows else 0.0,
+            "comparable_runs": len(comp),
+            "comparable_completed": comp_done,
+            "comparable_rate": comp_done / len(comp) if comp else 0.0,
+            "excluded_tasks": sorted(flagged_tasks),
             "mean_turns": statistics.fmean(r.turns for r in rows) if rows else 0.0,
             "mean_turns_completed": (statistics.fmean(r.turns for r in rows if r.success)
                                      if completed else 0.0),
@@ -471,6 +508,12 @@ class H2HReport:
         return {"meta": self.meta, "aggregate": self.aggregate(),
                 "records": [r.to_dict() for r in self.records]}
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "H2HReport":
+        """Rebuild a report from a saved ``h2h.json`` (re-rendering, merging runs)."""
+        return cls(records=[RunRecord.from_dict(r) for r in data.get("records", [])],
+                   meta=dict(data.get("meta") or {}))
+
 
 def _fmt_cost(value: float | None) -> str:
     return "" if value is None else f"${value:.3f}"
@@ -495,8 +538,11 @@ def format_report(report: H2HReport) -> str:
         return "\n".join(lines)
     has_reported = any(v["cost_reported_usd"] is not None for v in agg.values())
     has_est = any(v["cost_estimated_usd"] is not None for v in agg.values())
-    head = ["mode", "completed", "rate", "mean turns", "actions", "misclicks", "wasted",
-            "tokens in", "tokens out"]
+    excluded = next(iter(agg.values()))["excluded_tasks"]
+    head = ["mode", "completed", "rate"]
+    if excluded:
+        head.append("rate (comparable tasks)")
+    head += ["mean turns", "actions", "misclicks", "wasted", "tokens in", "tokens out"]
     if has_reported:
         head.append("cost (reported)")
     if has_est:
@@ -505,30 +551,40 @@ def format_report(report: H2HReport) -> str:
     lines.append("| " + " | ".join(head) + " |")
     lines.append("|" + "---|" * len(head))
     for mode, v in agg.items():
-        row = [mode, f"{v['completed']}/{v['runs']}", f"{v['completion_rate'] * 100:.0f}%",
-               f"{v['mean_turns']:.1f}", str(v["actions"]), str(v["misclicks"]), str(v["wasted"]),
-               f"{v['input_tokens']:,}", f"{v['output_tokens']:,}"]
+        row = [mode, f"{v['completed']}/{v['runs']}", f"{v['completion_rate'] * 100:.0f}%"]
+        if excluded:
+            row.append(f"{v['comparable_completed']}/{v['comparable_runs']} "
+                       f"({v['comparable_rate'] * 100:.0f}%)")
+        row += [f"{v['mean_turns']:.1f}", str(v["actions"]), str(v["misclicks"]), str(v["wasted"]),
+                f"{v['input_tokens']:,}", f"{v['output_tokens']:,}"]
         if has_reported:
             row.append(_fmt_cost(v["cost_reported_usd"]))
         if has_est:
             row.append(_fmt_cost(v["cost_estimated_usd"]))
         row.append(f"{v['wall_s']:.0f}s")
         lines.append("| " + " | ".join(row) + " |")
+    if excluded:
+        lines.append("")
+        lines.append(f"The \"comparable tasks\" rate leaves out {', '.join(excluded)} for every mode, "
+                     "because at least one mode is flagged as not comparable on that task "
+                     "(see the notes column).")
     lines.append("")
-    lines.append("| task | mode | round | done | stopped | turns | actions | misclicks | wasted | tokens in/out | wall |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| task | mode | round | done | stopped | turns | actions | misclicks | wasted | tokens in/out | wall | note |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in report.records:
+        note = r.note if r.comparable else f"not comparable: {r.note}"
         lines.append(
             f"| {r.task_id} | {r.mode} | {r.round} | {'yes' if r.success else 'no'} | {r.stopped} | "
             f"{r.turns} | {r.actions} | {r.misclicks} | {r.wasted} | "
-            f"{r.input_tokens:,}/{r.output_tokens:,} | {r.wall_s:.0f}s |")
+            f"{r.input_tokens:,}/{r.output_tokens:,} | {r.wall_s:.0f}s | {note} |")
     failures = [r for r in report.records if not r.success]
     if failures:
         lines.append("")
         lines.append("Failed runs:")
         for r in failures:
             why = r.error or r.summary or r.stopped
-            lines.append(f"- {r.task_id} / {r.mode} (round {r.round}): {why[:300]}")
+            flag = " [not comparable]" if not r.comparable else ""
+            lines.append(f"- {r.task_id} / {r.mode} (round {r.round}){flag}: {why[:300]}")
     return "\n".join(lines)
 
 
@@ -625,6 +681,7 @@ class Harness:
             clicks = json.loads(clicks_raw)
         except json.JSONDecodeError:
             clicks = []
+        reason = spec.comparability(mode)
         record = RunRecord(
             task_id=spec.id, mode=mode, round=round_no, success=success,
             stopped=result.stopped, turns=provider.turns, actions=state["actions"],
@@ -632,6 +689,7 @@ class Harness:
             input_tokens=provider.usage.input_tokens, output_tokens=provider.usage.output_tokens,
             cost_reported_usd=provider.usage.cost_usd, wall_s=result.wall_time_s,
             summary=result.summary, model=provider.model, error=error,
+            comparable=reason is None, note=reason or "",
             steps=[s.to_dict() for s in result.steps], clicks=clicks,
         )
         self.on_event("run", {"record": record})
