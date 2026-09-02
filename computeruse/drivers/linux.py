@@ -361,10 +361,10 @@ class LinuxDriver:
 
 
 def _grab_wayland() -> bytes | None:
-    """Full-screen PNG on Wayland via grim (wlroots ext-image-copy-capture) —
+    """Full-screen PNG on Wayland via grim (wlroots ext-image-copy-capture);
     PIL's X11 grab cannot see a Wayland compositor. Returns None when grim is
-    absent or fails (caller falls through to the X path). Verified live under
-    headless sway."""
+    absent or fails (caller falls through to the X path). Exercised manually
+    under headless sway (2026-08-29); no automated test."""
     import shutil
     import subprocess
 
