@@ -20,7 +20,7 @@ from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
 from computeruse import act, capture, observe, safety, server
-from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot
+from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Point, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 pytestmark = pytest.mark.anyio

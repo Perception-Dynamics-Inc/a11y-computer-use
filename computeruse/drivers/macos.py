@@ -89,6 +89,11 @@ class MacOSDriver:
     def zoom_region(self, region: Bounds) -> bytes:
         return capture.zoom_region(region)
 
+    def main_display_id(self) -> int:
+        import Quartz  # pyobjc, macOS only; loaded at call time like the rest
+
+        return int(Quartz.CGMainDisplayID())
+
     # -- system / windowing (delegated to server helpers for now) ----------
     def frontmost_app(self) -> tuple[str | None, int | None]:
         from computeruse import safety

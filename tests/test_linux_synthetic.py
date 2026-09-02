@@ -122,3 +122,93 @@ def test_linux_driver_run_inline_when_events_disabled(monkeypatch) -> None:
     monkeypatch.delenv("COMPUTERUSE_ATSPI_EVENTS", raising=False)
     d = LinuxDriver()
     assert d._run(lambda: 42) == 42  # default path runs inline, no thread/gi needed
+
+
+# --- XTEST pointer positioning (the coordinate/vision fallback) ---------------
+#
+# python-xlib is not installed on macOS/Windows dev machines, so these tests
+# install a fake `Xlib` (X constants + xtest.fake_input recorder) and a fake
+# cached display. What they pin: coordinate input positions the pointer with an
+# ABSOLUTE XTEST MotionNotify, never `Display.warp_pointer`, which X treats as a
+# move relative to the current pointer. Under Xvfb the pointer starts at (0, 0)
+# so the two coincide and CI could not see the difference; on a real desktop
+# (docs/box-testbed.md) the relative warp put clicks at pointer + (x, y).
+
+_X_MOTION, _X_BPRESS, _X_BRELEASE = 6, 4, 5  # X11 protocol event codes
+
+
+class _FakeXDisplay:
+    def __init__(self):
+        self.warps: list[tuple[int, int]] = []
+        self.syncs = 0
+
+    def warp_pointer(self, x, y):  # the trap: relative motion
+        self.warps.append((x, y))
+
+    def sync(self):
+        self.syncs += 1
+
+    def keysym_to_keycode(self, keysym):
+        return 0  # no modifiers mapped -> `held()` presses nothing
+
+
+@pytest.fixture
+def xtest_recorder(monkeypatch):
+    """Install a fake Xlib whose xtest.fake_input records (event, detail, x, y)
+    and route _linux_input at a fake cached display. Yields (events, display)."""
+    import sys
+    import types
+
+    events: list[tuple[int, int, int, int]] = []
+    X = types.ModuleType("Xlib.X")
+    X.MotionNotify, X.ButtonPress, X.ButtonRelease = _X_MOTION, _X_BPRESS, _X_BRELEASE
+    X.KeyPress, X.KeyRelease, X.CurrentTime, X.NONE = 2, 3, 0, 0
+    xtest = types.ModuleType("Xlib.ext.xtest")
+
+    def fake_input(display, event_type, detail=0, time=0, root=0, x=0, y=0):
+        events.append((event_type, detail, x, y))
+
+    xtest.fake_input = fake_input
+    ext = types.ModuleType("Xlib.ext")
+    ext.xtest = xtest
+    xlib = types.ModuleType("Xlib")
+    xlib.X, xlib.ext = X, ext
+    for name, mod in {"Xlib": xlib, "Xlib.X": X, "Xlib.ext": ext, "Xlib.ext.xtest": xtest}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    display = _FakeXDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    return events, display
+
+
+def test_click_positions_pointer_absolutely_then_presses(xtest_recorder) -> None:
+    events, display = xtest_recorder
+    _linux_input.click(500, 400)
+    assert events == [(_X_MOTION, 0, 500, 400), (_X_BPRESS, 1, 0, 0), (_X_BRELEASE, 1, 0, 0)]
+    assert display.warps == [], "relative warp_pointer must never be used for coordinates"
+    assert display.syncs == 1  # one flush per logical operation
+
+
+def test_click_button_and_count(xtest_recorder) -> None:
+    events, _ = xtest_recorder
+    _linux_input.click(10, 20, button="right", count=2)
+    assert events[0] == (_X_MOTION, 0, 10, 20)
+    assert events[1:] == [(_X_BPRESS, 3, 0, 0), (_X_BRELEASE, 3, 0, 0)] * 2
+
+
+def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder) -> None:
+    events, display = xtest_recorder
+    _linux_input.drag(10, 20, 300, 400)
+    assert events == [
+        (_X_MOTION, 0, 10, 20), (_X_BPRESS, 1, 0, 0),
+        (_X_MOTION, 0, 300, 400), (_X_BRELEASE, 1, 0, 0),
+    ]
+    assert display.warps == []
+
+
+def test_scroll_positions_before_wheel_notches(xtest_recorder) -> None:
+    events, display = xtest_recorder
+    _linux_input.scroll(100, 200, dy=2, dx=-1)
+    assert events[0] == (_X_MOTION, 0, 100, 200)
+    assert events[1:5] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)] * 2  # wheel down x2
+    assert events[5:] == [(_X_BPRESS, 6, 0, 0), (_X_BRELEASE, 6, 0, 0)]  # horizontal
+    assert display.warps == []

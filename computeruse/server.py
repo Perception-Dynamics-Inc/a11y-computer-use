@@ -649,7 +649,8 @@ class Runtime:
 
         Refs re-resolve against the live tree (`observe.resolve_ref`) and
         gate against the issuing snapshot's app; raw points gate against the
-        frontmost app and default to the main display.
+        frontmost app and default to the driver's main display (so this path is
+        platform-free: Linux/Windows/browser report 0, macOS `CGMainDisplayID`).
         """
         if ref is not None:
             snap, _anchor = self._anchor(ref)
@@ -658,7 +659,7 @@ class Runtime:
         if x is None or y is None:
             raise ValueError("target an element ref, or both x and y coordinates")
         if display_id is None:
-            display_id = int(Quartz.CGMainDisplayID())
+            display_id = int(self.driver.main_display_id())  # through the seam, not Quartz
         return Point(display_id=display_id, x=x, y=y), self._frontmost()
 
     # -- observation tools (gated at READ + audited like everything else) ------

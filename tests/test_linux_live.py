@@ -26,7 +26,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
-from computeruse.schema import ComputerUseError, Scope  # noqa: E402
+from computeruse.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
 
 _APP = "cuatestapp"
 
@@ -183,3 +183,98 @@ def test_linux_forces_a11y_status() -> None:
 
     assert getp("IsEnabled") is True
     assert getp("ScreenReaderEnabled") is True
+
+
+def _pointer_xy():
+    """Current pointer position from the X server (None if Xlib is unavailable)."""
+    try:
+        from Xlib import display as _xd
+
+        root = _xd.Display().screen().root
+        q = root.query_pointer()
+        return int(q.root_x), int(q.root_y)
+    except Exception:  # pragma: no cover - environment guard
+        return None
+
+
+def test_linux_coordinate_click_lands_with_pointer_away_from_origin(tmp_path) -> None:
+    """The coordinate/vision-fallback click: position the pointer ABSOLUTELY and
+    press. The pointer is first parked away from (0, 0) on purpose: under Xvfb it
+    starts at the origin, where a relative warp and an absolute move coincide,
+    which is how a relative `warp_pointer` shipped unnoticed until a real desktop
+    (Budgie/Xorg, docs/box-testbed.md) put every click at pointer + (x, y)."""
+    from computeruse.drivers import _linux_input
+    from computeruse.drivers.linux import LinuxDriver
+    from computeruse.schema import Point
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    if _pointer_xy() is None:
+        pytest.skip("no X pointer (python-xlib or DISPLAY unavailable)")
+    proc = _launch_app(tmp_path)
+    try:
+        snap = _wait_for_snapshot(driver)
+        button = next((el for el in snap.elements if el.clickable and "Save" in el.title), None)
+        assert button is not None, f"no Save button; {[(e.role, e.title) for e in snap.elements]}"
+        b = button.bounds
+        cx, cy = int(b.x + b.width / 2), int(b.y + b.height / 2)
+
+        _linux_input._move(cx + 150, cy + 120)  # park the pointer off-origin, off-target
+        _linux_input._flush()
+        parked = _pointer_xy()
+        assert parked != (cx, cy), "test setup: pointer must start away from the target"
+
+        try:
+            driver.click(Point(display_id=driver.main_display_id(), x=cx, y=cy))
+        except ComputerUseError as exc:
+            pytest.skip(f"coordinate input unsupported here: {exc.message}")
+        time.sleep(0.4)
+
+        assert _pointer_xy() == (cx, cy), f"pointer ended at {_pointer_xy()}, wanted {(cx, cy)}"
+        after = driver.snapshot(Scope.WINDOW, _APP)
+        values = [el.value for el in after.elements if el.value]
+        assert any("SAVED" in (v or "") for v in values), f"coordinate click missed; {values}"
+    finally:
+        proc.terminate()
+
+
+def test_linux_runtime_click_without_display_id(tmp_path) -> None:
+    """`Runtime.click(x, y)` with no display_id must resolve the default display
+    through the driver (it used to call Quartz unconditionally and raise
+    NameError off macOS). Needs a window manager so the GTK app is the active
+    window the gate keys on; self-skips when there is none (Xvfb without a WM)."""
+    from computeruse import safety, server
+    from computeruse.drivers import _linux_input
+    from computeruse.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    if _pointer_xy() is None:
+        pytest.skip("no X pointer (python-xlib or DISPLAY unavailable)")
+    proc = _launch_app(tmp_path)
+    try:
+        snap = _wait_for_snapshot(driver)
+        button = next((el for el in snap.elements if el.clickable and "Save" in el.title), None)
+        assert button is not None
+        b = button.bounds
+        cx, cy = int(b.x + b.width / 2), int(b.y + b.height / 2)
+
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+        front = rt._frontmost()
+        if not front:
+            pytest.skip("no active window (no window manager): the gate has no app to key on")
+        store.set_tier(front, safety.Tier.FULL)
+
+        _linux_input._move(cx + 150, cy + 120)
+        _linux_input._flush()
+        try:
+            msg = rt.click(x=cx, y=cy)  # no display_id: the driver seam supplies it
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.UNSUPPORTED:
+                pytest.skip(f"coordinate input unsupported here: {exc.message}")
+            raise
+        assert msg.startswith("clicked (") and "on display" in msg, msg
+        assert _pointer_xy() == (cx, cy)
+    finally:
+        proc.terminate()

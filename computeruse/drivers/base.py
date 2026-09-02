@@ -108,6 +108,13 @@ class Driver(Protocol):
         """A full-display capture (a `capture.Screenshot`-shaped object)."""
         ...
 
+    def main_display_id(self) -> int:
+        """The display id a raw x/y target defaults to when the caller gives
+        none. It must be the id this backend stamps on its snapshot geometry
+        and screenshots (0 on single-display backends), so an un-qualified
+        point lands on the same display the model just observed."""
+        ...
+
     def zoom_region(self, region: Bounds) -> bytes:
         """A native-resolution PNG crop of ``region``."""
         ...

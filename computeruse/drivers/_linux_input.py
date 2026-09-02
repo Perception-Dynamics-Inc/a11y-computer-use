@@ -197,13 +197,27 @@ def held(modifiers):
 _BUTTON_NUM = {"left": 1, "middle": 2, "right": 3}
 
 
+def _move(x: int, y: int) -> None:
+    """Queue an ABSOLUTE pointer move to screen (x, y) via XTEST MotionNotify
+    (detail=0 = absolute). Not `Display.warp_pointer`: python-xlib's
+    `Display.warp_pointer(x, y)` is a WarpPointer with no destination window,
+    which X defines as a move RELATIVE to the current pointer position. That
+    only coincides with absolute coordinates when the pointer sits at (0, 0),
+    which is exactly the Xvfb state that hid this on CI; on a real desktop the
+    click landed at pointer + (x, y). Verified on a Budgie/Xorg desktop
+    (docs/box-testbed.md)."""
+    from Xlib import X
+    from Xlib.ext import xtest
+
+    xtest.fake_input(_disp(), X.MotionNotify, 0, x=int(x), y=int(y))
+
+
 def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     """Synthesize a mouse click at screen (x, y). Only used when the a11y press
     path is unavailable (coordinate/vision fallback)."""
     from Xlib import X
 
-    d = _disp()
-    d.warp_pointer(int(x), int(y))  # queued; X processes warp before the buttons
+    _move(x, y)  # queued; X processes the motion before the buttons
     num = _BUTTON_NUM.get(button, 1)
     for _ in range(max(1, count)):
         _fake(X.ButtonPress, num)
@@ -214,11 +228,10 @@ def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
 def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left") -> None:
     from Xlib import X
 
-    d = _disp()
     num = _BUTTON_NUM.get(button, 1)
-    d.warp_pointer(int(x1), int(y1))
+    _move(x1, y1)
     _fake(X.ButtonPress, num)
-    d.warp_pointer(int(x2), int(y2))  # motion while the button is held = the drag
+    _move(x2, y2)  # motion while the button is held = the drag
     _fake(X.ButtonRelease, num)
     _flush()
 
@@ -228,8 +241,7 @@ def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
     One button tap per notch; positive dy scrolls content up (wheel down)."""
     from Xlib import X
 
-    d = _disp()
-    d.warp_pointer(int(x), int(y))
+    _move(x, y)
     for _ in range(abs(int(dy))):
         _fake(X.ButtonPress, 5 if dy > 0 else 4)
         _fake(X.ButtonRelease, 5 if dy > 0 else 4)
