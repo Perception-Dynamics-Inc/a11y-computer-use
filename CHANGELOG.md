@@ -107,6 +107,10 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - `scroll_to_find` anchors its wheel on the largest list, table, or outline container below the window rather than the window itself; the browser backend exposes an overflow list as `AXList`, so the previous anchor scrolled the page (d6c19d9, 2026-09-02).
 
 ### Fixed
+- Agent loop: planner transport failures (timeouts, connection resets, truncated bodies) end the run with `stopped=provider_error` and an audit row instead of an unhandled exception; `done(success)` is validated (string booleans flagged as `invalid_done_arguments`, anything else fails the run); a `done` issued alongside other tool calls is deferred until their results are seen (b8b297f, 2026-09-02).
+- Adapters: coordinate clicks snap to a ref only for a plain left click, never against a stale snapshot when the refresh fails, and never inside a populated field or a slider; OpenAI `pending_safety_checks` block execution until acknowledged; screenshot coordinate mapping is normalised to the display size, and the browser driver captures a CSS-sized bitmap on HiDPI tabs (b8b297f, 2026-09-02).
+- Observe: the snapshot depth cap now bounds the tree walk itself, so deep wrapper chains and cyclic fan-out are read in bounded time (b8b297f, 2026-09-02).
+- Linux: `pids_matching` matches the window owner's comm only; AltGr-only keysyms are typed through a spare keycode; the AT-SPI focus probe asks the Collection interface first and `type` refuses when the probe cannot decide (b8b297f, 2026-09-02).
 
 - Linux CI live AT-SPI2 step no longer exits with code 137 from a `pkill` self-match (dd79f5f, 2026-08-28).
 - Headless Chrome launch in the browser CI job: added `--disable-dev-shm-usage`, a wait for `/json/version`, and diagnostics on failure. The CI run for the previous commit had failed at this step with exit code 7 (3b331ba, 2026-09-01).
