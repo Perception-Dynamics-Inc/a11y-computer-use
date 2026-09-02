@@ -238,6 +238,7 @@ def test_pyobjc_check_reports_missing_install(monkeypatch: pytest.MonkeyPatch) -
 # --- render_text --------------------------------------------------------------
 
 
+@darwin_only
 def test_render_text_lists_checks_fixes_and_summary(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_environment(monkeypatch, ax=False, screen=True, ps_table=TERMINAL_PS)
     text = render_text(run_doctor())

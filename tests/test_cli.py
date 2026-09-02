@@ -46,8 +46,11 @@ def test_doctor_exits_zero_and_names_responsible_app(capsys, monkeypatch) -> Non
     monkeypatch.setattr(doctor, "parent_chain", lambda pid: chain)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "responsible_app" in out
-    assert "Terminal" in out
+    if sys.platform == "darwin":
+        assert "responsible_app" in out
+        assert "Terminal" in out
+    else:  # Linux/Windows report the display session instead of TCC grants
+        assert "display_session" in out
     assert "checks passed" in out
 
 
@@ -56,7 +59,7 @@ def test_doctor_subprocess_smoke() -> None:
         [sys.executable, "-m", "computeruse", "doctor"], capture_output=True, text=True
     )
     assert result.returncode == 0
-    assert "responsible_app" in result.stdout
+    assert ("responsible_app" if sys.platform == "darwin" else "display_session") in result.stdout
     assert "checks passed" in result.stdout
 
 
@@ -154,6 +157,8 @@ def test_run_once_granted_action_executes(capsys, home, fake_front, monkeypatch)
     )
     pressed: list[str] = []
     # the Runtime routes key through the driver, which delegates to act.key_chord
+    # on the macOS driver; select it explicitly so the seam is the same on every OS.
+    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
     monkeypatch.setattr(act, "key_chord", lambda chord, **kw: pressed.append(chord) or [])
     assert cli.main(["run-once", '{"tool": "key", "chord": "cmd+s"}']) == 0
     assert capsys.readouterr().out.strip() == "pressed cmd+s"

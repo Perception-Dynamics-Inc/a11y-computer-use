@@ -90,6 +90,8 @@ def load_tasks(ids: list[str] | None = None, *, directory: Path = TASKS_DIR) -> 
     subset named in ``ids`` (in that order). Unknown ids raise ``KeyError``."""
     specs: dict[str, TaskSpec] = {}
     for path in sorted(directory.glob("*.json")):
+        if path.name.startswith("."):  # editor swap files, AppleDouble sidecars
+            continue
         data = json.loads(path.read_text(encoding="utf-8"))
         spec = TaskSpec(
             id=str(data["id"]), title=str(data.get("title", data["id"])), page=str(data["page"]),

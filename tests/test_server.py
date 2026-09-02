@@ -52,6 +52,18 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def _macos_driver_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module mocks the macOS native seams (``observe.snapshot``,
+    ``act.click`` and friends, ``server._frontmost_bundle``), so the Runtime
+    under test must be built on the macOS driver on every OS. The macOS driver
+    imports without pyobjc because act/capture/observe are import-safe off
+    macOS; only its native calls need pyobjc, and those are exactly what the
+    fixtures replace. Tests that build a Runtime with an explicit ``driver=``
+    are unaffected."""
+    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> safety.PermissionStore:
     return safety.PermissionStore(tmp_path / "permissions.json")
@@ -520,6 +532,9 @@ async def test_window_list_bounds_are_display_qualified_physical_pixels(
 
 async def test_clipboard_write_needs_full_tier(mcp_server, store, monkeypatch) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    # The tier decision is under test, not the pasteboard: keep the read off
+    # the real clipboard (xclip needs a DISPLAY on Linux; NSPasteboard is macOS-only).
+    monkeypatch.setattr(server, "_read_clipboard", lambda: "clipboard text")
     store.set_tier("com.test.front", safety.Tier.READ)
 
     read = await call_tool(mcp_server, "clipboard", {"action": "read"})

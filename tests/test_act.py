@@ -12,7 +12,10 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
-import Quartz
+
+# The CGEvent executor is macOS-only; off macOS the whole module skips at
+# collection (the full suite runs on every CI runner).
+Quartz = pytest.importorskip("Quartz", reason="macOS CGEvent executor needs pyobjc (Quartz)")
 
 from computeruse import act
 from computeruse.schema import (

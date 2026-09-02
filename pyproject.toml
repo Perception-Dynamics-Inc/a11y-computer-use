@@ -84,5 +84,10 @@ Documentation = "https://github.com/Perception-Dynamics-Inc/computerUse/tree/mai
 [tool.hatch.build.targets.wheel]
 packages = ["computeruse"]
 
+# The sdist ships the source, tests, and docs, not the brand media or the Box
+# VM scripts (3 MB of PNGs otherwise dominate the archive).
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/assets", "docs/hero-demo.gif", "scratch", "scripts/box"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
