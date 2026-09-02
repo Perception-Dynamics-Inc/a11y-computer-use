@@ -5,5 +5,10 @@
   "instruction": "Set the shipping country to Norway and press Apply.",
   "success": "document.title === 'SHIP:Norway' && document.getElementById('status').textContent === 'Shipping to Norway'",
   "allowed_targets": ["country", "apply", "label-country"],
-  "max_steps": 8
+  "max_steps": 8,
+  "not_comparable": {
+    "pixels": "headless Chrome does not paint the native select popup into screenshots, so a screenshot-only planner cannot see the options (keyboard entry after focusing the select is its only path)",
+    "pixels+snap": "headless Chrome does not paint the native select popup into screenshots, so a screenshot-only planner cannot see the options (keyboard entry after focusing the select is its only path)"
+  },
+  "notes": "Kept in the suite because the accessibility path (set_value on the combobox) is a real capability worth measuring; see dropdown_custom for the fair three-way comparison."
 }

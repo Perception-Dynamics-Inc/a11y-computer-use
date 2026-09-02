@@ -385,9 +385,14 @@ class BrowserDriver:
             pre_check()
         x, y = self._viewport_point(*_point_of(target))
         step = 40 if unit is ScrollUnit.LINES else 1  # ~40 px per wheel line
+        # Tool contract: positive dy scrolls content UP (the reader moves down the
+        # page), positive dx scrolls content LEFT. CDP's wheel deltas use the same
+        # sign (positive deltaY scrolls the scroller down), so they pass through
+        # unnegated. (cu-arena's long_list task caught the earlier inverted sign:
+        # every "scroll down" at the top of a list was a no-op.)
         self._connect().call("Input.dispatchMouseEvent", {
             "type": "mouseWheel", "x": x, "y": y,
-            "deltaX": -dx * step, "deltaY": -dy * step})
+            "deltaX": dx * step, "deltaY": dy * step})
         return None
 
     def _scroll_offset(self) -> tuple[float, float]:

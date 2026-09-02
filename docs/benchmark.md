@@ -11,10 +11,14 @@ and the harness scores every run the same way:
 | `pixels` | a PNG screenshot only, plus a fresh screenshot after every action | pixel coordinates executed by the Anthropic computer-use adapter as raw coordinate clicks (the incumbent loop) |
 | `pixels+snap` | the same screenshot-only loop | the same coordinates, but a click that lands inside a known accessibility element executes as a ref click (`snap_to_refs`, what a pixel client gets for free from `computeruse.adapters`) |
 
-The pixel planner never sees the accessibility tree. The refs planner never sees a
-screenshot unless it asks for one. Both get the same instruction, the same planner,
-the same planner-turn budget, and a freshly loaded page. The harness cannot make
-the accessibility path win; it can only count.
+Observation isolation is strict. The refs planner never receives a screenshot:
+its tool surface is the MCP surface, and in the recorded runs it never called
+`screenshot`. The pixel planners never receive the accessibility snapshot: their
+tool surface is `screenshot`, `left_click`, `double_click`, `type`, `key`,
+`scroll` and `done`, and the only observation they get is a PNG. Both get the
+same instruction, the same planner, the same planner-turn budget, and a freshly
+loaded page. The harness cannot make the accessibility path win; it can only
+count.
 
 The implementation is `computeruse/h2h.py`. The task suite is
 `computeruse/arena_tasks/` (shipped inside the package).
@@ -38,18 +42,34 @@ Per task, mode and round:
 Aggregates per mode: completion rate, mean turns, total actions, misclicks,
 wasted actions, tokens, cost, wall time.
 
+### Runs that are not a fair comparison
+
+A manifest can flag a mode as `not_comparable` with a reason. The run still
+executes and is reported, the row is annotated, and the aggregate table adds a
+"rate (comparable tasks)" column that leaves that task out for every mode, so a
+mode's failure on an unfair task cannot inflate another mode's advantage. Today
+one task carries the flag: `dropdown` uses a native `select`, and headless Chrome
+does not paint the open select popup into screenshots, so a screenshot-only
+planner cannot see the options at all. Its twin `dropdown_custom` renders the
+options as ordinary DOM elements and is comparable in every mode.
+
+`computeruse bench h2h --render a.json b.json` re-renders saved results (merging
+several runs) with the manifests' current comparability notes, which is how a
+finished run picks up a flag added afterwards.
+
 ## The task suite
 
-Twelve deterministic single-page fixtures. Each has a manifest (`<id>.json`) with
-the instruction the planner receives, the success predicate, the allowed click
-targets and the turn budget. Pages are deliberately plain: system font, high
+Thirteen deterministic single-page fixtures. Each has a manifest (`<id>.json`)
+with the instruction the planner receives, the success predicate, the allowed
+click targets and the turn budget. Pages are deliberately plain: system font, high
 contrast, every target at least 24x24 CSS px, no decoration that would handicap a
 screenshot planner or help an accessibility planner.
 
 | id | probes |
 |---|---|
 | `form_fill` | two text fields and a submit button |
-| `dropdown` | a native `select` with 12 options |
+| `dropdown` | a native `select` with 12 options (pixel modes flagged not comparable in headless Chrome) |
+| `dropdown_custom` | the same task with a DOM-rendered listbox, comparable in every mode |
 | `checkboxes` | two specific checkboxes among eight with similar labels |
 | `menu` | a click-to-open menu bar with a nested submenu (File, Export, PDF) |
 | `long_list` | a scrolling list of 111 cities, target near the end |
@@ -99,6 +119,14 @@ planner's context.
 The benchmark uses its own permission store and audit log under a temporary
 directory (the `workdir` in the JSON meta). It never touches `~/.computeruse`.
 
+The Runtime's confirmation gate (the prompt before a plausibly irreversible
+click, such as a button titled "Delete") is auto-approved in both loops. A ref
+click carries the element title, so the classifier fires on it; a raw coordinate
+click carries no title, so it does not. Leaving the gate armed would block the
+refs loop on `modal_confirm` while the pixel loop proceeds, which measures the
+gate, not the observation strategy. The fixtures are throwaway pages, so
+approving is safe here. A real agent should route that prompt to a human.
+
 ## Adding a task
 
 1. Write `computeruse/arena_tasks/<id>.html`: include `<link rel="stylesheet"
@@ -107,7 +135,9 @@ directory (the `workdir` in the JSON meta). It never touches `~/.computeruse`.
    `document.title` or a status element).
 2. Write `<id>.json` with `id`, `title`, `page`, `instruction`, `success` (a
    JavaScript expression), `allowed_targets` (ids a correct solution may click,
-   including labels that toggle a control) and `max_steps`.
+   including labels that toggle a control) and `max_steps`. Add
+   `not_comparable: {"<mode>": "<reason>"}` only when a mode genuinely cannot
+   perceive what the task needs (a rendering limitation, not a planner weakness).
 3. Run `pytest tests/test_h2h.py`: the manifest validator checks that every
    allowed target is an id in the page (or its iframe pages), that the page is
    instrumented, and that the success expression is at least syntactically

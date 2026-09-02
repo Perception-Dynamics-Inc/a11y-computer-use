@@ -150,6 +150,9 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_h2h.add_argument("--out", help="directory to write h2h.md and h2h.json into")
     bench_h2h.add_argument("--json", action="store_true", help="print the JSON report instead of markdown")
     bench_h2h.add_argument("--list", action="store_true", help="list the task suite and exit")
+    bench_h2h.add_argument("--render", metavar="JSON", nargs="+",
+                           help="do not run; re-render one or more saved h2h.json files (merged) "
+                                "with the current manifests' comparability notes")
     bench_h2h.set_defaults(handler=_cmd_bench_h2h)
 
     agent = sub.add_parser(
@@ -253,7 +256,35 @@ def _cmd_bench_h2h(args: argparse.Namespace) -> int:
     tasks = h2h.load_tasks()
     if args.list:
         for t in tasks:
-            print(f"{t.id:16} {t.title}  (max_steps={t.max_steps})")
+            flags = "".join(f"  [{m}: not comparable]" for m, _ in t.not_comparable)
+            print(f"{t.id:16} {t.title}  (max_steps={t.max_steps}){flags}")
+        return 0
+    if args.render:
+        report = h2h.H2HReport()
+        specs = {t.id: t for t in tasks}
+        for path in args.render:
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"cannot read {path}: {exc}", file=sys.stderr)
+                return 2
+            part = h2h.H2HReport.from_dict(data)
+            for record in part.records:  # apply the manifests' current comparability notes
+                spec = specs.get(record.task_id)
+                reason = spec.comparability(record.mode) if spec else None
+                record.comparable, record.note = reason is None, reason or record.note
+            report.records.extend(part.records)
+            if not report.meta:
+                report.meta = part.meta
+            elif part.meta:
+                report.meta = {**part.meta, **report.meta, "merged_from": args.render}
+        text = h2h.format_report(report)
+        if args.out:
+            out = Path(args.out)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "h2h.md").write_text(text + "\n", encoding="utf-8")
+            (out / "h2h.json").write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        print(json.dumps(report.to_dict(), indent=2) if args.json else text)
         return 0
     if args.tasks != "all":
         try:

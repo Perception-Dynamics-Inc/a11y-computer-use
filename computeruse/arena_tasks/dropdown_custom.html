@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shipping</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.combo { position: relative; display: inline-block; }
+.combo > button { min-width: 220px; text-align: left; }
+.combo ul { position: absolute; left: 0; top: 44px; margin: 0; padding: 4px 0; list-style: none; background: #fff; border: 1px solid #888; width: 220px; max-height: 260px; overflow-y: auto; z-index: 2; }
+.combo li { padding: 8px 12px; min-height: 24px; cursor: pointer; }
+.combo li:hover, .combo li[aria-selected=true] { background: #eef; }
+.hidden { display: none; }
+.spacer { height: 300px; }
+</style>
+</head>
+<body>
+<h1>Shipping options</h1>
+<div class="row">
+  <span id="label-country">Country</span><br>
+  <div class="combo">
+    <button id="country-toggle" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="label-country country-toggle">Choose a country</button>
+    <ul id="country-list" role="listbox" class="hidden" aria-labelledby="label-country">
+      <li role="option" id="opt-austria">Austria</li>
+      <li role="option" id="opt-belgium">Belgium</li>
+      <li role="option" id="opt-denmark">Denmark</li>
+      <li role="option" id="opt-finland">Finland</li>
+      <li role="option" id="opt-france">France</li>
+      <li role="option" id="opt-germany">Germany</li>
+      <li role="option" id="opt-netherlands">Netherlands</li>
+      <li role="option" id="opt-norway">Norway</li>
+      <li role="option" id="opt-poland">Poland</li>
+      <li role="option" id="opt-portugal">Portugal</li>
+      <li role="option" id="opt-spain">Spain</li>
+      <li role="option" id="opt-sweden">Sweden</li>
+    </ul>
+  </div>
+</div>
+<div class="spacer"></div>
+<div class="row"><button id="apply">Apply</button> <button id="clear">Clear</button></div>
+<div class="status" id="status">No shipping country set.</div>
+<script>
+var selected = '';
+var toggle = document.getElementById('country-toggle');
+var list = document.getElementById('country-list');
+toggle.addEventListener('click', function () {
+  var open = list.classList.contains('hidden');
+  list.classList.toggle('hidden', !open);
+  toggle.setAttribute('aria-expanded', String(open));
+});
+Array.prototype.forEach.call(list.querySelectorAll('li'), function (li) {
+  li.addEventListener('click', function () {
+    selected = li.textContent;
+    Array.prototype.forEach.call(list.querySelectorAll('li'), function (o) { o.setAttribute('aria-selected', String(o === li)); });
+    toggle.textContent = selected;
+    list.classList.add('hidden');
+    toggle.setAttribute('aria-expanded', 'false');
+  });
+});
+document.getElementById('apply').addEventListener('click', function () {
+  document.getElementById('status').textContent = selected ? 'Shipping to ' + selected : 'Choose a country first.';
+  document.title = selected ? 'SHIP:' + selected : 'Shipping';
+});
+document.getElementById('clear').addEventListener('click', function () {
+  selected = '';
+  toggle.textContent = 'Choose a country';
+  document.getElementById('status').textContent = 'No shipping country set.';
+  document.title = 'Shipping';
+});
+</script>
+</body>
+</html>

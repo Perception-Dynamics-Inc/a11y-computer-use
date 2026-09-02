@@ -1,0 +1,4938 @@
+{
+  "meta": {
+    "date": "2026-09-02",
+    "browser": "Chrome/152.0.7977.65",
+    "tasks": "form_fill, dropdown, dropdown_custom, checkboxes, menu, long_list, iframe_field, similar_buttons, modal_confirm, tabs, copy_value, table_row, search_filter",
+    "modes": [
+      "refs",
+      "pixels",
+      "pixels+snap"
+    ],
+    "rounds": 1,
+    "max_steps": "per task",
+    "model": "claude-fable-5-1",
+    "price_in": null,
+    "price_out": null,
+    "workdir": "/var/folders/8b/h39vysdn0h32gc46s_471fh40000gn/T/cu-h2h-k0rem978",
+    "planner": "claude-cli",
+    "machine": "Apple Silicon MacBook (macOS), headless Chrome, 1280x800 window (1280x713 viewport)",
+    "assembled_from": [
+      "h2h-full2 (minus modal_confirm, long_list)",
+      "h2h-modal-rerun",
+      "h2h-longlist-rerun2",
+      "h2h-dropdown-custom"
+    ]
+  },
+  "aggregate": {
+    "refs": {
+      "runs": 13,
+      "completed": 13,
+      "completion_rate": 1.0,
+      "comparable_runs": 12,
+      "comparable_completed": 12,
+      "comparable_rate": 1.0,
+      "excluded_tasks": [
+        "dropdown"
+      ],
+      "mean_turns": 3.076923076923077,
+      "mean_turns_completed": 3.076923076923077,
+      "actions": 21,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 344427,
+      "output_tokens": 3044,
+      "cost_reported_usd": 7.03995,
+      "cost_estimated_usd": null,
+      "wall_s": 394.24324912403245
+    },
+    "pixels": {
+      "runs": 13,
+      "completed": 7,
+      "completion_rate": 0.5384615384615384,
+      "comparable_runs": 12,
+      "comparable_completed": 7,
+      "comparable_rate": 0.5833333333333334,
+      "excluded_tasks": [
+        "dropdown"
+      ],
+      "mean_turns": 6.384615384615385,
+      "mean_turns_completed": 5.0,
+      "actions": 72,
+      "misclicks": 27,
+      "wasted": 42,
+      "input_tokens": 1168051,
+      "output_tokens": 25575,
+      "cost_reported_usd": 11.73601275,
+      "cost_estimated_usd": null,
+      "wall_s": 1478.6116760420846
+    },
+    "pixels+snap": {
+      "runs": 13,
+      "completed": 6,
+      "completion_rate": 0.46153846153846156,
+      "comparable_runs": 12,
+      "comparable_completed": 6,
+      "comparable_rate": 0.5,
+      "excluded_tasks": [
+        "dropdown"
+      ],
+      "mean_turns": 6.615384615384615,
+      "mean_turns_completed": 5.0,
+      "actions": 74,
+      "misclicks": 31,
+      "wasted": 44,
+      "input_tokens": 1212479,
+      "output_tokens": 25278,
+      "cost_reported_usd": 12.073063750000001,
+      "cost_estimated_usd": null,
+      "wall_s": 1510.637668750831
+    }
+  },
+  "records": [
+    {
+      "task_id": "form_fill",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 16727,
+      "output_tokens": 219,
+      "cost_reported_usd": 0.34545000000000003,
+      "wall_s": 14.750521374982782,
+      "summary": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows 'Sent: Ada Lovelace <ada@example.com>' and the title changed to SENT.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "act",
+          "params": {
+            "steps": [
+              {
+                "do": "click",
+                "ref": "e7"
+              },
+              {
+                "do": "type",
+                "text": "Ada Lovelace"
+              },
+              {
+                "do": "click",
+                "ref": "e10"
+              },
+              {
+                "do": "type",
+                "text": "ada@example.com"
+              },
+              {
+                "do": "click",
+                "ref": "e15"
+              }
+            ],
+            "verify": true
+          },
+          "ok": true,
+          "result": "{\"steps\": [{\"i\": 0, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e7 (AXTextField 'Full name')\"}, {\"i\": 1, \"do\": \"type\", \"ok\": true, \"result\": \"typed 12 characters\"}, {\"i\": 2, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e10 (AXTextField 'Email address')\"}, {\"i\": 3, \"do\": \"type\", \"ok\": true, \"result\": \"typed 15 characters\"}, {\"i\": 4, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e15 (AXButton 'Send')\"}], \"effect\": \"[snap-39 \\u2190 snap-35] +1 -1 ~3\\n  + e19 statictext \\\"Sent: Ada Lovelace <ada@example.com>\\\"\\n  - e19 statictext \\\"Nothing sent yet.\\\" (gone)\\n  ~ e1 webarea [title: Contact\\u219",
+          "error_code": null,
+          "duration_ms": 33.8880829513073,
+          "usage": {
+            "input_tokens": 8038,
+            "output_tokens": 119
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows 'Sent: Ada Lovelace <ada@example.com>' and the title changed to SENT.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows 'Sent: Ada Lovelace <ada@example.com>' and the title changed to SENT.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8689,
+            "output_tokens": 100
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "send",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "form_fill",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 6,
+      "actions": 5,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 78110,
+      "output_tokens": 969,
+      "cost_reported_usd": 0.7541380000000001,
+      "wall_s": 82.36129741708282,
+      "summary": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows the confirmation 'Sent: Ada Lovelace <ada@example.com>'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 168,
+            "y": 118
+          },
+          "ok": true,
+          "result": "clicked (168, 118) on display 0 [image point (168, 118) -> physical (168, 118)]",
+          "error_code": null,
+          "duration_ms": 46.92633298691362,
+          "usage": {
+            "input_tokens": 12479,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "Ada Lovelace"
+          },
+          "ok": true,
+          "result": "typed 12 characters",
+          "error_code": null,
+          "duration_ms": 47.032375005073845,
+          "usage": {
+            "input_tokens": 12754,
+            "output_tokens": 150
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 168,
+            "y": 218
+          },
+          "ok": true,
+          "result": "clicked (168, 218) on display 0 [image point (168, 218) -> physical (168, 218)]",
+          "error_code": null,
+          "duration_ms": 47.21220803912729,
+          "usage": {
+            "input_tokens": 12896,
+            "output_tokens": 150
+          }
+        },
+        {
+          "index": 4,
+          "tool": "type",
+          "params": {
+            "text": "ada@example.com"
+          },
+          "ok": true,
+          "result": "typed 15 characters",
+          "error_code": null,
+          "duration_ms": 54.84154191799462,
+          "usage": {
+            "input_tokens": 13161,
+            "output_tokens": 163
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 61,
+            "y": 348
+          },
+          "ok": true,
+          "result": "clicked (61, 348) on display 0 [image point (61, 348) -> physical (61, 348)]",
+          "error_code": null,
+          "duration_ms": 40.98729102406651,
+          "usage": {
+            "input_tokens": 13284,
+            "output_tokens": 150
+          }
+        },
+        {
+          "index": 6,
+          "tool": "done",
+          "params": {
+            "summary": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows the confirmation 'Sent: Ada Lovelace <ada@example.com>'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Filled the contact form with 'Ada Lovelace' and 'ada@example.com' and pressed Send; the page now shows the confirmation 'Sent: Ada Lovelace <ada@example.com>'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13536,
+            "output_tokens": 223
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "name",
+          "x": 168,
+          "y": 118
+        },
+        {
+          "target": "email",
+          "x": 168,
+          "y": 218
+        },
+        {
+          "target": "send",
+          "x": 61,
+          "y": 348
+        }
+      ]
+    },
+    {
+      "task_id": "form_fill",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 7,
+      "actions": 6,
+      "misclicks": 1,
+      "wasted": 0,
+      "input_tokens": 92236,
+      "output_tokens": 1326,
+      "cost_reported_usd": 0.84597025,
+      "wall_s": 97.03701412503142,
+      "summary": "Filled the contact form with full name 'Ada Lovelace' and email 'ada@example.com' and pressed Send; the status confirms 'Sent: Ada Lovelace <ada@example.com>'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 170,
+            "y": 118
+          },
+          "ok": true,
+          "result": "clicked e7 (AXTextField 'Full name') [snapped from image point (170, 118) to e7 AXTextField 'Full name'] [snapped to e7]",
+          "error_code": null,
+          "duration_ms": 54.55766699742526,
+          "usage": {
+            "input_tokens": 12493,
+            "output_tokens": 147
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "Ada Lovelace"
+          },
+          "ok": true,
+          "result": "typed 12 characters",
+          "error_code": null,
+          "duration_ms": 49.72733301110566,
+          "usage": {
+            "input_tokens": 12798,
+            "output_tokens": 152
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 170,
+            "y": 215
+          },
+          "ok": true,
+          "result": "clicked e10 (AXTextField 'Email address') [snapped from image point (170, 215) to e10 AXTextField 'Email address'] [snapped to e10]",
+          "error_code": null,
+          "duration_ms": 51.05608294252306,
+          "usage": {
+            "input_tokens": 12950,
+            "output_tokens": 204
+          }
+        },
+        {
+          "index": 4,
+          "tool": "type",
+          "params": {
+            "text": "ada@example.com"
+          },
+          "ok": true,
+          "result": "typed 15 characters",
+          "error_code": null,
+          "duration_ms": 42.5749170826748,
+          "usage": {
+            "input_tokens": 13203,
+            "output_tokens": 163
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 60,
+            "y": 320
+          },
+          "ok": true,
+          "result": "clicked (60, 320) on display 0 [image point (60, 320) -> physical (60, 320)]",
+          "error_code": null,
+          "duration_ms": 57.25845799315721,
+          "usage": {
+            "input_tokens": 13289,
+            "output_tokens": 180
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 54,
+            "y": 348
+          },
+          "ok": true,
+          "result": "clicked e15 (AXButton 'Send') [snapped from image point (54, 348) to e15 AXButton 'Send'] [snapped to e15]",
+          "error_code": null,
+          "duration_ms": 61.52541597839445,
+          "usage": {
+            "input_tokens": 13589,
+            "output_tokens": 221
+          }
+        },
+        {
+          "index": 7,
+          "tool": "done",
+          "params": {
+            "summary": "Filled the contact form with full name 'Ada Lovelace' and email 'ada@example.com' and pressed Send; the status confirms 'Sent: Ada Lovelace <ada@example.com>'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Filled the contact form with full name 'Ada Lovelace' and email 'ada@example.com' and pressed Send; the status confirms 'Sent: Ada Lovelace <ada@example.com>'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13914,
+            "output_tokens": 259
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 60,
+          "y": 320
+        },
+        {
+          "target": "send",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "dropdown",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 24178,
+      "output_tokens": 203,
+      "cost_reported_usd": 0.49365000000000003,
+      "wall_s": 21.55004858400207,
+      "summary": "Set the shipping country to Norway and clicked Apply; the page now shows 'Shipping to Norway' and the combobox value is Norway.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "set_value",
+          "params": {
+            "ref": "e7",
+            "value": "Norway"
+          },
+          "ok": true,
+          "result": "set e7 = 'Norway'",
+          "error_code": null,
+          "duration_ms": 5.941709037870169,
+          "usage": {
+            "input_tokens": 7925,
+            "output_tokens": 102
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e12",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e12 (AXButton 'Apply')\n\neffect: [snap-28 \u2190 snap-25] +1 -1 ~2\n  + e16 statictext \"Shipping to Norway\"\n  - e16 statictext \"No shipping country set.\" (gone)\n  ~ e1 webarea [title: Shipping\u2192SHIP:Norway]\n  ~ e7 combobox [value: Choose a country\u2192Norway]",
+          "error_code": null,
+          "duration_ms": 15.156875015236437,
+          "usage": {
+            "input_tokens": 8022,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Set the shipping country to Norway and clicked Apply; the page now shows 'Shipping to Norway' and the combobox value is Norway.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Set the shipping country to Norway and clicked Apply; the page now shows 'Shipping to Norway' and the combobox value is Norway.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8231,
+            "output_tokens": 72
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "apply",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "dropdown",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 0,
+      "wasted": 6,
+      "input_tokens": 105389,
+      "output_tokens": 3000,
+      "cost_reported_usd": 1.139793,
+      "wall_s": 182.1908889580518,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": false,
+      "note": "headless Chrome does not paint the native select popup into screenshots, so a screenshot-only planner cannot see the options (keyboard entry after focusing the select is its only path)",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 122
+          },
+          "ok": true,
+          "result": "clicked (105, 122) on display 0 [image point (105, 122) -> physical (105, 122)]",
+          "error_code": null,
+          "duration_ms": 53.96087502595037,
+          "usage": {
+            "input_tokens": 12260,
+            "output_tokens": 171
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 52.324082935228944,
+          "usage": {
+            "input_tokens": 12532,
+            "output_tokens": 199
+          }
+        },
+        {
+          "index": 3,
+          "tool": "key",
+          "params": {
+            "text": "Down"
+          },
+          "ok": true,
+          "result": "pressed down",
+          "error_code": null,
+          "duration_ms": 38.9570000115782,
+          "usage": {
+            "input_tokens": 12774,
+            "output_tokens": 213
+          }
+        },
+        {
+          "index": 4,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 47.3644589073956,
+          "usage": {
+            "input_tokens": 13057,
+            "output_tokens": 211
+          }
+        },
+        {
+          "index": 5,
+          "tool": "key",
+          "params": {
+            "text": "Escape"
+          },
+          "ok": true,
+          "result": "pressed escape",
+          "error_code": null,
+          "duration_ms": 55.91912497766316,
+          "usage": {
+            "input_tokens": 13410,
+            "output_tokens": 679
+          }
+        },
+        {
+          "index": 6,
+          "tool": "type",
+          "params": {
+            "text": "N"
+          },
+          "ok": true,
+          "result": "typed 1 characters",
+          "error_code": null,
+          "duration_ms": 48.31758397631347,
+          "usage": {
+            "input_tokens": 13528,
+            "output_tokens": 197
+          }
+        },
+        {
+          "index": 7,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 42.21012501511723,
+          "usage": {
+            "input_tokens": 13808,
+            "output_tokens": 569
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 122
+          },
+          "ok": true,
+          "result": "clicked (105, 122) on display 0 [image point (105, 122) -> physical (105, 122)]",
+          "error_code": null,
+          "duration_ms": 67.57175002712756,
+          "usage": {
+            "input_tokens": 14020,
+            "output_tokens": 761
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "country",
+          "x": 105,
+          "y": 122
+        },
+        {
+          "target": "country",
+          "x": 105,
+          "y": 122
+        }
+      ]
+    },
+    {
+      "task_id": "dropdown",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 0,
+      "wasted": 7,
+      "input_tokens": 112110,
+      "output_tokens": 2374,
+      "cost_reported_usd": 1.1057027499999998,
+      "wall_s": 196.26400479197036,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": false,
+      "note": "headless Chrome does not paint the native select popup into screenshots, so a screenshot-only planner cannot see the options (keyboard entry after focusing the select is its only path)",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 106,
+            "y": 122
+          },
+          "ok": true,
+          "result": "clicked e7 (AXComboBox 'Country') [snapped from image point (106, 122) to e7 AXComboBox 'Country'] [snapped to e7]",
+          "error_code": null,
+          "duration_ms": 52.11404198780656,
+          "usage": {
+            "input_tokens": 12257,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 52.54199996124953,
+          "usage": {
+            "input_tokens": 12571,
+            "output_tokens": 203
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 106,
+            "y": 122
+          },
+          "ok": true,
+          "result": "clicked e7 (AXComboBox 'Country') [snapped from image point (106, 122) to e7 AXComboBox 'Country'] [snapped to e7]",
+          "error_code": null,
+          "duration_ms": 57.31229204684496,
+          "usage": {
+            "input_tokens": 12651,
+            "output_tokens": 190
+          }
+        },
+        {
+          "index": 4,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 41.349458042532206,
+          "usage": {
+            "input_tokens": 12943,
+            "output_tokens": 330
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 106,
+            "y": 122
+          },
+          "ok": true,
+          "result": "clicked e7 (AXComboBox 'Country') [snapped from image point (106, 122) to e7 AXComboBox 'Country'] [snapped to e7]",
+          "error_code": null,
+          "duration_ms": 61.12124992068857,
+          "usage": {
+            "input_tokens": 13026,
+            "output_tokens": 236
+          }
+        },
+        {
+          "index": 6,
+          "tool": "key",
+          "params": {
+            "text": "Escape"
+          },
+          "ok": true,
+          "result": "pressed escape",
+          "error_code": null,
+          "duration_ms": 40.55720800533891,
+          "usage": {
+            "input_tokens": 13494,
+            "output_tokens": 543
+          }
+        },
+        {
+          "index": 7,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 39.35079195071012,
+          "usage": {
+            "input_tokens": 21346,
+            "output_tokens": 385
+          }
+        },
+        {
+          "index": 8,
+          "tool": "key",
+          "params": {
+            "text": "Down"
+          },
+          "ok": true,
+          "result": "pressed down",
+          "error_code": null,
+          "duration_ms": 47.46216698549688,
+          "usage": {
+            "input_tokens": 13822,
+            "output_tokens": 354
+          }
+        }
+      ],
+      "clicks": []
+    },
+    {
+      "task_id": "dropdown_custom",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 5,
+      "actions": 3,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 44135,
+      "output_tokens": 409,
+      "cost_reported_usd": 0.9030499999999999,
+      "wall_s": 40.20590937498491,
+      "summary": "Selected Norway in the Country dropdown and clicked Apply; the page now shows 'Shipping to Norway' and the title changed to SHIP:Norway.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "click",
+          "params": {
+            "ref": "e7",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e7 (AXButton 'Country Choose a country')\n\neffect: [snap-3 \u2190 snap-1] +26 -0 ~1\n  + e7 group\n  + e10 list \"Country\"\n  + e11 menuitem \"Austria\" (click)\n  + e12 statictext \"Austria\"\n  + e13 menuitem \"Belgium\" (click)\n  + e14 statictext \"Belgium\"\n  + e15 menuitem \"Denmark\" (click)\n  + e16 statictext \"Denmark\"\n  + e17 menuitem \"Finland\" (click)\n  + e18 statictext \"Finland\"\n  + e19 menuitem \"France\" (click)\n  + e20 statictext \"France\"\n  + e21 menuitem \"Germany\" (click)\n  + e22 statictext \"Germany\"\n  + e23 menuitem \"Netherlands\" (click)\n  + e24 statictext \"Netherlands\"\n  + e25 menuitem \"Norway",
+          "error_code": null,
+          "duration_ms": 10.653208009898663,
+          "usage": {
+            "input_tokens": 7972,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e25",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e25 (AXMenuItem 'Norway')\n\neffect: [snap-5 \u2190 snap-3] +1 -27 ~1\n  + e8 statictext \"Norway\"\n  - e7 group (gone)\n  - e9 statictext \"Choose a country\" (gone)\n  - e10 list \"Country\" (gone)\n  - e11 menuitem \"Austria\" (gone)\n  - e12 statictext \"Austria\" (gone)\n  - e13 menuitem \"Belgium\" (gone)\n  - e14 statictext \"Belgium\" (gone)\n  - e15 menuitem \"Denmark\" (gone)\n  - e16 statictext \"Denmark\" (gone)\n  - e17 menuitem \"Finland\" (gone)\n  - e18 statictext \"Finland\" (gone)\n  - e19 menuitem \"France\" (gone)\n  - e20 statictext \"France\" (gone)\n  - e21 menuitem \"Germany\" (gone)\n  - e22 statictext \"German",
+          "error_code": null,
+          "duration_ms": 12.668250012211502,
+          "usage": {
+            "input_tokens": 8521,
+            "output_tokens": 121
+          }
+        },
+        {
+          "index": 3,
+          "tool": "find",
+          "params": {
+            "app": "D9950D5A198C6A389AE34A18EB115935",
+            "text": "Apply",
+            "role": "button"
+          },
+          "ok": true,
+          "result": "[snap-6] D9950D5A198C6A389AE34A18EB115935: 1 match(es)\n  e11 button \"Apply\" (click) [75x40 @0:24,470]",
+          "error_code": null,
+          "duration_ms": 3.6500839050859213,
+          "usage": {
+            "input_tokens": 9187,
+            "output_tokens": 151
+          }
+        },
+        {
+          "index": 4,
+          "tool": "click",
+          "params": {
+            "ref": "e11",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e11 (AXButton 'Apply')\n\neffect: [snap-8 \u2190 snap-6] +1 -1 ~1\n  + e15 statictext \"Shipping to Norway\"\n  - e15 statictext \"No shipping country set.\" (gone)\n  ~ e1 webarea [title: Shipping\u2192SHIP:Norway]",
+          "error_code": null,
+          "duration_ms": 14.049791032448411,
+          "usage": {
+            "input_tokens": 9135,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 5,
+          "tool": "done",
+          "params": {
+            "summary": "Selected Norway in the Country dropdown and clicked Apply; the page now shows 'Shipping to Norway' and the title changed to SHIP:Norway.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Selected Norway in the Country dropdown and clicked Apply; the page now shows 'Shipping to Norway' and the title changed to SHIP:Norway.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 9320,
+            "output_tokens": 79
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "country-toggle",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "opt-norway",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "apply",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "dropdown_custom",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 1,
+      "wasted": 6,
+      "input_tokens": 116833,
+      "output_tokens": 2844,
+      "cost_reported_usd": 1.1756307499999998,
+      "wall_s": 130.46893175004516,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 118
+          },
+          "ok": true,
+          "result": "clicked (132, 118) on display 0 [image point (132, 118) -> physical (132, 118)]",
+          "error_code": null,
+          "duration_ms": 473.71487505733967,
+          "usage": {
+            "input_tokens": 12444,
+            "output_tokens": 146
+          }
+        },
+        {
+          "index": 2,
+          "tool": "scroll",
+          "params": {
+            "x": 132,
+            "y": 300,
+            "direction": "down",
+            "amount": 3
+          },
+          "ok": true,
+          "result": "scrolled (132, 300) on display 0 by (dx=0, dy=3) lines [at image point (132, 300)]",
+          "error_code": null,
+          "duration_ms": 80.17687499523163,
+          "usage": {
+            "input_tokens": 12702,
+            "output_tokens": 210
+          }
+        },
+        {
+          "index": 3,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 52.994915982708335,
+          "usage": {
+            "input_tokens": 13073,
+            "output_tokens": 220
+          }
+        },
+        {
+          "index": 4,
+          "tool": "scroll",
+          "params": {
+            "x": 132,
+            "y": 350,
+            "direction": "down",
+            "amount": 3
+          },
+          "ok": true,
+          "result": "scrolled (132, 350) on display 0 by (dx=0, dy=3) lines [at image point (132, 350)]",
+          "error_code": null,
+          "duration_ms": 79.042958910577,
+          "usage": {
+            "input_tokens": 13332,
+            "output_tokens": 243
+          }
+        },
+        {
+          "index": 5,
+          "tool": "key",
+          "params": {
+            "text": "Down"
+          },
+          "ok": true,
+          "result": "pressed down",
+          "error_code": null,
+          "duration_ms": 55.49475003499538,
+          "usage": {
+            "input_tokens": 13816,
+            "output_tokens": 237
+          }
+        },
+        {
+          "index": 6,
+          "tool": "scroll",
+          "params": {
+            "x": 132,
+            "y": 250,
+            "direction": "down",
+            "amount": 10
+          },
+          "ok": true,
+          "result": "scrolled (132, 250) on display 0 by (dx=0, dy=10) lines [at image point (132, 250)]",
+          "error_code": null,
+          "duration_ms": 86.01279207505286,
+          "usage": {
+            "input_tokens": 22380,
+            "output_tokens": 621
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "End"
+          },
+          "ok": true,
+          "result": "pressed end",
+          "error_code": null,
+          "duration_ms": 50.59500003699213,
+          "usage": {
+            "input_tokens": 14420,
+            "output_tokens": 611
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 77,
+            "y": 429
+          },
+          "ok": true,
+          "result": "clicked (77, 429) on display 0 [image point (77, 429) -> physical (77, 429)]",
+          "error_code": null,
+          "duration_ms": 40.46820802614093,
+          "usage": {
+            "input_tokens": 14666,
+            "output_tokens": 556
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "country-toggle",
+          "x": 132,
+          "y": 118
+        },
+        {
+          "target": "div",
+          "x": 77,
+          "y": 429
+        }
+      ]
+    },
+    {
+      "task_id": "dropdown_custom",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 3,
+      "wasted": 8,
+      "input_tokens": 112863,
+      "output_tokens": 3206,
+      "cost_reported_usd": 1.15758325,
+      "wall_s": 146.21521358389873,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 145
+          },
+          "ok": true,
+          "result": "clicked (132, 145) on display 0 [image point (132, 145) -> physical (132, 145)]",
+          "error_code": null,
+          "duration_ms": 53.85204206686467,
+          "usage": {
+            "input_tokens": 12467,
+            "output_tokens": 167
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 39.80641602538526,
+          "usage": {
+            "input_tokens": 12691,
+            "output_tokens": 238
+          }
+        },
+        {
+          "index": 3,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 41.612833039835095,
+          "usage": {
+            "input_tokens": 12830,
+            "output_tokens": 344
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 145
+          },
+          "ok": true,
+          "result": "clicked (132, 145) on display 0 [image point (132, 145) -> physical (132, 145)]",
+          "error_code": null,
+          "duration_ms": 54.684000089764595,
+          "usage": {
+            "input_tokens": 12993,
+            "output_tokens": 244
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 48,
+            "y": 88
+          },
+          "ok": true,
+          "result": "clicked (48, 88) on display 0 [image point (48, 88) -> physical (48, 88)]",
+          "error_code": null,
+          "duration_ms": 43.95183292217553,
+          "usage": {
+            "input_tokens": 21026,
+            "output_tokens": 551
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 145
+          },
+          "ok": true,
+          "result": "clicked (132, 145) on display 0 [image point (132, 145) -> physical (132, 145)]",
+          "error_code": null,
+          "duration_ms": 42.4345419742167,
+          "usage": {
+            "input_tokens": 13448,
+            "output_tokens": 351
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "Escape"
+          },
+          "ok": true,
+          "result": "pressed escape",
+          "error_code": null,
+          "duration_ms": 40.50704196561128,
+          "usage": {
+            "input_tokens": 13645,
+            "output_tokens": 899
+          }
+        },
+        {
+          "index": 8,
+          "tool": "type",
+          "params": {
+            "text": "Norway"
+          },
+          "ok": true,
+          "result": "typed 6 characters",
+          "error_code": null,
+          "duration_ms": 47.543374937959015,
+          "usage": {
+            "input_tokens": 13763,
+            "output_tokens": 412
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 132,
+          "y": 145
+        },
+        {
+          "target": "body",
+          "x": 132,
+          "y": 145
+        },
+        {
+          "target": "label-country",
+          "x": 48,
+          "y": 88
+        },
+        {
+          "target": "body",
+          "x": 132,
+          "y": 145
+        }
+      ]
+    },
+    {
+      "task_id": "checkboxes",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 16718,
+      "output_tokens": 164,
+      "cost_reported_usd": 0.34253,
+      "wall_s": 16.342659750021994,
+      "summary": "Checked 'Security advisories' and 'Release notes', clicked 'Save preferences'; the page confirmed with 'Saved: rel, sec' and both checkboxes are checked.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "act",
+          "params": {
+            "steps": [
+              {
+                "do": "click",
+                "ref": "e13"
+              },
+              {
+                "do": "click",
+                "ref": "e19"
+              },
+              {
+                "do": "click",
+                "ref": "e31"
+              }
+            ],
+            "verify": true
+          },
+          "ok": true,
+          "result": "{\"steps\": [{\"i\": 0, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e13 (AXCheckBox 'Security advisories')\"}, {\"i\": 1, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e19 (AXCheckBox 'Release notes')\"}, {\"i\": 2, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e31 (AXButton 'Save preferences')\"}], \"effect\": \"[snap-5 \\u2190 snap-1] +1 -1 ~3\\n  + e35 statictext \\\"Saved: rel, sec\\\"\\n  - e35 statictext \\\"Preferences not saved.\\\" (gone)\\n  ~ e1 webarea [title: Newsletters\\u2192SAVED:rel,sec]\\n  ~ e13 checkbox [checked: False\\u2192True]\\n  ~ e19 checkbox [checked: False\\u2192True]\"}",
+          "error_code": null,
+          "duration_ms": 40.62912508379668,
+          "usage": {
+            "input_tokens": 8120,
+            "output_tokens": 77
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Checked 'Security advisories' and 'Release notes', clicked 'Save preferences'; the page confirmed with 'Saved: rel, sec' and both checkboxes are checked.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Checked 'Security advisories' and 'Release notes', clicked 'Save preferences'; the page confirmed with 'Saved: rel, sec' and both checkboxes are checked.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8598,
+            "output_tokens": 87
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "sec",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "rel",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "save",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "checkboxes",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 7,
+      "actions": 6,
+      "misclicks": 3,
+      "wasted": 2,
+      "input_tokens": 97413,
+      "output_tokens": 2090,
+      "cost_reported_usd": 0.9589670000000001,
+      "wall_s": 110.16991400008556,
+      "summary": "Subscribed to exactly 'Security advisories' and 'Release notes' and clicked 'Save preferences'; the page confirms with the status 'Saved: rel, sec'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 232
+          },
+          "ok": true,
+          "result": "clicked (33, 232) on display 0 [image point (33, 232) -> physical (33, 232)]",
+          "error_code": null,
+          "duration_ms": 48.09312499128282,
+          "usage": {
+            "input_tokens": 12031,
+            "output_tokens": 274
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 216
+          },
+          "ok": true,
+          "result": "clicked (33, 216) on display 0 [image point (33, 216) -> physical (33, 216)]",
+          "error_code": null,
+          "duration_ms": 48.43320895452052,
+          "usage": {
+            "input_tokens": 19757,
+            "output_tokens": 446
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 308
+          },
+          "ok": true,
+          "result": "clicked (33, 308) on display 0 [image point (33, 308) -> physical (33, 308)]",
+          "error_code": null,
+          "duration_ms": 42.69112495239824,
+          "usage": {
+            "input_tokens": 12617,
+            "output_tokens": 187
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 559
+          },
+          "ok": true,
+          "result": "clicked (105, 559) on display 0 [image point (105, 559) -> physical (105, 559)]",
+          "error_code": null,
+          "duration_ms": 51.08287499751896,
+          "usage": {
+            "input_tokens": 12844,
+            "output_tokens": 205
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 104,
+            "y": 559
+          },
+          "ok": true,
+          "result": "clicked (104, 559) on display 0 [image point (104, 559) -> physical (104, 559)]",
+          "error_code": null,
+          "duration_ms": 47.233583056367934,
+          "usage": {
+            "input_tokens": 13124,
+            "output_tokens": 367
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 508
+          },
+          "ok": true,
+          "result": "clicked (105, 508) on display 0 [image point (105, 508) -> physical (105, 508)]",
+          "error_code": null,
+          "duration_ms": 49.19266700744629,
+          "usage": {
+            "input_tokens": 13324,
+            "output_tokens": 332
+          }
+        },
+        {
+          "index": 7,
+          "tool": "done",
+          "params": {
+            "summary": "Subscribed to exactly 'Security advisories' and 'Release notes' and clicked 'Save preferences'; the page confirms with the status 'Saved: rel, sec'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Subscribed to exactly 'Security advisories' and 'Release notes' and clicked 'Save preferences'; the page confirms with the status 'Saved: rel, sec'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13716,
+            "output_tokens": 279
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "div",
+          "x": 33,
+          "y": 232
+        },
+        {
+          "target": "sec",
+          "x": 33,
+          "y": 216
+        },
+        {
+          "target": "rel",
+          "x": 33,
+          "y": 308
+        },
+        {
+          "target": "status",
+          "x": 105,
+          "y": 559
+        },
+        {
+          "target": "status",
+          "x": 104,
+          "y": 559
+        },
+        {
+          "target": "save",
+          "x": 105,
+          "y": 508
+        }
+      ]
+    },
+    {
+      "task_id": "checkboxes",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 6,
+      "actions": 5,
+      "misclicks": 3,
+      "wasted": 0,
+      "input_tokens": 76643,
+      "output_tokens": 1343,
+      "cost_reported_usd": 0.783936,
+      "wall_s": 87.744660083903,
+      "summary": "Subscribed to exactly 'Security advisories' and 'Release notes' (all others unchecked) and clicked 'Save preferences'; the page confirms 'Saved: rel, sec'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 216
+          },
+          "ok": true,
+          "result": "clicked e13 (AXCheckBox 'Security advisories') [snapped from image point (33, 216) to e13 AXCheckBox 'Security advisories'] [snapped to e13]",
+          "error_code": null,
+          "duration_ms": 62.595374998636544,
+          "usage": {
+            "input_tokens": 12159,
+            "output_tokens": 350
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 308
+          },
+          "ok": true,
+          "result": "clicked e19 (AXCheckBox 'Release notes') [snapped from image point (33, 308) to e19 AXCheckBox 'Release notes'] [snapped to e19]",
+          "error_code": null,
+          "duration_ms": 63.93104197923094,
+          "usage": {
+            "input_tokens": 12489,
+            "output_tokens": 147
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 450
+          },
+          "ok": true,
+          "result": "clicked (105, 450) on display 0 [image point (105, 450) -> physical (105, 450)]",
+          "error_code": null,
+          "duration_ms": 60.12541695963591,
+          "usage": {
+            "input_tokens": 12688,
+            "output_tokens": 150
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 33,
+            "y": 447
+          },
+          "ok": true,
+          "result": "clicked e28 (AXCheckBox 'Job openings') [snapped from image point (33, 447) to e28 AXCheckBox 'Job openings'] [snapped to e28]",
+          "error_code": null,
+          "duration_ms": 58.9273750083521,
+          "usage": {
+            "input_tokens": 12817,
+            "output_tokens": 224
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 105,
+            "y": 498
+          },
+          "ok": true,
+          "result": "clicked e31 (AXButton 'Save preferences') [snapped from image point (105, 498) to e31 AXButton 'Save preferences'] [snapped to e31]",
+          "error_code": null,
+          "duration_ms": 55.48154201824218,
+          "usage": {
+            "input_tokens": 13089,
+            "output_tokens": 220
+          }
+        },
+        {
+          "index": 6,
+          "tool": "done",
+          "params": {
+            "summary": "Subscribed to exactly 'Security advisories' and 'Release notes' (all others unchecked) and clicked 'Save preferences'; the page confirms 'Saved: rel, sec'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Subscribed to exactly 'Security advisories' and 'Release notes' (all others unchecked) and clicked 'Save preferences'; the page confirms 'Saved: rel, sec'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13401,
+            "output_tokens": 252
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "sec",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "rel",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "label-jobs",
+          "x": 105,
+          "y": 450
+        },
+        {
+          "target": "jobs",
+          "x": 105,
+          "y": 450
+        },
+        {
+          "target": "jobs",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "save",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "menu",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 4,
+      "actions": 3,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 34730,
+      "output_tokens": 201,
+      "cost_reported_usd": 0.70457,
+      "wall_s": 33.60940750001464,
+      "summary": "Exported the document as PDF via File \u2192 Export \u2192 PDF; the editor confirmed with the status 'Exported as PDF' and the page title changed to EXPORTED:PDF.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "click",
+          "params": {
+            "ref": "e6",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e6 (AXButton 'File')\n\neffect: [snap-88 \u2190 snap-86] +11 -0 ~1\n  + e14 menu\n  + e15 menuitem \"New\" (click)\n  + e16 statictext \"New\"\n  + e17 menuitem \"Open...\" (click)\n  + e18 statictext \"Open...\"\n  + e19 menuitem \"Save\" (click)\n  + e20 statictext \"Save\"\n  + e21 menuitem \"Export \u25b8\" (click,collapsed)\n  + e22 statictext \"Export \u25b8\"\n  + e23 menuitem \"Print...\" (click)\n  + e24 statictext \"Print...\"\n  ~ e6 button [expanded: False\u2192True]",
+          "error_code": null,
+          "duration_ms": 18.164125038310885,
+          "usage": {
+            "input_tokens": 8168,
+            "output_tokens": 60
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e21",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e21 (AXMenuItem 'Export \u25b8')\n\neffect: [snap-90 \u2190 snap-88] +9 -0 ~1\n  + e25 menu\n  + e26 menuitem \"HTML\" (click)\n  + e27 statictext \"HTML\"\n  + e28 menuitem \"Markdown\" (click)\n  + e29 statictext \"Markdown\"\n  + e30 menuitem \"PDF\" (click)\n  + e31 statictext \"PDF\"\n  + e32 menuitem \"Word (.docx)\" (click)\n  + e33 statictext \"Word (.docx)\"\n  ~ e21 menuitem [expanded: False\u2192True]",
+          "error_code": null,
+          "duration_ms": 12.860417016781867,
+          "usage": {
+            "input_tokens": 8472,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 3,
+          "tool": "click",
+          "params": {
+            "ref": "e30",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e30 (AXMenuItem 'PDF')\n\neffect: [snap-92 \u2190 snap-90] +1 -21 ~2\n  + e15 statictext \"Exported as PDF\"\n  - e14 menu (gone)\n  - e15 menuitem \"New\" (gone)\n  - e16 statictext \"New\" (gone)\n  - e17 menuitem \"Open...\" (gone)\n  - e18 statictext \"Open...\" (gone)\n  - e19 menuitem \"Save\" (gone)\n  - e20 statictext \"Save\" (gone)\n  - e21 menuitem \"Export \u25b8\" (gone)\n  - e22 statictext \"Export \u25b8\" (gone)\n  - e23 menuitem \"Print...\" (gone)\n  - e24 statictext \"Print...\" (gone)\n  - e25 menu (gone)\n  - e26 menuitem \"HTML\" (gone)\n  - e27 statictext \"HTML\" (gone)\n  - e28 menuitem \"Markdown\" (gone)\n  - e29 static",
+          "error_code": null,
+          "duration_ms": 15.28254197910428,
+          "usage": {
+            "input_tokens": 8761,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 4,
+          "tool": "done",
+          "params": {
+            "summary": "Exported the document as PDF via File \u2192 Export \u2192 PDF; the editor confirmed with the status 'Exported as PDF' and the page title changed to EXPORTED:PDF.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Exported the document as PDF via File \u2192 Export \u2192 PDF; the editor confirmed with the status 'Exported as PDF' and the page title changed to EXPORTED:PDF.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 9329,
+            "output_tokens": 83
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "menu-file",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "item-export",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "item-pdf",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "menu",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 6,
+      "wasted": 7,
+      "input_tokens": 115645,
+      "output_tokens": 2507,
+      "cost_reported_usd": 1.14892475,
+      "wall_s": 131.0594319589436,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 54.162333952263,
+          "usage": {
+            "input_tokens": 12775,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 42.93458291795105,
+          "usage": {
+            "input_tokens": 13048,
+            "output_tokens": 180
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 40.99283297546208,
+          "usage": {
+            "input_tokens": 20804,
+            "output_tokens": 340
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 42.933166958391666,
+          "usage": {
+            "input_tokens": 13447,
+            "output_tokens": 273
+          }
+        },
+        {
+          "index": 5,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 43.02145796827972,
+          "usage": {
+            "input_tokens": 13651,
+            "output_tokens": 475
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 38.15458295866847,
+          "usage": {
+            "input_tokens": 13759,
+            "output_tokens": 294
+          }
+        },
+        {
+          "index": 7,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 44.20645802747458,
+          "usage": {
+            "input_tokens": 14034,
+            "output_tokens": 513
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 56,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (56, 67) on display 0 [image point (56, 67) -> physical (56, 67)]",
+          "error_code": null,
+          "duration_ms": 40.51404201891273,
+          "usage": {
+            "input_tokens": 14127,
+            "output_tokens": 299
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 56,
+          "y": 67
+        }
+      ]
+    },
+    {
+      "task_id": "menu",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 5,
+      "wasted": 7,
+      "input_tokens": 125149,
+      "output_tokens": 2807,
+      "cost_reported_usd": 1.1824492500000001,
+      "wall_s": 146.684090499999,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (57, 67) on display 0 [image point (57, 67) -> physical (57, 67)]",
+          "error_code": null,
+          "duration_ms": 45.8727499935776,
+          "usage": {
+            "input_tokens": 12800,
+            "output_tokens": 160
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (57, 67) on display 0 [image point (57, 67) -> physical (57, 67)]",
+          "error_code": null,
+          "duration_ms": 68.08237498626113,
+          "usage": {
+            "input_tokens": 13030,
+            "output_tokens": 197
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (57, 67) on display 0 [image point (57, 67) -> physical (57, 67)]",
+          "error_code": null,
+          "duration_ms": 50.39508291520178,
+          "usage": {
+            "input_tokens": 13310,
+            "output_tokens": 299
+          }
+        },
+        {
+          "index": 4,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 41.67125001549721,
+          "usage": {
+            "input_tokens": 13602,
+            "output_tokens": 328
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (57, 67) on display 0 [image point (57, 67) -> physical (57, 67)]",
+          "error_code": null,
+          "duration_ms": 46.80116707459092,
+          "usage": {
+            "input_tokens": 13732,
+            "output_tokens": 202
+          }
+        },
+        {
+          "index": 6,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 42.850208934396505,
+          "usage": {
+            "input_tokens": 22278,
+            "output_tokens": 407
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "Down"
+          },
+          "ok": true,
+          "result": "pressed down",
+          "error_code": null,
+          "duration_ms": 39.616708061657846,
+          "usage": {
+            "input_tokens": 14052,
+            "output_tokens": 829
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (57, 67) on display 0 [image point (57, 67) -> physical (57, 67)]",
+          "error_code": null,
+          "duration_ms": 41.40858305618167,
+          "usage": {
+            "input_tokens": 22345,
+            "output_tokens": 385
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 57,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 57,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 57,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 57,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 57,
+          "y": 67
+        }
+      ]
+    },
+    {
+      "task_id": "long_list",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 25415,
+      "output_tokens": 205,
+      "cost_reported_usd": 0.51849,
+      "wall_s": 24.723908082931302,
+      "summary": "Scrolled the city list to reveal 'Reykjavik' and clicked it; the page now shows 'Selected Reykjavik' and the title changed to CITY:Reykjavik.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "scroll_to_find",
+          "params": {
+            "app": "84F9B49D86959431987E2D7C373106F0",
+            "text": "Reykjavik",
+            "role": "button",
+            "direction": "down",
+            "max_scrolls": 15,
+            "ref": "e6"
+          },
+          "ok": true,
+          "result": "found after 13 scroll(s):\n[snap-15] 84F9B49D86959431987E2D7C373106F0: 1 match(es)\n  e39 button \"Reykjavik\" (click) [360x39 @0:25,614]",
+          "error_code": null,
+          "duration_ms": 445.3774580033496,
+          "usage": {
+            "input_tokens": 8645,
+            "output_tokens": 89
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e39",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e39 (AXButton 'Reykjavik')\n\neffect: [snap-17 \u2190 snap-15] +1 -1 ~1\n  + e45 statictext \"Selected Reykjavik\"\n  - e45 statictext \"No city selected.\" (gone)\n  ~ e1 webarea [title: Cities\u2192CITY:Reykjavik]",
+          "error_code": null,
+          "duration_ms": 56.462291977368295,
+          "usage": {
+            "input_tokens": 8291,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Scrolled the city list to reveal 'Reykjavik' and clicked it; the page now shows 'Selected Reykjavik' and the title changed to CITY:Reykjavik.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Scrolled the city list to reveal 'Reykjavik' and clicked it; the page now shows 'Selected Reykjavik' and the title changed to CITY:Reykjavik.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8479,
+            "output_tokens": 87
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "city-reykjavik",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "long_list",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 4,
+      "actions": 3,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 53346,
+      "output_tokens": 759,
+      "cost_reported_usd": 0.53858875,
+      "wall_s": 89.51360595808364,
+      "summary": "Clicked 'Reykjavik' in the city list; the page now shows it highlighted and displays 'Selected Reykjavik'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "scroll",
+          "params": {
+            "x": 205,
+            "y": 240,
+            "direction": "down",
+            "amount": 40
+          },
+          "ok": true,
+          "result": "scrolled (205, 240) on display 0 by (dx=0, dy=40) lines [at image point (205, 240)]",
+          "error_code": null,
+          "duration_ms": 64.07445797231048,
+          "usage": {
+            "input_tokens": 12910,
+            "output_tokens": 225
+          }
+        },
+        {
+          "index": 2,
+          "tool": "scroll",
+          "params": {
+            "x": 205,
+            "y": 400,
+            "direction": "down",
+            "amount": 30
+          },
+          "ok": true,
+          "result": "scrolled (205, 400) on display 0 by (dx=0, dy=30) lines [at image point (205, 400)]",
+          "error_code": null,
+          "duration_ms": 54.3070420389995,
+          "usage": {
+            "input_tokens": 13236,
+            "output_tokens": 197
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 76,
+            "y": 432
+          },
+          "ok": true,
+          "result": "clicked (76, 432) on display 0 [image point (76, 432) -> physical (76, 432)]",
+          "error_code": null,
+          "duration_ms": 56.43254204187542,
+          "usage": {
+            "input_tokens": 13506,
+            "output_tokens": 148
+          }
+        },
+        {
+          "index": 4,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked 'Reykjavik' in the city list; the page now shows it highlighted and displays 'Selected Reykjavik'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked 'Reykjavik' in the city list; the page now shows it highlighted and displays 'Selected Reykjavik'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13694,
+            "output_tokens": 189
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "city-reykjavik",
+          "x": 76,
+          "y": 432
+        }
+      ]
+    },
+    {
+      "task_id": "long_list",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 6,
+      "actions": 5,
+      "misclicks": 2,
+      "wasted": 0,
+      "input_tokens": 82446,
+      "output_tokens": 1222,
+      "cost_reported_usd": 0.8367697500000001,
+      "wall_s": 94.0475102920318,
+      "summary": "Clicked 'Reykjavik' in the city list; the page now shows 'Selected Reykjavik' confirming the selection.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "scroll",
+          "params": {
+            "x": 200,
+            "y": 250,
+            "direction": "down",
+            "amount": 60
+          },
+          "ok": true,
+          "result": "scrolled (200, 250) on display 0 by (dx=0, dy=60) lines [at image point (200, 250)]",
+          "error_code": null,
+          "duration_ms": 54.523207945749164,
+          "usage": {
+            "input_tokens": 12907,
+            "output_tokens": 250
+          }
+        },
+        {
+          "index": 2,
+          "tool": "scroll",
+          "params": {
+            "x": 200,
+            "y": 250,
+            "direction": "down",
+            "amount": 10
+          },
+          "ok": true,
+          "result": "scrolled (200, 250) on display 0 by (dx=0, dy=10) lines [at image point (200, 250)]",
+          "error_code": null,
+          "duration_ms": 36.219957983121276,
+          "usage": {
+            "input_tokens": 13387,
+            "output_tokens": 267
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 75,
+            "y": 404
+          },
+          "ok": true,
+          "result": "clicked e27 (AXButton 'Riga') [snapped from image point (75, 404) to e27 AXButton 'Riga'] [snapped to e27]",
+          "error_code": null,
+          "duration_ms": 104.57470896653831,
+          "usage": {
+            "input_tokens": 13643,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 75,
+            "y": 460
+          },
+          "ok": true,
+          "result": "clicked e31 (AXButton 'Rome') [snapped from image point (75, 460) to e31 AXButton 'Rome'] [snapped to e31]",
+          "error_code": null,
+          "duration_ms": 122.21187504474074,
+          "usage": {
+            "input_tokens": 13900,
+            "output_tokens": 206
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 75,
+            "y": 432
+          },
+          "ok": true,
+          "result": "clicked e29 (AXButton 'Reykjavik') [snapped from image point (75, 432) to e29 AXButton 'Reykjavik'] [snapped to e29]",
+          "error_code": null,
+          "duration_ms": 93.49758399184793,
+          "usage": {
+            "input_tokens": 14167,
+            "output_tokens": 177
+          }
+        },
+        {
+          "index": 6,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked 'Reykjavik' in the city list; the page now shows 'Selected Reykjavik' confirming the selection.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked 'Reykjavik' in the city list; the page now shows 'Selected Reykjavik' confirming the selection.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 14442,
+            "output_tokens": 189
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "city-riga",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "city-rome",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "city-reykjavik",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "iframe_field",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 16807,
+      "output_tokens": 182,
+      "cost_reported_usd": 0.34519999999999995,
+      "wall_s": 15.06979845801834,
+      "summary": "Entered SPRING24 into the embedded payment panel's coupon field and clicked Redeem; the panel now shows \"Redeemed SPRING24\" and the checkout page shows \"Coupon SPRING24 applied.\"",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "act",
+          "params": {
+            "steps": [
+              {
+                "do": "click",
+                "ref": "e13"
+              },
+              {
+                "do": "type",
+                "text": "SPRING24"
+              },
+              {
+                "do": "click",
+                "ref": "e15"
+              }
+            ],
+            "verify": true
+          },
+          "ok": true,
+          "result": "{\"steps\": [{\"i\": 0, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e13 (AXTextField 'Coupon code')\"}, {\"i\": 1, \"do\": \"type\", \"ok\": true, \"result\": \"typed 8 characters\"}, {\"i\": 2, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e15 (AXButton 'Redeem')\"}], \"effect\": \"[snap-50 \\u2190 snap-47] +2 -2 ~3\\n  + e19 statictext \\\"Redeemed SPRING24\\\"\\n  + e25 statictext \\\"Coupon SPRING24 applied.\\\"\\n  - e19 statictext \\\"No coupon entered.\\\" (gone)\\n  - e25 statictext \\\"No coupon applied.\\\" (gone)\\n  ~ e1 webarea [title: Checkout\\u2192REDEEMED:SPRING24]\\n  ~ e8 webarea [focused: False\\u2192True]\\n  ~ e13 tex",
+          "error_code": null,
+          "duration_ms": 24.848375003784895,
+          "usage": {
+            "input_tokens": 8138,
+            "output_tokens": 79
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Entered SPRING24 into the embedded payment panel's coupon field and clicked Redeem; the panel now shows \"Redeemed SPRING24\" and the checkout page shows \"Coupon SPRING24 applied.\"",
+            "success": true
+          },
+          "ok": true,
+          "result": "Entered SPRING24 into the embedded payment panel's coupon field and clicked Redeem; the panel now shows \"Redeemed SPRING24\" and the checkout page shows \"Coupon SPRING24 applied.\"",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8669,
+            "output_tokens": 103
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "redeem",
+          "x": 0,
+          "y": 0,
+          "frame": "payment-panel"
+        }
+      ]
+    },
+    {
+      "task_id": "iframe_field",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 2,
+      "wasted": 5,
+      "input_tokens": 108004,
+      "output_tokens": 2273,
+      "cost_reported_usd": 1.1293767499999998,
+      "wall_s": 125.14750412490685,
+      "summary": "Entered coupon code SPRING24 in the embedded payment panel and clicked Redeem; the panel now shows 'Redeemed SPRING24' and the page confirms 'Coupon SPRING24 applied.'",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 258
+          },
+          "ok": true,
+          "result": "clicked (132, 258) on display 0 [image point (132, 258) -> physical (132, 258)]",
+          "error_code": null,
+          "duration_ms": 48.63595904316753,
+          "usage": {
+            "input_tokens": 12503,
+            "output_tokens": 177
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 36.88045800663531,
+          "usage": {
+            "input_tokens": 12731,
+            "output_tokens": 181
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 132,
+            "y": 258
+          },
+          "ok": true,
+          "result": "clicked (132, 258) on display 0 [image point (132, 258) -> physical (132, 258)]",
+          "error_code": null,
+          "duration_ms": 51.340334000997245,
+          "usage": {
+            "input_tokens": 12971,
+            "output_tokens": 253
+          }
+        },
+        {
+          "index": 4,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 48.58108295593411,
+          "usage": {
+            "input_tokens": 13343,
+            "output_tokens": 240
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 85,
+            "y": 224
+          },
+          "ok": true,
+          "result": "clicked (85, 224) on display 0 [image point (85, 224) -> physical (85, 224)]",
+          "error_code": null,
+          "duration_ms": 51.42787494696677,
+          "usage": {
+            "input_tokens": 13611,
+            "output_tokens": 747
+          }
+        },
+        {
+          "index": 6,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 51.152541069313884,
+          "usage": {
+            "input_tokens": 13999,
+            "output_tokens": 199
+          }
+        },
+        {
+          "index": 7,
+          "tool": "left_click",
+          "params": {
+            "x": 84,
+            "y": 288
+          },
+          "ok": true,
+          "result": "clicked (84, 288) on display 0 [image point (84, 288) -> physical (84, 288)]",
+          "error_code": null,
+          "duration_ms": 61.021832982078195,
+          "usage": {
+            "input_tokens": 14239,
+            "output_tokens": 213
+          }
+        },
+        {
+          "index": 8,
+          "tool": "done",
+          "params": {
+            "summary": "Entered coupon code SPRING24 in the embedded payment panel and clicked Redeem; the panel now shows 'Redeemed SPRING24' and the page confirms 'Coupon SPRING24 applied.'",
+            "success": true
+          },
+          "ok": true,
+          "result": "Entered coupon code SPRING24 in the embedded payment panel and clicked Redeem; the panel now shows 'Redeemed SPRING24' and the page confirms 'Coupon SPRING24 applied.'",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 14607,
+            "output_tokens": 263
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 107,
+          "y": 125,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "body",
+          "x": 107,
+          "y": 125,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "coupon",
+          "x": 60,
+          "y": 91,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "redeem",
+          "x": 59,
+          "y": 155,
+          "frame": "payment-panel"
+        }
+      ]
+    },
+    {
+      "task_id": "iframe_field",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 5,
+      "wasted": 6,
+      "input_tokens": 106301,
+      "output_tokens": 1855,
+      "cost_reported_usd": 1.0900785000000002,
+      "wall_s": 122.5944155829493,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 133,
+            "y": 262
+          },
+          "ok": true,
+          "result": "clicked (133, 262) on display 0 [image point (133, 262) -> physical (133, 262)]",
+          "error_code": null,
+          "duration_ms": 50.307707977481186,
+          "usage": {
+            "input_tokens": 12456,
+            "output_tokens": 132
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 44.28958403877914,
+          "usage": {
+            "input_tokens": 12728,
+            "output_tokens": 143
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 133,
+            "y": 262
+          },
+          "ok": true,
+          "result": "clicked (133, 262) on display 0 [image point (133, 262) -> physical (133, 262)]",
+          "error_code": null,
+          "duration_ms": 57.94245796278119,
+          "usage": {
+            "input_tokens": 12858,
+            "output_tokens": 193
+          }
+        },
+        {
+          "index": 4,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 52.32020793482661,
+          "usage": {
+            "input_tokens": 13188,
+            "output_tokens": 240
+          }
+        },
+        {
+          "index": 5,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 51.00649991072714,
+          "usage": {
+            "input_tokens": 13335,
+            "output_tokens": 284
+          }
+        },
+        {
+          "index": 6,
+          "tool": "double_click",
+          "params": {
+            "x": 133,
+            "y": 262
+          },
+          "ok": true,
+          "result": "clicked (133, 262) on display 0 [image point (133, 262) -> physical (133, 262)]",
+          "error_code": null,
+          "duration_ms": 49.17691694572568,
+          "usage": {
+            "input_tokens": 13558,
+            "output_tokens": 289
+          }
+        },
+        {
+          "index": 7,
+          "tool": "type",
+          "params": {
+            "text": "SPRING24"
+          },
+          "ok": true,
+          "result": "typed 8 characters",
+          "error_code": null,
+          "duration_ms": 55.04362506326288,
+          "usage": {
+            "input_tokens": 13960,
+            "output_tokens": 207
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 83,
+            "y": 345
+          },
+          "ok": true,
+          "result": "clicked (83, 345) on display 0 [image point (83, 345) -> physical (83, 345)]",
+          "error_code": null,
+          "duration_ms": 56.05741695035249,
+          "usage": {
+            "input_tokens": 14218,
+            "output_tokens": 367
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 108,
+          "y": 129,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "body",
+          "x": 108,
+          "y": 129,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "body",
+          "x": 108,
+          "y": 129,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "body",
+          "x": 108,
+          "y": 129,
+          "frame": "payment-panel"
+        },
+        {
+          "target": "panel-status",
+          "x": 58,
+          "y": 212,
+          "frame": "payment-panel"
+        }
+      ]
+    },
+    {
+      "task_id": "similar_buttons",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 16651,
+      "output_tokens": 92,
+      "cost_reported_usd": 0.33758,
+      "wall_s": 48.5387749170186,
+      "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the press.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "click",
+          "params": {
+            "ref": "e10",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e10 (AXButton 'Archive')\n\neffect: [snap-116 \u2190 snap-114] +1 -1 ~1\n  + e23 statictext \"Action: Archive\"\n  - e23 statictext \"No action taken.\" (gone)\n  ~ e1 webarea [title: Mailbox\u2192PRESSED:Archive]",
+          "error_code": null,
+          "duration_ms": 75.37916710134596,
+          "usage": {
+            "input_tokens": 8234,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the press.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the press.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8417,
+            "output_tokens": 63
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "btn-archive",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "similar_buttons",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 25680,
+      "output_tokens": 306,
+      "cost_reported_usd": 0.25540725,
+      "wall_s": 29.96071395801846,
+      "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive', confirming the correct button was pressed.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 321,
+            "y": 92
+          },
+          "ok": true,
+          "result": "clicked (321, 92) on display 0 [image point (321, 92) -> physical (321, 92)]",
+          "error_code": null,
+          "duration_ms": 39.43279094528407,
+          "usage": {
+            "input_tokens": 12711,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive', confirming the correct button was pressed.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive', confirming the correct button was pressed.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 12969,
+            "output_tokens": 173
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "btn-archive",
+          "x": 321,
+          "y": 92
+        }
+      ]
+    },
+    {
+      "task_id": "similar_buttons",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 26174,
+      "output_tokens": 306,
+      "cost_reported_usd": 0.260409,
+      "wall_s": 25.93579362507444,
+      "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the correct button was pressed.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 321,
+            "y": 92
+          },
+          "ok": true,
+          "result": "clicked e10 (AXButton 'Archive') [snapped from image point (321, 92) to e10 AXButton 'Archive'] [snapped to e10]",
+          "error_code": null,
+          "duration_ms": 56.70420790556818,
+          "usage": {
+            "input_tokens": 12939,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the correct button was pressed.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked the 'Archive' toolbar button; the page now shows 'Action: Archive' confirming the correct button was pressed.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13235,
+            "output_tokens": 173
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "btn-archive",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "modal_confirm",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 25523,
+      "output_tokens": 147,
+      "cost_reported_usd": 0.51775,
+      "wall_s": 23.218985292012803,
+      "summary": "Clicked Delete on the 'Orion' project, then confirmed via 'Delete permanently' in the dialog; the page now shows 'Deleted Orion.' and the dialog is gone.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "click",
+          "params": {
+            "ref": "e15",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e15 (AXButton 'Delete')\n\neffect: [snap-3 \u2190 snap-1] +10 -0 ~0\n  + e24 group\n  + e25 group \"Delete project?\"\n  + e26 heading \"Delete project?\"\n  + e27 statictext \"Delete project?\"\n  + e28 statictext \"Delete the project \"Orion\"? This cannot be undone.\"\n  + e29 group\n  + e30 button \"Cancel\" (click)\n  + e31 statictext \"Cancel\"\n  + e32 button \"Delete permanently\" (click)\n  + e33 statictext \"Delete permanently\"",
+          "error_code": null,
+          "duration_ms": 13.40795902069658,
+          "usage": {
+            "input_tokens": 8203,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e32",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e32 (AXButton 'Delete permanently')\n\neffect: [snap-5 \u2190 snap-3] +1 -11 ~1\n  + e23 statictext \"Deleted Orion.\"\n  - e23 statictext \"3 projects.\" (gone)\n  - e24 group (gone)\n  - e25 group \"Delete project?\" (gone)\n  - e26 heading \"Delete project?\" (gone)\n  - e27 statictext \"Delete project?\" (gone)\n  - e28 statictext \"Delete the project \"Orion\"? This cannot be undone.\" (gone)\n  - e29 group (gone)\n  - e30 button \"Cancel\" (gone)\n  - e31 statictext \"Cancel\" (gone)\n  - e32 button \"Delete permanently\" (gone)\n  - e33 statictext \"Delete permanently\" (gone)\n  ~ e1 webarea [title: Projects\u2192DELETED:Or",
+          "error_code": null,
+          "duration_ms": 13.69749999139458,
+          "usage": {
+            "input_tokens": 8474,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Clicked Delete on the 'Orion' project, then confirmed via 'Delete permanently' in the dialog; the page now shows 'Deleted Orion.' and the dialog is gone.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Clicked Delete on the 'Orion' project, then confirmed via 'Delete permanently' in the dialog; the page now shows 'Deleted Orion.' and the dialog is gone.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8846,
+            "output_tokens": 89
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "delete-orion",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "confirm-delete",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "modal_confirm",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 5,
+      "wasted": 7,
+      "input_tokens": 130869,
+      "output_tokens": 3786,
+      "cost_reported_usd": 1.2274107500000002,
+      "wall_s": 164.6823267498985,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 553,
+            "y": 196
+          },
+          "ok": true,
+          "result": "clicked (553, 196) on display 0 [image point (553, 196) -> physical (553, 196)]",
+          "error_code": null,
+          "duration_ms": 56.69941706582904,
+          "usage": {
+            "input_tokens": 12704,
+            "output_tokens": 134
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 553,
+            "y": 196
+          },
+          "ok": true,
+          "result": "clicked (553, 196) on display 0 [image point (553, 196) -> physical (553, 196)]",
+          "error_code": null,
+          "duration_ms": 55.474666063673794,
+          "usage": {
+            "input_tokens": 12979,
+            "output_tokens": 307
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 553,
+            "y": 196
+          },
+          "ok": true,
+          "result": "clicked (553, 196) on display 0 [image point (553, 196) -> physical (553, 196)]",
+          "error_code": null,
+          "duration_ms": 48.24983305297792,
+          "usage": {
+            "input_tokens": 20825,
+            "output_tokens": 453
+          }
+        },
+        {
+          "index": 4,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 48.627750016748905,
+          "usage": {
+            "input_tokens": 13377,
+            "output_tokens": 332
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 553,
+            "y": 196
+          },
+          "ok": true,
+          "result": "clicked (553, 196) on display 0 [image point (553, 196) -> physical (553, 196)]",
+          "error_code": null,
+          "duration_ms": 45.544125023297966,
+          "usage": {
+            "input_tokens": 21300,
+            "output_tokens": 475
+          }
+        },
+        {
+          "index": 6,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 38.50012505427003,
+          "usage": {
+            "input_tokens": 13747,
+            "output_tokens": 803
+          }
+        },
+        {
+          "index": 7,
+          "tool": "left_click",
+          "params": {
+            "x": 553,
+            "y": 196
+          },
+          "ok": true,
+          "result": "clicked (553, 196) on display 0 [image point (553, 196) -> physical (553, 196)]",
+          "error_code": null,
+          "duration_ms": 38.80858304910362,
+          "usage": {
+            "input_tokens": 21807,
+            "output_tokens": 393
+          }
+        },
+        {
+          "index": 8,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 39.82595796696842,
+          "usage": {
+            "input_tokens": 14130,
+            "output_tokens": 889
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "div",
+          "x": 553,
+          "y": 196
+        },
+        {
+          "target": "div",
+          "x": 553,
+          "y": 196
+        },
+        {
+          "target": "div",
+          "x": 553,
+          "y": 196
+        },
+        {
+          "target": "div",
+          "x": 553,
+          "y": 196
+        },
+        {
+          "target": "div",
+          "x": 553,
+          "y": 196
+        }
+      ]
+    },
+    {
+      "task_id": "modal_confirm",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 6,
+      "wasted": 7,
+      "input_tokens": 132438,
+      "output_tokens": 3929,
+      "cost_reported_usd": 1.26151675,
+      "wall_s": 173.81399733305443,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 54.23079093452543,
+          "usage": {
+            "input_tokens": 12701,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 51.0243340395391,
+          "usage": {
+            "input_tokens": 12976,
+            "output_tokens": 286
+          }
+        },
+        {
+          "index": 3,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 52.22587496973574,
+          "usage": {
+            "input_tokens": 13173,
+            "output_tokens": 358
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 72.41112494375557,
+          "usage": {
+            "input_tokens": 13285,
+            "output_tokens": 222
+          }
+        },
+        {
+          "index": 5,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 53.51779097691178,
+          "usage": {
+            "input_tokens": 21488,
+            "output_tokens": 557
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 50.49549997784197,
+          "usage": {
+            "input_tokens": 21687,
+            "output_tokens": 621
+          }
+        },
+        {
+          "index": 7,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 43.101040995679796,
+          "usage": {
+            "input_tokens": 23013,
+            "output_tokens": 1286
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 554,
+            "y": 191
+          },
+          "ok": true,
+          "result": "clicked (554, 191) on display 0 [image point (554, 191) -> physical (554, 191)]",
+          "error_code": null,
+          "duration_ms": 54.03545906301588,
+          "usage": {
+            "input_tokens": 14115,
+            "output_tokens": 466
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        },
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        },
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        },
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        },
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        },
+        {
+          "target": "div",
+          "x": 554,
+          "y": 191
+        }
+      ]
+    },
+    {
+      "task_id": "tabs",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 25987,
+      "output_tokens": 130,
+      "cost_reported_usd": 0.5261800000000001,
+      "wall_s": 61.39963337499648,
+      "summary": "Opened the Billing tab and clicked 'Download invoice'; the page confirmed 'Invoice INV-2088 downloaded.'",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "click",
+          "params": {
+            "ref": "e8",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e8 (AXTab 'Billing')\n\neffect: [snap-129 \u2190 snap-127] +8 -5 ~4\n  + e12 group\n  + e13 statictext \"Last invoice: INV-2088, 640.00 EUR, paid.\"\n  + e14 group\n  + e15 button \"Download invoice\" (click)\n  + e16 statictext \"Download invoice\"\n  + e17 button \"Update card\" (click)\n  + e18 statictext \"Update card\"\n  + e19 statictext \"Viewing Billing.\"\n  - e12 group (gone)\n  - e13 statictext \"Plan: Team. Seats: 12 of 20 used.\" (gone)\n  - e14 button \"Edit profile\" (gone)\n  - e15 statictext \"Edit profile\" (gone)\n  - e16 statictext \"Viewing Overview.\" (gone)\n  ~ e6 tab [selected: True\u2192False]\n  ~ e7 stat",
+          "error_code": null,
+          "duration_ms": 8.320708060637116,
+          "usage": {
+            "input_tokens": 8249,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 2,
+          "tool": "click",
+          "params": {
+            "ref": "e15",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e15 (AXButton 'Download invoice')\n\neffect: [snap-131 \u2190 snap-129] +1 -1 ~1\n  + e19 statictext \"Invoice INV-2088 downloaded.\"\n  - e19 statictext \"Viewing Billing.\" (gone)\n  ~ e1 webarea [title: Account\u2192INVOICE:downloaded]",
+          "error_code": null,
+          "duration_ms": 8.979332982562482,
+          "usage": {
+            "input_tokens": 8772,
+            "output_tokens": 29
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Opened the Billing tab and clicked 'Download invoice'; the page confirmed 'Invoice INV-2088 downloaded.'",
+            "success": true
+          },
+          "ok": true,
+          "result": "Opened the Billing tab and clicked 'Download invoice'; the page confirmed 'Invoice INV-2088 downloaded.'",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8966,
+            "output_tokens": 72
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "tab-billing",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "download-invoice",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "tabs",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 6,
+      "wasted": 7,
+      "input_tokens": 118692,
+      "output_tokens": 2991,
+      "cost_reported_usd": 1.2050322500000001,
+      "wall_s": 178.84505316696595,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 200,
+            "y": 68
+          },
+          "ok": true,
+          "result": "clicked (200, 68) on display 0 [image point (200, 68) -> physical (200, 68)]",
+          "error_code": null,
+          "duration_ms": 47.633124981075525,
+          "usage": {
+            "input_tokens": 13103,
+            "output_tokens": 169
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 200,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (200, 67) on display 0 [image point (200, 67) -> physical (200, 67)]",
+          "error_code": null,
+          "duration_ms": 45.06399994716048,
+          "usage": {
+            "input_tokens": 13338,
+            "output_tokens": 248
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 78,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (78, 67) on display 0 [image point (78, 67) -> physical (78, 67)]",
+          "error_code": null,
+          "duration_ms": 52.52683407161385,
+          "usage": {
+            "input_tokens": 21501,
+            "output_tokens": 519
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 200,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (200, 67) on display 0 [image point (200, 67) -> physical (200, 67)]",
+          "error_code": null,
+          "duration_ms": 38.9352081110701,
+          "usage": {
+            "input_tokens": 13750,
+            "output_tokens": 298
+          }
+        },
+        {
+          "index": 5,
+          "tool": "key",
+          "params": {
+            "text": "Right"
+          },
+          "ok": true,
+          "result": "pressed right",
+          "error_code": null,
+          "duration_ms": 46.95637500844896,
+          "usage": {
+            "input_tokens": 13941,
+            "output_tokens": 336
+          }
+        },
+        {
+          "index": 6,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 37.447124952450395,
+          "usage": {
+            "input_tokens": 14050,
+            "output_tokens": 509
+          }
+        },
+        {
+          "index": 7,
+          "tool": "double_click",
+          "params": {
+            "x": 200,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (200, 67) on display 0 [image point (200, 67) -> physical (200, 67)]",
+          "error_code": null,
+          "duration_ms": 43.20970794651657,
+          "usage": {
+            "input_tokens": 14383,
+            "output_tokens": 513
+          }
+        },
+        {
+          "index": 8,
+          "tool": "key",
+          "params": {
+            "text": "Tab"
+          },
+          "ok": true,
+          "result": "pressed tab",
+          "error_code": null,
+          "duration_ms": 45.52787507418543,
+          "usage": {
+            "input_tokens": 14626,
+            "output_tokens": 399
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 200,
+          "y": 68
+        },
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 78,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        }
+      ]
+    },
+    {
+      "task_id": "tabs",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 4,
+      "wasted": 6,
+      "input_tokens": 120015,
+      "output_tokens": 2494,
+      "cost_reported_usd": 1.19285675,
+      "wall_s": 161.24589945795015,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 200,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (200, 67) on display 0 [image point (200, 67) -> physical (200, 67)]",
+          "error_code": null,
+          "duration_ms": 44.73854193929583,
+          "usage": {
+            "input_tokens": 13232,
+            "output_tokens": 146
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 201,
+            "y": 66
+          },
+          "ok": true,
+          "result": "clicked (201, 66) on display 0 [image point (201, 66) -> physical (201, 66)]",
+          "error_code": null,
+          "duration_ms": 57.42479208856821,
+          "usage": {
+            "input_tokens": 13552,
+            "output_tokens": 367
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 77,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (77, 67) on display 0 [image point (77, 67) -> physical (77, 67)]",
+          "error_code": null,
+          "duration_ms": 54.15866698604077,
+          "usage": {
+            "input_tokens": 13693,
+            "output_tokens": 375
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 200,
+            "y": 67
+          },
+          "ok": true,
+          "result": "clicked (200, 67) on display 0 [image point (200, 67) -> physical (200, 67)]",
+          "error_code": null,
+          "duration_ms": 54.16466703172773,
+          "usage": {
+            "input_tokens": 13907,
+            "output_tokens": 331
+          }
+        },
+        {
+          "index": 5,
+          "tool": "key",
+          "params": {
+            "text": "Tab"
+          },
+          "ok": true,
+          "result": "pressed tab",
+          "error_code": null,
+          "duration_ms": 34.054000047035515,
+          "usage": {
+            "input_tokens": 22504,
+            "output_tokens": 642
+          }
+        },
+        {
+          "index": 6,
+          "tool": "key",
+          "params": {
+            "text": "Right"
+          },
+          "ok": true,
+          "result": "pressed right",
+          "error_code": null,
+          "duration_ms": 39.10766600165516,
+          "usage": {
+            "input_tokens": 14215,
+            "output_tokens": 228
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "Tab"
+          },
+          "ok": true,
+          "result": "pressed tab",
+          "error_code": null,
+          "duration_ms": 48.8793330732733,
+          "usage": {
+            "input_tokens": 14378,
+            "output_tokens": 233
+          }
+        },
+        {
+          "index": 8,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 41.065790923312306,
+          "usage": {
+            "input_tokens": 14534,
+            "output_tokens": 172
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 201,
+          "y": 66
+        },
+        {
+          "target": "body",
+          "x": 77,
+          "y": 67
+        },
+        {
+          "target": "body",
+          "x": 200,
+          "y": 67
+        }
+      ]
+    },
+    {
+      "task_id": "copy_value",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 16472,
+      "output_tokens": 158,
+      "cost_reported_usd": 0.33730000000000004,
+      "wall_s": 14.2856740829302,
+      "summary": "Entered order number A7-4412 into the 'Order number to look up' field and pressed 'Look up'; the page now shows 'Looking up order A7-4412'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "act",
+          "params": {
+            "steps": [
+              {
+                "do": "click",
+                "ref": "e20"
+              },
+              {
+                "do": "type",
+                "text": "A7-4412"
+              },
+              {
+                "do": "click",
+                "ref": "e25"
+              }
+            ],
+            "verify": true
+          },
+          "ok": true,
+          "result": "{\"steps\": [{\"i\": 0, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e20 (AXTextField 'Order number to look up')\"}, {\"i\": 1, \"do\": \"type\", \"ok\": true, \"result\": \"typed 7 characters\"}, {\"i\": 2, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e25 (AXButton 'Look up')\"}], \"effect\": \"[snap-18 \\u2190 snap-15] +1 -1 ~2\\n  + e29 statictext \\\"Looking up order A7-4412\\\"\\n  - e29 statictext \\\"Enter an order number.\\\" (gone)\\n  ~ e1 webarea [title: Support\\u2192LOOKUP:A7-4412, focused: False\\u2192True]\\n  ~ e20 textfield [value: None\\u2192A7-4412, focused: False\\u2192True]\"}",
+          "error_code": null,
+          "duration_ms": 21.814667037688196,
+          "usage": {
+            "input_tokens": 8004,
+            "output_tokens": 79
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Entered order number A7-4412 into the 'Order number to look up' field and pressed 'Look up'; the page now shows 'Looking up order A7-4412'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Entered order number A7-4412 into the 'Order number to look up' field and pressed 'Look up'; the page now shows 'Looking up order A7-4412'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 8468,
+            "output_tokens": 79
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "lookup",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "copy_value",
+      "mode": "pixels",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 8,
+      "misclicks": 4,
+      "wasted": 2,
+      "input_tokens": 111690,
+      "output_tokens": 2512,
+      "cost_reported_usd": 1.110424,
+      "wall_s": 128.33824525005184,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 112,
+            "y": 392
+          },
+          "ok": true,
+          "result": "clicked (112, 392) on display 0 [image point (112, 392) -> physical (112, 392)]",
+          "error_code": null,
+          "duration_ms": 51.526666968129575,
+          "usage": {
+            "input_tokens": 12212,
+            "output_tokens": 196
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "A7-4412"
+          },
+          "ok": true,
+          "result": "typed 7 characters",
+          "error_code": null,
+          "duration_ms": 46.10200005117804,
+          "usage": {
+            "input_tokens": 12408,
+            "output_tokens": 213
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 70,
+            "y": 595
+          },
+          "ok": true,
+          "result": "clicked (70, 595) on display 0 [image point (70, 595) -> physical (70, 595)]",
+          "error_code": null,
+          "duration_ms": 47.869417001493275,
+          "usage": {
+            "input_tokens": 12538,
+            "output_tokens": 162
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 70,
+            "y": 595
+          },
+          "ok": true,
+          "result": "clicked (70, 595) on display 0 [image point (70, 595) -> physical (70, 595)]",
+          "error_code": null,
+          "duration_ms": 37.967832991853356,
+          "usage": {
+            "input_tokens": 12861,
+            "output_tokens": 337
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 70,
+            "y": 595
+          },
+          "ok": true,
+          "result": "clicked (70, 595) on display 0 [image point (70, 595) -> physical (70, 595)]",
+          "error_code": null,
+          "duration_ms": 54.761708015576005,
+          "usage": {
+            "input_tokens": 13061,
+            "output_tokens": 357
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 150,
+            "y": 399
+          },
+          "ok": true,
+          "result": "clicked (150, 399) on display 0 [image point (150, 399) -> physical (150, 399)]",
+          "error_code": null,
+          "duration_ms": 46.65237490553409,
+          "usage": {
+            "input_tokens": 21276,
+            "output_tokens": 490
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "Tab"
+          },
+          "ok": true,
+          "result": "pressed tab",
+          "error_code": null,
+          "duration_ms": 62.70179199054837,
+          "usage": {
+            "input_tokens": 13608,
+            "output_tokens": 419
+          }
+        },
+        {
+          "index": 8,
+          "tool": "left_click",
+          "params": {
+            "x": 70,
+            "y": 567
+          },
+          "ok": true,
+          "result": "clicked (70, 567) on display 0 [image point (70, 567) -> physical (70, 567)]",
+          "error_code": null,
+          "duration_ms": 47.20787506084889,
+          "usage": {
+            "input_tokens": 13726,
+            "output_tokens": 338
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "order-input",
+          "x": 112,
+          "y": 392
+        },
+        {
+          "target": "status",
+          "x": 70,
+          "y": 595
+        },
+        {
+          "target": "status",
+          "x": 70,
+          "y": 595
+        },
+        {
+          "target": "status",
+          "x": 70,
+          "y": 595
+        },
+        {
+          "target": "order-input",
+          "x": 150,
+          "y": 399
+        },
+        {
+          "target": "body",
+          "x": 70,
+          "y": 567
+        }
+      ]
+    },
+    {
+      "task_id": "copy_value",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": false,
+      "stopped": "max_steps",
+      "turns": 8,
+      "actions": 7,
+      "misclicks": 2,
+      "wasted": 3,
+      "input_tokens": 105727,
+      "output_tokens": 2680,
+      "cost_reported_usd": 1.1253192500000002,
+      "wall_s": 125.11671841691714,
+      "summary": "stopped after 8 planner turns without a done call",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 116,
+            "y": 384
+          },
+          "ok": true,
+          "result": "clicked e20 (AXTextField 'Order number to look up') [snapped from image point (116, 384) to e20 AXTextField 'Order number to look up'] [snapped to e20]",
+          "error_code": null,
+          "duration_ms": 53.226749994792044,
+          "usage": {
+            "input_tokens": 12291,
+            "output_tokens": 151
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "A7-4412"
+          },
+          "ok": true,
+          "result": "typed 7 characters",
+          "error_code": null,
+          "duration_ms": 42.10762504953891,
+          "usage": {
+            "input_tokens": 12656,
+            "output_tokens": 141
+          }
+        },
+        {
+          "index": 3,
+          "tool": "left_click",
+          "params": {
+            "x": 72,
+            "y": 594
+          },
+          "ok": true,
+          "result": "clicked (72, 594) on display 0 [image point (72, 594) -> physical (72, 594)]",
+          "error_code": null,
+          "duration_ms": 80.53795795422047,
+          "usage": {
+            "input_tokens": 12719,
+            "output_tokens": 158
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 72,
+            "y": 594
+          },
+          "ok": true,
+          "result": "clicked (72, 594) on display 0 [image point (72, 594) -> physical (72, 594)]",
+          "error_code": null,
+          "duration_ms": 81.25245792325586,
+          "usage": {
+            "input_tokens": 13023,
+            "output_tokens": 328
+          }
+        },
+        {
+          "index": 5,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 42.649999959394336,
+          "usage": {
+            "input_tokens": 13323,
+            "output_tokens": 468
+          }
+        },
+        {
+          "index": 6,
+          "tool": "left_click",
+          "params": {
+            "x": 116,
+            "y": 384
+          },
+          "ok": true,
+          "result": "clicked e20 (AXTextField 'Order number to look up') [snapped from image point (116, 384) to e20 AXTextField 'Order number to look up'] [snapped to e20]",
+          "error_code": null,
+          "duration_ms": 55.18995795864612,
+          "usage": {
+            "input_tokens": 13571,
+            "output_tokens": 511
+          }
+        },
+        {
+          "index": 7,
+          "tool": "key",
+          "params": {
+            "text": "Return"
+          },
+          "ok": true,
+          "result": "pressed return",
+          "error_code": null,
+          "duration_ms": 49.59270800463855,
+          "usage": {
+            "input_tokens": 13998,
+            "output_tokens": 187
+          }
+        },
+        {
+          "index": 8,
+          "tool": "key",
+          "params": {
+            "text": "ctrl+a"
+          },
+          "ok": true,
+          "result": "pressed ctrl+a",
+          "error_code": null,
+          "duration_ms": 43.226500041782856,
+          "usage": {
+            "input_tokens": 14146,
+            "output_tokens": 736
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "status",
+          "x": 72,
+          "y": 594
+        },
+        {
+          "target": "status",
+          "x": 72,
+          "y": 594
+        }
+      ]
+    },
+    {
+      "task_id": "table_row",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 2,
+      "actions": 1,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 19441,
+      "output_tokens": 135,
+      "cost_reported_usd": 0.39552999999999994,
+      "wall_s": 18.273970791022293,
+      "summary": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page now reports 'Marked paid: INV-2031'.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "act",
+          "params": {
+            "steps": [
+              {
+                "do": "click",
+                "ref": "e64"
+              },
+              {
+                "do": "click",
+                "ref": "e107"
+              }
+            ],
+            "verify": true
+          },
+          "ok": true,
+          "result": "{\"steps\": [{\"i\": 0, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e64 (AXCheckBox 'Select INV-2031')\"}, {\"i\": 1, \"do\": \"click\", \"ok\": true, \"result\": \"clicked e107 (AXButton 'Mark paid')\"}], \"effect\": \"[snap-122 \\u2190 snap-119] +1 -1 ~2\\n  + e111 statictext \\\"Marked paid: INV-2031\\\"\\n  - e111 statictext \\\"No rows selected.\\\" (gone)\\n  ~ e1 webarea [title: Invoices\\u2192PAID:INV-2031]\\n  ~ e64 checkbox [checked: False\\u2192True]\"}",
+          "error_code": null,
+          "duration_ms": 38.32120890729129,
+          "usage": {
+            "input_tokens": 9533,
+            "output_tokens": 60
+          }
+        },
+        {
+          "index": 2,
+          "tool": "done",
+          "params": {
+            "summary": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page now reports 'Marked paid: INV-2031'.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page now reports 'Marked paid: INV-2031'.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 9908,
+            "output_tokens": 75
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "row-INV-2031",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "mark-paid",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "table_row",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 39647,
+      "output_tokens": 516,
+      "cost_reported_usd": 0.39737175,
+      "wall_s": 42.69098979094997,
+      "summary": "Ticked only the INV-2031 checkbox and clicked 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 313
+          },
+          "ok": true,
+          "result": "clicked (57, 313) on display 0 [image point (57, 313) -> physical (57, 313)]",
+          "error_code": null,
+          "duration_ms": 49.40183297730982,
+          "usage": {
+            "input_tokens": 12959,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 77,
+            "y": 507
+          },
+          "ok": true,
+          "result": "clicked (77, 507) on display 0 [image point (77, 507) -> physical (77, 507)]",
+          "error_code": null,
+          "duration_ms": 54.28729101549834,
+          "usage": {
+            "input_tokens": 13217,
+            "output_tokens": 160
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Ticked only the INV-2031 checkbox and clicked 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Ticked only the INV-2031 checkbox and clicked 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13471,
+            "output_tokens": 223
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "row-INV-2031",
+          "x": 57,
+          "y": 313
+        },
+        {
+          "target": "mark-paid",
+          "x": 77,
+          "y": 507
+        }
+      ]
+    },
+    {
+      "task_id": "table_row",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 3,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 39745,
+      "output_tokens": 486,
+      "cost_reported_usd": 0.39719974999999996,
+      "wall_s": 43.91851925000083,
+      "summary": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 57,
+            "y": 313
+          },
+          "ok": true,
+          "result": "clicked e64 (AXCheckBox 'Select INV-2031') [snapped from image point (57, 313) to e64 AXCheckBox 'Select INV-2031'] [snapped to e64]",
+          "error_code": null,
+          "duration_ms": 68.73091601300985,
+          "usage": {
+            "input_tokens": 12976,
+            "output_tokens": 148
+          }
+        },
+        {
+          "index": 2,
+          "tool": "left_click",
+          "params": {
+            "x": 77,
+            "y": 507
+          },
+          "ok": true,
+          "result": "clicked e107 (AXButton 'Mark paid') [snapped from image point (77, 507) to e107 AXButton 'Mark paid'] [snapped to e107]",
+          "error_code": null,
+          "duration_ms": 71.30979106295854,
+          "usage": {
+            "input_tokens": 13286,
+            "output_tokens": 134
+          }
+        },
+        {
+          "index": 3,
+          "tool": "done",
+          "params": {
+            "summary": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+            "success": true
+          },
+          "ok": true,
+          "result": "Ticked only the INV-2031 checkbox and pressed 'Mark paid'; the page confirms 'Marked paid: INV-2031' with no other rows selected.",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13483,
+            "output_tokens": 204
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "row-INV-2031",
+          "x": 0,
+          "y": 0
+        },
+        {
+          "target": "mark-paid",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "search_filter",
+      "mode": "refs",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 7,
+      "actions": 2,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 61643,
+      "output_tokens": 799,
+      "cost_reported_usd": 1.2726700000000002,
+      "wall_s": 62.273957541096024,
+      "summary": "Typed 'lamp' into the product search box (list filtered to 3 products) and clicked 'Add to cart' for Desk Lamp; the page confirmed 'Added Desk Lamp to the cart.'",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "set_value",
+          "params": {
+            "ref": "e7",
+            "value": "lamp"
+          },
+          "ok": true,
+          "result": "set e7 = 'lamp'",
+          "error_code": null,
+          "duration_ms": 14.005708042532206,
+          "usage": {
+            "input_tokens": 8701,
+            "output_tokens": 138
+          }
+        },
+        {
+          "index": 2,
+          "tool": "desktop_snapshot",
+          "params": {
+            "app": "418BCD00897B3025BD097682B2E0C82C",
+            "mode": "diff"
+          },
+          "ok": true,
+          "result": "[snap-104 \u2190 snap-102] +1 -1 ~1\n  + e59 statictext \"Showing 3 products.\"\n  - e59 statictext \"Cart is empty. Showing 10 products.\" (gone)\n  ~ e7 textfield [value: None\u2192lamp]",
+          "error_code": null,
+          "duration_ms": 7.966042030602694,
+          "usage": {
+            "input_tokens": 8798,
+            "output_tokens": 89
+          }
+        },
+        {
+          "index": 3,
+          "tool": "find",
+          "params": {
+            "app": "418BCD00897B3025BD097682B2E0C82C",
+            "text": "Desk Lamp"
+          },
+          "ok": true,
+          "result": "[snap-105] 418BCD00897B3025BD097682B2E0C82C: 1 match(es)\n  e25 statictext \"Desk Lamp\" [81x18 @0:24,360]",
+          "error_code": null,
+          "duration_ms": 9.927958948537707,
+          "usage": {
+            "input_tokens": 8197,
+            "output_tokens": 89
+          }
+        },
+        {
+          "index": 4,
+          "tool": "find",
+          "params": {
+            "app": "418BCD00897B3025BD097682B2E0C82C",
+            "role": "button"
+          },
+          "ok": true,
+          "result": "[snap-106] 418BCD00897B3025BD097682B2E0C82C: 10 match(es)\n  e12 button \"Add to cart\" (click) [115x40 @0:461,165]\n  e17 button \"Add to cart\" (click) [115x40 @0:461,227]\n  e22 button \"Add to cart\" (click) [115x40 @0:461,288]\n  e27 button \"Add to cart\" (click) [115x40 @0:461,349]\n  e32 button \"Add to cart\" (click) [115x40 @0:461,411]\n  e37 button \"Add to cart\" (click) [115x40 @0:461,472]\n  e42 button \"Add to cart\" (click) [115x40 @0:461,534]\n  e47 button \"Add to cart\" (click) [115x40 @0:461,595]\n  e52 button \"Add to cart\" (click) [115x40 @0:461,656]\n  e57 button \"Add to cart\" (click) [115x40 @0:4",
+          "error_code": null,
+          "duration_ms": 9.136958047747612,
+          "usage": {
+            "input_tokens": 8323,
+            "output_tokens": 79
+          }
+        },
+        {
+          "index": 5,
+          "tool": "desktop_snapshot",
+          "params": {
+            "app": "418BCD00897B3025BD097682B2E0C82C",
+            "mode": "full"
+          },
+          "ok": true,
+          "result": "[snap-107] 418BCD00897B3025BD097682B2E0C82C (window)\n  e1 webarea \"Shop\" [1280x713 @0:0,0]\n    e2 group\n      e3 heading \"Shop\"\n        e4 statictext \"Shop\"\n      e5 group\n        e6 statictext \"Search products\"\n        e7 textfield \"Search products\" =\"lamp\" (edit)\n      e8 list\n        e9 group\n          e10 statictext \"Standing Desk\"\n          e11 statictext \"499.00\"\n          e12 button \"Add to cart\" (click)\n            e13 statictext \"Add to cart\"\n        e14 group\n          e15 statictext \"Office Chair\"\n          e16 statictext \"289.00\"\n          e17 button \"Add to cart\" (click)\n         ",
+          "error_code": null,
+          "duration_ms": 12.038249988108873,
+          "usage": {
+            "input_tokens": 8706,
+            "output_tokens": 194
+          }
+        },
+        {
+          "index": 6,
+          "tool": "click",
+          "params": {
+            "ref": "e27",
+            "verify": true
+          },
+          "ok": true,
+          "result": "clicked e27 (AXButton 'Add to cart')\n\neffect: [snap-109 \u2190 snap-107] +1 -1 ~1\n  + e59 statictext \"Added Desk Lamp to the cart.\"\n  - e59 statictext \"Showing 3 products.\" (gone)\n  ~ e1 webarea [title: Shop\u2192CART:Desk Lamp]",
+          "error_code": null,
+          "duration_ms": 23.650499992072582,
+          "usage": {
+            "input_tokens": 9362,
+            "output_tokens": 115
+          }
+        },
+        {
+          "index": 7,
+          "tool": "done",
+          "params": {
+            "summary": "Typed 'lamp' into the product search box (list filtered to 3 products) and clicked 'Add to cart' for Desk Lamp; the page confirmed 'Added Desk Lamp to the cart.'",
+            "success": true
+          },
+          "ok": true,
+          "result": "Typed 'lamp' into the product search box (list filtered to 3 products) and clicked 'Add to cart' for Desk Lamp; the page confirmed 'Added Desk Lamp to the cart.'",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 9556,
+            "output_tokens": 95
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "add-desk-lamp",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    },
+    {
+      "task_id": "search_filter",
+      "mode": "pixels",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 5,
+      "actions": 3,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 66733,
+      "output_tokens": 1022,
+      "cost_reported_usd": 0.6949477499999999,
+      "wall_s": 83.18277295900043,
+      "summary": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 171,
+            "y": 124
+          },
+          "ok": true,
+          "result": "clicked (171, 124) on display 0 [image point (171, 124) -> physical (171, 124)]",
+          "error_code": null,
+          "duration_ms": 68.99875006638467,
+          "usage": {
+            "input_tokens": 12971,
+            "output_tokens": 159
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "lamp"
+          },
+          "ok": true,
+          "result": "typed 4 characters",
+          "error_code": null,
+          "duration_ms": 49.08716608770192,
+          "usage": {
+            "input_tokens": 13202,
+            "output_tokens": 127
+          }
+        },
+        {
+          "index": 3,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 55.94433401711285,
+          "usage": {
+            "input_tokens": 13324,
+            "output_tokens": 243
+          }
+        },
+        {
+          "index": 4,
+          "tool": "left_click",
+          "params": {
+            "x": 518,
+            "y": 369
+          },
+          "ok": true,
+          "result": "clicked (518, 369) on display 0 [image point (518, 369) -> physical (518, 369)]",
+          "error_code": null,
+          "duration_ms": 73.43395904172212,
+          "usage": {
+            "input_tokens": 13498,
+            "output_tokens": 244
+          }
+        },
+        {
+          "index": 5,
+          "tool": "done",
+          "params": {
+            "summary": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+            "success": true
+          },
+          "ok": true,
+          "result": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13738,
+            "output_tokens": 249
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "search",
+          "x": 171,
+          "y": 124
+        },
+        {
+          "target": "add-desk-lamp",
+          "x": 518,
+          "y": 369
+        }
+      ]
+    },
+    {
+      "task_id": "search_filter",
+      "mode": "pixels+snap",
+      "round": 1,
+      "success": true,
+      "stopped": "done",
+      "turns": 6,
+      "actions": 3,
+      "misclicks": 0,
+      "wasted": 0,
+      "input_tokens": 80632,
+      "output_tokens": 1250,
+      "cost_reported_usd": 0.8332725000000001,
+      "wall_s": 90.01983170805033,
+      "summary": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+      "model": "claude-fable-5-1",
+      "error": null,
+      "comparable": true,
+      "note": "",
+      "steps": [
+        {
+          "index": 1,
+          "tool": "left_click",
+          "params": {
+            "x": 171,
+            "y": 124
+          },
+          "ok": true,
+          "result": "clicked e7 (AXTextField 'Search products') [snapped from image point (171, 124) to e7 AXTextField 'Search products'] [snapped to e7]",
+          "error_code": null,
+          "duration_ms": 73.21695797145367,
+          "usage": {
+            "input_tokens": 12947,
+            "output_tokens": 133
+          }
+        },
+        {
+          "index": 2,
+          "tool": "type",
+          "params": {
+            "text": "lamp"
+          },
+          "ok": true,
+          "result": "typed 4 characters",
+          "error_code": null,
+          "duration_ms": 290.24645895697176,
+          "usage": {
+            "input_tokens": 13276,
+            "output_tokens": 157
+          }
+        },
+        {
+          "index": 3,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 50.00354198273271,
+          "usage": {
+            "input_tokens": 13327,
+            "output_tokens": 237
+          }
+        },
+        {
+          "index": 4,
+          "tool": "screenshot",
+          "params": {},
+          "ok": true,
+          "result": "",
+          "error_code": null,
+          "duration_ms": 59.35912497807294,
+          "usage": {
+            "input_tokens": 13475,
+            "output_tokens": 300
+          }
+        },
+        {
+          "index": 5,
+          "tool": "left_click",
+          "params": {
+            "x": 518,
+            "y": 369
+          },
+          "ok": true,
+          "result": "clicked e27 (AXButton 'Add to cart') [snapped from image point (518, 369) to e27 AXButton 'Add to cart'] [snapped to e27]",
+          "error_code": null,
+          "duration_ms": 66.98216695804149,
+          "usage": {
+            "input_tokens": 13639,
+            "output_tokens": 219
+          }
+        },
+        {
+          "index": 6,
+          "tool": "done",
+          "params": {
+            "summary": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+            "success": true
+          },
+          "ok": true,
+          "result": "Typed 'lamp' into the product search box and clicked 'Add to cart' for Desk Lamp; the page confirms 'Added Desk Lamp to the cart.'",
+          "error_code": null,
+          "duration_ms": 0.0,
+          "usage": {
+            "input_tokens": 13968,
+            "output_tokens": 204
+          }
+        }
+      ],
+      "clicks": [
+        {
+          "target": "add-desk-lamp",
+          "x": 0,
+          "y": 0
+        }
+      ]
+    }
+  ]
+}

@@ -22,7 +22,9 @@
   document.addEventListener('input', record, true);
   document.addEventListener('change', record, true);
   /* cu-arena reads this to detect "wasted" actions: a stable digest of the
-     page state the planner can influence. Clicks are excluded on purpose. */
+     page state the planner can influence. Clicks are excluded on purpose.
+     Focus is included, so a click that only focuses a field (the necessary
+     first step of the pixel loop) counts as an effect, not as waste. */
   root.__cuState = function () {
     var fields = [];
     var els = document.querySelectorAll('input, select, textarea');
@@ -33,6 +35,8 @@
     var scrolls = [];
     var boxes = document.querySelectorAll('[data-cu-scroll]');
     for (var j = 0; j < boxes.length; j++) scrolls.push(boxes[j].scrollTop);
-    return JSON.stringify([document.title, fields, document.body.innerText, window.scrollY, scrolls, location.hash]);
+    var active = document.activeElement;
+    var focus = active && active !== document.body ? (active.id || active.tagName) : '';
+    return JSON.stringify([document.title, fields, document.body.innerText, window.scrollY, scrolls, location.hash, focus]);
   };
 })();
