@@ -333,35 +333,40 @@ def _point_to_global(point: Point) -> tuple[float, float]:
 
 # --- CGEvent construction & posting -----------------------------------------
 
-_CG_BUTTON = {
-    MouseButton.LEFT: Quartz.kCGMouseButtonLeft,
-    MouseButton.RIGHT: Quartz.kCGMouseButtonRight,
-    MouseButton.MIDDLE: Quartz.kCGMouseButtonCenter,
-}
-_MOUSE_DOWN = {
-    MouseButton.LEFT: Quartz.kCGEventLeftMouseDown,
-    MouseButton.RIGHT: Quartz.kCGEventRightMouseDown,
-    MouseButton.MIDDLE: Quartz.kCGEventOtherMouseDown,
-}
-_MOUSE_UP = {
-    MouseButton.LEFT: Quartz.kCGEventLeftMouseUp,
-    MouseButton.RIGHT: Quartz.kCGEventRightMouseUp,
-    MouseButton.MIDDLE: Quartz.kCGEventOtherMouseUp,
-}
-_MOUSE_DRAG = {
-    MouseButton.LEFT: Quartz.kCGEventLeftMouseDragged,
-    MouseButton.RIGHT: Quartz.kCGEventRightMouseDragged,
-    MouseButton.MIDDLE: Quartz.kCGEventOtherMouseDragged,
-}
+if Quartz is not None:
+    _CG_BUTTON = {
+        MouseButton.LEFT: Quartz.kCGMouseButtonLeft,
+        MouseButton.RIGHT: Quartz.kCGMouseButtonRight,
+        MouseButton.MIDDLE: Quartz.kCGMouseButtonCenter,
+    }
+    _MOUSE_DOWN = {
+        MouseButton.LEFT: Quartz.kCGEventLeftMouseDown,
+        MouseButton.RIGHT: Quartz.kCGEventRightMouseDown,
+        MouseButton.MIDDLE: Quartz.kCGEventOtherMouseDown,
+    }
+    _MOUSE_UP = {
+        MouseButton.LEFT: Quartz.kCGEventLeftMouseUp,
+        MouseButton.RIGHT: Quartz.kCGEventRightMouseUp,
+        MouseButton.MIDDLE: Quartz.kCGEventOtherMouseUp,
+    }
+    _MOUSE_DRAG = {
+        MouseButton.LEFT: Quartz.kCGEventLeftMouseDragged,
+        MouseButton.RIGHT: Quartz.kCGEventRightMouseDragged,
+        MouseButton.MIDDLE: Quartz.kCGEventOtherMouseDragged,
+    }
 
-#: schema.MODIFIER_KEYS -> CGEventFlags. Kept in lockstep with the schema.
-_MODIFIER_FLAGS = {
-    "cmd": Quartz.kCGEventFlagMaskCommand,
-    "ctrl": Quartz.kCGEventFlagMaskControl,
-    "alt": Quartz.kCGEventFlagMaskAlternate,
-    "shift": Quartz.kCGEventFlagMaskShift,
-    "fn": Quartz.kCGEventFlagMaskSecondaryFn,
-}
+    #: schema.MODIFIER_KEYS -> CGEventFlags. Kept in lockstep with the schema.
+    _MODIFIER_FLAGS = {
+        "cmd": Quartz.kCGEventFlagMaskCommand,
+        "ctrl": Quartz.kCGEventFlagMaskControl,
+        "alt": Quartz.kCGEventFlagMaskAlternate,
+        "shift": Quartz.kCGEventFlagMaskShift,
+        "fn": Quartz.kCGEventFlagMaskSecondaryFn,
+    }
+else:  # pragma: no cover - the CGEvent constants exist only on macOS; the
+    # tables stay importable (and the chord/modifier validators usable) elsewhere.
+    _CG_BUTTON = _MOUSE_DOWN = _MOUSE_UP = _MOUSE_DRAG = {}
+    _MODIFIER_FLAGS = {name: 0 for name in ("cmd", "ctrl", "alt", "shift", "fn")}
 
 # US-layout virtual keycodes (Carbon HIToolbox Events.h). MVP limitation:
 # TODO(layout): resolve keycodes via UCKeyTranslate so chords work on non-US

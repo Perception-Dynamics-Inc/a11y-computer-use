@@ -18,6 +18,7 @@ is covered by tests/test_linux_synthetic.py; its live effect is not asserted her
 from __future__ import annotations
 
 import subprocess
+import os
 import sys
 import textwrap
 import time
@@ -57,6 +58,8 @@ _GTK_APP = textwrap.dedent(
 
 
 def _require_bus(driver) -> None:
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("no DISPLAY/WAYLAND_DISPLAY: the GTK test app cannot open a window")
     try:
         driver.ensure_trusted()
     except ComputerUseError as exc:
