@@ -1,7 +1,10 @@
 """MCP server: the v1 tool surface (PLAN.md §8).
 
-12 tools: desktop_snapshot, screenshot, zoom, click, type, key, scroll,
-drag, wait_for, app, window, clipboard. EVERY tool — observation included —
+The full MCP tool surface, one canonical schema shared with the CLI: observe
+(desktop_snapshot, find, screenshot, zoom), act (click, type, key, scroll, drag,
+wait_for, act, set_value, scroll_to_find), manage (app, window, clipboard), plus
+console and network when the browser backend provides those feeds. EVERY tool —
+observation included —
 routes through `safety.check_action` and is recorded in the audit log;
 structured errors (`schema.ComputerUseError`) are rendered as clear
 tool-error strings that carry the doctor hint, never raised across the wire
@@ -1188,7 +1191,8 @@ class Runtime:
 # ---------------------------------------------------------------------------
 
 _INSTRUCTIONS = (
-    "Accessibility-first macOS control. Call desktop_snapshot first and act on "
+    "Accessibility-first computer use (macOS, Windows, Linux, and Chromium over CDP). "
+    "Call desktop_snapshot first and act on "
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
     "snapshot — a stale_ref error means the UI changed, re-observe. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "

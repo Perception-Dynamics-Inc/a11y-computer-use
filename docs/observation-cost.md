@@ -82,15 +82,26 @@ COMPUTERUSE_DRIVER=browser computeruse bench desktop --rounds 3   # every view o
 | example.com (756x469) | 7 | 473 tok | 95 tok (5.0x cheaper) | 72 tok (6.6x cheaper) | 10 tok |
 | news.ycombinator.com (804x1214) | 330 | 1,301 tok | 4,509 tok (3.5x more expensive) | 758 tok, 84 element lines (1.7x cheaper) | 10 tok |
 
+Those two rows predate the depth-cap fix described below. The same commands on
+the fixed engine, run the same day on a second headless Chrome (port 9777,
+default window, so the frame and the screenshot price differ from the rows
+above):
+
+| Page | Elements | Screenshot | Full view | Interactive view | Re-observe diff |
+|---|---|---|---|---|---|
+| example.com (1280x513) | 7 | 876 tok | 95 tok (9.2x cheaper) | 72 tok (12.2x cheaper) | 10 tok |
+| news.ycombinator.com (1280x1214), before the fix | 330 | 2,072 tok | 4,511 tok (0.5x) | 759 tok | 10 tok |
+| news.ycombinator.com (1280x1214), after the fix | 435 | 2,072 tok | 4,539 tok (0.5x) | 1,089 tok (1.9x cheaper) | 10 tok |
+
 Two readings of that table.
 
 On a simple page both views beat the screenshot by a wide margin, and the diff
 makes every later observation nearly free. On a dense, link-heavy page the full
-tree costs more than the screenshot: 78 links plus the table cells and static
+tree costs more than the screenshot: 102 links plus the table cells and static
 text around them render to 18k characters. The interactive view brings the same
-page under the screenshot's cost by folding 246 static elements into text lines
-and dropping the layout rows and cells, while keeping all 78 links addressable
-by ref. The diff is 10 tokens either way, which is the number the moat actually
+page under the screenshot's cost by folding the static elements into text lines
+and dropping the layout rows and cells, while keeping every link addressable by
+ref. The diff is 10 tokens either way, which is the number the moat actually
 rests on: an agent that observes once and then re-observes by diff pays the
 screenshot price zero times.
 
@@ -108,18 +119,29 @@ figure gets a companion `interactive` number.
 `tests/test_arena.py` carries an opt-in live test for Finder that self-skips
 without the grants, and one for the browser backend that runs in CI.
 
-### Where the remaining full-view cost comes from
+### The depth cap fix, and what the markers were hiding
 
-On the Hacker News page, 209 of the 540 lines of the full render are `… 1 more`
-markers, about 5,200 characters or 1,300 tokens, roughly 29 percent of the full
-view. They come from the depth cap in `observe.build_snapshot`: the cap counts
-raw tree depth including the generic wrappers that later collapse, and the
-page's real DOM is deeper than 12 levels, so each link's own text node is
-elided and marked. The interactive view does not print these markers on
-input-taking elements (a link's elided child is the text it already shows), but
-the full view still pays for them. Counting depth over kept ancestors only, or
-letting the browser driver pass a deeper cap, would remove that cost from the
-full view. That change touches the pruning engine and is not part of this page.
+Before the fix, 209 of the 540 lines of the Hacker News full render were
+`… 1 more` markers, about 5,000 characters or 1,240 tokens. They came from the
+depth cap in `observe.build_snapshot`: `MAX_DEPTH` counted raw tree depth,
+including the generic wrappers that later collapse into their only child, and
+the page's DOM is deeper than 12 levels, so the walk stopped one level short
+under most rows. The engine now counts depth over kept ancestors only
+(`_prune_inner` carries a lower bound while walking, `_enforce_depth` applies
+the exact cap afterwards, and a separate `_MAX_RAW_DEPTH` still bounds
+pathological trees).
+
+The measurement corrected the expectation this page used to state. The markers
+were not removable cost: they were hiding real nodes. On the same page and
+frame, the fix took the marker count from 209 lines to 1 (the remaining one is
+the fan-out cap on the story table, `… 68 more`), and the full view stayed at
+4,511 to 4,539 tokens, because 1,240 tokens of markers became about 1,270
+tokens of content: 24 more links and 93 more text nodes that the agent could
+previously neither read nor click. Actionable elements went from 79 to 103. The
+interactive view rose from 759 to 1,089 tokens for the same reason: it now
+lists 24 more targets. The full view of a dense page still costs more than one
+screenshot; the ways to pay less remain `interactive`, `find`, `diff`, and
+`budget`.
 
 ## Which view to use
 

@@ -121,6 +121,35 @@ def test_depth_capped_with_marker() -> None:
     assert "… 1 more" in render_text(snap)
 
 
+def _wrapped(node: dict, levels: int, *, siblings: bool = False) -> dict:
+    """Bury ``node`` under ``levels`` untitled AXGroup wrappers inside a window.
+    With ``siblings`` every wrapper also holds a button, so none of them can
+    collapse and the pruned depth equals the raw depth."""
+    for i in range(levels):
+        kids = [button(f"sibling {i}", (120.0, 140.0 + i)), node] if siblings else [node]
+        node = ax("AXGroup", at=(100.0, 50.0), size=(1000.0, 700.0), children=kids)
+    return ax("AXWindow", title="Doc", at=(100.0, 50.0), size=(1000.0, 700.0), children=[node])
+
+
+def test_depth_counts_kept_ancestors_not_collapsed_wrappers() -> None:
+    # Fifteen raw levels of generic single-child wrappers but two kept levels
+    # (window > button): the leaf survives and nothing is marked as elided. This
+    # is the web case (a link's text under a dozen generic wrappers).
+    snap = snap_of(_wrapped(button("Deep", (120.0, 120.0)), levels=MAX_DEPTH + 3))
+    assert by_title(snap, "Deep").path == ("AXWindow", "AXButton")
+    assert "more" not in render_text(snap)
+
+
+def test_depth_cap_applies_to_kept_depth_after_collapse() -> None:
+    # Wrappers that keep two children never collapse, so the cap bites at the
+    # same kept level as before and hides every raw child of the node at the cap.
+    snap = snap_of(_wrapped(button("Deep", (120.0, 120.0)), levels=MAX_DEPTH + 3, siblings=True))
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+    assert not any(el.title == "Deep" for el in snap.elements)
+    assert "… 2 more" in render_text(snap)
+    assert render_text(snap).count("more") == 1
+
+
 def test_refs_are_sequential_and_preorder() -> None:
     snap = snap_of(typical_app_window())
     assert [el.ref for el in snap.elements] == [f"e{i}" for i in range(1, len(snap.elements) + 1)]

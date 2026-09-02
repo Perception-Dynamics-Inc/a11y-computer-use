@@ -41,7 +41,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="computeruse",
-        description="Accessibility-first computer-use framework for macOS.",
+        description=(
+            "Accessibility-first computer use for AI agents on macOS, Windows, Linux, "
+            "and Chromium (CDP)."
+        ),
     )
     sub = parser.add_subparsers(required=True)
 
