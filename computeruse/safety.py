@@ -74,6 +74,27 @@ def _sync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _replace_file(source: Path, target: Path, *, timeout: float = 1.0) -> None:
+    """Replace atomically, allowing brief Windows reader/sharing conflicts.
+
+    Ordinary Windows file readers can temporarily deny replacement. Keep the
+    old file intact while retrying; persistent access errors still propagate
+    after a bounded wait, and other filesystem errors fail immediately.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.01, remaining))
+
+
 @contextmanager
 def _file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
     """Serialize local processes using a stable sidecar file, with a deadline.
@@ -245,12 +266,17 @@ class PermissionStore:
         return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
 
     def _file_stamp(self) -> tuple[int, ...] | None:
-        """Identity and modification stamp; None only when the file is absent."""
+        """Use the same metadata API as loading; None only for an absent file.
+
+        On Windows/Python 3.12, stat reports creation time as ctime while
+        fstat reports change time. Comparing those makes unchanged policies
+        reload on every action, including repeatedly parsing invalid JSON.
+        """
         try:
-            stat = self.path.stat()
+            with self.path.open("rb") as fh:
+                return self._stat_stamp(os.fstat(fh.fileno()))
         except FileNotFoundError:
             return None
-        return self._stat_stamp(stat)
 
     def _refresh(self) -> None:
         """Reload when the file changed on disk since the last load/save."""
@@ -336,7 +362,7 @@ class PermissionStore:
                 fh.flush()
                 os.fsync(fh.fileno())
                 stamp = self._stat_stamp(os.fstat(fh.fileno()))
-            os.replace(temporary, self.path)
+            _replace_file(temporary, self.path)
             _sync_directory(self.path.parent)
         finally:
             temporary.unlink(missing_ok=True)

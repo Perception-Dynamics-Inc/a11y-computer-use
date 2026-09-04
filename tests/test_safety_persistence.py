@@ -9,6 +9,7 @@ import os
 import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,6 +126,102 @@ def test_invalid_policy_stays_denied_without_reparsing_until_it_changes(tmp_path
     path.write_text(json.dumps({"apps": {APP: {"tier": "full"}}}))
     assert safety.check_action(TypeText("hello"), APP, store=store).allowed
     assert loads == 2
+
+
+@pytest.mark.parametrize("contents", [
+    '{"apps":',
+    '{"apps":{"test.app":{"tier":"read"}}}',
+])
+def test_policy_cache_uses_consistent_metadata_when_stat_and_fstat_differ(
+    tmp_path: Path, monkeypatch, contents: str,
+) -> None:
+    path = tmp_path / "permissions.json"
+    path.write_text(contents)
+    original_fstat, original_load = os.fstat, json.load
+    loads = 0
+
+    def different_fstat(fd: int):
+        stat = original_fstat(fd)
+        # Reproduce Python 3.12 on Windows: path stat exposes birthtime as
+        # ctime, while fstat exposes change time for the very same file.
+        return SimpleNamespace(
+            st_dev=stat.st_dev, st_ino=stat.st_ino, st_size=stat.st_size,
+            st_mtime_ns=stat.st_mtime_ns, st_ctime_ns=stat.st_ctime_ns + 1_000_000_000,
+        )
+
+    def counted_load(fh):
+        nonlocal loads
+        loads += 1
+        return original_load(fh)
+
+    monkeypatch.setattr(os, "fstat", different_fstat)
+    monkeypatch.setattr(json, "load", counted_load)
+    store = safety.PermissionStore(path)
+    for _ in range(20):
+        assert not safety.check_action(TypeText("hello"), APP, store=store).allowed
+    assert loads == 1
+    path.write_text(json.dumps({"apps": {APP: {"tier": "full"}}}))
+    assert safety.check_action(TypeText("hello"), APP, store=store).allowed
+    assert loads == 2
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_atomic_replace_retries_brief_windows_reader_conflicts(
+    tmp_path: Path, monkeypatch, winerror: int,
+) -> None:
+    path = tmp_path / "permissions.json"
+    store = safety.PermissionStore(path)
+    store.set_tier(APP, safety.Tier.READ)
+    original_replace = os.replace
+    attempts = 0
+
+    def reader_blocks_replace(source, target) -> None:
+        nonlocal attempts
+        attempts += 1
+        assert json.loads(path.read_text())["apps"][APP]["tier"] == "read"
+        if attempts < 3:
+            error = PermissionError(errno.EACCES, "reader has file open")
+            error.winerror = winerror
+            raise error
+        original_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", reader_blocks_replace)
+    store.set_tier(APP, safety.Tier.FULL)
+    assert attempts == 3
+    assert json.loads(path.read_text())["apps"][APP]["tier"] == "full"
+    assert store.get_tier(APP) is safety.Tier.FULL
+    assert list(tmp_path.glob(".permissions.json.*")) == []
+
+
+def test_blocked_windows_replace_has_deadline_and_preserves_old_grant(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "permissions.json"
+    store = safety.PermissionStore(path)
+    store.set_tier(APP, safety.Tier.READ)
+    before = path.read_bytes()
+    elapsed = 0.0
+    attempts = 0
+
+    def permanently_blocked_replace(source, target) -> None:
+        nonlocal attempts
+        attempts += 1
+        error = PermissionError(errno.EACCES, "replacement remains blocked")
+        error.winerror = 5
+        raise error
+
+    def advance_time(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(os, "replace", permanently_blocked_replace)
+    monkeypatch.setattr(safety.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(safety.time, "sleep", advance_time)
+    with pytest.raises(PermissionError, match="remains blocked"):
+        store.set_tier(APP, safety.Tier.FULL)
+    assert elapsed == pytest.approx(1.0)
+    assert 2 <= attempts <= 102
+    assert path.read_bytes() == before
+    assert store.get_tier(APP) is safety.Tier.READ
+    assert list(tmp_path.glob(".permissions.json.*")) == []
 
 
 def test_failed_atomic_replace_preserves_old_file_and_in_memory_policy(tmp_path: Path, monkeypatch) -> None:

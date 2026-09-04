@@ -16,6 +16,8 @@ Within a group, lines are ordered by theme, then by date.
 - Permission updates are atomic across local processes; invalid policy edits
   deny actions. Audit files have configurable size/retention limits and recover
   incomplete writes.
+- Windows permission updates retry transient file-sharing errors within a
+  deadline and use consistent file metadata to cache unchanged policies.
 - Browser password probes fail closed. Long scrolling searches recheck their
   target and permissions before input.
 - Linux typing verifies the remembered editable belongs to the frontmost app
