@@ -253,7 +253,16 @@ def test_atomic_grants_never_expose_partial_json_to_readers(tmp_path: Path) -> N
         reads = 0
         ready.set()
         while not done.is_set():
-            assert json.loads(path.read_text())["apps"][APP]["tier"] in {"read", "full"}
+            try:
+                contents = path.read_text()
+            except PermissionError as exc:
+                if os.name != "nt" or exc.errno != errno.EACCES:
+                    raise
+                # Windows may deny a new read while replacement is pending.
+                # This is temporary unavailability, not partially written JSON.
+                done.wait(0.001)
+                continue
+            assert json.loads(contents)["apps"][APP]["tier"] in {"read", "full"}
             reads += 1
         return reads
 
