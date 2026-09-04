@@ -47,7 +47,7 @@ dependencies = [
     # cross-platform
     # Pin below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (server.py imports
     # FastMCP from there). The 1.x line (tested on 1.28.x) keeps that import.
-    "mcp<2",
+    "mcp<3",
     "pillow",
 ]
 
