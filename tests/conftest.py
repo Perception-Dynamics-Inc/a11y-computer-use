@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -165,3 +167,24 @@ def synthetic_snapshot() -> Snapshot:
 def snapshot_builder():
     """The builder itself, for tests needing custom ids/apps."""
     return build_synthetic_snapshot
+
+
+if sys.platform == "win32":
+
+    @pytest.fixture(autouse=True)
+    def _home_follows_HOME(monkeypatch):
+        """Make ``Path.home()`` honour ``HOME`` on Windows for the test session.
+
+        The package resolves ``~/.computeruse`` through ``Path.home()``, which
+        on Windows reads ``USERPROFILE`` and ignores ``HOME``. Tests isolate
+        state by pointing ``HOME`` at ``tmp_path``; without this shim they would
+        read and write the runner's real ``~/.computeruse`` and leak grants and
+        audit rows between tests.
+        """
+        real_home = Path.home
+
+        def _home(cls=Path):
+            env = os.environ.get("HOME")
+            return Path(env) if env else real_home()
+
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: _home(cls)))

@@ -17,6 +17,7 @@ import importlib
 import importlib.metadata
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -256,22 +257,191 @@ def _check_mcp() -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def run_doctor() -> list[CheckResult]:
-    """Run all environment checks and return their results.
+# ---------------------------------------------------------------------------
+# Linux (AT-SPI2 / X11) and Windows (UIA) checks — the same shape as the macOS
+# TCC probes, so `doctor` tells the truth on every platform the driver seam
+# supports instead of reporting macOS grants that do not exist there.
+# ---------------------------------------------------------------------------
 
-    Checks (Phase 0 set): responsible host app identification, Accessibility
-    grant, Screen Recording grant, Python version, pyobjc install, mcp import.
-    Never raises for a failed check — failures are data, not exceptions.
+
+def _check_display_session() -> CheckResult:
+    display = os.environ.get("DISPLAY")
+    wayland = os.environ.get("WAYLAND_DISPLAY")
+    kind = os.environ.get("XDG_SESSION_TYPE") or "unset"
+    ok = bool(display or wayland)
+    return {
+        "check": "display_session",
+        "ok": ok,
+        "detail": f"XDG_SESSION_TYPE={kind} DISPLAY={display or 'unset'} WAYLAND_DISPLAY={wayland or 'unset'}",
+        "fix": None if ok else (
+            "Run inside the graphical session, or export DISPLAY and XAUTHORITY (X11) or "
+            "WAYLAND_DISPLAY and XDG_RUNTIME_DIR from a session process; scripts/box/run-live.sh shows how."
+        ),
+    }
+
+
+def _check_window_manager() -> CheckResult:
+    if (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland":
+        return {
+            "check": "window_manager",
+            "ok": True,
+            "detail": "Wayland compositor session",
+            "fix": None,
+        }
+    try:
+        from Xlib import display as xdisplay
+
+        d = xdisplay.Display()
+        root = d.screen().root
+        prop = root.get_full_property(d.intern_atom("_NET_SUPPORTING_WM_CHECK"), 0)
+        if prop is None or not prop.value:
+            raise LookupError("no _NET_SUPPORTING_WM_CHECK on the root window")
+        win = d.create_resource_object("window", int(prop.value[0]))
+        name = win.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
+        wm = name.value.decode("utf-8", "replace") if name is not None and name.value else "unknown"
+        return {"check": "window_manager", "ok": True, "detail": f"EWMH window manager: {wm}", "fix": None}
+    except Exception as exc:  # noqa: BLE001 — failures are data
+        return {
+            "check": "window_manager",
+            "ok": False,
+            "detail": f"no EWMH window manager on this display ({exc})",
+            "fix": (
+                "Focus-dependent input (coordinate clicks, XTEST typing) misbehaves without a window "
+                "manager; plain Xvfb has none. Start one (openbox, xfwm4) or use a real desktop session."
+            ),
+        }
+
+
+def _check_atspi_bindings() -> CheckResult:
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "check": "atspi_bindings",
+            "ok": False,
+            "detail": f"AT-SPI2 GI bindings unavailable: {exc}",
+            "fix": (
+                "apt install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi, then create the venv "
+                "with --system-site-packages (or pip install PyGObject)."
+            ),
+        }
+    return {"check": "atspi_bindings", "ok": True, "detail": "gi + Atspi 2.0 typelib import cleanly", "fix": None}
+
+
+def _check_a11y_bus() -> CheckResult:
+    try:
+        from computeruse.drivers.linux import LinuxDriver
+
+        LinuxDriver().ensure_trusted()
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+
+        count = Atspi.get_desktop(0).get_child_count()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "check": "a11y_bus",
+            "ok": False,
+            "detail": f"org.a11y.Bus not reachable: {str(exc).splitlines()[0][:200]}",
+            "fix": (
+                "Turn accessibility on for the session (GNOME/Budgie: gsettings set "
+                "org.gnome.desktop.interface toolkit-accessibility true) or start "
+                "/usr/libexec/at-spi-bus-launcher --launch-immediately; GTK apps need "
+                "GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 to publish their trees."
+            ),
+        }
+    return {
+        "check": "a11y_bus",
+        "ok": True,
+        "detail": f"org.a11y.Bus reachable; {count} application(s) on the desktop",
+        "fix": None,
+    }
+
+
+def _check_coordinate_input() -> CheckResult:
+    if (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland":
+        return {
+            "check": "coordinate_input",
+            "ok": False,
+            "detail": "Wayland: raw coordinate clicks and key chords are UNSUPPORTED (a11y actions work)",
+            "fix": "Use ref-based actions (click ref, set_value, type via EditableText); libei/RemoteDesktop portal input is pending.",
+        }
+    try:
+        from Xlib import display as xdisplay
+
+        d = xdisplay.Display()
+        if not d.query_extension("XTEST"):
+            raise LookupError("XTEST extension missing on this X server")
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "check": "coordinate_input",
+            "ok": False,
+            "detail": f"XTEST unavailable: {exc}",
+            "fix": "pip install python-xlib and run against an X server with the XTEST extension.",
+        }
+    return {"check": "coordinate_input", "ok": True, "detail": "XTEST available (python-xlib)", "fix": None}
+
+
+def _check_clipboard_tool() -> CheckResult:
+    wayland = (os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland"
+    candidates = ("wl-copy", "xclip", "xsel") if wayland else ("xclip", "xsel", "wl-copy")
+    found = next((c for c in candidates if shutil.which(c)), None)
+    return {
+        "check": "clipboard_tool",
+        "ok": found is not None,
+        "detail": f"{found} on PATH" if found else "no xclip / xsel / wl-copy on PATH",
+        "fix": None if found else ("apt install wl-clipboard" if wayland else "apt install xclip"),
+    }
+
+
+def _check_uiautomation() -> CheckResult:
+    try:
+        importlib.import_module("uiautomation")
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "check": "uiautomation_import",
+            "ok": False,
+            "detail": f"import uiautomation failed: {exc}",
+            "fix": 'pip install "computeruse[windows]" (uiautomation + comtypes)',
+        }
+    return {"check": "uiautomation_import", "ok": True, "detail": "uiautomation imports cleanly", "fix": None}
+
+
+def run_doctor() -> list[CheckResult]:
+    """Run the environment checks for THIS platform and return their results.
+
+    macOS: responsible host app, Accessibility grant, Screen Recording grant,
+    Python, pyobjc, mcp. Linux: graphical session, window manager, AT-SPI2
+    bindings, a11y bus, XTEST coordinate input, clipboard tool, Python, mcp.
+    Windows: uiautomation, Python, mcp. Never raises for a failed check —
+    failures are data, not exceptions.
     """
-    app = responsible_app(parent_chain(os.getpid()))
-    return [
-        _check_responsible_app(app),
-        _check_accessibility(app),
-        _check_screen_recording(app),
-        _check_python(),
-        _check_pyobjc(),
-        _check_mcp(),
-    ]
+    if sys.platform == "darwin":
+        app = responsible_app(parent_chain(os.getpid()))
+        return [
+            _check_responsible_app(app),
+            _check_accessibility(app),
+            _check_screen_recording(app),
+            _check_python(),
+            _check_pyobjc(),
+            _check_mcp(),
+        ]
+    if sys.platform.startswith("linux"):
+        return [
+            _check_display_session(),
+            _check_window_manager(),
+            _check_atspi_bindings(),
+            _check_a11y_bus(),
+            _check_coordinate_input(),
+            _check_clipboard_tool(),
+            _check_python(),
+            _check_mcp(),
+        ]
+    return [_check_uiautomation(), _check_python(), _check_mcp()]
 
 
 def render_text(report: list[CheckResult]) -> str:

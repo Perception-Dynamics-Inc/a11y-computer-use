@@ -1,0 +1,10 @@
+{
+  "id": "iframe_field",
+  "title": "Type into a field inside a same-origin iframe",
+  "page": "iframe_field.html",
+  "instruction": "In the embedded payment panel, enter the coupon code SPRING24 and press Redeem.",
+  "success": "document.title === 'REDEEMED:SPRING24'",
+  "allowed_targets": ["coupon", "redeem", "label-coupon", "payment-panel"],
+  "max_steps": 8,
+  "notes": "The iframe forwards its clicks to the parent page with frame='payment-panel'. A pixel click that lands on the frame but misses the field or button is recorded as the frame's body tag and counts as a misclick."
+}

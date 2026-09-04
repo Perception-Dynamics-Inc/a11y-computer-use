@@ -134,6 +134,22 @@ class Element:
         secure: True for secure/password fields. Acting on a secure element
             raises `ErrorCode.SECURE_FIELD`; the safety layer converts that
             into a human-handoff gate.
+        checked: Toggle state for checkboxes/radios/toggles — True (on),
+            False (off), or None for elements that aren't checkable. A mixed
+            (tri-state) control reads as True.
+        selected: True if the element is currently selected (a chosen list row,
+            table cell, or tab).
+        expanded: Disclosure state for expandable controls (disclosure
+            triangles, combo boxes, outline rows) — True (open), False (closed),
+            or None when the element does not expand.
+        placeholder: Prompt text shown in an empty field (e.g. "Search"),
+            empty string when none — lets the agent identify a blank input by
+            its purpose.
+        stable_id: A developer-assigned, layout-independent identity (macOS
+            ``AXIdentifier``, Windows ``AutomationId``, Linux ``accessible-id``),
+            or None when the app exposes none. Far more durable than the
+            title/path/bounds anchor across relayout, scroll, and dynamic lists,
+            so `resolve_ref` matches on it first when present.
     """
 
     ref: str
@@ -149,6 +165,11 @@ class Element:
     clickable: bool = False
     editable: bool = False
     secure: bool = False
+    checked: bool | None = None
+    selected: bool = False
+    expanded: bool | None = None
+    placeholder: str = ""
+    stable_id: str | None = None
 
     @property
     def actionable(self) -> bool:
@@ -233,6 +254,11 @@ class ErrorCode(str, Enum):
     CONFIRMATION_DECLINED = "confirmation_declined"
     """An irreversible action needed explicit human confirmation and it was
     declined, cancelled, or could not be requested (no elicitation channel)."""
+
+    UNSUPPORTED = "unsupported"
+    """The operation isn't available in this environment (e.g. raw coordinate /
+    key injection on native Wayland, which has no XTEST) — the detail hint names
+    the supported alternative (usually a ref-based action)."""
 
 
 class ComputerUseError(Exception):
@@ -423,6 +449,8 @@ class ObserveVerb(str, Enum):
     SNAPSHOT = "snapshot"
     SCREENSHOT = "screenshot"
     ZOOM = "zoom"
+    CONSOLE = "console"  # browser: console output + uncaught exceptions
+    NETWORK = "network"  # browser: request outcomes (status/failure)
 
 
 @dataclass(frozen=True, slots=True)

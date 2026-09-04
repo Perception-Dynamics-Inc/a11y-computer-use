@@ -121,6 +121,83 @@ def test_depth_capped_with_marker() -> None:
     assert "… 1 more" in render_text(snap)
 
 
+def _wrapped(node: dict, levels: int, *, siblings: bool = False) -> dict:
+    """Bury ``node`` under ``levels`` untitled AXGroup wrappers inside a window.
+    With ``siblings`` every wrapper also holds a button, so none of them can
+    collapse and the pruned depth equals the raw depth."""
+    for i in range(levels):
+        kids = [button(f"sibling {i}", (120.0, 140.0 + i)), node] if siblings else [node]
+        node = ax("AXGroup", at=(100.0, 50.0), size=(1000.0, 700.0), children=kids)
+    return ax("AXWindow", title="Doc", at=(100.0, 50.0), size=(1000.0, 700.0), children=[node])
+
+
+def test_depth_counts_kept_ancestors_not_collapsed_wrappers() -> None:
+    # Fifteen raw levels of generic single-child wrappers but two kept levels
+    # (window > button): the leaf survives and nothing is marked as elided. This
+    # is the web case (a link's text under a dozen generic wrappers).
+    snap = snap_of(_wrapped(button("Deep", (120.0, 120.0)), levels=MAX_DEPTH + 3))
+    assert by_title(snap, "Deep").path == ("AXWindow", "AXButton")
+    assert "more" not in render_text(snap)
+
+
+def test_depth_cap_applies_to_kept_depth_after_collapse() -> None:
+    # Wrappers that keep two children never collapse, so the cap bites at the
+    # same kept level as before and hides every raw child of the node at the cap.
+    snap = snap_of(_wrapped(button("Deep", (120.0, 120.0)), levels=MAX_DEPTH + 3, siblings=True))
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+    assert not any(el.title == "Deep" for el in snap.elements)
+    assert "… 2 more" in render_text(snap)
+    assert render_text(snap).count("more") == 1
+
+
+class _CountingAccessor(DictAccessor):
+    """Counts accessor reads, the cost unit of a live walk (several IPC attribute
+    copies per node on AX, D-Bus round-trips on AT-SPI). ``cap`` turns an
+    unbounded walk into a failure instead of a hang."""
+
+    def __init__(self, cap: int = 100_000) -> None:
+        self.reads, self.cap = 0, cap
+
+    def read(self, node):
+        self.reads += 1
+        assert self.reads <= self.cap, "the walk is not bounded by MAX_DEPTH"
+        return super().read(node)
+
+
+def _binary_wrapper_tree(depth: int) -> dict:
+    """Web div soup: a complete binary tree of untitled AXGroup wrappers with a
+    button at every leaf. No wrapper can collapse (each keeps two children)."""
+    def node(d: int) -> dict:
+        if d == 0:
+            return button("Leaf", (120.0, 60.0))
+        return ax("AXGroup", at=(100.0, 50.0), size=(500.0, 500.0), children=[node(d - 1), node(d - 1)])
+
+    return ax("AXWindow", title="W", at=(100.0, 50.0), size=(1000.0, 700.0), children=[node(depth)])
+
+
+def test_depth_cap_bounds_the_walk_not_just_the_output() -> None:
+    # 2^17-1 raw nodes, but the cap must fire DURING the walk: only raw levels
+    # 0..MAX_DEPTH are read (1 + 2^12 - 1 = 4096 reads, the count at 3b331ba), not
+    # the whole tree followed by a post-pass that throws the deep part away.
+    acc = _CountingAccessor()
+    snap = build_snapshot(_binary_wrapper_tree(16), acc, scope=Scope.WINDOW, app="x", pid=1,
+                          geometry=GEOMETRY)
+    assert acc.reads == 4096
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+
+
+def test_cyclic_wrapper_with_fanout_is_bounded_by_max_depth() -> None:
+    # An untitled group that lists itself twice (a fan-out-2 AX cycle) must be
+    # capped by MAX_DEPTH during the walk, not by _MAX_RAW_DEPTH after ~2^64 reads.
+    g = ax("AXGroup", at=(100.0, 50.0), size=(500.0, 500.0), children=[])
+    g["children"] = [button("B", (120.0, 60.0)), g, g]
+    root = ax("AXWindow", title="W", at=(100.0, 50.0), size=(1000.0, 700.0), children=[g])
+    acc = _CountingAccessor()
+    snap = build_snapshot(root, acc, scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+    assert acc.reads == 6143  # the 3b331ba count
+    assert max(len(el.path) for el in snap.elements) == MAX_DEPTH + 1
+
+
 def test_refs_are_sequential_and_preorder() -> None:
     snap = snap_of(typical_app_window())
     assert [el.ref for el in snap.elements] == [f"e{i}" for i in range(1, len(snap.elements) + 1)]
@@ -351,3 +428,483 @@ def test_interactive_count_distinguishes_hostile_apps() -> None:
     )
     bare = build_snapshot(plain, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
     assert observe.interactive_count(bare) == 0
+
+
+# ---------------------------------------------------------------------------
+# find_elements / render_matches (the `find` tool query, platform-free)
+# ---------------------------------------------------------------------------
+
+
+def _find_window() -> dict:
+    return ax(
+        "AXWindow", title="Form", at=(100.0, 50.0), size=(1000.0, 700.0),
+        children=[
+            button("Save", (120.0, 70.0)),
+            button("Cancel", (220.0, 70.0)),
+            ax("AXTextField", title="Name", value="Alice", at=(120.0, 120.0), size=(300.0, 30.0)),
+            ax("AXStaticText", value="Welcome back", at=(120.0, 170.0), size=(300.0, 20.0)),
+        ],
+    )
+
+
+def test_find_by_text_matches_title_or_value() -> None:
+    snap = snap_of(_find_window())
+    assert {e.title for e in observe.find_elements(snap, text="save")} == {"Save"}
+    # value is searched too: "Alice" lives in the text field's value
+    assert [e.role for e in observe.find_elements(snap, text="alice")] == ["AXTextField"]
+
+
+def test_find_by_role_ignores_ax_prefix_and_is_substring() -> None:
+    snap = snap_of(_find_window())
+    assert {e.title for e in observe.find_elements(snap, role="button")} == {"Save", "Cancel"}
+    assert {e.title for e in observe.find_elements(snap, role="AXButton")} == {"Save", "Cancel"}
+    assert [e.title for e in observe.find_elements(snap, role="textfield")] == ["Name"]
+
+
+def test_find_by_capability_flags() -> None:
+    snap = snap_of(_find_window())
+    assert [e.title for e in observe.find_elements(snap, editable=True)] == ["Name"]
+    assert {e.title for e in observe.find_elements(snap, clickable=True)} == {"Save", "Cancel"}
+
+
+def test_find_combines_filters() -> None:
+    snap = snap_of(_find_window())
+    # role + text narrows to one
+    assert {e.title for e in observe.find_elements(snap, role="button", text="cancel")} == {"Cancel"}
+
+
+def test_render_matches_shows_refs_and_bounds_or_no_match() -> None:
+    snap = snap_of(_find_window())
+    matches = observe.find_elements(snap, role="button")
+    out = observe.render_matches(snap, matches)
+    assert "2 match(es)" in out
+    assert "Save" in out and "Cancel" in out
+    assert "e" in out and "@" in out  # refs + bounds
+    empty = observe.render_matches(snap, observe.find_elements(snap, text="nonesuch"))
+    assert "no elements match" in empty
+
+
+# ---------------------------------------------------------------------------
+# Rich element states (checked / selected / expanded / placeholder)
+# ---------------------------------------------------------------------------
+
+
+def test_checked_state_helper() -> None:
+    assert observe._checked_state("AXCheckBox", "", 1) is True
+    assert observe._checked_state("AXCheckBox", "", 0) is False
+    assert observe._checked_state("AXCheckBox", "", 2) is True   # mixed reads as on
+    assert observe._checked_state("AXRadioButton", "", "1") is True
+    assert observe._checked_state("AXButton", "AXToggle", 1) is True
+    assert observe._checked_state("AXButton", "", 1) is None      # not checkable
+    assert observe._checked_state("AXCheckBox", "", None) is None  # no value
+
+
+def test_states_flow_to_element_and_render() -> None:
+    tree = ax(
+        "AXWindow", title="Prefs", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax("AXCheckBox", title="Wifi", at=(10.0, 10.0), size=(120.0, 20.0),
+               actions=("AXPress",), checked=True),
+            ax("AXCheckBox", title="Bluetooth", at=(10.0, 40.0), size=(120.0, 20.0),
+               actions=("AXPress",), checked=False),
+            ax("AXRow", title="Row A", at=(10.0, 70.0), size=(300.0, 20.0), selected=True),
+            ax("AXDisclosureTriangle", title="More", at=(10.0, 100.0), size=(20.0, 20.0),
+               actions=("AXPress",), expanded=False),
+            ax("AXTextField", title="", placeholder="Search", at=(10.0, 130.0), size=(300.0, 24.0)),
+        ],
+    )
+    snap = snap_of(tree)
+    els = {el.title: el for el in snap.elements}
+    assert els["Wifi"].checked is True
+    assert els["Bluetooth"].checked is False
+    assert els["Row A"].selected is True
+    assert els["More"].expanded is False
+    text = observe.render_text(snap)
+    assert "(click,checked)" in text or "checked" in text
+    assert "unchecked" in text
+    assert "selected" in text
+    assert "collapsed" in text
+    assert '~"Search"' in text  # empty field shows its placeholder for identity
+
+
+# ---------------------------------------------------------------------------
+# Chromium/Electron a11y force-enable (AXEnhancedUserInterface)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAx:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def AXUIElementSetAttributeValue(self, el, attr, val):  # noqa: N802
+        self.calls.append((attr, val))
+        return 0
+
+
+class _FakeAcc:
+    def __init__(self, root_role: str) -> None:
+        self._role = root_role
+
+    def _attr(self, node, name):
+        if name == "AXRole":
+            return self._role
+        if name == "AXChildren":
+            return ()
+        return None
+
+
+def test_web_a11y_enabled_on_chromium_like_app(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    monkeypatch.setattr(observe.time, "sleep", lambda _s: None)
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1234)
+    assert ("AXManualAccessibility", True) in ax.calls
+    assert ("AXEnhancedUserInterface", True) in ax.calls
+    assert 1234 in observe._WEB_A11Y_ENABLED  # cached: won't re-set next snapshot
+
+
+def test_web_a11y_skipped_on_native_app_but_marked_handled(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWindow"), pid=999)
+    assert ax.calls == []  # no web area -> nothing set
+    assert 999 in observe._WEB_A11Y_ENABLED  # but never probed again
+
+
+def test_web_a11y_opt_out(monkeypatch) -> None:
+    observe._WEB_A11Y_ENABLED.clear()
+    monkeypatch.setenv("COMPUTERUSE_NO_WEB_A11Y", "1")
+    ax = _FakeAx()
+    observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1)
+    assert ax.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Stable-id anchors (AXIdentifier / AutomationId / accessible-id)
+# ---------------------------------------------------------------------------
+
+
+def test_stable_id_survives_title_and_bounds_drift() -> None:
+    """A button whose label AND position both change still re-resolves via its
+    stable_id — the case title/path/bounds anchoring fails on (dynamic UIs)."""
+    before = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Submit", at=(10.0, 10.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ])
+    after = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Sending…", at=(250.0, 200.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ])
+    snap_before, snap_after = snap_of(before), snap_of(after)
+    anchor = by_title(snap_before, "Submit")
+    match, reason = observe._match_anchor(anchor, snap_after)
+    assert match is not None and reason == ""
+    assert match.title == "Sending…" and match.stable_id == "submit-btn"
+
+
+def test_stable_id_duplicates_disambiguate_by_proximity() -> None:
+    tree = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0), children=[
+        ax("AXButton", title="Row", at=(10.0, 10.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="row"),
+        ax("AXButton", title="Row", at=(10.0, 300.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="row"),
+    ])
+    snap = snap_of(tree)
+    top = [el for el in snap.elements if el.bounds.y < 100][0]
+    match, _ = observe._match_anchor(top, snap)
+    assert match is not None and match.bounds.y == top.bounds.y  # nearest wins
+
+
+def test_no_stable_id_falls_back_to_positional_ladder() -> None:
+    # unchanged behaviour when the app assigns no ids
+    snap1 = snap_of(save_window())
+    snap2 = snap_of(save_window(save_at=(205.0, 105.0)))
+    anchor = by_title(snap1, "Save")
+    match, reason = observe._match_anchor(anchor, snap2)
+    assert match is not None and match.title == "Save" and reason == ""
+
+
+# ---------------------------------------------------------------------------
+# Snapshot diffing (the non-accumulation token win)
+# ---------------------------------------------------------------------------
+
+
+def _btn(title, at, sid=None):
+    node = ax("AXButton", title=title, at=at, size=(80.0, 30.0), actions=("AXPress",))
+    if sid:
+        node["stable_id"] = sid
+    return node
+
+
+def test_diff_add_remove_change() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXTextField", title="Name", value="", at=(10.0, 50.0), size=(200.0, 30.0)),
+        _btn("Cancel", (10.0, 90.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXTextField", title="Name", value="Alice", at=(10.0, 50.0), size=(200.0, 30.0)),
+        _btn("Submit", (10.0, 90.0)),
+    ])
+    d = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert {e.title for e in d.added} == {"Submit"}
+    assert {e.title for e in d.removed} == {"Cancel"}
+    assert len(d.changed) == 1
+    _oel, nel, ch = d.changed[0]
+    assert nel.title == "Name" and ch["value"] == ("", "Alice")
+    assert not d.empty
+
+
+def test_diff_no_change_is_empty() -> None:
+    d = observe.diff_snapshots(snap_of(save_window()), snap_of(save_window()))
+    assert d.empty
+    assert "(no change)" in observe.render_diff(d)
+
+
+def test_diff_stable_id_move_is_change_not_add_remove() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(500.0, 500.0),
+             children=[_btn("Go", (10.0, 10.0), sid="go")])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(500.0, 500.0),
+             children=[_btn("Going…", (300.0, 400.0), sid="go")])
+    d = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert not d.added and not d.removed  # same stable_id -> matched
+    assert len(d.changed) == 1
+    _o, _n, ch = d.changed[0]
+    assert "title" in ch and "bounds" in ch
+
+
+def test_render_diff_shows_all_three_sections() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Keep", (10.0, 10.0)),
+        _btn("Old", (10.0, 50.0)),
+        ax("AXTextField", title="F", value="a", at=(10.0, 90.0), size=(200.0, 30.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Keep", (10.0, 10.0)),
+        _btn("New", (10.0, 50.0)),
+        ax("AXTextField", title="F", value="b", at=(10.0, 90.0), size=(200.0, 30.0)),
+    ])
+    text = observe.render_diff(observe.diff_snapshots(snap_of(old), snap_of(new)))
+    assert "+1 -1 ~1" in text
+    assert "New" in text and "gone" in text and "→" in text
+
+
+# ---------------------------------------------------------------------------
+# Self-correcting stale-ref candidates
+# ---------------------------------------------------------------------------
+
+
+def test_stale_ref_candidates_rank_partial_title_near_misses() -> None:
+    live = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Submit form", (10.0, 10.0)),
+        _btn("Cancel", (10.0, 50.0)),
+    ]))
+    anchor = Element(ref="e9", role="AXButton", title="Submit", value=None,
+                     bounds=Bounds(0, 10, 10, 80, 30), snapshot_id="old",
+                     path=("AXWindow", "AXButton"))
+    cands = observe.stale_ref_candidates(anchor, live)
+    assert cands and cands[0]["title"] == "Submit form"  # partial overlap ranked first
+    assert all(set(c) == {"ref", "role", "title", "score"} for c in cands)
+
+
+def test_stale_ref_error_carries_candidates() -> None:
+    old = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0),
+                     children=[_btn("Submit", (10.0, 10.0))]))
+    # renamed + reparented under a toolbar → genuinely stale (path & title differ)
+    new = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXToolbar", title="Bar", at=(0.0, 0.0), size=(400.0, 40.0),
+           children=[_btn("Submit form", (10.0, 10.0))]),
+    ]))
+    anchor = by_title(old, "Submit")
+    with pytest.raises(ComputerUseError) as ei:
+        observe.resolve_ref(old, anchor.ref, live=new)
+    assert ei.value.code is ErrorCode.STALE_REF
+    cands = ei.value.detail["candidates"]
+    assert any(c["title"] == "Submit form" for c in cands)
+
+
+# ---------------------------------------------------------------------------
+# Interactive view (render mode) and budget truncation
+# ---------------------------------------------------------------------------
+
+
+def _interactive_window() -> dict:
+    """A window mixing actionable controls, static text, an untitled wrapper, a
+    titled group, a plain (selectable) row and a layout row holding a button."""
+    return ax(
+        "AXWindow", title="Editor", at=(100.0, 50.0), size=(1000.0, 700.0),
+        children=[
+            ax("AXToolbar", at=(100.0, 50.0), size=(1000.0, 40.0), children=[
+                button("Save", (110.0, 55.0)),
+                ax("AXStaticText", value="Draft", at=(200.0, 55.0), size=(60.0, 20.0)),
+            ]),
+            ax("AXGroup", at=(100.0, 100.0), size=(600.0, 500.0), children=[  # untitled: skipped
+                ax("AXStaticText", value="Welcome back, Alice", at=(110.0, 110.0), size=(300.0, 20.0)),
+                ax("AXStaticText", value="3 unread", at=(110.0, 140.0), size=(300.0, 20.0)),
+                ax("AXTextField", title="Name", value="Alice", at=(110.0, 170.0), size=(300.0, 30.0)),
+                ax("AXCheckBox", title="Remember", at=(110.0, 210.0), size=(120.0, 20.0),
+                   actions=("AXPress",), checked=False),
+            ]),
+            ax("AXGroup", title="Sidebar", at=(720.0, 100.0), size=(250.0, 500.0), children=[
+                ax("AXStaticText", value="Recent", at=(725.0, 105.0), size=(100.0, 20.0)),
+                ax("AXRow", at=(725.0, 130.0), size=(240.0, 20.0), children=[  # plain row: a target
+                    ax("AXCell", value="Report Q3", at=(725.0, 130.0), size=(240.0, 20.0)),
+                ]),
+                ax("AXRow", at=(725.0, 160.0), size=(240.0, 20.0), children=[  # layout row: folded
+                    button("Open", (730.0, 160.0)),
+                ]),
+            ]),
+            ax("AXStaticText", value="Status: saved", at=(110.0, 650.0), size=(300.0, 20.0)),
+        ],
+    )
+
+
+def test_interactive_view_keeps_actionables_with_identical_refs() -> None:
+    snap = snap_of(_interactive_window())
+    view = observe.interactive_view(snap)
+    kept = {el.title or el.value: el for el in view}
+    # every actionable element survives, as the SAME object the full snapshot issued
+    for title in ("Save", "Name", "Remember", "Open"):
+        assert title in kept, title
+        assert snap.element(kept[title].ref) is kept[title]
+    # a plain row is a selectable target; a row that merely holds a button is layout
+    assert len([el for el in view if el.role == "AXRow"]) == 1
+    assert not any(el.role == "AXCell" for el in view)
+    # structure: the root, the toolbar (structural role) and the titled group stay;
+    # the untitled wrapper group and every static text go
+    assert {el.role for el in view if el.title == "Sidebar"} == {"AXGroup"}
+    assert any(el.role == "AXToolbar" for el in view)
+    assert not any(el.role == "AXStaticText" for el in view)
+    assert not any(el.role == "AXGroup" and not el.title for el in view)
+    assert [el.ref for el in view] == sorted((el.ref for el in view), key=lambda r: int(r[1:]))
+
+
+def test_interactive_render_folds_static_text_per_container() -> None:
+    snap = snap_of(_interactive_window())
+    text = render_text(snap, mode="interactive")
+    lines = text.splitlines()
+    assert lines[0].endswith("(window) interactive")
+    # one folded text line per kept container, in tree order
+    assert '    text: "Welcome back, Alice | 3 unread | Status: saved"' in lines
+    assert '      text: "Draft"' in lines  # under the toolbar
+    assert '        text: "Report Q3"' in lines  # under the plain row
+    assert '      text: "Recent"' in lines  # under Sidebar
+    assert not any('"Draft"' in ln and "statictext" in ln for ln in lines)
+    # the click flag is implied for buttons/checkboxes; other flags remain
+    save = next(ln for ln in lines if '"Save"' in ln)
+    assert "(click" not in save
+    assert any('"Remember" (unchecked)' in ln for ln in lines)
+    assert any('"Name" ="Alice" (edit)' in ln for ln in lines)
+    # the footer says what was folded, so the agent knows how to see it
+    hidden = len(snap.elements) - len(observe.interactive_view(snap))
+    assert lines[-1] == f"… {hidden} static elements folded; mode='full' or find lists them"
+    # the full view still prints the flag and the static lines
+    full = render_text(snap)
+    assert 'button "Save" (click)' in full and 'statictext ="Draft"' in full
+
+
+def test_interactive_layout_row_children_reparent_under_nearest_kept() -> None:
+    snap = snap_of(_interactive_window())
+    lines = render_text(snap, mode="interactive").splitlines()
+    sidebar = next(i for i, ln in enumerate(lines) if '"Sidebar"' in ln)
+    open_btn = next(i for i, ln in enumerate(lines) if '"Open"' in ln)
+    assert open_btn > sidebar
+
+    def indent(ln: str) -> int:
+        return len(ln) - len(ln.lstrip(" "))
+
+    # "Open" sits exactly one level below Sidebar: its layout row was folded away
+    assert indent(lines[open_btn]) == indent(lines[sidebar]) + 2
+    # while the plain row keeps its own line, one level below Sidebar as well
+    row = next(i for i, ln in enumerate(lines) if ln.strip().split(" ")[1:2] == ["row"])
+    assert indent(lines[row]) == indent(lines[sidebar]) + 2
+
+
+def test_interactive_omits_bounds_unless_requested() -> None:
+    snap = snap_of(_interactive_window())
+    assert " @1:" not in render_text(snap, mode="interactive")  # no geometry, not even the root
+    with_bounds = render_text(snap, mode="interactive", include_bounds=True)
+    element_lines = [ln for ln in with_bounds.splitlines()[1:]
+                     if ln.strip().startswith("e") and "text:" not in ln]
+    assert element_lines and all(" @1:" in ln for ln in element_lines)
+    # full mode keeps geometry on roots only by default, everywhere on request
+    assert render_text(snap).count(" @1:") == 1
+    assert render_text(snap, include_bounds=True).count(" @1:") == len(snap.elements)
+
+
+def test_interactive_elisions_roll_up_to_the_kept_container() -> None:
+    # typical_app_window's untitled sidebar list is capped (16 rows elided); the
+    # list itself is folded, so its marker surfaces on the window it folds into.
+    snap = snap_of(typical_app_window())
+    text = render_text(snap, mode="interactive")
+    assert f"… {40 - MAX_CHILDREN} more" in text
+    assert not any(ln.strip().startswith("e") and " list" in ln for ln in text.splitlines())
+
+
+def test_budget_truncates_deterministically_and_reports_omissions() -> None:
+    snap = snap_of(_interactive_window())
+    full = render_text(snap)
+    total_lines = len(full.splitlines())
+    cut = render_text(snap, budget=30)
+    assert cut == render_text(snap, budget=30), "same snapshot, same budget, same text"
+    lines = cut.splitlines()
+    assert lines[0] == full.splitlines()[0], "the header always survives"
+    assert lines[-1].startswith("… truncated at ~30 tokens: ")
+    omitted = int(lines[-1].split(": ")[1].split(" ")[0])
+    assert omitted == total_lines - len(lines) + 1  # every dropped line here is an element line
+    assert len("\n".join(lines[:-1])) <= 30 * 4
+    assert render_text(snap, budget=10_000) == full, "a roomy budget changes nothing"
+    with pytest.raises(ValueError):
+        render_text(snap, budget=0)
+    assert estimate_tokens(snap, mode="interactive") < estimate_tokens(snap)
+
+
+def test_render_text_rejects_unknown_mode() -> None:
+    snap = snap_of(save_window())
+    with pytest.raises(ValueError):
+        render_text(snap, mode="compact")
+    with pytest.raises(ValueError):
+        observe.render_diff(observe.diff_snapshots(snap, snap), mode="compact")
+
+
+def test_interactive_diff_folds_static_changes_into_one_text_line() -> None:
+    old = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        ax("AXStaticText", title="status", value="Status: saving", at=(10.0, 50.0), size=(200.0, 20.0)),
+        ax("AXStaticText", title="tip", value="Tip of the day", at=(10.0, 80.0), size=(200.0, 20.0)),
+    ])
+    new = ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        _btn("Save", (10.0, 10.0)),
+        _btn("Undo", (100.0, 10.0)),
+        ax("AXStaticText", title="status", value="Status: saved", at=(10.0, 50.0), size=(200.0, 20.0)),
+        ax("AXStaticText", title="banner", value="New!", at=(10.0, 80.0), size=(200.0, 20.0)),
+    ])
+    diff = observe.diff_snapshots(snap_of(old), snap_of(new))
+    assert len(diff.added) == 2 and len(diff.removed) == 1 and len(diff.changed) == 1
+    text = observe.render_diff(diff, mode="interactive")
+    lines = text.splitlines()
+    assert lines[0].endswith("+2 -1 ~1")  # header counts describe the whole diff
+    assert any(ln.startswith("  + ") and '"Undo"' in ln for ln in lines)
+    # the static label change is kept, folded into a single text line
+    assert sum(1 for ln in lines if ln.startswith("  ~ text: ")) == 1
+    assert "Status: saving→Status: saved" in text
+    # static elements that appeared or vanished are only counted
+    assert "(1 added, 1 removed static elements folded)" in text
+    assert "Tip of the day" not in text and "New!" not in text
+    # the full diff still lists everything (removed elements print title, not value)
+    full = observe.render_diff(diff)
+    assert '"tip" (gone)' in full and "New!" in full and '"Undo" (click)' in full
+
+
+def test_interactive_diff_empty_and_budget() -> None:
+    snap = snap_of(save_window())
+    d = observe.diff_snapshots(snap, snap_of(save_window()))
+    assert "(no change)" in observe.render_diff(d, mode="interactive")
+    big_old = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0), children=[]))
+    big_new = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 400.0),
+                         children=[_btn(f"B{i}", (10.0, 10.0 + 30.0 * i)) for i in range(12)]))
+    cut = observe.render_diff(observe.diff_snapshots(big_old, big_new), budget=20)
+    assert cut.splitlines()[-1].startswith("… truncated at ~20 tokens")

@@ -67,6 +67,14 @@ class Driver(Protocol):
         """Reveal ``element`` via the accessibility API without moving the pointer."""
         ...
 
+    def set_value(self, element: Element, value: str) -> bool:
+        """Set ``element``'s text/value directly through the accessibility API —
+        one deterministic op, no keystroke simulation and no focus dance (macOS
+        `AXValue` set / UIA `ValuePattern.SetValue` / AT-SPI `EditableText`).
+        True on success; False → caller falls back to focus + type. Secure fields
+        are refused (return False)."""
+        ...
+
     # -- act (synthesized input) -------------------------------------------
     def click(
         self,
@@ -100,6 +108,13 @@ class Driver(Protocol):
         """A full-display capture (a `capture.Screenshot`-shaped object)."""
         ...
 
+    def main_display_id(self) -> int:
+        """The display id a raw x/y target defaults to when the caller gives
+        none. It must be the id this backend stamps on its snapshot geometry
+        and screenshots (0 on single-display backends), so an un-qualified
+        point lands on the same display the model just observed."""
+        ...
+
     def zoom_region(self, region: Bounds) -> bytes:
         """A native-resolution PNG crop of ``region``."""
         ...
@@ -120,6 +135,19 @@ class Driver(Protocol):
     def activate_app(self, identifier: str) -> str: ...
 
     def windows(self) -> list[dict]: ...
+
+    def window_owner(self, window_id: int) -> str:
+        """The app id (the permission grant key) owning ``window_id``.
+
+        Raises `ErrorCode.APP_NOT_FOUND` when no such window exists, and
+        `ErrorCode.UNSUPPORTED` where windows are not addressable by an integer
+        id (the browser's windows are tabs: use ``app focus <target id>``)."""
+        ...
+
+    def raise_window(self, window_id: int) -> None:
+        """Bring ``window_id`` frontmost. Same error contract as `window_owner`;
+        never returns normally for a no-op (the Runtime reports success)."""
+        ...
 
     def read_clipboard(self) -> str | None: ...
 

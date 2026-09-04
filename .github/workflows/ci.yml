@@ -5,6 +5,18 @@ on:
     branches: [main, computeruse-mvp]
   pull_request:
 
+# One run per branch: a new push cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Every job runs the FULL hermetic suite (`pytest -q -rs`): tests that need a
+# platform, a TCC grant, a display, or a CDP endpoint self-skip and print why.
+# Each job then adds the live proof only that runner can give. docs/ci.md
+# explains what each job proves and how to reproduce it locally.
 jobs:
   macos:
     name: macOS · full suite
@@ -15,12 +27,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: pip install -e ".[dev]"
-      - name: pytest (live/TCC-gated tests auto-skip on CI)
-        run: pytest -q
+      - run: pip install -e ".[dev,browser]"
+      # The TCC-gated live tests run when the runner image holds the
+      # Accessibility / Screen Recording grants and skip when it does not; the
+      # ungranted-path tests do the reverse. -rs prints which way it went.
+      - name: pytest (full suite; TCC-gated tests skip in either direction depending on the runner's grants)
+        run: pytest -q -rs -p no:cacheprovider
 
   windows:
-    name: Windows · cross-platform structure
+    name: Windows · full suite + live UIA
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +44,9 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       # pyobjc is gated to sys_platform == 'darwin', so this installs cleanly on
-      # Windows; the [windows] extra pulls the UIA deps for the live backend.
-      - run: pip install -e ".[dev,windows]"
+      # Windows; the [windows] extra pulls the UIA deps for the live backend and
+      # [browser] adds websocket-client so the browser modules import.
+      - run: pip install -e ".[dev,windows,browser]"
       - name: import + driver selection smoke
         run: >
           python -c "import computeruse;
@@ -38,20 +54,204 @@ jobs:
           d = get_driver();
           print('platform:', current_platform(), '| driver:', d.name);
           assert d.name == 'windows', d.name"
-      # The shared, platform-free core (schema, pruning engine, ref lifecycle)
-      # and the driver seam must pass on Windows too — that's the whole point of
-      # the Driver abstraction.
-      - name: platform-free core + driver seam
-        run: pytest tests/test_drivers.py tests/test_observe.py -q
-      # The MCP server (Runtime + 12-tool surface) must import and build on
-      # Windows — an agent has to be able to run `computeruse mcp` there.
+      # The whole hermetic suite must pass on Windows: the platform-free core
+      # (schema, pruning engine, ref lifecycle, safety, Runtime, MCP surface,
+      # agent loop, adapters, benchmark harness) and the driver seam. macOS-only
+      # modules (the CGEvent executor, the overlay) skip at collection.
+      - name: pytest (full hermetic suite)
+        run: pytest -q -rs -p no:cacheprovider
+      # The MCP server (Runtime + the full 16-tool surface; console/network are
+      # added only on the browser backend) must import and build on Windows: an
+      # agent has to be able to run `computeruse mcp` there.
       - name: MCP server imports + builds on Windows
         run: >
           python -c "import computeruse.server as s;
           srv = s.build_server();
           assert srv is not None and srv.name == 'computeruse', srv;
           print('MCP server built on Windows:', srv.name)"
-      # The live Windows backend: UIA snapshot of Notepad through the SHARED
-      # pruning engine, on a real windows-latest runner.
+      # The live Windows backend on a real windows-latest runner: UIA snapshot of
+      # Notepad through the SHARED pruning engine, a11y press + SendInput typing,
+      # a ctrl+a key chord, and the gated Runtime end to end (test_windows_live.py).
       - name: windows backend (live UIA)
-        run: pytest tests/test_windows_live.py -q -s
+        run: pytest tests/test_windows_live.py -q -rs -s -p no:cacheprovider
+
+  browser:
+    name: Browser · CDP backend (headless Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      # The [browser] extra is just websocket-client; CDP discovery uses stdlib.
+      - run: pip install -e ".[dev,browser]"
+      # Hermetic first: the transport seam means the full observe + act mapping,
+      # the adapters, the agent loop, and the head-to-head harness are asserted
+      # with a scripted fake transport and NO browser.
+      - name: browser stack (hermetic, fake transport)
+        run: >
+          pytest tests/test_browser.py tests/test_adapters.py tests/test_agent.py
+          tests/test_providers.py tests/test_h2h.py tests/test_arena.py -q -rs -p no:cacheprovider
+      # Then the real thing: a11y-first observe->act->verify against headless
+      # Chrome. This is the payoff of a coordinate-free backend: the whole loop
+      # runs in a container with no display, no window manager, no pixels.
+      - name: launch headless Chrome
+        run: |
+          CHROME=$(command -v google-chrome || command -v chromium-browser || command -v chromium)
+          echo "using $CHROME"
+          # --disable-dev-shm-usage: the runner's /dev/shm is tiny and headless
+          # Chrome crashes on startup without it (the classic CI flake).
+          "$CHROME" --headless=new --remote-debugging-port=9222 \
+            --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --no-first-run --no-default-browser-check --window-size=1280,800 about:blank >/tmp/chrome.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:9222/json/version >/dev/null 2>&1 && up=1 && break
+            sleep 0.5
+          done
+          if [ -z "${up:-}" ]; then
+            echo "::error::headless Chrome did not expose CDP on :9222"; cat /tmp/chrome.log; exit 1
+          fi
+          curl -s http://127.0.0.1:9222/json/version
+      - name: browser backend (live headless Chromium)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        # The live paths: observe->act->verify, iframe content stitched from a child
+        # frame (getFullAXTree per frame + owner-offset geometry), console capture,
+        # and network outcomes (status codes + failures).
+        run: pytest tests/test_browser.py -k live -q -rs -p no:cacheprovider
+      - name: cu-arena (a11y-vs-vision observation cost, live number)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        # Prints the honest per-observation token comparison to the CI log (-s).
+        run: pytest tests/test_arena.py -k live -q -rs -s -p no:cacheprovider
+      # Provider executor adapters: an Anthropic-style pixel click on a real page
+      # snaps to the element's accessibility ref and executes without coordinates.
+      - name: provider adapters (live)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: pytest tests/test_adapters.py -k live -q -rs -p no:cacheprovider
+      # Reference agent loop: a scripted planner observes, acts by ref, verifies,
+      # and stops, through the same gated Runtime the MCP server uses.
+      - name: agent loop (live, scripted planner)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: pytest tests/test_agent.py -k live -q -rs -p no:cacheprovider
+      # Head-to-head harness: scripted planner solves tasks in refs mode and in
+      # pixels mode, and misclicks are counted by the instrumented pages.
+      - name: cu-arena head-to-head harness (live, scripted planner)
+        env:
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: pytest tests/test_h2h.py -k live -q -rs -p no:cacheprovider
+      # Every snapshot view of the bound tab against one screenshot, printed.
+      - name: bench desktop on the browser driver (printed)
+        env:
+          COMPUTERUSE_DRIVER: browser
+          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: computeruse bench desktop --rounds 2
+
+  linux:
+    name: Linux · full suite + live AT-SPI2 under a window manager
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The AT-SPI2 stack: the a11y bus (at-spi2-core), the GI typelibs the
+      # driver imports (Atspi, Gtk3), apt's PyGObject (python3-gi), a virtual X
+      # server + D-Bus session for the live run, a real window manager (openbox)
+      # so focus and pointer semantics resemble a desktop, xdotool/x11-utils for
+      # the pointer checks, and xclip for the clipboard.
+      - name: install AT-SPI2 / GTK / X11 system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
+            xvfb dbus dbus-x11 openbox xdotool x11-utils xclip
+      # No setup-python here on purpose: apt's python3-gi is built for the
+      # distro interpreter, and setup-python's cannot import it. So the venv is
+      # created from the runner's /usr/bin/python3 with --system-site-packages;
+      # gi/Atspi resolve from apt, everything else (computeruse, pytest,
+      # python-xlib, pillow, websocket-client) from pip. The [linux] extra is
+      # skipped so pip never tries to build PyGObject from source.
+      - name: venv with system gi
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev,browser]" python-xlib
+      - name: import + driver selection smoke
+        run: >
+          .venv/bin/python -c "import computeruse;
+          from computeruse.drivers import get_driver, current_platform;
+          d = get_driver();
+          print('platform:', current_platform(), '| driver:', d.name);
+          assert d.name == 'linux', d.name"
+      # The whole hermetic suite on Linux, outside any X session: the
+      # platform-free core, the driver seam, the bus-free synthetic AT-SPI and
+      # XTEST tests, the agent loop, adapters, and benchmark harness. Display-
+      # and bus-dependent tests skip here and run in the live step below.
+      - name: pytest (full hermetic suite)
+        run: .venv/bin/pytest -q -rs -p no:cacheprovider
+      # The MCP server (Runtime + the full 16-tool surface; console/network are
+      # added only on the browser backend) must import and build on Linux: an
+      # agent has to be able to run `computeruse mcp` there.
+      - name: MCP server imports + builds on Linux
+        run: >
+          .venv/bin/python -c "import computeruse.server as s;
+          srv = s.build_server();
+          assert srv is not None and srv.name == 'computeruse', srv;
+          print('MCP server built on Linux:', srv.name)"
+      # The live Linux backend on a real ubuntu-latest runner. Headless AT-SPI
+      # needs three buses brought up in order: Xvfb (X server), dbus-run-session
+      # (a session bus), and org.a11y.Bus (the a11y bus); at-spi-bus-launcher
+      # lives at /usr/libexec on ubuntu-24.04 and is started explicitly with
+      # --launch-immediately so the registry is up before the GTK app.
+      # openbox gives the display an EWMH window manager, so real focus and an
+      # active window exist: that is what turns tests/test_linux_desktop_live.py
+      # (coordinate input with the pointer parked off-origin, the act-time
+      # hit-test, apps/windows/clipboard, the gated Runtime) from skipped into
+      # run. Xvfb without a window manager hid three pointer bugs
+      # (docs/box-testbed.md). GTK_MODULES=gail:atk-bridge + NO_AT_BRIDGE=0
+      # force GTK3's atk-bridge on so the app publishes its tree.
+      - name: linux backend (live AT-SPI2 + XTEST under openbox)
+        env:
+          GTK_MODULES: gail:atk-bridge
+          NO_AT_BRIDGE: "0"
+        # No manual pkill cleanup: the tests terminate their own GTK apps, and a
+        # `pkill -f cuatestapp` self-matches the wrapping shell's command line and
+        # SIGKILLs it (exit 137). The backgrounded a11y bus and window manager are
+        # reaped as orphans by the runner. `timeout` (as the block's last command)
+        # sets the exit code.
+        run: |
+          xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
+            ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
+            ( openbox >/dev/null 2>&1 & )
+            sleep 2
+            timeout -k 5 300 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py -q -rs -p no:cacheprovider
+          '
+
+  package:
+    name: Package · wheel + sdist build, uvx smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # hatchling builds both artifacts; the sdist excludes the brand assets,
+      # the hero GIF, and the Box scripts (pyproject [tool.hatch.build.targets.sdist]).
+      - name: uv build
+        run: |
+          uv build
+          ls -la dist
+          if tar tzf dist/*.tar.gz | grep -E 'docs/assets/|hero-demo.gif'; then
+            echo "::error::sdist contains media that should be excluded"; exit 1
+          fi
+      # The wheel installs and the console script runs from an isolated
+      # environment, the way `uvx computeruse mcp` will once it is on PyPI.
+      - name: uvx from the built wheel
+        run: uvx --from "$(ls dist/*.whl)" computeruse --help
+      - name: import the wheel in a fresh venv
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install --quiet "$(ls dist/*.whl)"
+          /tmp/wheel-venv/bin/python -c "import computeruse, computeruse.server, computeruse.agent, computeruse.adapters, computeruse.h2h; print('wheel imports ok', computeruse.__version__ if hasattr(computeruse, '__version__') else '')"

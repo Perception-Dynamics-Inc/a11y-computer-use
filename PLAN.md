@@ -1,5 +1,7 @@
 # computerUse — Project Plan
 
+> **Status (2026-09):** this plan is a dated design record. The front-matter below (v0.2, 2026-07-02) and the section 9 outcomes (through 2026-07-13) predate the Windows observe/act loop (later on 2026-07-13), the Linux/AT-SPI2 backend (2026-08-23) and the browser/CDP backend (2026-08-29), and have not been revised for them. For the current state see [README.md](./README.md) and [CHANGELOG.md](./CHANGELOG.md); for the newer backends see [docs/windows-port.md](./docs/windows-port.md), [docs/linux-port.md](./docs/linux-port.md) and [docs/browser-backend.md](./docs/browser-backend.md). Where this file says "~12 tools" (section 8), the server registers 16, plus `console` and `network` on the browser backend; where it calls Windows a "mapped skeleton" (section 6), `drivers/windows.py` now implements snapshot, press, scroll-into-view, set_value, typing and key chords, with its remaining 15 methods still raising `NotImplementedError`.
+
 **Status:** v0.2 — revised after adversarial review (3 independent critiques) · **Date:** 2026-07-02
 **Vision (from README):** an open-source, **embeddable computer-use SDK for AI-platform builders** on macOS & Windows — integrate native desktop control into your product instead of building your own. The host app owns the identity (signing, entitlements, OS permissions); computerUse is the layer, not the end-user product.
 

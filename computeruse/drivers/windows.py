@@ -17,7 +17,9 @@ from collections.abc import Callable
 
 from computeruse.schema import (
     Bounds,
+    ComputerUseError,
     Element,
+    ErrorCode,
     MouseButton,
     Point,
     Scope,
@@ -36,6 +38,37 @@ _TODO = (
 
 def _todo(api: str):
     return NotImplementedError(f"{_TODO}\nThis method maps to: {api}")
+
+
+def _unsupported_window(op: str, api: str) -> ComputerUseError:
+    """Structured (never a crash through MCP) for the window verbs the Windows
+    backend has not implemented; names the native API that will back it."""
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{op} is not implemented on the Windows backend yet",
+        detail={"hint": f"maps to {api}; use `app focus <name>` meanwhile"},
+    )
+
+
+def _focused_is_password() -> bool:
+    """Whether the UIA focused control reports ``IsPassword``. False when the
+    uiautomation package or a focused control is unavailable (no signal). The
+    probe is unit-tested with a fake module and not yet live-verified on
+    Windows."""
+    try:
+        import uiautomation as auto
+    except ImportError:
+        return False
+    try:
+        focused = auto.GetFocusedControl()
+    except Exception:
+        return False
+    if focused is None:
+        return False
+    try:
+        return bool(focused.IsPassword)
+    except Exception:
+        return False
 
 
 class WindowsDriver:
@@ -119,6 +152,24 @@ class WindowsDriver:
         except Exception:
             return False
 
+    def set_value(self, element: Element, value: str) -> bool:
+        from computeruse import observe
+        from computeruse.drivers import _uia
+
+        if element.secure:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        pattern = _uia._safe(lambda: handle.GetValuePattern())  # UIA ValuePattern
+        if pattern is None:
+            return False
+        try:
+            pattern.SetValue(value)
+            return True
+        except Exception:
+            return False
+
     # -- act (SendInput) ----------------------------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,
@@ -140,6 +191,12 @@ class WindowsDriver:
         # pre_check hook is applied by the Runtime's gate before this is called.
         if dry_run or not text:
             return None
+        if _focused_is_password():
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "the focused control is a password field; secrets are typed by the human",
+                detail={"api": "IUIAutomationElement.IsPassword (GetFocusedControl)"},
+            )
         from computeruse.drivers import _win_input
 
         _win_input.type_unicode(text)
@@ -162,6 +219,10 @@ class WindowsDriver:
     def screenshot(self, display_id: int | None = None) -> object:
         raise _todo("DXGI Desktop Duplication (BitBlt/PrintWindow fallback)")
 
+    def main_display_id(self) -> int:
+        # One display, id 0: the primary monitor `_uia.primary_geometry()` reports.
+        return 0
+
     def zoom_region(self, region: Bounds) -> bytes:
         raise _todo("crop the DXGI frame")
 
@@ -183,6 +244,12 @@ class WindowsDriver:
 
     def windows(self) -> list[dict]:
         raise _todo("EnumWindows + GetWindowText/Rect")
+
+    def window_owner(self, window_id: int) -> str:
+        raise _unsupported_window("window_owner", "GetWindowThreadProcessId + process image name")
+
+    def raise_window(self, window_id: int) -> None:
+        raise _unsupported_window("raise_window", "SetForegroundWindow")
 
     def read_clipboard(self) -> str | None:
         raise _todo("OpenClipboard/GetClipboardData(CF_UNICODETEXT)")

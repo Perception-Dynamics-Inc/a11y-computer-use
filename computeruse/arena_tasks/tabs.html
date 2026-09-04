@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Account</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid #ccc; }
+.tabs button { border-radius: 4px 4px 0 0; min-width: 110px; margin-bottom: -1px; }
+.tabs button[aria-selected=true] { background: #fff; border-bottom-color: #fff; font-weight: 600; }
+.panel { border: 1px solid #ccc; border-top: 0; padding: 16px; max-width: 640px; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>Account settings</h1>
+<div class="tabs" role="tablist">
+  <button role="tab" id="tab-overview" aria-selected="true" aria-controls="panel-overview">Overview</button>
+  <button role="tab" id="tab-billing" aria-selected="false" aria-controls="panel-billing">Billing</button>
+  <button role="tab" id="tab-security" aria-selected="false" aria-controls="panel-security">Security</button>
+</div>
+<div class="panel" id="panel-overview" role="tabpanel">
+  <p>Plan: Team. Seats: 12 of 20 used.</p>
+  <div class="row"><button id="edit-profile">Edit profile</button></div>
+</div>
+<div class="panel hidden" id="panel-billing" role="tabpanel">
+  <p>Last invoice: INV-2088, 640.00 EUR, paid.</p>
+  <div class="row"><button id="download-invoice">Download invoice</button> <button id="update-card">Update card</button></div>
+</div>
+<div class="panel hidden" id="panel-security" role="tabpanel">
+  <p>Two-factor authentication is on.</p>
+  <div class="row"><button id="rotate-keys">Rotate API keys</button></div>
+</div>
+<div class="status" id="status">Viewing Overview.</div>
+<script>
+['overview', 'billing', 'security'].forEach(function (name) {
+  document.getElementById('tab-' + name).addEventListener('click', function () {
+    ['overview', 'billing', 'security'].forEach(function (other) {
+      document.getElementById('tab-' + other).setAttribute('aria-selected', String(other === name));
+      document.getElementById('panel-' + other).classList.toggle('hidden', other !== name);
+    });
+    document.getElementById('status').textContent = 'Viewing ' + name.charAt(0).toUpperCase() + name.slice(1) + '.';
+  });
+});
+document.getElementById('download-invoice').addEventListener('click', function () {
+  document.getElementById('status').textContent = 'Invoice INV-2088 downloaded.';
+  document.title = 'INVOICE:downloaded';
+});
+['edit-profile', 'update-card', 'rotate-keys'].forEach(function (id) {
+  document.getElementById(id).addEventListener('click', function () {
+    document.getElementById('status').textContent = 'Pressed ' + this.textContent + '.';
+  });
+});
+</script>
+</body>
+</html>

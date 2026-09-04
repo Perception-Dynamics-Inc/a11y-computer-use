@@ -1,0 +1,154 @@
+name: App compatibility report
+description: An app whose accessibility tree is missing, partial or hostile. Say which roles showed up and whether the vision fallback worked.
+title: "[app-compat] <app> on <platform>"
+labels: ["app-compat"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template builds the per-app coverage table. Two signals matter most: what `desktop_snapshot` returned (a full snapshot with no clickable or editable element ends with a line beginning `note: no interactive elements were found`), and whether `screenshot` plus coordinate `click` got the task done when refs could not.
+
+        Values in a snapshot can contain private text. Redact before you paste. Secure fields never carry a value.
+
+  - type: input
+    id: app_name
+    attributes:
+      label: App name and version
+      placeholder: Telegram 11.2 / Slack 4.40 / LibreOffice Writer 24.8
+    validations:
+      required: true
+
+  - type: input
+    id: app_id
+    attributes:
+      label: App identifier
+      description: What the permission gate keys on. macOS bundle id, Windows process image name, Linux process comm name, or the CDP target (tab) id of the bound tab for the browser backend (the `id` field of the target in `http://127.0.0.1:9222/json`; paste the page URL as well).
+      placeholder: ru.keepcoder.Telegram / slack.exe / soffice.bin / <CDP target id> (https://app.example.com)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - macOS (AXUIElement)
+        - Windows (UI Automation)
+        - Linux X11 or XWayland (AT-SPI2)
+        - Linux native Wayland (AT-SPI2)
+        - Browser (Chromium over CDP)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: toolkit
+    attributes:
+      label: UI toolkit, if you know it
+      options:
+        - Native (AppKit, SwiftUI, Win32, WinUI, GTK, Qt)
+        - Chromium or Electron
+        - Custom-drawn (game engine, Flutter, a canvas-drawn client)
+        - Java (Swing, JavaFX)
+        - Not sure
+
+  - type: dropdown
+    id: scope_tried
+    attributes:
+      label: Snapshot scopes tried
+      description: The handoff note suggests `scope="app"` when `scope="window"` came back empty.
+      options:
+        - window only
+        - app only
+        - both window and app
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tree_state
+    attributes:
+      label: What did desktop_snapshot return?
+      options:
+        - Nothing actionable, the handoff note appeared (no clickable or editable element)
+        - A shell only (window and groups, no buttons or fields)
+        - Partial (some controls present, others missing)
+        - Controls present but untitled (no title, description or value, so refs are unusable)
+        - A full tree, but actions fail (press returns False, stale_ref, wrong bounds)
+        - The snapshot timed out or raised an error
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: role_coverage
+    attributes:
+      label: Role coverage
+      description: Tick each kind of element that appears in the snapshot with a usable title or value. Role names are the snapshot's lowercase forms.
+      options:
+        - label: Buttons, menu items and links (button, menuitem, link) with titles
+        - label: Text inputs (textfield, textarea, searchfield) marked edit
+        - label: Password fields as securetextfield
+        - label: Toggles (checkbox, radiobutton) with a checked or unchecked flag
+        - label: Lists, tables and outlines (list, table, outline, grid, row, cell)
+        - label: Tab groups and toolbars
+        - label: Web content (webarea) with children
+        - label: Static text and images with titles
+
+  - type: textarea
+    id: snapshot
+    attributes:
+      label: Snapshot excerpt
+      description: The header line `[snap-N] <app> (<scope>)` and enough element lines to show what is missing. Include the trailing note if there was one.
+      render: text
+    validations:
+      required: true
+
+  - type: dropdown
+    id: web_a11y
+    attributes:
+      label: Chromium or Electron apps only, did the accessibility force-enable help?
+      description: On macOS computerUse sets `AXManualAccessibility` and `AXEnhancedUserInterface` on the app element once per process; on Linux it sets `org.a11y.Status` on the session bus. Set `COMPUTERUSE_NO_WEB_A11Y=1` to compare with it off; `examples/web_a11y_demo.py` prints a before and after on macOS.
+      options:
+        - Not applicable, the app is not Chromium or Electron
+        - Yes, the tree populated after the first snapshot
+        - Partly, some web content appeared but not the whole page
+        - No, the tree stayed empty with the force-enable on
+        - Not compared
+
+  - type: dropdown
+    id: vision_fallback
+    attributes:
+      label: Did the vision fallback work?
+      description: The vision path is `screenshot` (downscaled to 1280 px on the long edge by default), `zoom` for a native-resolution crop, then `click` by x and y in display-qualified physical pixels. On macOS it needs the Screen Recording grant; on native Wayland it needs `grim`; on Windows `screenshot` and `zoom` are not implemented yet.
+      options:
+        - Yes, screenshot plus coordinate click completed the task
+        - Partly, the screenshot worked but coordinate clicks landed off target or the app ignored synthetic input
+        - No, screenshot failed (permission_denied_screen, unsupported, or NotImplementedError on Windows)
+        - Not tried
+    validations:
+      required: true
+
+  - type: textarea
+    id: actions
+    attributes:
+      label: Which actions worked and which did not
+      description: For example `click(ref)` through the a11y press versus a synthetic click with `COMPUTERUSE_AX_CLICKS=0`, `set_value`, `type`, `scroll` with `into_view=true`. Paste the error strings.
+
+  - type: textarea
+    id: native_inspector
+    attributes:
+      label: What a native accessibility inspector shows
+      description: Accessibility Inspector (Xcode) on macOS, Accessibility Insights on Windows, Accerciser on Linux, `chrome://accessibility` for Chromium. Does the native inspector see more than computerUse did? A screenshot of the inspector helps.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of computeruse doctor
+      render: text
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: The pastes above contain no passwords, tokens or private text.
+          required: true
+        - label: I searched the open and closed issues for this app.

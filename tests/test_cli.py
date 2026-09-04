@@ -8,14 +8,18 @@ the one live ungranted-path test is skipif-guarded in the reverse direction.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
 
 import pytest
 
-from computeruse import act, cli, doctor, observe, safety, server
-from tests.conftest import HAS_AX
+from computeruse import act, cli, doctor, drivers, observe, safety, server
+from computeruse.drivers import browser
+from computeruse.schema import ComputerUseError, Display, ErrorCode
+from tests.conftest import HAS_AX, build_synthetic_snapshot
+from tests.test_arena import _png
 from tests.test_doctor import TERMINAL_PS, _canned
 
 FRONT = "com.test.front"
@@ -36,14 +40,21 @@ def home(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 # --- doctor -------------------------------------------------------------------
 
+#: The first doctor check differs per platform: TCC's responsible app on macOS,
+#: the display session on Linux, the UI Automation import on Windows.
+_FIRST_CHECK = {"darwin": "responsible_app", "win32": "uiautomation_import"}.get(
+    sys.platform, "display_session"
+)
+
 
 def test_doctor_exits_zero_and_names_responsible_app(capsys, monkeypatch) -> None:
     chain = doctor.parent_chain(500, run_ps=_canned(TERMINAL_PS))
     monkeypatch.setattr(doctor, "parent_chain", lambda pid: chain)
     assert cli.main(["doctor"]) == 0
     out = capsys.readouterr().out
-    assert "responsible_app" in out
-    assert "Terminal" in out
+    assert _FIRST_CHECK in out
+    if sys.platform == "darwin":
+        assert "Terminal" in out
     assert "checks passed" in out
 
 
@@ -52,13 +63,31 @@ def test_doctor_subprocess_smoke() -> None:
         [sys.executable, "-m", "computeruse", "doctor"], capture_output=True, text=True
     )
     assert result.returncode == 0
-    assert "responsible_app" in result.stdout
+    assert _FIRST_CHECK in result.stdout
     assert "checks passed" in result.stdout
 
 
 # --- snapshot -------------------------------------------------------------------
 
 
+class _SnapshotDriver:
+    """Stand-in for `drivers.get_driver()`: the CLI goes through the Driver seam,
+    so these tests exercise the CLI on every platform, not the macOS observe path."""
+
+    def __init__(self, build, front=("com.apple.TextEdit", 42)) -> None:
+        self._build = build
+        self._front = front
+        self.seen: list[str] = []
+
+    def frontmost_app(self):
+        return self._front
+
+    def snapshot(self, scope, app):
+        self.seen.append(app)
+        return self._build()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="exercises the macOS observe trust probe")
 def test_snapshot_without_ax_exits_nonzero_with_structured_message(
     capsys, monkeypatch
 ) -> None:
@@ -69,6 +98,7 @@ def test_snapshot_without_ax_exits_nonzero_with_structured_message(
     assert "doctor" in err
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS TCC path")
 @pytest.mark.skipif(HAS_AX, reason="machine holds the AX grant; ungranted path unreachable")
 def test_snapshot_without_ax_live_permission_path(capsys) -> None:
     """The real (unmocked) ungranted call degrades to the same structured error."""
@@ -77,7 +107,7 @@ def test_snapshot_without_ax_live_permission_path(capsys) -> None:
 
 
 def test_snapshot_prints_pruned_tree(capsys, monkeypatch, snapshot_builder) -> None:
-    monkeypatch.setattr(observe, "snapshot", lambda scope, *, app: snapshot_builder())
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _SnapshotDriver(snapshot_builder))
     assert cli.main(["snapshot", "--app", "TextEdit"]) == 0
     out = capsys.readouterr().out
     assert "[snap-test-1]" in out
@@ -85,13 +115,10 @@ def test_snapshot_prints_pruned_tree(capsys, monkeypatch, snapshot_builder) -> N
 
 
 def test_snapshot_defaults_to_frontmost_app(capsys, monkeypatch, snapshot_builder) -> None:
-    seen: list[str] = []
-    monkeypatch.setattr(safety, "frontmost_app", lambda: ("com.apple.TextEdit", 42))
-    monkeypatch.setattr(
-        observe, "snapshot", lambda scope, *, app: seen.append(app) or snapshot_builder()
-    )
+    fake = _SnapshotDriver(snapshot_builder, front=("com.apple.TextEdit", 42))
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: fake)
     assert cli.main(["snapshot"]) == 0
-    assert seen == ["com.apple.TextEdit"]
+    assert fake.seen == ["com.apple.TextEdit"]
 
 
 # --- run-once -------------------------------------------------------------------
@@ -134,6 +161,8 @@ def test_run_once_granted_action_executes(capsys, home, fake_front, monkeypatch)
     )
     pressed: list[str] = []
     # the Runtime routes key through the driver, which delegates to act.key_chord
+    # on the macOS driver; select it explicitly so the seam is the same on every OS.
+    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
     monkeypatch.setattr(act, "key_chord", lambda chord, **kw: pressed.append(chord) or [])
     assert cli.main(["run-once", '{"tool": "key", "chord": "cmd+s"}']) == 0
     assert capsys.readouterr().out.strip() == "pressed cmd+s"
@@ -149,3 +178,75 @@ def test_mcp_subcommand_runs_server_over_stdio(monkeypatch) -> None:
     monkeypatch.setattr(server, "build_server", lambda **kw: fake)
     assert cli.main(["mcp"]) == 0
     assert transports == ["stdio"]
+
+
+# --- snapshot view flags ---------------------------------------------------------
+
+
+def test_snapshot_mode_budget_and_bounds_flags(capsys, monkeypatch, snapshot_builder) -> None:
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _SnapshotDriver(snapshot_builder))
+    assert cli.main(["snapshot", "--app", "TextEdit", "--mode", "interactive"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].endswith("interactive") and 'e2 button "Save"' in out
+    assert cli.main(["snapshot", "--app", "TextEdit", "--budget", "12"]) == 0
+    assert "truncated at ~12 tokens" in capsys.readouterr().out
+    assert cli.main(["snapshot", "--app", "TextEdit", "--bounds"]) == 0
+    assert capsys.readouterr().out.count(" @1:") == 5  # every element line carries geometry
+
+
+# --- bench desktop / bench web flags ------------------------------------------------
+
+
+class _BenchDriver:
+    """A Driver stand-in for the bench subcommands (no OS, no browser)."""
+
+    name = "fake"
+
+    def __init__(self, endpoint=None, fail: bool = False) -> None:
+        self.fail = fail
+        self.urls: list[str] = []
+
+    def ensure_trusted(self) -> None:
+        if self.fail:
+            raise ComputerUseError(ErrorCode.PERMISSION_DENIED_ACCESSIBILITY, "no grant")
+
+    def frontmost_app(self):
+        return "com.test.app", 1
+
+    def snapshot(self, scope, app):
+        return build_synthetic_snapshot(app=app)
+
+    def screenshot(self, display_id=None):
+        return SimpleNamespace(png=_png(1600, 1200), display=Display(0, 1600, 1200, 2.0, True))
+
+    def navigate(self, url, **kw) -> None:
+        self.urls.append(url)
+
+    def close(self) -> None:
+        pass
+
+
+def test_bench_desktop_prints_report_and_json(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _BenchDriver())
+    assert cli.main(["bench", "desktop", "--rounds", "2"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("cu-arena desktop  app=com.test.app") and "a11y interactive" in out
+    assert cli.main(["bench", "desktop", "--app", "com.test.app", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["app"] == "com.test.app" and set(data["modes"]) == {"full", "interactive"}
+
+
+def test_bench_desktop_permission_error_is_structured(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(drivers, "get_driver", lambda name=None: _BenchDriver(fail=True))
+    assert cli.main(["bench", "desktop"]) == 1
+    assert "permission_denied_accessibility" in capsys.readouterr().err
+
+
+def test_bench_web_mode_and_json(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(browser, "BrowserDriver", _BenchDriver)
+    assert cli.main(["bench", "web", "https://example.com", "--mode", "interactive",
+                     "--json", "--rounds", "1"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "interactive" and len(data["observations"]) == 1
+    assert cli.main(["bench", "web", "https://example.com", "--rounds", "1"]) == 0
+    assert "cu-arena  observations=1" in capsys.readouterr().out

@@ -1,0 +1,23 @@
+# Dependabot keeps the Python dependencies declared in pyproject.toml and the
+# actions used by .github/workflows current. Both ecosystems are checked weekly.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+    ignore:
+      # computeruse/server.py imports FastMCP from mcp.server.fastmcp, which
+      # mcp 2.0 removed; pyproject.toml pins mcp<2 for that reason. Skip the
+      # major bump until the import is migrated.
+      - dependency-name: mcp
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

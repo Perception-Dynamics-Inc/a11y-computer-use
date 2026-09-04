@@ -74,11 +74,45 @@ def _actions(node) -> tuple[str, ...]:
     return tuple(dict.fromkeys(acts))  # de-dup, preserve order
 
 
+def _checked(node) -> bool | None:
+    """Toggle state via UIA TogglePattern (ToggleState 0=off,1=on,2=indeterminate);
+    None when the control has no toggle pattern."""
+    tp = _safe(lambda: node.GetTogglePattern())
+    if tp is None:
+        return None
+    state = _safe(lambda: tp.ToggleState)
+    return None if state is None else state != 0
+
+
+def _selected(node) -> bool:
+    sip = _safe(lambda: node.GetSelectionItemPattern())
+    return bool(_safe(lambda: sip.IsSelected, False)) if sip is not None else False
+
+
+def _expanded(node) -> bool | None:
+    """Disclosure via ExpandCollapsePattern (0=collapsed,1=expanded,2=partial,
+    3=leaf-no-children); None when the control does not expand."""
+    ecp = _safe(lambda: node.GetExpandCollapsePattern())
+    if ecp is None:
+        return None
+    state = _safe(lambda: ecp.ExpandCollapseState)
+    if state is None or state == 3:  # LeafNode: not an expandable control
+        return None
+    return state in (1, 2)
+
+
 class UIAAccessor:
     """`observe.TreeAccessor` over `uiautomation.Control` handles."""
 
     def read(self, node: object) -> RawNode:
         role = _ROLE.get(_safe(lambda: node.ControlTypeName, "") or "", "AXGroup")
+        # UIA_IsPasswordPropertyId: a password edit is a text field whose value
+        # must never be read or emitted. Mapping it onto AXSecureTextField makes
+        # the engine mark it `secure`, so press/set_value/type refuse it and the
+        # snapshot withholds its value, exactly as on the other backends.
+        # Unit-tested with a fake control; not yet live-verified on Windows.
+        if role in ("AXTextField", "AXTextArea") and bool(_safe(lambda: node.IsPassword, False)):
+            role = "AXSecureTextField"
         rect = _safe(lambda: node.BoundingRectangle)
         position = size = None
         if rect is not None:
@@ -90,9 +124,10 @@ class UIAAccessor:
                 position = (float(left), float(top))
                 size = (float(right - left), float(bottom - top))
         value = None
-        vp = _safe(lambda: node.GetValuePattern())
-        if vp is not None:
-            value = _safe(lambda: vp.Value)
+        if role != "AXSecureTextField":  # never read a password field's value
+            vp = _safe(lambda: node.GetValuePattern())
+            if vp is not None:
+                value = _safe(lambda: vp.Value)
         return RawNode(
             role=role,
             subrole=None,
@@ -104,6 +139,10 @@ class UIAAccessor:
             position=position,
             size=size,
             actions=_actions(node),
+            checked=_checked(node),
+            selected=_selected(node),
+            expanded=_expanded(node),
+            stable_id=(_safe(lambda: node.AutomationId, "") or "") or None,
         )
 
     def children(self, node: object) -> Sequence[object]:

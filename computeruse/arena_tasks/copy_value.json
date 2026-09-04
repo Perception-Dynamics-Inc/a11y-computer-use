@@ -1,0 +1,9 @@
+{
+  "id": "copy_value",
+  "title": "Read a value on the page and type it elsewhere",
+  "page": "copy_value.html",
+  "instruction": "Read the order number shown in the request summary, type it into the 'Order number to look up' field, then press 'Look up'.",
+  "success": "document.title === 'LOOKUP:A7-4412'",
+  "allowed_targets": ["order-input", "lookup", "label-order", "order-summary", "order-number"],
+  "max_steps": 8
+}

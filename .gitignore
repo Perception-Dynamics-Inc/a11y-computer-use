@@ -15,3 +15,9 @@ dist/
 
 # Throwaway live-driver scripts and their local state
 scratch/
+
+# Internal strategy/planning context — never publish in the open-source repo
+.claude/knowledgebase/
+
+# Claude Code session exports
+/*-this-session-is-being-continued-*.txt

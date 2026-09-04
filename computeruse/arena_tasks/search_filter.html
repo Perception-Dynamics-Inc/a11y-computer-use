@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shop</title>
+<link rel="stylesheet" href="_style.css">
+<script src="_cu.js"></script>
+<style>
+#products { list-style: none; padding: 0; margin: 12px 0; max-width: 560px; }
+#products li { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid #eee; }
+#products li span { flex: 1; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<h1>Shop</h1>
+<div class="row"><label id="label-search" for="search">Search products</label><br><input type="text" id="search" size="32" placeholder="type to filter"></div>
+<ul id="products">
+  <li data-name="Standing Desk"><span>Standing Desk</span><span>499.00</span><button id="add-standing-desk">Add to cart</button></li>
+  <li data-name="Office Chair"><span>Office Chair</span><span>289.00</span><button id="add-office-chair">Add to cart</button></li>
+  <li data-name="Monitor Arm"><span>Monitor Arm</span><span>79.00</span><button id="add-monitor-arm">Add to cart</button></li>
+  <li data-name="Desk Lamp"><span>Desk Lamp</span><span>45.00</span><button id="add-desk-lamp">Add to cart</button></li>
+  <li data-name="Floor Lamp"><span>Floor Lamp</span><span>120.00</span><button id="add-floor-lamp">Add to cart</button></li>
+  <li data-name="Lamp Shade"><span>Lamp Shade</span><span>18.00</span><button id="add-lamp-shade">Add to cart</button></li>
+  <li data-name="Keyboard Tray"><span>Keyboard Tray</span><span>59.00</span><button id="add-keyboard-tray">Add to cart</button></li>
+  <li data-name="Cable Organizer"><span>Cable Organizer</span><span>12.00</span><button id="add-cable-organizer">Add to cart</button></li>
+  <li data-name="Footrest"><span>Footrest</span><span>39.00</span><button id="add-footrest">Add to cart</button></li>
+  <li data-name="Desk Mat"><span>Desk Mat</span><span>29.00</span><button id="add-desk-mat">Add to cart</button></li>
+</ul>
+<div class="status" id="status">Cart is empty. Showing 10 products.</div>
+<script>
+var items = document.querySelectorAll('#products li');
+document.getElementById('search').addEventListener('input', function () {
+  var q = this.value.trim().toLowerCase();
+  var shown = 0;
+  Array.prototype.forEach.call(items, function (li) {
+    var hit = !q || li.getAttribute('data-name').toLowerCase().indexOf(q) !== -1;
+    li.classList.toggle('hidden', !hit);
+    if (hit) shown++;
+  });
+  document.getElementById('status').textContent = 'Showing ' + shown + ' products.';
+});
+Array.prototype.forEach.call(document.querySelectorAll('#products button'), function (b) {
+  b.addEventListener('click', function () {
+    var name = b.closest('li').getAttribute('data-name');
+    document.getElementById('status').textContent = 'Added ' + name + ' to the cart.';
+    document.title = 'CART:' + name;
+  });
+});
+</script>
+</body>
+</html>

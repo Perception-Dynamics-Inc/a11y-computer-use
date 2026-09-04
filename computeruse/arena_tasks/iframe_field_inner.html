@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Payment panel</title>
+<link rel="stylesheet" href="_style.css">
+<style>body { margin: 12px; }</style>
+</head>
+<body>
+<p><strong>Have a coupon?</strong></p>
+<div class="row"><label id="label-coupon" for="coupon">Coupon code</label><br><input type="text" id="coupon" size="20"></div>
+<div class="row"><button id="redeem">Redeem</button> <button id="skip">Skip</button></div>
+<div class="status" id="panel-status">No coupon entered.</div>
+<script>
+/* Forward instrumentation to the parent page so misclicks inside the frame count. */
+function idOf(el) { var t = el && el.closest ? el.closest('[id]') : null; return t ? t.id : ((el && el.tagName) || '').toLowerCase(); }
+document.addEventListener('click', function (e) {
+  parent.postMessage({ type: 'cu-click', click: { target: idOf(e.target), x: e.clientX, y: e.clientY, frame: 'payment-panel' } }, '*');
+}, true);
+function record(e) { parent.postMessage({ type: 'cu-input', input: { target: idOf(e.target), value: e.target.value, frame: 'payment-panel' } }, '*'); }
+document.addEventListener('input', record, true);
+document.addEventListener('change', record, true);
+document.getElementById('redeem').addEventListener('click', function () {
+  var code = document.getElementById('coupon').value.trim();
+  if (!code) { document.getElementById('panel-status').textContent = 'Enter a code first.'; return; }
+  document.getElementById('panel-status').textContent = 'Redeemed ' + code;
+  parent.postMessage({ type: 'redeemed', code: code }, '*');
+});
+document.getElementById('skip').addEventListener('click', function () {
+  document.getElementById('panel-status').textContent = 'Skipped.';
+});
+</script>
+</body>
+</html>

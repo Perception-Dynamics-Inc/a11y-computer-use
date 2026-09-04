@@ -22,12 +22,23 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import Quartz
-from AppKit import NSScreen
-from CoreFoundation import CFDataCreateMutable
 from PIL import Image
 
 from computeruse.schema import Bounds, ComputerUseError, Display, ErrorCode
+
+# pyobjc backs only the macOS capture functions (displays/screenshot/zoom_region);
+# the Screenshot/ScaledImage dataclasses and downscale() are pure PIL. Gate the
+# imports so `import computeruse.capture` works on Linux/Windows too — the Linux
+# driver constructs Screenshot directly and uses downscale/draw_marks, never the
+# Quartz paths. (Same discipline as server.py's pyobjc gating.)
+try:
+    import Quartz
+    from AppKit import NSScreen
+    from CoreFoundation import CFDataCreateMutable
+except ImportError:  # non-macOS
+    Quartz = None  # type: ignore[assignment]
+    NSScreen = None  # type: ignore[assignment]
+    CFDataCreateMutable = None  # type: ignore[assignment]
 
 #: Default long-edge budget for `downscale`. 1280 px keeps a screenshot well
 #: under every provider cap (Sonnet 5 / Opus 4.8 reject > 2576 px long edge,

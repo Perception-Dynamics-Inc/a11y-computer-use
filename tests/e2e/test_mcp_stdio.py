@@ -27,9 +27,10 @@ from tests.conftest import HAS_AX
 
 HANDSHAKE_TIMEOUT_S = 30.0
 
-#: PLAN.md §8: the ~12-tool front door, verbatim.
+#: PLAN.md §8: the ~12-tool front door, plus the `find` query tool.
 EXPECTED_TOOLS = {
     "desktop_snapshot",
+    "find",
     "screenshot",
     "zoom",
     "click",
@@ -38,6 +39,9 @@ EXPECTED_TOOLS = {
     "scroll",
     "drag",
     "wait_for",
+    "act",
+    "set_value",
+    "scroll_to_find",
     "app",
     "window",
     "clipboard",
@@ -89,6 +93,7 @@ def test_tools_list_exposes_full_v1_surface(tmp_path: Path) -> None:
     assert all(t.inputSchema.get("type") == "object" for t in tools.tools)
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS TCC path")
 @pytest.mark.skipif(HAS_AX, reason="AX grant present; this asserts the ungranted path")
 def test_desktop_snapshot_permission_error_is_a_tool_result(tmp_path: Path) -> None:
     """Missing TCC grant surfaces as a structured tool error, not a crash."""

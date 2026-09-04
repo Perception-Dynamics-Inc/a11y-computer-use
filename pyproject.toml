@@ -4,41 +4,90 @@ build-backend = "hatchling.build"
 
 [project]
 name = "computeruse"
-version = "0.0.1"
-description = "Accessibility-first computer-use framework for macOS (Windows next): pruned a11y-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
+version = "0.1.0"
+description = "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned accessibility-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+authors = [{ name = "Perception Dynamics, Inc." }]
+keywords = [
+    "computer-use",
+    "accessibility",
+    "a11y",
+    "mcp",
+    "agents",
+    "automation",
+    "macos",
+    "windows",
+    "linux",
+    "chrome-devtools-protocol",
+    "ai-agents",
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    # macOS backend (pyobjc) — gated so the package installs on Windows/Linux,
-    # where only the platform-free core + the Windows driver path are used.
+    # macOS backend (pyobjc), gated on darwin so the package installs on
+    # Windows/Linux, where the platform-free core is used with the opt-in
+    # [windows], [linux] or [browser] extras below.
     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
     # cross-platform
-    "mcp",
+    # Pin below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (server.py imports
+    # FastMCP from there). The 1.x line (tested on 1.28.x) keeps that import.
+    "mcp<2",
     "pillow",
-    # Windows backend deps (uiautomation, comtypes) land here gated on
-    # sys_platform == 'win32' when drivers/windows.py is implemented.
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Windows a11y backend (UI Automation via `uiautomation`); drivers/windows.py is
+# partially implemented: snapshot, press_element, scroll_into_view, set_value,
+# type_text, and key_chord land, the remaining Driver methods still raise
+# NotImplementedError naming their native API.
 windows = ["uiautomation; sys_platform == 'win32'"]
+# Linux a11y-first backend: PyGObject exposes the AT-SPI2 client (gi.repository
+# .Atspi) for observe + XTEST event generation; python-xlib (pure Python) covers
+# window/frontmost/clipboard. Both need the system AT-SPI2 typelib + bus at
+# runtime: apt install gir1.2-atspi-2.0 at-spi2-core (see docs/linux-port.md).
+linux = [
+    "PyGObject; sys_platform == 'linux'",
+    "python-xlib; sys_platform == 'linux'",
+]
+# Browser backend (any OS): a11y-first control of a running Chromium over the
+# Chrome DevTools Protocol. Only a WebSocket client is needed: CDP target
+# discovery uses stdlib urllib and the AX/DOM tree comes over the socket.
+browser = ["websocket-client"]
 
 [project.scripts]
 computeruse = "computeruse.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Perception-Dynamics-Inc/computerUse"
+Repository = "https://github.com/Perception-Dynamics-Inc/computerUse"
+Issues = "https://github.com/Perception-Dynamics-Inc/computerUse/issues"
+Changelog = "https://github.com/Perception-Dynamics-Inc/computerUse/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/Perception-Dynamics-Inc/computerUse/tree/main/docs"
+
 [tool.hatch.build.targets.wheel]
 packages = ["computeruse"]
+
+# The sdist ships the source, tests, and docs, not the brand media or the Box
+# VM scripts (3 MB of PNGs otherwise dominate the archive).
+[tool.hatch.build.targets.sdist]
+exclude = ["docs/assets", "docs/hero-demo.gif", "scratch", "scripts/box"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

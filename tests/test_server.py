@@ -20,7 +20,7 @@ from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
 from computeruse import act, capture, observe, safety, server
-from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot
+from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Point, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 pytestmark = pytest.mark.anyio
@@ -29,6 +29,7 @@ APP = "com.apple.TextEdit"
 
 EXPECTED_TOOLS = {
     "desktop_snapshot",
+    "find",
     "screenshot",
     "zoom",
     "click",
@@ -37,6 +38,9 @@ EXPECTED_TOOLS = {
     "scroll",
     "drag",
     "wait_for",
+    "act",
+    "set_value",
+    "scroll_to_find",
     "app",
     "window",
     "clipboard",
@@ -46,6 +50,18 @@ EXPECTED_TOOLS = {
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _macos_driver_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This module mocks the macOS native seams (``observe.snapshot``,
+    ``act.click`` and friends, ``server._frontmost_bundle``), so the Runtime
+    under test must be built on the macOS driver on every OS. The macOS driver
+    imports without pyobjc because act/capture/observe are import-safe off
+    macOS; only its native calls need pyobjc, and those are exactly what the
+    fixtures replace. Tests that build a Runtime with an explicit ``driver=``
+    are unaffected."""
+    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
 
 
 @pytest.fixture
@@ -127,7 +143,7 @@ async def test_tool_registry_matches_plan_surface(mcp_server) -> None:
     async with client_session(mcp_server) as client:
         listed = (await client.list_tools()).tools
     assert {tool.name for tool in listed} == EXPECTED_TOOLS
-    assert len(listed) == 12
+    assert len(listed) == len(EXPECTED_TOOLS)
     for tool in listed:
         assert tool.description, f"{tool.name} has no description"
 
@@ -516,6 +532,9 @@ async def test_window_list_bounds_are_display_qualified_physical_pixels(
 
 async def test_clipboard_write_needs_full_tier(mcp_server, store, monkeypatch) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    # The tier decision is under test, not the pasteboard: keep the read off
+    # the real clipboard (xclip needs a DISPLAY on Linux; NSPasteboard is macOS-only).
+    monkeypatch.setattr(server, "_read_clipboard", lambda: "clipboard text")
     store.set_tier("com.test.front", safety.Tier.READ)
 
     read = await call_tool(mcp_server, "clipboard", {"action": "read"})
@@ -693,3 +712,313 @@ async def test_snapshot_with_refs_has_no_handoff(mcp_server, mocked_driver, stor
     result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
     assert not result.isError
     assert "no interactive elements" not in result.content[0].text
+
+
+def test_act_batch_dispatch_stop_and_errors() -> None:
+    """Batched act: runs steps in order, stops at the first failure, and reports
+    unknown steps / empty input — without needing a live driver."""
+    import json as _json
+
+    import pytest
+
+    from computeruse import server
+    from computeruse.schema import ComputerUseError, ErrorCode
+
+    rt = server.Runtime.__new__(server.Runtime)  # bare instance; stub the dispatch targets
+    calls: list = []
+    rt.type_text = lambda text: (calls.append(("type", text)), f"typed {text}")[1]
+    rt.key = lambda chord: (calls.append(("key", chord)), f"pressed {chord}")[1]
+
+    out = _json.loads(rt.act_batch([{"do": "type", "text": "hi"}, {"do": "key", "chord": "enter"}]))
+    assert [s["ok"] for s in out] == [True, True]
+    assert calls == [("type", "hi"), ("key", "enter")]
+
+    def boom(_text):
+        raise ComputerUseError(ErrorCode.STALE_REF, "e1 no longer resolves")
+
+    rt.type_text = boom
+    out2 = _json.loads(rt.act_batch([{"do": "type", "text": "x"}, {"do": "key", "chord": "enter"}]))
+    assert out2[0]["ok"] is False and len(out2) == 1  # stopped before the key step
+    assert "stale_ref" in out2[0]["error"]
+
+    out3 = _json.loads(rt.act_batch([{"do": "frobnicate"}]))
+    assert out3[0]["ok"] is False and "unknown step" in out3[0]["error"]
+
+    with pytest.raises(ValueError):
+        rt.act_batch([])
+
+
+def test_effect_receipt_appends_post_action_diff() -> None:
+    """verify=true turns the audit-backed re-observe into an Effect Receipt: the
+    single post-action snapshot diff, so the agent confirms what changed without a
+    separate desktop_snapshot round-trip. Off by default (backward compat)."""
+    import json as _json
+
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def snap(sid: str, extra: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXButton", title="Save", value=None,
+                       bounds=Bounds(0, 0, 0, 80, 30), snapshot_id=sid, clickable=True)]
+        if extra:  # a new element appears — the visible effect of the action
+            els.append(Element(ref="e2", role="AXStaticText", title="Saved ✓",
+                               value=None, bounds=Bounds(0, 0, 40, 80, 60), snapshot_id=sid))
+        return Snapshot(snapshot_id=sid, scope=Scope.WINDOW, app="com.test", pid=1,
+                        created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                        elements=tuple(els))
+
+    pre, post = snap("s0", False), snap("s1", True)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = pre
+    rt.type_text = lambda text: f"typed {text}"
+    rt.driver = type("_D", (), {"snapshot": lambda self, scope, app: post})()
+
+    # _effect_after (the helper click() uses) returns the bare diff and advances _current.
+    effect = rt._effect_after(pre)
+    assert "Saved" in effect and not effect.startswith("\n")  # bare diff, callers format
+    assert rt._current is post
+
+    # act_batch(verify=True): one net diff for the whole batch, steps preserved.
+    rt._current = pre
+    out = _json.loads(rt.act_batch([{"do": "type", "text": "hi"}], verify=True))
+    assert out["steps"][0]["ok"] is True
+    assert "Saved" in out["effect"] and "effect:" not in out["effect"]  # unprefixed inside JSON
+
+    # Default stays a bare list — existing callers unchanged.
+    rt._current = pre
+    assert isinstance(_json.loads(rt.act_batch([{"do": "type", "text": "hi"}])), list)
+
+    # No prior snapshot → empty receipt, never an error.
+    rt._current = None
+    assert rt._effect_after(None) == ""
+
+
+def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
+    """set_value: one a11y op via the driver; focus+type fallback when the app
+    can't set a value; secure fields refused."""
+    from computeruse import server
+    from computeruse.schema import Bounds, Element, ErrorCode
+
+    rt = server.Runtime.__new__(server.Runtime)
+    el = Element(ref="e1", role="AXTextField", title="Name", value="",
+                 bounds=Bounds(0, 0, 0, 10, 10), snapshot_id="s")
+    snap = type("S", (), {"app": "com.test"})()
+    rt._anchor = lambda ref: (snap, el)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    calls = {"set": [], "press": [], "type": []}
+
+    class _D:
+        set_ok = True
+
+        def resolve_ref(self, s, ref):
+            return rt._anchor(ref)[1]
+
+        def set_value(self, e, v):
+            calls["set"].append((e.ref, v))
+            return _D.set_ok
+
+        def press_element(self, e):
+            calls["press"].append(e.ref)
+            return True
+
+        def type_text(self, t):
+            calls["type"].append(t)
+
+    rt.driver = _D()
+    assert "set e1" in rt.set_value("e1", "Alice")
+    assert calls["set"] == [("e1", "Alice")] and calls["type"] == []  # driver op, no fallback
+
+    _D.set_ok = False
+    rt.set_value("e1", "Bob")
+    assert calls["press"] == ["e1"] and calls["type"] == ["Bob"]  # fell back to focus+type
+
+    secure = dataclasses.replace(el, secure=True)
+    rt._anchor = lambda ref: (snap, secure)
+    with pytest.raises(ComputerUseError) as ei:
+        rt.set_value("e1", "secret")
+    assert ei.value.code is ErrorCode.SECURE_FIELD
+
+
+def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def mk(has_target: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXScrollArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+        if has_target:
+            els.append(Element(ref="e2", role="AXButton", title="Target", value=None,
+                               bounds=Bounds(0, 10, 10, 80, 30), snapshot_id="s", clickable=True))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+    seq = [mk(False), mk(False), mk(True)]
+    scrolls: list = []
+
+    class _D:
+        i = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return seq[min(_D.i, len(seq) - 1)]
+
+        def scroll(self, target, **kw):
+            scrolls.append(kw.get("dy"))
+            _D.i += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="Target")
+    assert "found after 2 scroll(s)" in out and "Target" in out
+    assert scrolls == [5, 5]  # scrolled twice, found on the third observation
+
+
+# --- interactive view + budget through the tool surface -----------------------------
+
+
+async def test_snapshot_interactive_mode_via_mcp(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "mode": "interactive"})
+    assert not result.isError
+    text = result.content[0].text
+    assert text.splitlines()[0].endswith("(window) interactive")
+    # same refs as the full view; the click flag is implied on buttons
+    assert 'e2 button "Save"' in text and 'e2 button "Save" (click)' not in text
+    assert 'e3 textarea "Document body" ="hello" (click,edit,focus)' in text
+    full = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    assert 'e2 button "Save" (click)' in full.content[0].text
+
+
+async def test_snapshot_budget_truncates_via_mcp(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    result = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "budget": 12})
+    assert not result.isError
+    assert "truncated at ~12 tokens" in result.content[0].text
+
+
+async def test_snapshot_rejects_bad_mode_and_budget(mcp_server, mocked_driver, store) -> None:
+    store.set_tier(APP, safety.Tier.READ)
+    bad_mode = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "mode": "compact"})
+    assert bad_mode.isError and "mode must be" in bad_mode.content[0].text
+    bad_budget = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit", "budget": 0})
+    assert bad_budget.isError and "budget" in bad_budget.content[0].text
+
+
+def test_diff_and_effect_receipt_follow_the_last_view(tmp_path) -> None:
+    """mode='diff' and Effect Receipts render in the view the agent last asked
+    for, so a cheap-view agent keeps getting cheap re-observations."""
+
+    def snap(sid: str, status: str) -> Snapshot:
+        els = (
+            Element(ref="e1", role="AXWindow", title="W", value=None,
+                    bounds=Bounds(0, 0, 0, 800, 600), snapshot_id=sid, path=("AXWindow",)),
+            Element(ref="e2", role="AXButton", title="Save", value=None,
+                    bounds=Bounds(0, 10, 10, 80, 30), snapshot_id=sid, parent="e1",
+                    path=("AXWindow", "AXButton"), clickable=True),
+            Element(ref="e3", role="AXStaticText", title="status", value=status,
+                    bounds=Bounds(0, 10, 50, 200, 20), snapshot_id=sid, parent="e1",
+                    path=("AXWindow", "AXStaticText")),
+        )
+        return Snapshot(snapshot_id=sid, scope=Scope.WINDOW, app="com.test", pid=1,
+                        created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),), elements=els)
+
+    snaps = iter([snap("s0", "idle"), snap("s1", "saving"), snap("s2", "saved"),
+                  snap("s3", "saved"), snap("s4", "done")])
+    driver = type("_D", (), {
+        "resolves_apps": True, "name": "fake",
+        "ensure_trusted": lambda self: None,
+        "frontmost_app": lambda self: ("com.test", 1),
+        "snapshot": lambda self, scope, app: next(snaps),
+    })()
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.READ)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+    first = rt.desktop_snapshot("com.test", mode="interactive")
+    assert first.splitlines()[0].endswith("interactive") and 'text: "status: idle"' in first
+    delta = rt.desktop_snapshot("com.test", mode="diff")  # rendered in the interactive view
+    assert "~ text: e3 idle→saving" in delta and "statictext" not in delta
+    receipt = rt._effect_after(rt._current)  # Effect Receipts follow the same view
+    assert "~ text: e3 saving→saved" in receipt
+
+    rt.desktop_snapshot("com.test", mode="full")  # switching back changes the diff rendering
+    assert "~ e3 statictext [value: saved→done]" in rt.desktop_snapshot("com.test", mode="diff")
+
+
+def test_scroll_anchor_prefers_a_scroll_container_below_the_window() -> None:
+    """The browser backend exposes an overflow <ul> as AXList (CDP has no
+    scroll-area role). Wheeling over the window scrolls nothing there, so the
+    anchor must be the list, not the webarea; AXScrollArea still wins when present."""
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def el(ref, role, x, y, w, h):
+        return Element(ref=ref, role=role, title="", value=None,
+                       bounds=Bounds(0, x, y, w, h), snapshot_id="s")
+
+    def snap(*els):
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 713, 1.0, True),), elements=tuple(els))
+
+    web = el("e1", "AXWebArea", 0, 0, 1280, 713)
+    wrapper = el("e2", "AXGroup", 0, 0, 1280, 700)       # page-sized wrapper: not a target
+    lst = el("e3", "AXList", 24, 101, 362, 382)          # the overflow list
+    small_group = el("e4", "AXGroup", 24, 500, 300, 40)
+    assert server._scroll_anchor(snap(web, wrapper, lst, small_group)).ref == "e3"
+    # no list-like container: the largest group that is not the window
+    assert server._scroll_anchor(snap(web, wrapper, small_group)).ref == "e4"
+    # nothing but the window: the window
+    assert server._scroll_anchor(snap(web)).ref == "e1"
+    # an explicit scroll area always wins, whatever its size
+    area = el("e5", "AXScrollArea", 0, 0, 1280, 713)
+    assert server._scroll_anchor(snap(web, area, lst)).ref == "e5"
+    assert server._scroll_anchor(snap()) is None
+
+
+def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
+    from computeruse import server
+    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def mk(has_target: bool) -> Snapshot:
+        els = [Element(ref="e1", role="AXWebArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 1280, 713), snapshot_id="s"),
+               Element(ref="e6", role="AXList", title="", value=None,
+                       bounds=Bounds(0, 24, 101, 362, 382), snapshot_id="s")]
+        if has_target:
+            els.append(Element(ref="e9", role="AXButton", title="Reykjavik", value=None,
+                               bounds=Bounds(0, 30, 300, 300, 40), snapshot_id="s", clickable=True))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 713, 1.0, True),), elements=tuple(els))
+
+    seq = [mk(False), mk(True)]
+    anchors: list = []
+
+    class _D:
+        i = 0
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return seq[min(_D.i, len(seq) - 1)]
+
+        def scroll(self, target, **kw):
+            anchors.append(target.ref)
+            _D.i += 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._current = mk(False)
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="Reykjavik", ref="e6")
+    assert "found after 1 scroll(s)" in out and anchors == ["e6"]
+    with pytest.raises(server.ComputerUseError):  # a ref the current snapshot never issued
+        rt.scroll_to_find("app", text="Reykjavik", ref="e999")
