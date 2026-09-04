@@ -103,6 +103,7 @@ jobs:
           # --disable-dev-shm-usage: the runner's /dev/shm is tiny and headless
           # Chrome crashes on startup without it (the classic CI flake).
           "$CHROME" --headless=new --remote-debugging-port=9222 \
+            --remote-debugging-address=127.0.0.1 --user-data-dir="$RUNNER_TEMP/computeruse-chrome" \
             --no-sandbox --disable-gpu --disable-dev-shm-usage \
             --no-first-run --no-default-browser-check --window-size=1280,800 about:blank >/tmp/chrome.log 2>&1 &
           for _ in $(seq 1 60); do
@@ -149,6 +150,22 @@ jobs:
           COMPUTERUSE_DRIVER: browser
           COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
         run: computeruse bench desktop --rounds 2
+      - name: isolated browser workers (verified load smoke)
+        timeout-minutes: 5
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          timeout -k 5 240 python scripts/box/load_browser.py --endpoint http://127.0.0.1:9222 \
+            --workers 4 --iterations 10 --output artifacts/browser-load.json 2>&1 | tee artifacts/browser-load.log
+      - name: retain browser load evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-load
+          path: |
+            artifacts/browser-load.json
+            artifacts/browser-load.log
+          if-no-files-found: ignore
 
   linux:
     name: Linux · full suite + live AT-SPI2 under a window manager

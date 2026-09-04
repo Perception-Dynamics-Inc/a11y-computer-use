@@ -10,9 +10,16 @@ day-rotated JSONL audit log that never writes secure-field content to disk.
 
 from __future__ import annotations
 
+import errno
 import json
+import os
+import re
+import tempfile
+import threading
 import time
-from collections.abc import Callable, Mapping
+import uuid
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -54,6 +61,71 @@ class Tier(str, Enum):
 
 
 _TIER_RANK: dict[Tier, int] = {Tier.READ: 0, Tier.CLICK: 1, Tier.FULL: 2}
+
+
+def _sync_directory(path: Path) -> None:
+    """Persist directory changes on POSIX; Windows has no directory fsync."""
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
+    """Serialize local processes using a stable sidecar file, with a deadline.
+
+    The sidecar must never be removed: replacing a locked inode would allow
+    another writer to acquire a different lock for the same data file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+
+            def acquire() -> None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+            def release() -> None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def acquire() -> None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release() -> None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                acquire()
+                acquired = True
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK, errno.EDEADLK):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out waiting for lock: {path}") from exc
+                time.sleep(0.01)
+        yield
+    finally:
+        try:
+            if acquired:
+                release()
+        finally:
+            os.close(fd)
 
 
 def required_tier(action: Action) -> Tier:
@@ -104,6 +176,8 @@ class PermissionStore:
     * A non-empty ``allow`` list is a whitelist: apps not on it are denied.
 
     Mutations persist immediately; the file is created on first write.
+    Updates merge under a local-process lock and replace the file atomically.
+    Invalid or unreadable config denies every action until repaired.
     External edits are picked up on the next read (`_refresh`), so a user
     adding a runaway app to ``deny`` mid-session takes effect immediately in
     a long-lived server.
@@ -113,76 +187,160 @@ class PermissionStore:
         """Load the grant store at ``path`` (default under ``~``); a missing
         file is an empty store."""
         self.path = path if path is not None else Path.home() / ".computeruse" / "permissions.json"
+        self._lock = threading.RLock()
+        self._load_error: str | None = None
         self._load()
 
     def _load(self) -> None:
-        data = json.loads(self.path.read_text()) if self.path.exists() else {}
-        self._stamp = self._file_stamp()
-        self._tiers: dict[str, Tier] = {
-            app: Tier(entry["tier"]) for app, entry in data.get("apps", {}).items()
-        }
-        self._deny: set[str] = set(data.get("deny", ()))
-        self._allow: set[str] = set(data.get("allow", ()))
+        """Publish a complete valid policy, or an empty, denied policy.
 
-    def _file_stamp(self) -> tuple[int, int] | None:
-        """(mtime_ns, size) of the config file; None when it does not exist."""
+        Read and stamp the same open file so an atomic replacement cannot
+        mark old permissions as current. Invalid edits never retain grants.
+        """
+        self._tiers: dict[str, Tier] = {}
+        self._deny: set[str] = set()
+        self._allow: set[str] = set()
+        self._stamp: tuple[int, ...] | None = None
+        self._load_error = None
+        before: tuple[int, ...] | None = None
+        try:
+            try:
+                with self.path.open(encoding="utf-8") as fh:
+                    before = self._stat_stamp(os.fstat(fh.fileno()))
+                    data = json.load(fh)
+                    stamp = self._stat_stamp(os.fstat(fh.fileno()))
+                    if before != stamp:
+                        raise ValueError("permission configuration changed during the read")
+            except FileNotFoundError:
+                data, stamp = {}, None
+            if not isinstance(data, dict) or not isinstance(data.get("apps", {}), dict):
+                raise ValueError("expected a JSON object with an apps object")
+            tiers: dict[str, Tier] = {}
+            for app, entry in data.get("apps", {}).items():
+                self._validate_app(app)
+                if not isinstance(entry, dict) or "tier" not in entry:
+                    raise ValueError("each app must contain a tier")
+                tiers[app] = Tier(entry["tier"])
+            lists: dict[str, set[str]] = {}
+            for name in ("deny", "allow"):
+                values = data.get(name, [])
+                if not isinstance(values, list):
+                    raise ValueError(f"{name} must be a list of app identifiers")
+                for app in values:
+                    self._validate_app(app)
+                lists[name] = set(values)
+            self._tiers, self._deny, self._allow = tiers, lists["deny"], lists["allow"]
+            self._stamp = stamp
+        except (OSError, ValueError, TypeError, RecursionError):
+            self._stamp = before
+            self._load_error = "permission configuration is invalid or unreadable"
+
+    @staticmethod
+    def _validate_app(bundle_id: str) -> None:
+        if not isinstance(bundle_id, str) or not bundle_id.strip():
+            raise ValueError("app identifier must be a non-empty string")
+
+    @staticmethod
+    def _stat_stamp(stat: os.stat_result) -> tuple[int, ...]:
+        return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
+    def _file_stamp(self) -> tuple[int, ...] | None:
+        """Identity and modification stamp; None only when the file is absent."""
         try:
             stat = self.path.stat()
-        except OSError:
+        except FileNotFoundError:
             return None
-        return (stat.st_mtime_ns, stat.st_size)
+        return self._stat_stamp(stat)
 
     def _refresh(self) -> None:
         """Reload when the file changed on disk since the last load/save."""
-        if self._file_stamp() != self._stamp:
+        try:
+            changed = self._file_stamp() != self._stamp
+        except OSError:
+            changed = True
+        if changed:
             self._load()
+
+    def policy(self, bundle_id: str) -> tuple[Tier | None, bool, str | None]:
+        """Return grant, denial, and config error from one coherent policy."""
+        with self._lock:
+            self._refresh()
+            denied = self._load_error is not None or bundle_id in self._deny or (
+                bool(self._allow) and bundle_id not in self._allow
+            )
+            return self._tiers.get(bundle_id), denied, self._load_error
 
     def get_tier(self, bundle_id: str) -> Tier | None:
         """Granted tier for ``bundle_id``; None means ungranted ("ask")."""
-        self._refresh()
-        return self._tiers.get(bundle_id)
+        return self.policy(bundle_id)[0]
 
     def set_tier(self, bundle_id: str, tier: Tier) -> None:
         """Record a human-approved grant and persist it."""
-        self._refresh()
-        self._tiers[bundle_id] = tier
-        self._save()
+        self._validate_app(bundle_id)
+        tier = Tier(tier)
+
+        def grant() -> None:
+            self._tiers[bundle_id] = tier
+
+        self._mutate(grant)
 
     def revoke(self, bundle_id: str) -> None:
         """Remove any grant for ``bundle_id`` (back to the "ask" default)."""
-        self._refresh()
-        self._tiers.pop(bundle_id, None)
-        self._save()
+        self._validate_app(bundle_id)
+
+        def remove() -> None:
+            self._tiers.pop(bundle_id, None)
+
+        self._mutate(remove)
 
     def add_deny(self, bundle_id: str) -> None:
         """Put ``bundle_id`` on the deny list; beats any granted tier."""
-        self._refresh()
-        self._deny.add(bundle_id)
-        self._save()
+        self._validate_app(bundle_id)
+        self._mutate(lambda: self._deny.add(bundle_id))
 
     def add_allow(self, bundle_id: str) -> None:
         """Put ``bundle_id`` on the allow list; a non-empty allow list
         denies every app not on it."""
-        self._refresh()
-        self._allow.add(bundle_id)
-        self._save()
+        self._validate_app(bundle_id)
+        self._mutate(lambda: self._allow.add(bundle_id))
 
     def is_denied(self, bundle_id: str) -> bool:
         """True when the deny/allow lists block ``bundle_id`` outright."""
-        self._refresh()
-        if bundle_id in self._deny:
-            return True
-        return bool(self._allow) and bundle_id not in self._allow
+        return self.policy(bundle_id)[1]
+
+    def _mutate(self, update: Callable[[], None]) -> None:
+        """Merge with the latest disk state while excluding other writers."""
+        with self._lock, _file_lock(self.path.with_name(self.path.name + ".lock")):
+            self._load()
+            if self._load_error is not None:
+                raise ValueError(f"{self._load_error}; repair {self.path} before changing grants")
+            try:
+                update()
+                self._save()
+            except BaseException:
+                self._load()  # a failed save must not leave an unpersisted grant active
+                raise
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
             "apps": {app: {"tier": tier.value} for app, tier in sorted(self._tiers.items())},
             "deny": sorted(self._deny),
             "allow": sorted(self._allow),
         }
-        self.path.write_text(json.dumps(payload, indent=2) + "\n")
-        self._stamp = self._file_stamp()
+        fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, indent=2) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+                stamp = self._stat_stamp(os.fstat(fh.fileno()))
+            os.replace(temporary, self.path)
+            _sync_directory(self.path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._stamp = stamp
 
 
 class Verdict(str, Enum):
@@ -250,14 +408,17 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
         store = PermissionStore()
     required = required_tier(action)
     kind = type(action).__name__.lower()
-    granted = store.get_tier(target_app)
-    if store.is_denied(target_app):
+    granted, denied, config_error = store.policy(target_app)
+    if denied:
         return Decision(
             verdict=Verdict.DENY,
             app=target_app,
             required=required,
             granted=granted,
-            reason=f"{target_app} is on the deny list; no actions are permitted",
+            reason=(
+                f"{config_error}; repair {store.path} before retrying"
+                if config_error else f"{target_app} is on the deny list; no actions are permitted"
+            ),
         )
     if granted is None:
         return Decision(
@@ -382,20 +543,121 @@ def _redact_target_values(params: dict[str, object]) -> dict[str, object]:
 
 
 class AuditLog:
-    """Always-on JSONL audit log: one file per UTC day, one line per action.
+    """Always-on JSONL audit log with bounded files and serialized appends.
 
     Files live at ``<dir>/YYYY-MM-DD.jsonl`` (default ``~/.computeruse/audit``);
-    rotation is implicit — every entry is appended to the file named for the
-    current UTC day. The trajectory format doubles as a demonstration
-    recording (PLAN.md §9 Phase 3: teach & replay), so non-secure entries keep
-    full action params; secure-field content is always redacted.
+    full daily files rotate to ``YYYY-MM-DD.<timestamp>-<id>.jsonl``. Defaults
+    rotate new writes at 16 MiB, retain at most 32 files, and cap individual
+    records at 64 KiB. Older files are deleted by normal count retention.
+    Existing oversized logs are preserved until that eviction; the 512 MiB
+    bound applies after those legacy files have been archived or evicted.
+    Oversized records become explicit summaries, never silently broken JSON.
+    Ordinary non-secure entries keep replayable params; secure content is
+    redacted. Local processes sharing this directory serialize rotation and
+    appends through a sidecar lock. Use separate directories per worker/tenant
+    when isolation is required. Network filesystems are not supported.
     """
 
-    def __init__(self, dir_path: Path | None = None, *, now: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        dir_path: Path | None = None,
+        *,
+        now: Callable[[], float] = time.time,
+        max_file_bytes: int = 16 * 1024 * 1024,
+        max_files: int = 32,
+        max_record_bytes: int = 64 * 1024,
+        sync: bool = False,
+        lock_timeout: float = 10.0,
+    ) -> None:
         """Log into ``dir_path`` (default under ``~``); ``now`` is injectable
-        for rotation tests."""
+        for rotation tests. ``sync=True`` fsyncs each record for crash durability
+        at a throughput cost; by default writes reach the OS before return.
+        ``max_files=None`` is deliberately unsupported: retention is bounded.
+        """
+        for name, value in (("max_file_bytes", max_file_bytes), ("max_files", max_files),
+                            ("max_record_bytes", max_record_bytes)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if max_record_bytes < 1024 or max_record_bytes > max_file_bytes:
+            raise ValueError("max_record_bytes must be at least 1024 and at most max_file_bytes")
+        if not 0 < lock_timeout < float("inf"):
+            raise ValueError("lock_timeout must be positive and finite")
         self.dir_path = dir_path if dir_path is not None else Path.home() / ".computeruse" / "audit"
         self._now = now
+        self.max_file_bytes = max_file_bytes
+        self.max_files = max_files
+        self.max_record_bytes = max_record_bytes
+        self.sync = sync
+        self.lock_timeout = lock_timeout
+        self._lock = threading.Lock()
+        self._needs_prune = True
+
+    def _encode(self, entry: dict[str, object]) -> bytes:
+        """Encode a JSON line, or a bounded summary if a caller supplied huge params."""
+        data = (json.dumps(entry, ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+        if len(data) <= self.max_record_bytes:
+            return data
+        original_bytes = len(data)
+        # Keep verdict and outcome so summaries remain useful to audit/bench
+        # consumers. Escaped Unicode is checked against the byte cap below.
+        def label(value: object) -> str:
+            return str(value)[:64]
+
+        decision = entry.get("decision")
+        summary = {
+            "ts": entry["ts"],
+            "app": label(entry.get("app", "")),
+            "action": label(entry.get("action", "")),
+            "result": label(entry.get("result", "")),
+            "decision": {"verdict": label(decision.get("verdict", ""))}
+            if isinstance(decision, dict) else None,
+            "params": {"_truncated": True, "_original_bytes": original_bytes},
+        }
+        data = (json.dumps(summary, ensure_ascii=True) + "\n").encode("utf-8")
+        if len(data) > self.max_record_bytes:
+            # Pathological escaped identifiers must not defeat the byte cap.
+            data = (json.dumps({"ts": entry["ts"], "audit_truncated": True,
+                                "original_bytes": original_bytes}) + "\n").encode("utf-8")
+        return data
+
+    def _prune(self, current: Path) -> None:
+        """Keep only our newest files, never deleting unrelated JSONL data."""
+        files = [
+            path for path in self.dir_path.glob("*.jsonl")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:\.\d+-[0-9a-f]{8})?\.jsonl", path.name)
+            and path != current
+        ]
+        ordered = sorted(((path, path.stat()) for path in files),
+                         key=lambda item: (item[1].st_mtime_ns, item[0].name), reverse=True)
+        for path, _stat in ordered[self.max_files - 1:]:
+            path.unlink()
+
+    @staticmethod
+    def _repair_tail(fd: int) -> int:
+        """Discard an interrupted final record; return the intact file size.
+
+        Our records always end with a newline. Scan backward in bounded chunks
+        only when a killed writer left a partial line, preserving earlier rows.
+        """
+        size = os.fstat(fd).st_size
+        if not size:
+            return 0
+        os.lseek(fd, size - 1, os.SEEK_SET)
+        if os.read(fd, 1) == b"\n":
+            return size
+        end = size
+        while end:
+            start = max(0, end - 64 * 1024)
+            os.lseek(fd, start, os.SEEK_SET)
+            chunk = os.read(fd, end - start)
+            newline = chunk.rfind(b"\n")
+            if newline >= 0:
+                size = start + newline + 1
+                os.ftruncate(fd, size)
+                return size
+            end = start
+        os.ftruncate(fd, 0)
+        return 0
 
     def record(self, event: Mapping[str, object]) -> Path:
         """Append one event (already serialized, e.g. via
@@ -407,11 +669,47 @@ class AuditLog:
         """
         entry = dict(event)
         entry.setdefault("ts", self._now())
-        day = datetime.fromtimestamp(float(entry["ts"]), tz=timezone.utc).strftime("%Y-%m-%d")
+        entry["ts"] = float(entry["ts"])
+        day = datetime.fromtimestamp(entry["ts"], tz=timezone.utc).strftime("%Y-%m-%d")
         path = self.dir_path / f"{day}.jsonl"
-        self.dir_path.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        data = self._encode(entry)
+        with self._lock, _file_lock(self.dir_path / ".audit.lock", timeout=self.lock_timeout):
+            flags = os.O_CREAT | os.O_RDWR | os.O_APPEND
+            fd = os.open(path, flags, 0o600)
+            try:
+                size = self._repair_tail(fd)
+                if size and size + len(data) > self.max_file_bytes:
+                    os.close(fd)
+                    fd = -1
+                    archive = self.dir_path / f"{day}.{time.time_ns()}-{uuid.uuid4().hex[:8]}.jsonl"
+                    path.replace(archive)
+                    fd = os.open(path, flags, 0o600)
+                    size = 0
+                try:
+                    remaining = memoryview(data)
+                    while remaining:
+                        written = os.write(fd, remaining)
+                        if written <= 0:
+                            raise OSError("audit write made no progress")
+                        remaining = remaining[written:]
+                    if self.sync:
+                        os.fsync(fd)
+                except BaseException:
+                    # A failed write must not poison the following successful
+                    # row. Process death is handled by _repair_tail next time.
+                    try:
+                        os.ftruncate(fd, size)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if size == 0 or self._needs_prune:
+                self._prune(path)
+                self._needs_prune = False
+                if self.sync:
+                    _sync_directory(self.dir_path)
         return path
 
     def record_action(

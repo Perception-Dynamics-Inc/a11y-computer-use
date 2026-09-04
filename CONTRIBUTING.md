@@ -75,7 +75,7 @@ pip install -e ".[dev,linux]"
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
 ```
 
-For the clipboard install one of `xclip`, `xsel`, or `wl-clipboard`; headless machines add `xvfb` (`docs/linux-port.md`). On native Wayland (`WAYLAND_DISPLAY` set and no `DISPLAY`) coordinate clicks, drags, wheel scrolls, and key chords raise a structured `unsupported` error whose hint points at ref-based actions; press, `set_value`, and typing into a driver-focused field go through AT-SPI and are unaffected (`_on_wayland` and `_wayland_input_error` in `computeruse/drivers/linux.py`). The Linux CI job runs under Xvfb, so the Wayland branches have no CI coverage.
+For the clipboard install one of `xclip`, `xsel`, or `wl-clipboard`; headless machines add `xvfb` (`docs/linux-port.md`). On native Wayland (`WAYLAND_DISPLAY` set and no `DISPLAY`) coordinate clicks, drags, wheel scrolls, and key chords raise a structured `unsupported` error whose hint points at ref-based actions; press and explicit `set_value` go through AT-SPI; implicit typing requires a verified frontmost app owner (`_on_wayland` and `_wayland_input_error` in `computeruse/drivers/linux.py`). The Linux CI job runs under Xvfb, so the Wayland branches have no CI coverage.
 
 ### Browser (Chromium over CDP)
 
@@ -129,7 +129,13 @@ pytest -q          # everything that can run on this machine; gated tests skip
 pytest -q -rs      # also print the reason for every skip
 ```
 
-562 tests are collected across 24 modules (measured at commit f5bef72 with `pytest --collect-only -q`). On a Mac whose terminal holds neither TCC grant and has no Chrome remote-debugging endpoint the result is `534 passed, 28 skipped`. The 28 skips are: 5 Accessibility-gated, 2 Screen-Recording-gated, 1 that needs both grants (`tests/test_arena.py::test_live_desktop_task_on_finder_costs_all_views`), 10 live-browser tests that need a CDP endpoint (`COMPUTERUSE_CDP_ENDPOINT` or Chrome `--remote-debugging-port=9222`: 4 in `tests/test_browser.py`, 2 in `tests/test_arena.py`, 2 in `tests/test_h2h.py`, 1 each in `tests/test_adapters.py` and `tests/test_agent.py`), 5 Linux-only (`tests/test_linux_live.py`), and 5 Windows-only (`tests/test_windows_live.py`). These counts drift as tests are added; re-run `pytest -q -rs` and update this line when you change the suite.
+On 2026-09-04, the hardening checkout collects 807 tests on macOS. The full
+local run reports `765 passed, 42 skipped` (Python 3.13, without the required
+live macOS grants or a local CDP endpoint). Platform, display, grant and browser
+checks determine which live tests run. The ASCII Box release gate separately
+requires Linux desktop and browser integration tests to execute with no skips;
+see [production.md](docs/production.md) and [the validation report](docs/benchmarks/production-2026-09-04.md).
+Run `pytest -q -rs` for current results and explicit skip reasons.
 
 ### What runs without any grant
 

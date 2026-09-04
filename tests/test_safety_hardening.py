@@ -304,7 +304,7 @@ def test_browser_type_refuses_when_the_focused_element_is_a_password() -> None:
     assert "Input.insertText" not in t.methods()
 
 
-def test_browser_type_proceeds_when_nothing_secure_is_focused_or_the_probe_fails() -> None:
+def test_browser_type_proceeds_only_when_focus_is_verified_as_nonsecure() -> None:
     d, t = _driver_on()  # fixture: activeElement is not a password
     d.type_text("hello")
     assert ("Input.insertText", {"text": "hello"}) in t.sent
@@ -315,8 +315,10 @@ def test_browser_type_proceeds_when_nothing_secure_is_focused_or_the_probe_fails
         return _fixture_responder(method, params)
 
     d2, t2 = _driver_on(failing)
-    d2.type_text("hello")  # no signal degrades to "not secure", like the macOS probe
-    assert ("Input.insertText", {"text": "hello"}) in t2.sent
+    with pytest.raises(ComputerUseError) as ei:
+        d2.type_text("hello")
+    assert ei.value.code is ErrorCode.UNSUPPORTED
+    assert "Input.insertText" not in t2.methods()
 
 
 def test_browser_password_typing_refused_through_the_runtime_and_audited(tmp_path) -> None:

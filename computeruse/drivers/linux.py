@@ -57,8 +57,9 @@ def _wayland_input_error(op: str) -> ComputerUseError:
     return ComputerUseError(
         ErrorCode.UNSUPPORTED,
         f"{op}: raw coordinate/key injection (XTEST) is unavailable on native Wayland",
-        detail={"hint": "Use ref-based actions — click(ref) / press, set_value, and typing into "
-                "a focused field all work on Wayland via AT-SPI with no coordinates. Raw "
+        detail={"hint": "Use ref-based actions — click(ref) / press and set_value work on "
+                "Wayland via AT-SPI with no coordinates. Use set_value for text when the "
+                "frontmost app cannot be verified. Raw "
                 "coordinate/key input on Wayland needs libei/RemoteDesktop portal (planned), "
                 "or run under X/XWayland with $DISPLAY set."},
     )
@@ -151,6 +152,7 @@ class LinuxDriver:
         from computeruse import observe
         from computeruse.drivers import _atspi
 
+        self._focused_editable = None
         if element.secure:
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
@@ -177,14 +179,17 @@ class LinuxDriver:
         from computeruse import observe
         from computeruse.drivers import _atspi
 
+        self._focused_editable = None
         if element.secure:
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
-        self._focused_editable = handle
         # AT-SPI EditableText.set_text_contents (marshaled onto the a11y thread)
-        return self._run(lambda: _atspi.set_text(handle, value))
+        success = self._run(lambda: _atspi.set_text(handle, value))
+        if success:
+            self._focused_editable = handle
+        return success
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
@@ -196,6 +201,7 @@ class LinuxDriver:
             raise _wayland_input_error("click")
         from computeruse.drivers import _linux_input
 
+        self._focused_editable = None
         x, y = _point_of(target)
         with _linux_input.held(modifiers):
             _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
@@ -209,6 +215,7 @@ class LinuxDriver:
             raise _wayland_input_error("drag")
         from computeruse.drivers import _linux_input
 
+        self._focused_editable = None
         x1, y1 = _point_of(start)
         x2, y2 = _point_of(end)
         _linux_input.drag(x1, y1, x2, y2, button=_BUTTON_NAME.get(button, "left"))
@@ -223,6 +230,7 @@ class LinuxDriver:
             raise _wayland_input_error("scroll")
         from computeruse.drivers import _linux_input
 
+        self._focused_editable = None
         x, y = _point_of(target)
         _linux_input.scroll(x, y, dx=dx, dy=dy)
         return None
@@ -232,8 +240,9 @@ class LinuxDriver:
         """Enter ``text`` into the focused editable.
 
         Primary path: AT-SPI EditableText on the element last focused via
-        press_element — deterministic and needs no X/widget focus (which headless
-        AT-SPI cannot reliably grant). Falls back to synthetic XTEST keystrokes
+        press_element, provided its owner is the current frontmost app. This
+        needs no widget focus, but does require a detectable application owner.
+        Falls back to synthetic XTEST keystrokes
         when no editable was focused through the driver (e.g. the vision path)."""
         if dry_run or not text:
             return None
@@ -242,6 +251,20 @@ class LinuxDriver:
         handle = self._focused_editable
         if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
             raise _secure_focus_error("AT-SPI role 'password text' on the focused editable")
+        if handle is not None:
+            from computeruse.drivers import _linux_system
+
+            app_id, _pid = self.frontmost_app()
+            owner_pid = self._run(lambda: _atspi.pid_of(handle))
+            owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
+            if not owner or not app_id or owner != app_id:
+                self._focused_editable = None
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    "the remembered editable does not belong to a verified frontmost app; "
+                    "focus the intended field again or use set_value with its ref",
+                    detail={"editable_app": owner, "frontmost_app": app_id},
+                )
         if handle is not None and self._run(lambda: _atspi.insert_text(handle, text)):
             return None
         if _on_wayland():  # a11y path unavailable and XTEST can't reach Wayland apps
@@ -277,6 +300,7 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        self._focused_editable = None
         _linux_input.press_chord(chord)
         return None
 
@@ -367,11 +391,13 @@ class LinuxDriver:
     def launch_app(self, identifier: str) -> None:
         from computeruse.drivers import _linux_system
 
+        self._focused_editable = None
         _linux_system.launch_app(identifier)
 
     def activate_app(self, identifier: str) -> str:
         from computeruse.drivers import _linux_system
 
+        self._focused_editable = None
         return _linux_system.activate_app(identifier)
 
     def windows(self) -> list[dict]:
@@ -396,6 +422,7 @@ class LinuxDriver:
             raise _wayland_window_error("raise_window")
         from computeruse.drivers import _linux_system
 
+        self._focused_editable = None
         if not _linux_system.raise_window(window_id):
             raise _no_such_window(window_id)
 

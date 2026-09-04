@@ -14,7 +14,7 @@
 #   4. optional (XVFB=1): the same live suite under Xvfb + a fresh a11y bus, the
 #      CI shape, to show the new tests behave there too (the Runtime test
 #      self-skips without a window manager)
-set -uo pipefail
+set -euo pipefail
 
 REPO="${REPO:-$HOME/computerUse}"
 cd "$REPO"
@@ -50,7 +50,7 @@ if [[ "${XVFB:-0}" == "1" ]]; then
   echo "== 4. the CI shape: Xvfb + fresh session bus + a11y bus (no window manager)"
   command -v xvfb-run >/dev/null || sudo apt-get install -y -qq xvfb dbus-x11 >/dev/null
   env -u DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS \
-    xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
+    xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -euo pipefail -c '
       ( /usr/libexec/at-spi-bus-launcher --launch-immediately & ) 2>/dev/null
       sleep 2
       timeout -k 5 180 .venv/bin/pytest tests/test_linux_live.py -q -rs --tb=short -p no:cacheprovider 2>&1 \

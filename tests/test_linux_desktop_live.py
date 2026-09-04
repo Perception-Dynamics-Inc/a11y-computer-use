@@ -148,9 +148,19 @@ def test_xtest_typing_lands_including_unicode_and_punctuation(app) -> None:
     driver.click(Point(display_id=0, x=x, y=y))
     time.sleep(0.3)
     text = "Hello, World! 42 <a/b> ünïcödé 日本"
-    driver.type_text(text)
-    time.sleep(0.6)
-    assert _entry(_fresh(driver)).value == text
+    # Repeated replacements exercise keymap restore/rebind and the asynchronous
+    # input method. A single short string previously hid intermittent reordering.
+    for attempt in range(5):
+        driver.key_chord("ctrl+a")
+        driver.type_text(text)
+        deadline = time.monotonic() + 2
+        value = None
+        while time.monotonic() < deadline:
+            value = _entry(_fresh(driver)).value
+            if value == text:
+                break
+            time.sleep(0.05)
+        assert value == text, f"typing round {attempt + 1}: {value!r} != {text!r}"
 
 
 @requires_desktop

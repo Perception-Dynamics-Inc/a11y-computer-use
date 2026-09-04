@@ -1,0 +1,322 @@
+{
+  "date": "2026-09-04",
+  "branch": "codex/production-hardening",
+  "base_commit": "43b1d10",
+  "source_sha256": "91dccf5c6f3a35ec35af5118256d2a907fd323093fcdf56ab8069b98e0d3ab37",
+  "wheel_sha256": "1171f96ad8ef378923ef35eb048b2c735f2bfb05c151a1902833f3560b7b25c5",
+  "python": "3.12.3",
+  "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+  "installed_wheel_verification": {
+    "installed_path": "/home/user/computerUse-hardening/.release-venv/lib/python3.12/site-packages",
+    "installed_source_sha256": "91dccf5c6f3a35ec35af5118256d2a907fd323093fcdf56ab8069b98e0d3ab37",
+    "python": "3.12.3"
+  },
+  "local_tests": {
+    "passed": 765,
+    "skipped": 42
+  },
+  "linux_tests": {
+    "full": {
+      "tests": 723,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 32
+    },
+    "linux": {
+      "tests": 18,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "browser": {
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "verified_form_workflows": 12250,
+  "load_runs": [
+    {
+      "workload": "local HTML form: observe, set_value, ref click, observe and verify",
+      "isolation": "one spawned process, Runtime, tab and permission store per worker",
+      "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "workers": 1,
+      "iterations_per_worker": 250,
+      "completed": 250,
+      "expected": 250,
+      "errors": 0,
+      "wall_time_s": 9.36,
+      "verified_iterations_per_second": 26.72,
+      "iteration_ms": {
+        "p50": 33.27,
+        "p95": 50.38,
+        "p99": 100.89
+      },
+      "worker_results": [
+        {
+          "worker": 0,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.125
+        }
+      ],
+      "name": "load-1",
+      "box_id": "bx_4c4s3kdb",
+      "browser_mode": "desktop"
+    },
+    {
+      "workload": "local HTML form: observe, set_value, ref click, observe and verify",
+      "isolation": "one spawned process, Runtime, tab and permission store per worker",
+      "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "workers": 4,
+      "iterations_per_worker": 250,
+      "completed": 1000,
+      "expected": 1000,
+      "errors": 0,
+      "wall_time_s": 12.77,
+      "verified_iterations_per_second": 78.32,
+      "iteration_ms": {
+        "p50": 44.62,
+        "p95": 82.17,
+        "p99": 120.15
+      },
+      "worker_results": [
+        {
+          "worker": 0,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.08203125
+        },
+        {
+          "worker": 1,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.25
+        },
+        {
+          "worker": 2,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.125
+        },
+        {
+          "worker": 3,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.171875
+        }
+      ],
+      "name": "load-4",
+      "box_id": "bx_4c4s3kdb",
+      "browser_mode": "desktop"
+    },
+    {
+      "workload": "local HTML form: observe, set_value, ref click, observe and verify",
+      "isolation": "one spawned process, Runtime, tab and permission store per worker",
+      "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "workers": 8,
+      "iterations_per_worker": 250,
+      "completed": 2000,
+      "expected": 2000,
+      "errors": 0,
+      "wall_time_s": 21.1,
+      "verified_iterations_per_second": 94.77,
+      "iteration_ms": {
+        "p50": 73.45,
+        "p95": 139.93,
+        "p99": 162.4
+      },
+      "worker_results": [
+        {
+          "worker": 0,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.25
+        },
+        {
+          "worker": 1,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.25
+        },
+        {
+          "worker": 2,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.5
+        },
+        {
+          "worker": 3,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.125
+        },
+        {
+          "worker": 4,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.375
+        },
+        {
+          "worker": 5,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.0
+        },
+        {
+          "worker": 6,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.375
+        },
+        {
+          "worker": 7,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.375
+        }
+      ],
+      "name": "load-8",
+      "box_id": "bx_4c4s3kdb",
+      "browser_mode": "desktop"
+    },
+    {
+      "workload": "local HTML form: observe, set_value, ref click, observe and verify",
+      "isolation": "one spawned process, Runtime, tab and permission store per worker",
+      "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "workers": 8,
+      "iterations_per_worker": 1000,
+      "completed": 8000,
+      "expected": 8000,
+      "errors": 0,
+      "wall_time_s": 80.48,
+      "verified_iterations_per_second": 99.41,
+      "iteration_ms": {
+        "p50": 72.88,
+        "p95": 137.4,
+        "p99": 156.02
+      },
+      "worker_results": [
+        {
+          "worker": 0,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.375
+        },
+        {
+          "worker": 1,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.125
+        },
+        {
+          "worker": 2,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.203125
+        },
+        {
+          "worker": 3,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.125
+        },
+        {
+          "worker": 4,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.25
+        },
+        {
+          "worker": 5,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.31640625
+        },
+        {
+          "worker": 6,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.25
+        },
+        {
+          "worker": 7,
+          "completed": 1000,
+          "errors": [],
+          "peak_rss_mb": 30.25
+        }
+      ],
+      "name": "soak-8",
+      "box_id": "bx_4c4s3kdb",
+      "browser_mode": "desktop"
+    },
+    {
+      "workload": "local HTML form: observe, set_value, ref click, observe and verify",
+      "isolation": "one spawned process, Runtime, tab and permission store per worker",
+      "platform": "Linux-6.8.0-117-generic-x86_64-with-glibc2.39",
+      "python": "3.12.3",
+      "cpu_count": 4,
+      "workers": 4,
+      "iterations_per_worker": 250,
+      "completed": 1000,
+      "expected": 1000,
+      "errors": 0,
+      "wall_time_s": 24.94,
+      "verified_iterations_per_second": 40.09,
+      "iteration_ms": {
+        "p50": 92.28,
+        "p95": 124.27,
+        "p99": 147.39
+      },
+      "worker_results": [
+        {
+          "worker": 0,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.359375
+        },
+        {
+          "worker": 1,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.10546875
+        },
+        {
+          "worker": 2,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.33984375
+        },
+        {
+          "worker": 3,
+          "completed": 250,
+          "errors": [],
+          "peak_rss_mb": 28.109375
+        }
+      ],
+      "name": "wheel-load-4",
+      "box_id": "bx_pguvxg3x",
+      "browser_mode": "headless"
+    }
+  ],
+  "typing_regression": {
+    "baseline_failures": 2,
+    "baseline_runs": 12,
+    "patched_runs": 12,
+    "entries_per_patched_run": 5,
+    "patched_failures": 0
+  },
+  "snapshots": {
+    "desktop": "computeruse-hardened-2026-09-04",
+    "wheel": "computeruse-wheel-2026-09-04"
+  }
+}

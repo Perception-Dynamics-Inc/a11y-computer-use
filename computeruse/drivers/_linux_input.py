@@ -33,19 +33,18 @@ def _disp():
 
 
 def _fake(event_type, detail):
-    """Queue one XTEST event WITHOUT flushing — callers flush once at the end of
-    a logical operation (a whole string, chord, or click). X processes queued
-    requests in order, so batching a keystroke's press+release (or a click's
-    warp+press+release) into one round-trip is both correct and ~2-4x fewer
-    blocking syncs than flushing per event."""
+    """Queue one XTEST event; callers flush a keystroke, chord, or click.
+
+    Server request order does not imply application input-method completion.
+    Text therefore paces whole keystrokes instead of flooding the client.
+    """
     from Xlib.ext import xtest
 
     xtest.fake_input(_disp(), event_type, detail)
 
 
 def _flush():
-    """Send all queued events and wait for the server to process them (one
-    round-trip) — the single sync point at the end of an input operation."""
+    """Wait for the X server, without waiting for applications to handle input."""
     _disp().sync()
 
 
@@ -94,7 +93,7 @@ def _char_keysym(ch: str) -> int:
     return cp if cp < 0x100 else (0x01000000 | cp)
 
 
-def _keycode_and_shift(keysym: int):
+def _keycode_and_shift(keysym: int) -> tuple[int | None, bool]:
     """(keycode, needs_shift) for ``keysym`` when it sits on the base or Shift
     level of some key in the live keymap, else (None, False). python-xlib's
     keysym_to_keycode also matches the AltGr/level-3 and second-group columns
@@ -115,11 +114,17 @@ def _keycode_and_shift(keysym: int):
 def _tap_keysym(keysym: int) -> bool:
     """Press+release the key for ``keysym`` (bracketing with Shift if the keysym
     is on the upper level). Returns False if the keysym is unmapped."""
-    from Xlib import X
-
     keycode, needs_shift = _keycode_and_shift(keysym)
     if keycode is None:
         return False
+    _tap_keycode(keycode, needs_shift)
+    return True
+
+
+def _tap_keycode(keycode: int, needs_shift: bool) -> None:
+    """Queue a prepared keycode with its required Shift state."""
+    from Xlib import X
+
     shift_kc = _disp().keysym_to_keycode(_KEYSYM_MODS["shift"]) if needs_shift else 0
     if shift_kc:
         _fake(X.KeyPress, shift_kc)
@@ -127,7 +132,6 @@ def _tap_keysym(keysym: int) -> bool:
     _fake(X.KeyRelease, keycode)
     if shift_kc:
         _fake(X.KeyRelease, shift_kc)
-    return True
 
 
 def _spare_keycodes(d) -> list[int]:
@@ -156,6 +160,19 @@ class _TempKeymap:
         self._bound: dict[int, int] = {}  # keysym -> keycode
         self._saved: dict[int, list[int]] = {}  # keycode -> original keysyms
         self._spare = _spare_keycodes(self._d)
+
+    def bind_all(self, keysyms: list[int]) -> dict[int, int]:
+        """Reserve the complete text before typing, or fail without input."""
+        missing = list(dict.fromkeys(sym for sym in keysyms if sym not in self._bound))
+        if len(missing) > len(self._spare):
+            raise ValueError(
+                f"text needs {len(missing)} unmapped characters but only "
+                f"{len(self._spare)} spare keycodes are available; use set_value "
+                "or focus an editable element through its accessibility ref"
+            )
+        for sym in missing:
+            self.bind(sym)
+        return {sym: self._bound[sym] for sym in keysyms}
 
     def bind(self, keysym: int) -> int | None:
         """Keycode currently producing ``keysym`` (binding a spare one on first
@@ -194,31 +211,33 @@ class _TempKeymap:
 
 
 def type_string(text: str) -> None:
-    """Type ``text`` into the focused element via XTEST, one keysym per char.
-    All events are queued and flushed once (one round-trip for the whole string,
-    not two per character)."""
+    """Type with a stable keymap and paced keystrokes into the focused element.
+
+    Bind the complete text before sending input: midstream MappingNotify events
+    race client keymap refreshes. Pace mapped characters as well as Unicode;
+    asynchronous input methods can otherwise commit Unicode before preceding
+    ASCII that they requeue for the application. Prefer AT-SPI for bulk text.
+    """
     if not text:
         return
     import time
 
-    from Xlib import X
-
-    pool = _TempKeymap()
+    keysyms = [_char_keysym(ch) for ch in text]
+    keys = {sym: _keycode_and_shift(sym) for sym in dict.fromkeys(keysyms)}
+    missing = [sym for sym, (kc, _shift) in keys.items() if kc is None]
+    pool = _TempKeymap() if missing else None
     try:
-        for ch in text:
-            keysym = _char_keysym(ch)
-            if _tap_keysym(keysym):
-                continue
-            kc = pool.bind(keysym)  # not on the layout: type it through a spare keycode
-            if kc is None:
-                continue  # no spare keycode left; skip rather than mistype
-            _fake(X.KeyPress, kc)
-            _fake(X.KeyRelease, kc)
+        if pool is not None:
+            keys.update({sym: (kc, False) for sym, kc in pool.bind_all(missing).items()})
+        for sym in keysyms:
+            keycode, needs_shift = keys[sym]
+            assert keycode is not None  # all characters were resolved before input
+            _tap_keycode(keycode, needs_shift)
             _flush()
-            time.sleep(0.012)  # keep the client's lazy translation in step with the map
-        _flush()
+            time.sleep(0.012)  # let the client/input method dispatch this character
     finally:
-        pool.restore()
+        if pool is not None:
+            pool.restore()
 
 
 # --- key chords ------------------------------------------------------------

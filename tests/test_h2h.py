@@ -229,9 +229,12 @@ def _pixel_responder(method: str, params: dict):
         return {"cssVisualViewport": {"pageX": 0, "pageY": 0},
                 "cssContentSize": {"width": 800, "height": 600}}
     if method == "Runtime.evaluate":
+        if "activeElement" in params.get("expression", ""):
+            return {"result": {"type": "boolean", "value": False}}
         return {"result": {"type": "string", "value": "state"}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
-                  "DOM.enable", "Page.enable", "Runtime.enable", "Log.enable", "Network.enable"):
+                  "DOM.enable", "Page.enable", "Runtime.enable", "Log.enable", "Network.enable",
+                  "Runtime.releaseObject"):
         return {}
     raise AssertionError(f"unexpected CDP method {method}")
 
