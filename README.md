@@ -58,7 +58,7 @@ python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]
 .venv/bin/computeruse doctor && .venv/bin/computeruse mcp
 ```
 
-Accessibility actions, typing, coordinate input, and capture are verified on X11. On native Wayland the accessibility path works and `grim` captures; coordinate clicks and key chords return `unsupported` ([docs/linux-port.md](./docs/linux-port.md)).
+Accessibility actions, typing, coordinate input, and capture are verified on X11. On native Wayland explicit accessibility actions such as `set_value` work and `grim` captures; implicit typing needs a verified frontmost app, while coordinate clicks and key chords return `unsupported` ([docs/linux-port.md](./docs/linux-port.md)).
 
 **Windows (partial)**
 
@@ -146,7 +146,7 @@ The remaining variables are listed in [CONTRIBUTING.md](./CONTRIBUTING.md).
 | `app` · `window` · `clipboard` | list / launch / focus; list / raise; read / write. | read to full |
 | `console(app)` · `network(app)` | Browser only: buffered console messages and request outcomes. | read |
 
-Errors are wire-stable strings: `stale_ref` (with up to three candidates from the live tree), `secure_field`, `focus_changed`, `permission_denied_accessibility`, `permission_denied_screen`, `app_not_found`, `timeout`, `confirmation_declined`, `unsupported`.
+Errors are wire-stable strings: `stale_ref` (with up to three candidates from the live tree), `secure_field`, `focus_changed`, `permission_denied_accessibility`, `permission_denied_screen`, `app_not_found`, `timeout`, `confirmation_declined`, `unsupported`, `busy`, `closed`.
 
 ## Why computerUse
 
@@ -189,7 +189,7 @@ We deliberately do not build another browser agent (use Playwright MCP or browse
 |---|---|---|---|---|
 | Snapshot, `find`, diff, interactive view | ✔ | ✔ CI, Notepad | ✔ CI, GTK3 | ✔ CI, iframes stitched |
 | Ref press, `set_value` | ✔ | ◐ press live; no ref re-resolution yet | ✔ | ✔ |
-| Type, key chords | ✔ | ✔ CI | ✔ real desktop and CI; Wayland via a11y only | ✔ |
+| Type, key chords | ✔ | ✔ CI | ✔ real desktop and CI; implicit typing requires a verified frontmost app | ✔ |
 | Coordinate click, drag, scroll | ✔ | ✘ | ✔ X11 (real desktop and CI under openbox); ✘ Wayland | ✔ |
 | Screenshot, zoom | ✔ | ✘ | ◐ PIL on X11, `grim` on Wayland | ✔ |
 | App, window, clipboard | ✔ | ✘ | ✔ real desktop | ◐ tabs as apps; clipboard `unsupported` |
@@ -203,6 +203,8 @@ We deliberately do not build another browser agent (use Playwright MCP or browse
 - Browser: same-process iframes are stitched into the snapshot; cross-origin ones are skipped. Per-job evidence is in [docs/ci.md](./docs/ci.md).
 
 ## Embedding computerUse
+
+For concurrent workloads, use one Runtime and isolated target per worker. See the [production guide](./docs/production.md) for backpressure, cancellation, state retention and load validation, and the [concurrency contract](./docs/concurrency.md) for exact limits.
 
 computerUse is infrastructure for agent products. Two shapes, and in both your app is the identity the OS trusts.
 

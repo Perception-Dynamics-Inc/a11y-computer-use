@@ -20,9 +20,13 @@ are imported lazily).
 from __future__ import annotations
 
 import base64
+import math
 import os
 import time
+from collections import deque
 from collections.abc import Callable
+from itertools import islice
+from typing import TYPE_CHECKING
 
 from computeruse.schema import (
     Bounds,
@@ -39,7 +43,12 @@ from computeruse.schema import (
     WaitCondition,
 )
 
+if TYPE_CHECKING:
+    from computeruse.drivers._cdp import CDPSession
+
 _DEFAULT_ENDPOINT = "http://127.0.0.1:9222"
+_FEED_LIMIT = 1000
+_FEED_TEXT_LIMIT = 4096
 
 # CDP dispatchKeyEvent modifier bitmask (Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8).
 _MOD_BIT = {"alt": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "command": 4, "shift": 8}
@@ -85,16 +94,18 @@ class BrowserDriver:
     def __init__(self, endpoint: str | None = None, *, target_id: str | None = None) -> None:
         self._endpoint = endpoint or os.environ.get("COMPUTERUSE_CDP_ENDPOINT", _DEFAULT_ENDPOINT)
         self._target_id = target_id
-        self._session = None  # lazily connected _cdp.CDPSession (also = "connected")
-        self._console: list[dict] = []  # accumulated console/exception entries
+        self._session: CDPSession | None = None  # connected lazily
+        self._console: deque[dict] = deque(maxlen=_FEED_LIMIT)
         self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
-        self._network: list[dict] = []  # completed request outcomes (status/failure)
+        self._network: deque[dict] = deque(maxlen=_FEED_LIMIT)
 
     # -- connection ---------------------------------------------------------
-    def _connect(self):
+    def _connect(self) -> CDPSession:
         """Bind to a page target and return a ready CDPSession (domains enabled)."""
         if self._session is not None:
-            return self._session
+            if not self._session.closed:
+                return self._session
+            self.close()
         from computeruse.drivers import _cdp
 
         targets = _cdp.page_targets(self._endpoint)
@@ -107,25 +118,41 @@ class BrowserDriver:
         target = None
         if self._target_id is not None:
             target = next((t for t in targets if t.get("id") == self._target_id), None)
+            if target is None:
+                raise ComputerUseError(
+                    ErrorCode.APP_NOT_FOUND, f"CDP page target {self._target_id} no longer exists",
+                    detail={"target_id": self._target_id},
+                )
         target = target or targets[0]
-        self._target_id = target.get("id")
-        self._session = _cdp.CDPSession(_cdp.connect(target["webSocketDebuggerUrl"]))
+        if not target.get("id") or not target.get("webSocketDebuggerUrl"):
+            raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "CDP page has no target id or WebSocket URL")
+        sess = _cdp.CDPSession(_cdp.connect(target["webSocketDebuggerUrl"]))
         # Runtime + Log emit console / exception events; Network emits request/
         # response/failure events — the console + network feeds a vision agent is
         # blind to (buffered, bounded, by the session). Enabling here starts both
         # feeds before the first action so nothing is missed.
-        for domain in ("DOM", "Page", "Runtime", "Log", "Network"):
-            try:
-                self._session.call(f"{domain}.enable")
-            except ComputerUseError:
-                pass  # some builds gate a domain; observe/act degrade, not crash
-        return self._session
+        try:
+            for domain in ("DOM", "Page", "Runtime", "Log", "Network"):
+                try:
+                    sess.call(f"{domain}.enable")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.UNSUPPORTED:
+                        raise
+        except Exception:
+            sess.close()
+            raise
+        self._target_id = target["id"]
+        self._session = sess
+        return sess
 
     def close(self) -> None:
         """Drop the CDP connection (a fresh one opens on next use)."""
         if self._session is not None:
             self._session.close()
         self._session = None
+        self._console.clear()
+        self._network.clear()
+        self._net_pending.clear()
 
     _reset = close  # internal alias kept for existing call sites
 
@@ -166,7 +193,7 @@ class BrowserDriver:
     #: ad-heavy pages, not a real-page limit.
     _MAX_FRAMES = 24
 
-    def _collect_frames(self, sess) -> list[dict]:
+    def _collect_frames(self, sess: CDPSession) -> list[dict]:
         """The main AX tree plus each reachable child frame's, in tree order.
 
         Cross-origin out-of-process iframes live in a separate CDP target; their
@@ -179,23 +206,28 @@ class BrowserDriver:
         tree = sess.call("Page.getFrameTree").get("frameTree", {})
         main_id = tree.get("frame", {}).get("id")
         frames = [{"id": main_id, "parent_id": None, "owner_backend": None, "nodes": main_nodes}]
-        queue = [(c, main_id) for c in tree.get("childFrames", [])]
-        while queue and len(frames) < self._MAX_FRAMES:
-            node, parent_id = queue.pop(0)
+        queue = deque((c, main_id) for c in islice(tree.get("childFrames", []), self._MAX_FRAMES - 1))
+        attempts = 1
+        while queue and attempts < self._MAX_FRAMES:
+            node, parent_id = queue.popleft()
+            attempts += 1  # failed/OOPIF lookups consume the budget too
             fid = node.get("frame", {}).get("id")
             if not fid:
                 continue
             try:
                 owner = sess.call("DOM.getFrameOwner", {"frameId": fid}).get("backendNodeId")
                 sub = sess.call("Accessibility.getFullAXTree", {"frameId": fid}).get("nodes", [])
-            except ComputerUseError:
-                continue  # OOPIF / detached frame — skip, never fail the snapshot
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.UNSUPPORTED:
+                    raise
+                continue  # OOPIF / detached frame; transport failures still surface
             frames.append({"id": fid, "parent_id": parent_id,
                            "owner_backend": owner, "nodes": sub})
-            queue.extend((c, fid) for c in node.get("childFrames", []))
+            available = max(0, self._MAX_FRAMES - attempts - len(queue))
+            queue.extend((c, fid) for c in islice(node.get("childFrames", []), available))
         return frames
 
-    def _bind(self, app: str | None):
+    def _bind(self, app: str | None) -> CDPSession:
         """Return the session for ``app`` (a page target id), switching if needed."""
         if app and app != self._target_id:
             self._reset()
@@ -251,12 +283,28 @@ class BrowserDriver:
         object_id = self._object_id(backend_id)
         if object_id is None:
             return False
-        self._connect().call("Runtime.callFunctionOn", {
-            "objectId": object_id,
-            "functionDeclaration": fn,
-            "arguments": [{"value": a} for a in (args or [])],
-        })
-        return True
+        sess = self._connect()
+        try:
+            result = sess.call("Runtime.callFunctionOn", {
+                "objectId": object_id,
+                "functionDeclaration": fn,
+                "arguments": [{"value": a} for a in (args or [])],
+                "returnByValue": True,
+            })
+            if result.get("exceptionDetails"):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED, "the page could not perform the DOM action",
+                    detail={"backend_id": backend_id,
+                            "error": result["exceptionDetails"].get("text", "JavaScript exception")},
+                )
+            return True
+        finally:
+            # CDP keeps every resolved node alive until explicitly released.
+            # Navigating in the action may already have destroyed its context.
+            try:
+                sess.call("Runtime.releaseObject", {"objectId": object_id}, timeout=1.0)
+            except ComputerUseError:
+                pass
 
     def press_element(self, element: Element) -> bool:
         if element.secure:
@@ -293,15 +341,16 @@ class BrowserDriver:
         """Whether the page's focused element is ``<input type=password>``.
 
         One ``Runtime.evaluate`` that follows ``document.activeElement`` through
-        open shadow roots and same-origin iframes. Degrades to False when the
-        evaluate itself fails (a gated domain), mirroring the macOS probe, which
-        also reports "no signal" as not secure."""
-        try:
-            reply = self._connect().call("Runtime.evaluate", {
-                "expression": _FOCUSED_PASSWORD_JS, "returnByValue": True})
-        except ComputerUseError:
-            return False
-        return reply.get("result", {}).get("value") is True
+        open shadow roots and same-origin iframes. An unreadable focus probe
+        refuses typing rather than treating an unknown field as safe."""
+        reply = self._connect().call("Runtime.evaluate", {
+            "expression": _FOCUSED_PASSWORD_JS, "returnByValue": True})
+        value = reply.get("result", {}).get("value")
+        if reply.get("exceptionDetails") or not isinstance(value, bool):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED, "could not verify whether the focused field is secure",
+            )
+        return value
 
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
@@ -480,11 +529,13 @@ class BrowserDriver:
         sess = self._connect()
         try:
             sess.call("Runtime.evaluate", {"expression": "0", "returnByValue": True})
-        except ComputerUseError:
-            pass
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.UNSUPPORTED:
+                raise
         for ev in sess.drain_events():
             entry = _console_entry(ev)
             if entry is not None:
+                entry["text"] = str(entry["text"])[:_FEED_TEXT_LIMIT]
                 self._console.append(entry)
             self._ingest_network(ev)
 
@@ -499,7 +550,7 @@ class BrowserDriver:
         self._pump_events()
         out = list(self._console)
         if clear:
-            self._console = []
+            self._console.clear()
         return out
 
     def network_requests(self, *, clear: bool = True) -> list[dict]:
@@ -514,7 +565,7 @@ class BrowserDriver:
         self._pump_events()
         out = list(self._network)
         if clear:
-            self._network = []
+            self._network.clear()
         return out
 
     def _ingest_network(self, ev: dict) -> None:
@@ -524,17 +575,17 @@ class BrowserDriver:
         if method == "Network.requestWillBeSent":
             req = p.get("request", {})
             self._net_pending[rid] = {"method": req.get("method", "GET"),
-                                      "url": req.get("url", "")}
+                                      "url": str(req.get("url", ""))[:_FEED_TEXT_LIMIT]}
             if len(self._net_pending) > 512:  # bound: drop the oldest in-flight ids
                 for k in list(self._net_pending)[:256]:
                     self._net_pending.pop(k, None)
         elif method == "Network.responseReceived":
             base = self._net_pending.pop(rid, {"method": "GET",
-                                               "url": p.get("response", {}).get("url", "")})
+                                               "url": str(p.get("response", {}).get("url", ""))[:_FEED_TEXT_LIMIT]})
             self._network.append({**base, "status": p.get("response", {}).get("status")})
         elif method == "Network.loadingFailed":
             base = self._net_pending.pop(rid, {"method": "GET", "url": ""})
-            self._network.append({**base, "error": p.get("errorText", "failed")})
+            self._network.append({**base, "error": str(p.get("errorText", "failed"))[:_FEED_TEXT_LIMIT]})
 
     # -- system / windowing (tabs as apps/windows) --------------------------
     def frontmost_app(self) -> tuple[str | None, int | None]:
@@ -572,24 +623,42 @@ class BrowserDriver:
         A load-aware wait means the very next snapshot sees the loaded page, not a
         blank frame — no fixed sleep, no racing the navigation.
         """
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("timeout_s must be finite and positive")
         sess = self._connect()
-        result = sess.call("Page.navigate", {"url": url})
+        deadline = time.monotonic() + timeout_s
+        result = sess.call("Page.navigate", {"url": url}, timeout=timeout_s)
         if isinstance(result, dict) and result.get("errorText"):
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND, f"navigation to {url} failed: {result['errorText']}",
                 detail={"url": url},
             )
-        deadline = time.monotonic() + timeout_s
+        loader_id = result.get("loaderId")
         while time.monotonic() < deadline:
             try:
+                # A completed OLD document can remain visible until navigation
+                # commits. Only accept readiness for the requested loader.
+                if loader_id:
+                    frame = sess.call("Page.getFrameTree", timeout=max(0.001, deadline - time.monotonic()))
+                    current_loader = frame.get("frameTree", {}).get("frame", {}).get("loaderId")
+                    if current_loader != loader_id:
+                        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+                        continue
                 state = sess.call("Runtime.evaluate", {
                     "expression": "document.readyState", "returnByValue": True,
-                }).get("result", {}).get("value")
-            except ComputerUseError:
+                }, timeout=max(0.001, deadline - time.monotonic())).get("result", {}).get("value")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.UNSUPPORTED:
+                    raise
+                # A navigation can briefly destroy the old execution context.
                 state = None
             if state == "complete":
                 return
-            time.sleep(0.05)
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        raise ComputerUseError(
+            ErrorCode.TIMEOUT, f"navigation to {url} did not finish within {timeout_s}s",
+            detail={"url": url, "timeout_s": timeout_s, "outcome_unknown": True},
+        )
 
     def activate_app(self, identifier: str) -> str:
         self._bind(identifier)

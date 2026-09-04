@@ -9,7 +9,25 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+- Runtime operations and batches retain exclusive ownership of their snapshot;
+  MCP admission and queue waits are bounded, with `busy` and `closed` errors.
+- CDP commands use serialized deadlines, strict tab binding, bounded diagnostic
+  buffers, explicit disconnect errors, and release remote DOM handles.
+- Permission updates are atomic across local processes; invalid policy edits
+  deny actions. Audit files have configurable size/retention limits and recover
+  incomplete writes.
+- Windows permission updates retry transient file-sharing errors within a
+  deadline and use consistent file metadata to cache unchanged policies.
+- Browser password probes fail closed. Long scrolling searches recheck their
+  target and permissions before input.
+- Linux typing verifies the remembered editable belongs to the frontmost app
+  and clears stale targets after focus-changing actions.
+- Linux XTEST typing prepares the full Unicode keymap before input and paces
+  keystrokes consistently to prevent the observed GTK/IBus character reordering.
+  Insufficient spare keycodes now reject the text before emitting partial input.
+- ASCII Box verification fails on missing live coverage, preserves reports,
+  and includes a verified multiprocess browser load harness. See
+  [production guidance](docs/production.md) and [concurrency contract](docs/concurrency.md).
 
 ## [0.1.0] - 2026-09-02
 

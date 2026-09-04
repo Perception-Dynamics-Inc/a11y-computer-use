@@ -68,7 +68,7 @@ the session D-Bus address) from a live session process, then runs:
 | `tests/test_browser.py -k live` | the CDP backend against a real, non-headless Chrome window |
 | `tests/test_arena.py -k live` and `computeruse bench web` | the a11y-vs-screenshot observation cost on a 1920x1080 display |
 
-Use `box exec <id> --timeout 600 -- bash -c '...'` instead of `box ssh` for
+Use `box exec <id> --timeout 600 -- '...'` instead of `box ssh` for
 anything that launches GUI apps: `box ssh` waits for every child that inherits
 its stdout, so a stray GTK window keeps the session open until it times out.
 Redirect launched apps to `/dev/null` or use `--detach`.
@@ -76,8 +76,8 @@ Redirect launched apps to `/dev/null` or use `--detach`.
 ## 4b. Verify coordinate input under a real pointer (on the box)
 
 ```bash
-box exec <id> --timeout 900 -- bash -c 'bash ~/computerUse/scripts/box/verify-pointer.sh'
-box exec <id> --timeout 900 -- bash -c 'XVFB=1 bash ~/computerUse/scripts/box/verify-pointer.sh'   # also run the CI shape
+box exec <id> --timeout 600 -- 'bash ~/computerUse/scripts/box/verify-pointer.sh'
+box exec <id> --timeout 600 -- 'XVFB=1 bash ~/computerUse/scripts/box/verify-pointer.sh'   # also run the CI shape
 ```
 
 `verify-pointer.sh` (with `pointer_probe.py`) parks the pointer away from the
@@ -101,3 +101,27 @@ macOS (TCC, AXUIElement) and Windows (UIA). Those stay on the GitHub-hosted
 runners. The image is X11, so it also cannot exercise the Wayland-only paths
 (libei / RemoteDesktop portal); `xdg-desktop-portal-gtk` is installed but no
 RemoteDesktop backend is.
+
+## Concurrent workflows and release gates
+
+The current `run-live.sh` fails on test errors and rejects missing/skipped
+mandatory Linux and browser live tests. It saves full logs and JUnit XML under
+`artifacts/` (override with `REPORT_DIR`). Browser verification includes the
+adapters, reference agent loop and head-to-head fixtures. Only the Chrome
+process launched by the script is cleaned up; an existing CDP endpoint is reused.
+
+For long runs, use detached execution: the CLI/API response may time out while
+a foreground command is still running. Use the returned pid to inspect status.
+Pass the complete shell command as one argument (the CLI joins arguments):
+
+```bash
+box exec <id> --detach -- 'REPO=/home/user/computerUse LOAD_WORKERS=4 LOAD_ITERATIONS=100 bash /home/user/computerUse/scripts/box/run-live.sh'
+box exec <id> --status <pid>
+```
+
+`load_browser.py` creates separate worker processes and tabs, submits forms
+through the gated Runtime, and verifies every resulting value. Reports contain
+completion/error counts, throughput, latency percentiles and worker peak RSS.
+Use 1, 4 and 8 workers to find a suitable concurrency level on your box; then
+repeat with your real pages. See [production.md](../../docs/production.md) for
+worker isolation, overload/cancellation behavior and audit retention settings.

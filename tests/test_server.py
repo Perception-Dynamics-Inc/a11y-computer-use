@@ -76,7 +76,10 @@ def audit_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def mcp_server(store: safety.PermissionStore, audit_dir: Path):
-    return server.build_server(store=store, audit=safety.AuditLog(audit_dir))
+    # These tests reconnect the in-memory transport between tool calls. Keep
+    # the Runtime caller-owned across those individual server lifespans.
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir)) as runtime:
+        yield server.build_server(runtime=runtime)
 
 
 @pytest.fixture
@@ -872,6 +875,8 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     rt = server.Runtime.__new__(server.Runtime)
     rt.driver = _D()
     rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
 
     out = rt.scroll_to_find("app", text="Target")
@@ -1016,6 +1021,9 @@ def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
     rt.driver = _D()
     rt._current = mk(False)
     rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    rt.driver.resolve_ref = lambda old, ref, *, live: observe.rematch_ref(old, ref, live)
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
 
     out = rt.scroll_to_find("app", text="Reykjavik", ref="e6")

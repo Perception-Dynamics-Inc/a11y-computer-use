@@ -135,9 +135,9 @@ def test_linux_a11y_press_button(tmp_path) -> None:
 
 
 def test_linux_a11y_type_text(tmp_path) -> None:
-    """The a11y-first text path: focus the entry, then enter text via AT-SPI
-    EditableText (deterministic, no widget-focus needed), confirmed by a
-    re-snapshot."""
+    """Ref typing needs a verified app owner, but not widget focus. A desktop
+    with no window manager must refuse implicit typing instead of trusting an
+    old handle; explicit set_value is verified separately below."""
     from computeruse.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
@@ -150,6 +150,13 @@ def test_linux_a11y_type_text(tmp_path) -> None:
 
         driver.press_element(driver.resolve_ref(snap, entry.ref))  # records + focuses it
         time.sleep(0.3)
+        if driver.frontmost_app()[0] is None:
+            with pytest.raises(ComputerUseError) as error:
+                driver.type_text("must not enter an unverified app")
+            assert error.value.code is ErrorCode.FOCUS_CHANGED
+            after = driver.snapshot(Scope.WINDOW, _APP)
+            assert not any("must not enter" in (el.value or "") for el in after.elements)
+            return
         driver.type_text("hello atspi")
         time.sleep(0.3)
         driver.type_text(" more")  # a second call appends — insert-at-caret semantics
@@ -158,6 +165,26 @@ def test_linux_a11y_type_text(tmp_path) -> None:
         after = driver.snapshot(Scope.WINDOW, _APP)
         values = [el.value for el in after.elements if el.value]
         assert any("hello atspi more" in (v or "") for v in values), f"typed text missing; {values}"
+    finally:
+        proc.terminate()
+
+
+def test_linux_explicit_set_value_without_frontmost(tmp_path, monkeypatch) -> None:
+    """An explicit element target remains usable on a headless desktop."""
+    from computeruse.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_app(tmp_path)
+    try:
+        snap = _wait_for_snapshot(driver)
+        entry = next((el for el in snap.elements if el.editable), None)
+        assert entry is not None
+        target = driver.resolve_ref(snap, entry.ref)
+        monkeypatch.setattr(driver, "frontmost_app", lambda: (None, None))
+        assert driver.set_value(target, "explicit headless text")
+        after = driver.snapshot(Scope.WINDOW, _APP)
+        assert any(el.value == "explicit headless text" for el in after.elements)
     finally:
         proc.terminate()
 

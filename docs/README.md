@@ -1,5 +1,7 @@
 # Documentation index
 
+For deployment and concurrent workflows, start with [production.md](./production.md) and [concurrency.md](./concurrency.md).
+
 Everything under `docs/` in one place: the Phase-0 decision records, the per-backend port notes, the agent-loop, adapter, observation-cost, benchmark, and test-bed notes, the data behind the demand claim, and the brand assets. Status and date entries are copied from each document's own header; where a document has no header, the table says so.
 
 ## Documents

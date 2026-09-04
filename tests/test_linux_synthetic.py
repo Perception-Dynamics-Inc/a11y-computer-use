@@ -273,3 +273,113 @@ def test_altgr_only_keysym_is_typed_through_a_spare_keycode(xtest_recorder, monk
     spare = display.remapped[0][0]
     assert keys == [(key_press, 37), (key_press, spare), (key_release, spare), (key_release, 37)]
     assert display.remapped[-1] == (spare, 0)  # the keymap is restored after the chord
+
+
+def test_text_binds_complete_keymap_before_first_keystroke(xtest_recorder, monkeypatch) -> None:
+    """A mixed string must not change key translation while text is in flight."""
+    import time
+
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    display.keymap[65] = [ord(" ")] * 6
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    original_mapping = {kc: list(syms) for kc, syms in display.keymap.items()}
+    change_mapping = display.change_keyboard_mapping
+    mappings_when_bound: list[int] = []
+
+    def checked_mapping(first: int, keysyms: list[list[int]]) -> None:
+        if keysyms[0][0]:
+            mappings_when_bound.append(len(events))
+        change_mapping(first, keysyms)
+
+    monkeypatch.setattr(display, "change_keyboard_mapping", checked_mapping)
+    _linux_input.type_string("q @ü q@")
+
+    assert mappings_when_bound == [0, 0], "prepare every missing keysym before any input"
+    presses = [detail for event, detail, _x, _y in events if event == 2]
+    bound = {sym: kc for kc, sym in display.remapped if sym}
+    assert presses == [24, 65, bound[ord("@")], bound[ord("ü")], 65, 24, bound[ord("@")]]
+    assert {kc: syms for kc, syms in display.keymap.items() if any(syms)} == original_mapping
+
+
+def test_text_capacity_failure_does_not_type_or_change_keymap(xtest_recorder, monkeypatch) -> None:
+    """Exhausted keycodes must not silently truncate a partly typed string."""
+    import time
+
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [255])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(ValueError, match="2 unmapped characters.*1 spare keycodes"):
+        _linux_input.type_string("q@ü")
+
+    assert events == []
+    assert display.remapped == []
+
+
+def test_repeated_unmapped_character_only_needs_one_spare(xtest_recorder, monkeypatch) -> None:
+    import time
+
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(_linux_input, "_spare_keycodes", lambda _display: [255])
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+
+    _linux_input.type_string("üüüü")
+
+    assert [(event, detail) for event, detail, _x, _y in events] == [(2, 255), (3, 255)] * 4
+    assert display.remapped == [(255, ord("ü")), (255, 0)]
+
+
+def test_mapped_text_does_not_flood_input_method(xtest_recorder, monkeypatch) -> None:
+    """Even ASCII must give asynchronous input methods time to dispatch keys."""
+    import time
+
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    dispatched: list[list[tuple[int, int]]] = []
+
+    def dispatch(_seconds: float) -> None:
+        assert _seconds > 0
+        dispatched.append([(event, detail) for event, detail, _x, _y in events])
+        events.clear()
+
+    monkeypatch.setattr(time, "sleep", dispatch)
+    _linux_input.type_string("qQq")
+
+    assert dispatched == [
+        [(2, 24), (3, 24)],
+        [(2, 50), (2, 24), (3, 24), (3, 50)],
+        [(2, 24), (3, 24)],
+    ]
+    assert not events
+    assert display.remapped == []
+
+
+def test_binding_failure_restores_keymap_without_partial_text(xtest_recorder, monkeypatch) -> None:
+    """A server error midway through preparation must not leave a remapped key."""
+    import time
+
+    events, _ = xtest_recorder
+    display = _GermanLayoutDisplay()
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    change_mapping = display.change_keyboard_mapping
+
+    def fail_second_binding(first: int, keysyms: list[list[int]]) -> None:
+        if keysyms[0][0] == ord("ü"):
+            raise RuntimeError("test server mapping failure")
+        change_mapping(first, keysyms)
+
+    monkeypatch.setattr(display, "change_keyboard_mapping", fail_second_binding)
+    with pytest.raises(RuntimeError, match="test server mapping failure"):
+        _linux_input.type_string("q@ü")
+
+    assert events == []
+    assert display.remapped[0][1] == ord("@")
+    assert not any(display.keymap[display.remapped[0][0]])

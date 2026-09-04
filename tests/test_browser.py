@@ -76,7 +76,7 @@ def _fixture_responder(method: str, params: dict):
         # focused password field. Tests that need "focused" override this.
         return {"result": {"type": "boolean", "value": False}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
-                  "DOM.enable", "Page.enable", "Runtime.enable"):
+                  "DOM.enable", "Page.enable", "Runtime.enable", "Runtime.releaseObject"):
         return {}
     if method == "Page.captureScreenshot":
         import base64
@@ -414,6 +414,8 @@ def test_browser_navigate_waits_for_ready_and_launch_maps_to_url() -> None:
         if method == "Page.navigate":
             assert params["url"] == "https://example.com"
             return {"frameId": "F", "loaderId": "L"}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "F", "loaderId": "L"}}}
         if method == "Runtime.evaluate":
             return {"result": {"value": next(states, "complete")}}
         if method in ("DOM.enable", "Page.enable", "Runtime.enable"):

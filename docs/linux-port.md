@@ -25,10 +25,10 @@ Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` retu
 | `resolve_ref` | fresh `snapshot` + the shared `observe._match_anchor`; structured `STALE_REF` when the anchor no longer resolves | the *same* `_match_anchor` on all three OSes |
 | `press_element` | `AtspiAction.do_action` on the first activating action (the a11y-first payoff: no pointer movement); an editable field with no action falls back to `AtspiComponent.grab_focus`; secure fields are refused | `AXUIElementPerformAction(AXPress)` / `InvokePattern.Invoke` |
 | `scroll_into_view` | `AtspiComponent.scroll_to(ScrollType.ANYWHERE)` | `AXScrollToVisible` / `ScrollItemPattern.ScrollIntoView` |
-| `click` | XTEST via python-xlib: `warp_pointer(x, y)` + `xtest.fake_input(ButtonPress/Release)`; modifier-clicks bracket with keysym press/release (`held()`) | `CGEvent` mouse / `SendInput(MOUSEINPUT)` |
-| `drag` | XTEST: warp → `ButtonPress` → warp → `ButtonRelease` | `CGEvent` drag / `SendInput` |
+| `click` | XTEST via python-xlib: absolute XTEST `MotionNotify` + `ButtonPress/Release`; modifier-clicks bracket with keysym press/release (`held()`) | `CGEvent` mouse / `SendInput(MOUSEINPUT)` |
+| `drag` | XTEST: absolute motion → `ButtonPress` → absolute motion → `ButtonRelease` | `CGEvent` drag / `SendInput` |
 | `scroll` | XTEST wheel = X buttons **4/5** (vertical) and **6/7** (horizontal); one button tap per notch | `CGEventScrollWheel` / `MOUSEEVENTF_WHEEL` |
-| `type_text` | AT-SPI `EditableText.insert_text` on the editable last recorded via `press_element` (or `set_value`): the whole string in a single `insert_text` call, no keystrokes, and no widget focus required (which headless AT-SPI `grab_focus` cannot grant); CI-live headless on a GTK3 `Gtk.Entry` (`tests/test_linux_live.py::test_linux_a11y_type_text`). XTEST keystrokes (keysym to keycode, auto-Shift) are the fallback when no editable was recorded through the driver (vision path) | `CGEventKeyboardSetUnicodeString` / `KEYEVENTF_UNICODE` |
+| `type_text` | AT-SPI `EditableText.insert_text` on the remembered editable after verifying its owner matches the frontmost app. No widget focus is required, but missing/mismatched app ownership returns `focus_changed`; use explicit `set_value` without a detectable frontmost app. Coordinate/key/app/window changes clear the remembered target. Otherwise XTEST uses a prepared Unicode keymap and paced keystrokes. | `CGEventKeyboardSetUnicodeString` / `KEYEVENTF_UNICODE` |
 | `key_chord` | XTEST via python-xlib: chord → X keysyms (`keysymdef.h` table) → keycodes → modifier `KeyPress`es, key press/release, modifier `KeyRelease`s; `validate_chord` fails fast on dry-run. (Real widget focus is needed for chords to land, so a full desktop session, not headless, is where they apply.) | `_US_KEYCODES` / VK codes via `SendInput` |
 | `wait_for` | platform-free poll of the Runtime-supplied checker (re-resolution goes through `resolve_ref`); structured `TIMEOUT` | identical loop on all three OSes |
 | `screenshot` | native Wayland (`WAYLAND_DISPLAY` set, no `DISPLAY`): `grim -` first; X11/XWayland: PIL `ImageGrab.grab(xdisplay=$DISPLAY)` to PNG, with grim as the last resort; structured `PERMISSION_DENIED_SCREEN` carrying X11 and Wayland hints when neither path works (headless without Xvfb) | `CGWindowListCreateImage` / DXGI Desktop Duplication (Windows: not implemented yet) |
@@ -64,7 +64,8 @@ with a single manual check behind it, matching the ◐ rows in README.md.
 | Capability | Wayland | how |
 |---|---|---|
 | snapshot / find / diff | ◐ manual check 2026-08-29 (snapshot only); `find` and diff share the path, no test | AT-SPI over D-Bus (display-agnostic) |
-| press / invoke, set_value, type (focused) | ◐ manual check 2026-08-29 (press and `EditableText` typing); `set_value` not covered, no test | AT-SPI `do_action` / `EditableText`, no coordinates |
+| press / invoke, set_value | ◐ historical manual press check 2026-08-29; explicit `set_value` remains the supported text path without detected frontmost ownership | AT-SPI `do_action` / `EditableText`, no coordinates |
+| implicit type (focused) | refuses with `focus_changed` if frontmost ownership cannot be verified | The earlier manual typing result predates the ownership guard. |
 | screenshot / zoom | ◐ manual check 2026-08-29 (`grim` screenshot); zoom not covered, no test | `grim` (wlroots ext-image-copy-capture); PIL X11 grab off |
 | org.a11y.Status force-enable | ◐ implemented; not covered by the manual check, no test | D-Bus session bus |
 | click(x,y) / drag / wheel scroll / key_chord | ⛔ `unsupported` | XTEST is X11-only → structured `ErrorCode.UNSUPPORTED` with a hint to use ref-based actions; libei/RemoteDesktop-portal input is the session-gated follow-up |

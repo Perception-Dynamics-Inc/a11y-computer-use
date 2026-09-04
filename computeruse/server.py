@@ -34,13 +34,16 @@ doctor`` still works.
 from __future__ import annotations
 
 import json
+import math
 import time
 import os
 import subprocess
 import sys
 from collections.abc import Callable
-from functools import partial
-from typing import TYPE_CHECKING
+from contextlib import asynccontextmanager
+from functools import partial, wraps
+from threading import RLock
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
 if sys.platform == "darwin":
     # macOS platform helpers. The Driver seam isolates everything OS-specific,
@@ -96,6 +99,37 @@ _DOCTOR_HINT = "run `computeruse doctor` to see which host app needs the grant"
 
 #: Ceiling for the ``wait_for`` timeout parameter (seconds).
 MAX_WAIT_TIMEOUT_S = 60.0
+MAX_BATCH_STEPS = 100
+MAX_BATCH_DURATION_S = 60.0
+MAX_SCROLLS = 100
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Concatenate["Runtime", _P], _R]:
+    """Keep an entire tool's resolve/gate/act/audit sequence on one ref epoch.
+
+    Nested calls (including every step of a batch) are reentrant. Competing
+    synchronous callers fail immediately; the MCP layer queues asynchronously
+    before allocating a worker, so waiting calls never consume worker threads.
+    """
+    @wraps(method)
+    def execute(self: "Runtime", *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        if not self._operation_lock.acquire(blocking=False):
+            raise ComputerUseError(
+                ErrorCode.BUSY,
+                "this Runtime is executing another operation; retry after it completes",
+                detail={"retryable": True},
+            )
+        try:
+            if self._closed:
+                raise ComputerUseError(ErrorCode.CLOSED, "this Runtime is closed")
+            return method(self, *args, **kwargs)
+        finally:
+            self._operation_lock.release()
+
+    return execute
 
 #: Prefer AX activation (``AXPress``/focus — no cursor movement) over a
 #: synthetic mouse click for simple left single-clicks on a ref. This is what
@@ -519,11 +553,21 @@ class Runtime:
     `safety.PermissionStore`, and the `safety.AuditLog`. Methods return short
     result strings (except `screenshot`/`zoom`, which return image payloads)
     and raise `ComputerUseError` or `ActionRefused` for structured failures.
+
+    One Runtime belongs to one agent workflow and one desktop/tab. Public
+    operations never overlap, and an act batch holds that ownership throughout.
+    Separate agents need separate Runtimes AND isolated desktops/browser tabs:
+    serializing calls does not make independently planned actions share refs.
+    Direct concurrent callers receive ``busy``; MCP requests use a bounded queue.
     """
 
     #: Class-level default of the rendering view (see ``__init__``), so a Runtime
     #: assembled without ``__init__`` (test doubles) still renders full-mode.
     _view: str = "full"
+    # Defaults support lightweight __new__ test doubles. Every initialized
+    # Runtime has its own lock and lifecycle state below.
+    _operation_lock = RLock()
+    _closed: bool = False
 
     def __init__(
         self,
@@ -532,6 +576,8 @@ class Runtime:
         audit: safety.AuditLog | None = None,
         driver: "drivers.Driver | None" = None,
     ) -> None:
+        self._operation_lock = RLock()
+        self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
         #: The OS backend. Every platform op (observe/act/capture) routes through
@@ -542,6 +588,30 @@ class Runtime:
         #: diff snapshots and Effect Receipts render in it so an agent that chose
         #: the cheap view keeps getting it.
         self._view: str = "full"
+
+    def close(self) -> None:
+        """Wait for the active operation, then release the driver once.
+
+        Closing is final even if the driver's cleanup raises: a partially
+        closed connection must never receive more input. Queued calls will
+        fail with ``closed``. Drivers without resources need no close method.
+        """
+        with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._current = None
+            close = getattr(self.driver, "close", None)
+            if close is not None:
+                close()
+
+    def __enter__(self) -> "Runtime":
+        if self._closed:
+            raise ComputerUseError(ErrorCode.CLOSED, "this Runtime is closed")
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
     # -- app identity resolution -------------------------------------------
     # The OS backends resolve app identity through the platform system-ops
@@ -579,6 +649,16 @@ class Runtime:
 
     # -- gate + audit -------------------------------------------------------
 
+    def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
+        """Read the current grant and audit a refusal before any input."""
+        decision = safety.check_action(action, app, store=self.store)
+        if not decision.allowed:
+            self.audit.record_action(
+                action, app=app, decision=decision, result=decision.verdict.value, secure=secure
+            )
+            raise ActionRefused(decision)
+        return decision
+
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
     ):
@@ -595,12 +675,7 @@ class Runtime:
         errors are all audited before they propagate; a SECURE_FIELD failure
         forces redaction of injectable params.
         """
-        decision = safety.check_action(action, app, store=self.store)
-        if not decision.allowed:
-            self.audit.record_action(
-                action, app=app, decision=decision, result=decision.verdict.value, secure=secure
-            )
-            raise ActionRefused(decision)
+        decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
                 prompt = safety.confirmation_prompt(action, app)
@@ -617,6 +692,9 @@ class Runtime:
                         ),
                         detail={"app": app, "confirmable": confirm is not None},
                     )
+                if prompt is not None:
+                    # The user can revoke a grant while confirmation is open.
+                    decision = self._require_permission(action, app, secure=secure)
             if recheck is not None:
                 recheck(app)
             started = time.perf_counter()
@@ -803,6 +881,7 @@ class Runtime:
 
     # -- observation tools (gated at READ + audited like everything else) ------
 
+    @_serialized
     def desktop_snapshot(
         self,
         app: str,
@@ -843,6 +922,7 @@ class Runtime:
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
+    @_serialized
     def find(
         self,
         app: str,
@@ -875,6 +955,7 @@ class Runtime:
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
+    @_serialized
     def screenshot(
         self, display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE,
         marks: bool = False,
@@ -914,6 +995,7 @@ class Runtime:
         app = self._frontmost()
         return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
 
+    @_serialized
     def zoom(self, display_id: int, x: int, y: int, width: int, height: int) -> bytes:
         app = self._frontmost()
         return self._run_gated(
@@ -940,16 +1022,19 @@ class Runtime:
         return self._run_gated(ObserveOp(verb=verb, app=bundle), bundle,
                                lambda: json.dumps(fn()))
 
+    @_serialized
     def console(self, app: str) -> str:
         """Recent console output + uncaught exceptions from the browser backend."""
         return self._browser_feed(app, "console_messages", ObserveVerb.CONSOLE, "console")
 
+    @_serialized
     def network(self, app: str) -> str:
         """Completed network outcomes (status codes + failures) from the browser."""
         return self._browser_feed(app, "network_requests", ObserveVerb.NETWORK, "network")
 
     # -- action tools -----------------------------------------------------------
 
+    @_serialized
     def click(
         self,
         ref: str | None = None,
@@ -996,6 +1081,7 @@ class Runtime:
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
 
+    @_serialized
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
         self._run_gated(
@@ -1003,6 +1089,7 @@ class Runtime:
         )
         return f"typed {len(text)} characters"
 
+    @_serialized
     def key(self, chord: str) -> str:
         if sys.platform == "darwin":
             from computeruse import act  # lazy: US-layout keycode parse, macOS
@@ -1014,6 +1101,7 @@ class Runtime:
         )
         return f"pressed {chord}"
 
+    @_serialized
     def scroll(
         self,
         ref: str | None = None,
@@ -1050,6 +1138,7 @@ class Runtime:
             return f"scrolled {_describe(target)} into view"
         return f"scrolled {_describe(target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
 
+    @_serialized
     def drag(
         self,
         start_ref: str | None = None,
@@ -1076,8 +1165,11 @@ class Runtime:
         )
         return f"dragged {_describe(start)} -> {_describe(end)}"
 
+    @_serialized
     def wait_for(self, ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:
         parsed = WaitCondition(condition)
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("timeout_s must be finite and nonnegative")
         # Clamp: the tool runs on a worker thread, but an unbounded poll would
         # still pin that thread (and the model's patience) for minutes.
         timeout_s = min(timeout_s, MAX_WAIT_TIMEOUT_S)
@@ -1093,6 +1185,7 @@ class Runtime:
         )
         return f"{ref} {parsed.value}: satisfied"
 
+    @_serialized
     def act_batch(self, steps: list[dict], *, confirm: "Confirmer | None" = None,
                   verify: bool = False) -> str:
         """Execute act steps in ONE call — the transactional path that collapses
@@ -1110,7 +1203,10 @@ class Runtime:
         """
         if not isinstance(steps, list) or not steps:
             raise ValueError("steps must be a non-empty list of step objects")
+        if len(steps) > MAX_BATCH_STEPS:
+            raise ValueError(f"steps must contain at most {MAX_BATCH_STEPS} actions")
         pre = self._current if verify else None
+        deadline = time.monotonic() + MAX_BATCH_DURATION_S
         out: list[dict] = []
         for i, step in enumerate(steps):
             if not isinstance(step, dict) or "do" not in step:
@@ -1118,21 +1214,29 @@ class Runtime:
                 break
             do = step["do"]
             try:
-                out.append({"i": i, "do": do, "ok": True, "result": self._dispatch_step(do, step, confirm)})
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ComputerUseError(
+                        ErrorCode.TIMEOUT,
+                        "batch time budget exhausted; remaining steps were not executed",
+                        detail={"max_duration_s": MAX_BATCH_DURATION_S, "completed_steps": i},
+                    )
+                out.append({"i": i, "do": do, "ok": True,
+                            "result": self._dispatch_step(do, step, confirm, remaining)})
             except ActionRefused as exc:
                 out.append({"i": i, "do": do, "ok": False, "error": refusal_text(exc.decision)})
                 break
             except ComputerUseError as exc:
                 out.append({"i": i, "do": do, "ok": False, "error": error_text(exc)})
                 break
-            except (KeyError, ValueError) as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 out.append({"i": i, "do": do, "ok": False, "error": str(exc)})
                 break
         if verify:  # Effect Receipt: one post-batch diff of what changed
             return json.dumps({"steps": out, "effect": self._effect_after(pre)})
         return json.dumps(out)
 
-    def _dispatch_step(self, do: str, step: dict, confirm):
+    def _dispatch_step(self, do: str, step: dict, confirm, remaining_s: float = MAX_BATCH_DURATION_S):
         if do == "click":
             return self.click(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
                               step.get("button", "left"), step.get("count", 1),
@@ -1150,10 +1254,14 @@ class Runtime:
                              step.get("end_ref"), step.get("end_x"), step.get("end_y"),
                              step.get("display_id"))
         if do == "wait_for":
+            timeout_s = step.get("timeout_s", 10.0)
+            if not math.isfinite(timeout_s) or timeout_s < 0:
+                raise ValueError("timeout_s must be finite and nonnegative")
             return self.wait_for(step["ref"], step.get("condition", "exists"),
-                                 step.get("timeout_s", 10.0))
+                                 min(timeout_s, remaining_s))
         raise ValueError(f"unknown step '{do}' — use click/type/key/scroll/drag/wait_for")
 
+    @_serialized
     def set_value(self, ref: str, value: str) -> str:
         """Set an editable element's value directly via the a11y API (one op),
         falling back to focus + type when the app exposes no settable value.
@@ -1185,6 +1293,7 @@ class Runtime:
         self._run_gated(action, app, execute, recheck=partial(self._recheck_target, target=live))
         return f"set {ref} = {value!r}"
 
+    @_serialized
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
                        direction: str = "down", max_scrolls: int = 6, scope: str = "window",
                        ref: str | None = None) -> str:
@@ -1201,26 +1310,50 @@ class Runtime:
             raise ValueError("direction must be 'down' or 'up'")
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app'")
+        if isinstance(max_scrolls, bool) or not isinstance(max_scrolls, int) or not 0 <= max_scrolls <= MAX_SCROLLS:
+            raise ValueError(f"max_scrolls must be an integer between 0 and {MAX_SCROLLS}")
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
-        pinned = self._anchor(ref)[1] if ref is not None else None
+        pinned = self._anchor_audited(ref, "scroll") if ref is not None else None
         dy = 5 if direction == "down" else -5
+        self._require_permission(Scroll(target=Point(0, 0, 0), dy=dy), bundle)
+
+        def inject_scroll(anchor: Element) -> None:
+            self._refuse_secure(anchor)
+            self.driver.scroll(anchor, dy=dy)
 
         def execute() -> str:
             for i in range(max_scrolls + 1):
                 snap = self.driver.snapshot(Scope(scope), bundle)
                 self._current = snap
+                if pinned is not None and (pinned[0].app is None or pinned[0].app != snap.app):
+                    raise ComputerUseError(
+                        ErrorCode.STALE_REF,
+                        "the pinned scroll ref belongs to a different app; re-observe the requested app",
+                        detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
+                    )
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
                     return f"found after {i} scroll(s):\n{observe.render_matches(snap, matches)}"
-                anchor = pinned if pinned is not None else _scroll_anchor(snap)
-                if i >= max_scrolls or anchor is None:
+                if i >= max_scrolls:
                     break
-                self.driver.scroll(anchor, dy=dy)
+                anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
+                          if pinned is not None else _scroll_anchor(snap))
+                if anchor is None:
+                    break
+                # Scrolling is a pointer action too: the container can move,
+                # disappear, become secure or be covered between iterations.
+                self._run_gated(
+                    Scroll(target=anchor, dy=dy), bundle, partial(inject_scroll, anchor),
+                    recheck=partial(self._recheck_target, target=anchor),
+                )
             return f"not found after {max_scrolls} scroll(s): no element matches text={text!r} role={role!r}"
 
-        return self._run_gated(Scroll(target=Point(0, 0, 0), dy=dy), bundle, execute)
+        # Each injected scroll has its own receipt, including those that
+        # complete before a later iteration fails; the outer row is observation.
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
+    @_serialized
     def app(self, action: str, name: str | None = None) -> str:
         # Routed through the driver (running_apps/launch_app/activate_app), so the
         # browser backend lists/opens/focuses TABS and Windows/Linux use their own
@@ -1250,6 +1383,7 @@ class Runtime:
                         lambda: self.driver.activate_app(name))
         return f"focused {bundle}"
 
+    @_serialized
     def window(self, action: str, window_id: int | None = None) -> str:
         verb = WindowVerb(action)
         if verb is WindowVerb.LIST:
@@ -1271,6 +1405,7 @@ class Runtime:
         self._run_gated(op, owner, lambda: self.driver.raise_window(window_id))
         return f"raised window {window_id} ({owner})"
 
+    @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
         verb = ClipboardVerb(action)
         app = self._frontmost()
@@ -1291,6 +1426,7 @@ class Runtime:
         {"click", "type", "key", "scroll", "drag", "app", "window", "clipboard"}
     )
 
+    @_serialized
     def call_tool(
         self, tool: str, params: dict[str, object], *, confirm: "Confirmer | None" = None
     ):
@@ -1328,6 +1464,7 @@ class Runtime:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
         return methods[tool](**params)  # type: ignore[arg-type]
 
+    @_serialized
     def dispatch(self, tool: str, params: dict[str, object]) -> str:
         """Execute one action tool by name (the ``run-once`` entry point).
 
@@ -1367,6 +1504,8 @@ def build_server(
     store: safety.PermissionStore | None = None,
     audit: safety.AuditLog | None = None,
     runtime: "Runtime | None" = None,
+    max_pending_calls: int = 32,
+    queue_timeout_s: float = 30.0,
 ) -> "FastMCP":
     """Construct the MCP server with the v1 tool surface registered.
 
@@ -1375,7 +1514,14 @@ def build_server(
         audit: Audit log (default: the standard log directory).
         runtime: An existing Runtime to expose (default: a new one built from
             ``store``/``audit``). The agent loop passes its own so the tool
-            list matches the driver it acts through.
+            list matches the driver it acts through. Caller-supplied Runtimes
+            remain caller-owned; the server closes only a Runtime it creates.
+        max_pending_calls: Maximum admitted calls, including the active call.
+            Excess calls receive ``busy`` without starting a worker thread.
+        queue_timeout_s: Maximum wait for the active call to finish. Expired
+            calls receive ``busy`` and are never executed. Once a native call
+            starts it runs to completion despite transport cancellation: Python
+            cannot safely interrupt injected input or a blocking native API.
 
     Returns:
         The configured server; the CLI runs it over stdio
@@ -1387,18 +1533,61 @@ def build_server(
     from mcp.server.fastmcp.exceptions import ToolError
     from pydantic import BaseModel
 
+    if isinstance(max_pending_calls, bool) or not isinstance(max_pending_calls, int) or max_pending_calls < 1:
+        raise ValueError("max_pending_calls must be a positive integer")
+    if not math.isfinite(queue_timeout_s) or queue_timeout_s <= 0:
+        raise ValueError("queue_timeout_s must be finite and positive")
+    owns_runtime = runtime is None
     runtime = runtime if runtime is not None else Runtime(store=store, audit=audit)
-    server = FastMCP("computeruse", instructions=_INSTRUCTIONS)
+    admission = anyio.CapacityLimiter(max_pending_calls)
+    execution = anyio.Lock()
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:
+            if owns_runtime:
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(runtime.close)
+
+    server = FastMCP("computeruse", instructions=_INSTRUCTIONS, lifespan=lifespan)
 
     async def run(fn, /, *args, **kwargs):
         """Run a blocking Runtime call on a worker thread and convert
         structured failures into clear tool-error strings.
 
-        The thread hop keeps the MCP event loop responsive (ping,
-        tools/list, cancellation) while an AX walk or ``wait_for`` blocks.
+        Admission and waiting happen on the event loop, before the thread hop.
+        Cancellation while queued removes the call without executing it. An
+        active call retains execution ownership until its worker has finished,
+        even if its requester disconnects; subsequent calls cannot race it.
         """
         try:
-            return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+            try:
+                admission.acquire_nowait()
+            except anyio.WouldBlock:
+                raise ComputerUseError(
+                    ErrorCode.BUSY,
+                    "the Runtime request queue is full; retry later",
+                    detail={"retryable": True, "max_pending_calls": max_pending_calls},
+                ) from None
+            try:
+                try:
+                    with anyio.fail_after(queue_timeout_s):
+                        await execution.acquire()
+                except TimeoutError:
+                    raise ComputerUseError(
+                        ErrorCode.BUSY,
+                        "timed out waiting for the active Runtime operation; retry later",
+                        detail={"retryable": True, "queue_timeout_s": queue_timeout_s},
+                    ) from None
+                try:
+                    with anyio.CancelScope(shield=True):
+                        return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+                finally:
+                    execution.release()
+            finally:
+                admission.release()
         except ComputerUseError as exc:
             raise ToolError(error_text(exc)) from exc
         except ActionRefused as exc:
