@@ -159,7 +159,7 @@ jobs:
             --workers 4 --iterations 10 --output artifacts/browser-load.json 2>&1 | tee artifacts/browser-load.log
       - name: retain browser load evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: browser-load
           path: |
