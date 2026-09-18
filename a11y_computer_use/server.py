@@ -58,7 +58,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import drivers, observe, safety
+from a11y_computer_use import conditions, drivers, notes, observe, safety
 
 #: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
 #: the (pyobjc-backed) capture module at build time on non-macOS.
@@ -588,6 +588,9 @@ class Runtime:
         #: diff snapshots and Effect Receipts render in it so an agent that chose
         #: the cheap view keeps getting it.
         self._view: str = "full"
+        #: The agent's scratchpad (`notes` tool), persisted next to the audit log
+        #: so facts survive context compaction and process restarts.
+        self.notes_store = notes.NoteStore(self.audit.dir_path / "notes.json")
 
     def close(self) -> None:
         """Wait for the active operation, then release the driver once.
@@ -1418,6 +1421,69 @@ class Runtime:
                         lambda: self.driver.write_clipboard(text))
         return f"wrote {len(text)} characters to the clipboard"
 
+    # -- long-task support: notes and wait_until ------------------------------
+
+    def _context_app(self) -> str:
+        """The app a context-free tool is gated against: the app of the latest
+        snapshot when there is one (the agent's working target), else frontmost."""
+        if self._current is not None and self._current.app:
+            return self._current.app
+        return self._frontmost()
+
+    @_serialized
+    def notes(self, action: str, text: str | None = None) -> str:
+        """The agent's scratchpad. ``add`` records a fact, ``list`` returns the
+        numbered notes, ``clear`` empties them. Notes are injected into every
+        planner turn by the agent loop, so they survive context compaction."""
+        if action not in ("add", "list", "clear"):
+            raise ValueError("notes action must be 'add', 'list', or 'clear'")
+        if action == "add" and not (text or "").strip():
+            raise ValueError("notes add requires text")
+        app = self._context_app()
+
+        def execute() -> str:
+            if action == "add":
+                note = self.notes_store.add(text or "")
+                return f"noted #{note['n']}: {note['text']}"
+            if action == "clear":
+                return f"cleared {self.notes_store.clear()} notes"
+            return self.notes_store.render()
+
+        return self._run_gated(ObserveOp(verb=ObserveVerb.NOTES, app=app), app, execute)
+
+    def _checker(self) -> conditions.Checker:
+        def snapshot_text(app: str | None) -> str:
+            target = app or self._context_app()
+            _running, bundle = self._resolve_app(target)
+            snap = self.driver.snapshot(Scope.WINDOW, bundle)
+            self._current = snap
+            return observe.render_text(snap, mode="full")
+
+        ocr = getattr(self, "screen_text", None)
+        screen_text = (lambda: str(ocr())) if callable(ocr) else None
+        return conditions.Checker(snapshot_text=snapshot_text, screen_text=screen_text)
+
+    @_serialized
+    def wait_until(self, condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
+        """Wait for something outside the accessibility tree: a file to exist
+        or stop growing, a URL to answer, text to appear in an app's snapshot or
+        on screen. Read tier. Long timeouts are allowed (renders, deploys), up to
+        `conditions.MAX_WAIT_UNTIL_S`."""
+        kind = conditions.kind_of(condition)
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("timeout_s must be finite and nonnegative")
+        timeout_s = min(float(timeout_s), conditions.MAX_WAIT_UNTIL_S)
+        app = str(condition.get("app")) if kind == "snapshot_text" and condition.get("app") else None
+        if app is not None:
+            _running, app = self._resolve_app(app)
+        gated_app = app or self._context_app()
+        checker = self._checker()
+        return self._run_gated(
+            ObserveOp(verb=ObserveVerb.WAIT_UNTIL, app=gated_app),
+            gated_app,
+            lambda: json.dumps(checker.wait(condition, timeout_s=timeout_s, poll_s=poll_s)),
+        )
+
     # -- named dispatch (the agent loop, CLI `run-once`) ------------------------
 
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
@@ -1459,6 +1525,8 @@ class Runtime:
             "app": self.app,
             "window": self.window,
             "clipboard": self.clipboard,
+            "notes": self.notes,
+            "wait_until": self.wait_until,
         }
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
@@ -1495,7 +1563,9 @@ _INSTRUCTIONS = (
     "and mode='diff' to re-observe after an action. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
-    "permission_denied_* errors, run `a11y_computer_use doctor`."
+    "permission_denied_* errors, run `a11y_computer_use doctor`. In long tasks, "
+    "record facts you will need later with notes(action='add') and wait for files, "
+    "URLs, or on-screen text with wait_until instead of polling snapshots."
 )
 
 
@@ -1863,6 +1933,29 @@ def build_server(
         typing path). Gated against the frontmost app. The clipboard is
         cross-app: reads may return content copied from any app."""
         return await run(runtime.clipboard, action, text)
+
+    @server.tool(name="notes")
+    async def notes_tool(action: str, text: str | None = None) -> str:
+        """Your scratchpad for facts you will need later in a long task (a
+        downloaded file's path, a deployed URL, an id copied between apps).
+        action='add' with text records one fact; 'list' returns the numbered
+        notes; 'clear' empties them. Notes survive context compaction: the
+        agent loop shows them to you on every turn. Tier 'read'."""
+        return await run(runtime.notes, action, text)
+
+    @server.tool(name="wait_until")
+    async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
+        """Wait for something outside the accessibility tree, polling every
+        poll_s seconds up to timeout_s (max 1800). condition is an object with
+        exactly one of: {"file_exists": path, "min_bytes": n} (path may use ~ and
+        globs; newest match wins), {"file_stable": path, "seconds": n} (size
+        unchanged for n seconds: a finished download or render),
+        {"url_status": url, "status": 200}, {"snapshot_text": text, "app": id}
+        (re-snapshot the app until the text appears), or {"screen_text": text}
+        (OCR, where the backend supports it). Returns JSON {matched, waited_s,
+        polls} or a timeout error. Use it instead of repeated snapshots while a
+        render, upload, or deploy runs. Tier 'read'."""
+        return await run(runtime.wait_until, condition, timeout_s, poll_s)
 
     # Browser-only: a console feed is meaningful only where the backend has one,
     # so the tool appears on the surface exactly when the driver can serve it —
