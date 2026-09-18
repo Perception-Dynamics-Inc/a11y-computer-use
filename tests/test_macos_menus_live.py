@@ -28,6 +28,27 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode  # noqa: E402
 SETTLE_S = 1.0
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _textedit_in_front():
+    """Validated menus (Show Fonts / Hide Fonts) only update while the app is
+    active. Bring TextEdit to the front once; skip on a runner that cannot
+    (a CI Mac has no interactive user session)."""
+    from a11y_computer_use import safety, server
+
+    subprocess.run(["open", "-a", "TextEdit"], check=False, timeout=15)
+    for _ in range(40):
+        try:
+            running, _bundle = server._running_app("com.apple.TextEdit")
+            server._activate(running)
+        except Exception:  # noqa: BLE001 - still launching, or cannot activate here
+            pass
+        if safety.frontmost_app()[0] == "com.apple.TextEdit":
+            break
+        time.sleep(0.5)
+    else:
+        pytest.skip("this runner cannot bring TextEdit to the foreground; menus need a user session")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def textedit_running():
     subprocess.run(["/usr/bin/open", "-a", "TextEdit"], check=False)

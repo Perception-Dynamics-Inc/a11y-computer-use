@@ -116,6 +116,11 @@ def _wait_for_document(rt: server.Runtime, title_marker: str) -> Element:
         area = _find_text_area(snap)
         titles = [el.title or "" for el in snap.elements if el.role == "AXWindow"]
         if area is not None and any(title_marker in t for t in titles):
+            if not _frontmost_is_textedit():
+                # A CI Mac without an interactive session cannot bring an app to
+                # the foreground, so input injection cannot be tested there;
+                # observation was already exercised by the snapshot above.
+                pytest.skip("this runner cannot bring TextEdit to the foreground; input needs a user session")
             return area
         time.sleep(POLL_S)
     pytest.fail(f"TextEdit window for {title_marker!r} not snapshottable in {WINDOW_TIMEOUT_S}s")
