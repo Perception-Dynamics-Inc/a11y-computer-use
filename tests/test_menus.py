@@ -43,6 +43,7 @@ class FakeAccessor:
         self.pressed: list[str] = []
         self.set: list[tuple[str, str]] = []
         self.cancels = 0
+        self.closed: list[str] = []
         self.press_ok = press_ok or (lambda node: True)
 
     def attr(self, node, name):
@@ -59,8 +60,9 @@ class FakeAccessor:
         self.set.append((node.attrs.get("AXTitle", ""), value))
         return True
 
-    def cancel(self):
+    def close(self, node):
         self.cancels += 1
+        self.closed.append(node.attrs.get("AXTitle", ""))
 
 
 def item(title, **attrs):
@@ -163,7 +165,7 @@ def test_press_of_a_disabled_item_is_refused_and_closes_open_menus() -> None:
     with pytest.raises(ComputerUseError) as exc:
         menus.press_path(acc, app, "File > Save", settle=lambda s: None)
     assert exc.value.code is ErrorCode.UNSUPPORTED and exc.value.detail["reason"] == "disabled"
-    assert acc.pressed == ["File"] and acc.cancels == 1
+    assert acc.pressed == ["File"] and acc.closed == ["File"]
 
 
 def test_press_of_an_unknown_item_names_the_available_ones() -> None:
@@ -172,7 +174,7 @@ def test_press_of_an_unknown_item_names_the_available_ones() -> None:
         menus.press_path(acc, app, "File > Print", settle=lambda s: None)
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
     assert "Save As…" in exc.value.detail["available"]
-    assert acc.cancels == 1  # File was opened, so it is closed again
+    assert acc.closed == ["File"]  # File was opened, so its menu is closed again
 
 
 def test_press_refused_by_the_app_is_structured() -> None:

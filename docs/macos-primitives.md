@@ -27,8 +27,11 @@ menu(app="TextEdit", action="list", path="File")    # items of one menu
   while its menu is closed.
 - Errors are structured: an unknown component returns `app_not_found` with
   the titles that were available at that level, a disabled item returns
-  `unsupported` with `reason: disabled`, and open menus are closed with
-  Escape before the error is raised.
+  `unsupported` with `reason: disabled`, and the menu that was opened is
+  closed again through accessibility (`AXCancel`, else a second press of the
+  menu bar item) before the error is raised. Escape does not end menu
+  tracking that was started through accessibility, and an app left tracking
+  answers every accessibility call at the timeout, so this matters.
 - Tier: `read` to list, `click` to press, gated against the app. A press whose
   label reads like an irreversible action (Delete, Move to Trash, Discard,
   Erase) goes through the same confirmation gate as a destructive click.

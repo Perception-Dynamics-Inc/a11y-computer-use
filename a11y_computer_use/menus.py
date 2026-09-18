@@ -43,8 +43,13 @@ class MenuAccessor(Protocol):
     def children(self, node: object) -> Sequence[object]: ...
     def press(self, node: object) -> bool: ...
     def set_value(self, node: object, value: str) -> bool: ...
-    def cancel(self) -> None:
-        """Close an open menu level (Escape)."""
+    def close(self, node: object) -> None:
+        """Close the menu opened from ``node`` (a menu bar item or submenu item).
+
+        Escape does not end menu tracking started through accessibility, and
+        an app stuck in tracking answers every AX call at the timeout, so the
+        implementation must cancel through AX: ``AXCancel`` on the open menu,
+        else a second press of the item, which toggles its menu shut."""
         ...
 
 
@@ -248,15 +253,19 @@ def press_path(
     """
     components = parse_path(path)
     container = menu_bar(accessor, app_el)
-    opened = 0
+    opened: list[object] = []  # menu items whose menus we opened, top level first
+
+    def abandon() -> None:
+        if opened:  # closing the top-level menu ends the whole tracking session
+            accessor.close(opened[0])
+
     for depth, wanted in enumerate(components):
         entries = _entries(accessor, container)
         titles = [_title(accessor, n) for n in entries]
         try:
             index = match_title(wanted, titles)
         except LookupError as exc:
-            for _ in range(opened):
-                accessor.cancel()
+            abandon()
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"menu path component {depth + 1} ({wanted!r}): {exc}",
@@ -268,24 +277,21 @@ def press_path(
         if last:
             enabled = accessor.attr(node, "AXEnabled")
             if enabled is not None and not bool(enabled):
-                for _ in range(opened):
-                    accessor.cancel()
+                abandon()
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
                     f"menu item {title!r} is disabled right now",
                     detail={"path": path, "reason": "disabled"},
                 )
         if _menu_of(accessor, node) is None and not last:
-            for _ in range(opened):
-                accessor.cancel()
+            abandon()
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"{title!r} has no submenu",
                 detail={"component": wanted},
             )
         if not accessor.press(node):
-            for _ in range(opened):
-                accessor.cancel()
+            abandon()
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 f"the app refused to press {title!r}",
@@ -293,12 +299,11 @@ def press_path(
             )
         if last:
             return title
-        opened += 1
+        opened.append(node)
         settle(MENU_OPEN_SETTLE_S)
         submenu = _menu_of(accessor, node)
         if submenu is None:
-            for _ in range(opened):
-                accessor.cancel()
+            abandon()
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 f"{title!r} did not open its submenu",
@@ -480,13 +485,18 @@ class AXMenuAccessor:
         except Exception:
             return False
 
-    def cancel(self) -> None:
-        from a11y_computer_use import act
-
+    def close(self, node: object) -> None:
+        menu = None
         try:
-            act.key_chord("escape")
+            for child in self.children(node):
+                if self.attr(child, "AXRole") == "AXMenu":
+                    menu = child
+                    break
+            if menu is not None and self._ax.AXUIElementPerformAction(menu, "AXCancel") == 0:
+                return
         except Exception:
             pass
+        self.press(node)  # a second press on an open menu item toggles its menu shut
 
 
 def _macos_app_element(app: str) -> tuple[object, AXMenuAccessor, str]:

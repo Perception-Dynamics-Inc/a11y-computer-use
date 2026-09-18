@@ -31,7 +31,8 @@ SETTLE_S = 1.0
 @pytest.fixture(scope="module", autouse=True)
 def textedit_running():
     subprocess.run(["/usr/bin/open", "-a", "TextEdit"], check=False)
-    time.sleep(1.0)
+    subprocess.run(["/usr/bin/osascript", "-e", 'tell application "TextEdit" to activate'], check=False)
+    time.sleep(1.5)
     yield
     # Leave TextEdit as we found it as far as menus go: make sure the Fonts panel is closed.
     try:
@@ -49,6 +50,17 @@ def _press(path: str) -> bool:
         return False
 
 
+def _press_once_offered(path: str, attempts: int = 6) -> bool:
+    """Press ``path`` as soon as the menu offers it. The panel toggles a moment
+    after the press and the title is validated only when the menu opens, so
+    the first attempt can race the app."""
+    for _ in range(attempts):
+        if _press(path):
+            return True
+        time.sleep(SETTLE_S)
+    return False
+
+
 def test_menu_list_of_file_names_real_items_with_shortcuts() -> None:
     top = [i["title"] for i in menus.macos_menu_items("TextEdit", None)]
     assert "File" in top and "Format" in top
@@ -61,10 +73,16 @@ def test_menu_list_of_file_names_real_items_with_shortcuts() -> None:
 def test_show_then_hide_fonts_each_take_effect() -> None:
     _press("Format > Font > Hide Fonts")  # normalise: panel closed, whatever the start state
     time.sleep(SETTLE_S)
-    assert _press("Format > Font > Show Fonts"), "Show Fonts should be offered while the panel is closed"
+    assert _press_once_offered("Format > Font > Show Fonts"), "Show Fonts should be offered while the panel is closed"
+    assert _press_once_offered("Format > Font > Hide Fonts"), "Hide Fonts should be offered once the panel is open"
     time.sleep(SETTLE_S)
-    assert _press("Format > Font > Hide Fonts"), "Hide Fonts should be offered once the panel is open"
-    time.sleep(SETTLE_S)
-    with pytest.raises(ComputerUseError) as exc:
-        menus.macos_menu_press("TextEdit", "Format > Font > Hide Fonts")
-    assert "Show Fonts" in exc.value.detail["available"]
+    # Once hidden, the validated menu offers Show Fonts again, so Hide Fonts is refused.
+    available: list[str] = []
+    for _ in range(6):
+        try:
+            menus.macos_menu_press("TextEdit", "Format > Font > Hide Fonts")
+        except ComputerUseError as exc:
+            available = exc.detail["available"]
+            break
+        time.sleep(SETTLE_S)  # the panel was still open; that press closed it, poll again
+    assert "Show Fonts" in available, available
