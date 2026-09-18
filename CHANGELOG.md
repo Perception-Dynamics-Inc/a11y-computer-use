@@ -1,13 +1,53 @@
 # Changelog
 
 All notable changes to a11y-computer-use are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). 0.1.0 is the first
-tagged release; it is installed from git, and nothing is published on PyPI.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Releases from 0.1.1 on are
+published on PyPI as `a11y-computer-use`.
 
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.2.0] - 2026-09-19
+
+The desktop release: apps without an accessibility tree, long multi-app missions, menus and file dialogs. The OCR path, TextEdit menus, and Figma's tree were verified live on a Mac; the agency mission in `docs/missions/` has not been run end to end.
+
+### Added
+
+- OCR refs: `screen_text` reads the display with on-device OCR (Apple Vision) and returns text lines as refs `o1..oN`; `click`, `scroll`, `drag`, `wait_for`, and `find(ocr=true)` accept them, re-reading the screen at act time and re-finding the text nearby (`stale_ref` with candidates otherwise). A snapshot with no actionable element appends the OCR lines automatically (`A11Y_COMPUTER_USE_AUTO_OCR=0` disables); `screenshot(marks=true)` marks `o` refs in blue. macOS only; `unsupported` elsewhere. New dependency `pyobjc-framework-Vision` on macOS. Measured on a 3024x1964 Retina display: about 100 ms capture, 465 ms median recognition (b8903be, 2026-09-19).
+- `notes` and `wait_until` tools: an agent scratchpad that survives context compaction, and waits for files, URLs, snapshot text, or on-screen text up to 30 minutes (b61a28f, 2026-09-19).
+- Agent loop: history compaction past a token budget, `compactions` in the result, and a `deadline_s` stop (b61a28f, 2026-09-19).
+- `a11y-computer-use mission run|validate`: long multi-app tasks as verified phases with per-phase grants, retries, runner-side checks, and a wall-clock timeline; ships `examples/missions/agency-demo.toml` (15afbe0, 2026-09-19).
+- `menu` tool: list or press a menu item by path (`File > Export > Add to Render Queue`) through the accessibility menu bar; opens each level and re-reads items on open; destructive labels ask for confirmation; macOS only, structured `unsupported` elsewhere (8e7c5e5, 05bc300, 2026-09-19).
+- `file_dialog` tool: drive the frontmost open or save panel to an absolute path via the go-to-folder sheet (macOS, hermetically tested) (8e7c5e5, 2026-09-19).
+- `app launch` waits for the first window and returns its title; `app focus` waits until frontmost; `app quit` (tier full) sends cmd+q and reports a lingering dialog (8e7c5e5, 2026-09-19).
+- `drag` accepts `path=[[x,y],...]` waypoints, one continuous stroke through a path, for painting and gesture input; `act` steps take it too (8bc570a, 2026-09-19).
+- `menu(action="state"|"close")` reports and dismisses an open menu; `click`, `type`, and `key` close an open menu in the gated app before acting and say so; `desktop_snapshot` shows `open menu: File > Font` in its header. Open menus swallowed key chords during the live trials (d4615d8, 2026-09-19).
+- Auto-OCR escalation and `screen_text(app=...)` crop to the app's windows instead of reading the whole display; the fallback to the full display is stated in the reply (d4615d8, 2026-09-19).
+
+### Fixed
+
+- Electron apps (Figma, VS Code) at app scope exposed nothing: their windows hang off `AXWindows`, `AXMainWindow`, and `AXFocusedWindow` rather than `AXChildren`, and the application element has no geometry, so the walk dropped the subtree. Figma now exposes its panels (78 elements, 20 actionable, 0.66 s) (7cf8406, 2026-09-19).
+- `app focus` claimed success when the app never came to the front; it now escalates through `open -b`, `AXFrontmost`, and `AXRaise`, verifies, and raises `focus_changed` naming the app actually in front (b23370b, 2026-09-19).
+- A direct `AXPress` on a deep menu item reported success while doing nothing, and Escape did not end AX menu tracking, leaving the app answering every call at the messaging timeout; menus are opened level by level and closed with `AXCancel` (05bc300, 2026-09-19).
+- `wait_until` URL checks refuse hosts that resolve to loopback, private, link-local, multicast, or reserved addresses and never follow redirects, so a planner steered by page content cannot probe internal services; `A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1` opts out for local servers (c33ea11, 2026-09-19).
+
+### Docs
+
+- `docs/ocr-refs.md`, `docs/missions.md`, `docs/macos-primitives.md`, and `docs/missions/agency-demo.md`, the mission that drives this release (0915003, 2026-09-18).
+
+## [0.1.1] - 2026-09-18
+
+### Changed
+
+- Renamed to `a11y-computer-use`: PyPI rejected `computeruse` and `computeruse-mcp` as too similar to reserved names. The import is `a11y_computer_use`, the CLI and MCP server are `a11y-computer-use`, environment variables use the `A11Y_COMPUTER_USE_` prefix, state lives in `~/.a11y-computer-use/`, and the repository moved to Perception-Dynamics-Inc/a11y-computer-use. First release on PyPI (388cc84, 2026-09-18).
+- Release workflow: a `v*` tag builds, smoke-tests, and publishes through PyPI trusted publishing (eb8e393, 2026-09-18). GitHub Actions bumped to v7 (fb1c0e5, 2026-09-18).
+- README cut to about a hundred lines; PLAN.md and the July decision records moved under `docs/decisions/` (1e30314, 2026-09-18).
+
+### Hardening (production-hardening branch, merged 2026-09-04)
 
 - Runtime operations and batches retain exclusive ownership of their snapshot;
   MCP admission and queue waits are bounded, with `busy` and `closed` errors.
@@ -28,6 +68,10 @@ Within a group, lines are ordered by theme, then by date.
 - ASCII Box verification fails on missing live coverage, preserves reports,
   and includes a verified multiprocess browser load harness. See
   [production guidance](docs/production.md) and [concurrency contract](docs/concurrency.md).
+
+### Fixed
+
+- The permission store notices a repaired policy file even when size and mtime did not change: while the last load failed, a content digest is compared as well, so a same-length rewrite within one filesystem timestamp tick (Windows) is picked up (230b5f2, 2026-09-18).
 
 ## [0.1.0] - 2026-09-02
 
@@ -174,5 +218,7 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 
 Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag; nothing is published on PyPI.
 
-[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.1.0...main
+[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.2.0...main
+[0.2.0]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.0
+[0.1.1]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.0

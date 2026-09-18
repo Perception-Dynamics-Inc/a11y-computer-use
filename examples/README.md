@@ -60,6 +60,10 @@ python examples/anthropic_computer_use.py   # no key: scripted replay
 
 The scripted replays still execute real actions (a click at 100,100, typing, Return, a scroll) against whatever app is frontmost or the bound tab, subject to the permission tier of that app.
 
+## Mission example
+
+[`missions/agency-demo.toml`](./missions/agency-demo.toml) is a six-phase mission for `a11y-computer-use mission run` (format in `docs/missions.md`, story in `docs/missions/agency-demo.md`): read a brief in Telegram, design in Figma, generate a video in Chrome, edit it, deploy a site, reply with the link. Each phase names its apps, step budget, and runner-side checks. `a11y-computer-use mission validate examples/missions/agency-demo.toml` checks the file; running it drives real apps on your Mac and needs the Accessibility and Screen Recording grants. It has not been run end to end yet; two of its apps (After Effects, Media Encoder) are commented out where they are not installed.
+
 ## The same examples on the other backends
 
 `server.Runtime()` takes its driver from `drivers.get_driver()`, which reads `A11Y_COMPUTER_USE_DRIVER` (`macos`, `windows`, `linux`, `browser`) and falls back to the current OS (`a11y_computer_use/drivers/__init__.py:40`). `a11y-computer-use mcp` builds its `Runtime` the same way, so both integration shapes follow the variable. One thing does not: `web_a11y_demo.py`, which calls the macOS `observe.snapshot` directly. The `a11y-computer-use snapshot` subcommand goes through `get_driver()` as well.

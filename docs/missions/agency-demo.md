@@ -53,4 +53,20 @@ OCR text). A failed check re-runs the phase with the failure in the notes.
 - `mission run mission.yaml`: phases, budgets, checks, retries, recording hooks,
   a run log that a video editor can cut from.
 
+## Status (0.2.0, 2026-09-19)
+
+All six features above shipped in 0.2.0: `screen_text` with `o` refs and
+automatic, window-cropped escalation; `menu` (list, press, state, close);
+`file_dialog`; `wait_until`; `notes`; `mission run` with the example file at
+`examples/missions/agency-demo.toml`.
+
+Live-verified on the owner's Mac: OCR of the real screen (about half a second),
+TextEdit menus through the accessibility menu bar, detection and dismissal of a
+stray open menu before a key chord, and Figma exposing its panels after the
+Electron fix. Not yet run: any mission leg end to end. The first attempt found
+the machine in active use, so the safety layer refused to click under other
+apps' windows; the run needs a hands-off desktop. After Effects and Media
+Encoder are not installed on this Mac, so the edit phase cannot pass until they
+are.
+
 Owner's words: "I want a11y-computer-use to be this strong."
