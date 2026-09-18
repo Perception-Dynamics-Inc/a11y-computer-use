@@ -23,7 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, InitializeResult, ListToolsResult
 
-from tests.conftest import HAS_AX
+from tests.conftest import HAS_AX, HAS_DISPLAYS
 
 HANDSHAKE_TIMEOUT_S = 30.0
 
@@ -33,6 +33,7 @@ EXPECTED_TOOLS = {
     "find",
     "screenshot",
     "zoom",
+    "screen_text",
     "click",
     "type",
     "key",
@@ -106,6 +107,7 @@ def test_desktop_snapshot_permission_error_is_a_tool_result(tmp_path: Path) -> N
     assert "doctor" in text, "remediation hint must point at `a11y_computer_use doctor`"
 
 
+@pytest.mark.skipif(not HAS_DISPLAYS, reason="needs an unlocked window-server session reporting a display")
 @pytest.mark.skipif(not HAS_AX, reason="requires the Accessibility TCC grant")
 def test_desktop_snapshot_succeeds_when_granted(tmp_path: Path) -> None:
     """Read-only snapshot of Finder (always running; no input injected).

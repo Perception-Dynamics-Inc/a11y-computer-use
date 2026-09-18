@@ -44,6 +44,8 @@ dependencies = [
     "pyobjc-framework-Cocoa; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
+    # On-device OCR for apps without an accessibility tree (ocr.py, `screen_text`).
+    "pyobjc-framework-Vision; sys_platform == 'darwin'",
     # cross-platform
     # Pin below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (server.py imports
     # FastMCP from there). The 1.x line (tested on 1.28.x) keeps that import.

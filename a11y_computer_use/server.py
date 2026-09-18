@@ -58,7 +58,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import conditions, drivers, notes, observe, safety
+from a11y_computer_use import conditions, drivers, notes, observe, ocr, safety
 
 #: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
 #: the (pyobjc-backed) capture module at build time on non-macOS.
@@ -144,6 +144,21 @@ PREFER_AX_ACTIONS = os.environ.get("A11Y_COMPUTER_USE_AX_CLICKS", "1") != "0"
 #: unconfirmed. Set ``A11Y_COMPUTER_USE_CONFIRM=0`` to disable the gate entirely.
 CONFIRMATION_GATE = os.environ.get("A11Y_COMPUTER_USE_CONFIRM", "1") != "0"
 
+#: When a snapshot exposes no actionable element, run on-device OCR of the
+#: display right away and append the text lines as ``o`` refs, so the planner
+#: gets something to target in the same round-trip (`ocr.py`). Set
+#: ``A11Y_COMPUTER_USE_AUTO_OCR=0`` to keep snapshots pure.
+AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "1") != "0"
+
+#: Re-OCR the display when an ``o`` ref is acted on and re-resolve the ref by
+#: text near its old position (the OCR analogue of re-resolving an ``e`` ref
+#: against the live tree). ``A11Y_COMPUTER_USE_OCR_REMATCH=0`` trusts the stored
+#: box instead (one capture cheaper, blind to text that moved).
+OCR_REMATCH = os.environ.get("A11Y_COMPUTER_USE_OCR_REMATCH", "1") != "0"
+
+#: How often `wait_for` re-OCRs the display for an ``o`` ref.
+OCR_WAIT_POLL_S = 0.5
+
 #: A confirmer maps a prompt to the human's yes/no. Injected per call so the
 #: transport (MCP elicitation, a CLI prompt, a test double) stays out of the
 #: safety core.
@@ -156,9 +171,10 @@ Confirmer = Callable[[str], bool]
 _VISION_HANDOFF_HINT = (
     "note: no interactive elements were found in this app's accessibility tree — "
     "it is likely custom-drawn (e.g. Telegram, some games/Electron apps), so the "
-    "a11y ref path cannot target it. Fall back to the `screenshot` tool and act "
-    "by x/y coordinates; if it is Electron, the tree may populate after the app "
-    "gets focus. (Try scope='app' if you used 'window'.)"
+    "a11y ref path cannot target it. Call `screen_text` to get OCR refs (o1..oN) "
+    "for the text on screen and click those, or fall back to `screenshot` and x/y "
+    "coordinates; if it is Electron, the tree may populate after the app gets "
+    "focus. (Try scope='app' if you used 'window'.)"
 )
 
 _PERMISSION_CODES = frozenset(
@@ -564,6 +580,10 @@ class Runtime:
     #: Class-level default of the rendering view (see ``__init__``), so a Runtime
     #: assembled without ``__init__`` (test doubles) still renders full-mode.
     _view: str = "full"
+    #: Class-level defaults for the OCR epoch, for the same test-double reason.
+    _screen_text: "ocr.ScreenText | None" = None
+    _ocr_engine: "ocr.OcrEngine | None" = None
+    _ocr_seq: int = 0
     # Defaults support lightweight __new__ test doubles. Every initialized
     # Runtime has its own lock and lifecycle state below.
     _operation_lock = RLock()
@@ -575,6 +595,7 @@ class Runtime:
         store: safety.PermissionStore | None = None,
         audit: safety.AuditLog | None = None,
         driver: "drivers.Driver | None" = None,
+        ocr_engine: "ocr.OcrEngine | None" = None,
     ) -> None:
         self._operation_lock = RLock()
         self._closed = False
@@ -591,6 +612,11 @@ class Runtime:
         #: The agent's scratchpad (`notes` tool), persisted next to the audit log
         #: so facts survive context compaction and process restarts.
         self.notes_store = notes.NoteStore(self.audit.dir_path / "notes.json")
+        #: On-device OCR engine (`ocr.default_engine()`: Vision on macOS, None
+        #: elsewhere) and the latest OCR epoch, the ``o`` refs' staleness anchor.
+        self._ocr_engine = ocr_engine if ocr_engine is not None else ocr.default_engine()
+        self._screen_text: ocr.ScreenText | None = None
+        self._ocr_seq = 0
 
     def close(self) -> None:
         """Wait for the active operation, then release the driver once.
@@ -827,6 +853,9 @@ class Runtime:
         ``kind`` names the calling tool in the audit row a failed resolution
         leaves behind.
         """
+        if ocr.is_ocr_ref(ref):
+            line = self._resolve_ocr(ref, kind)
+            return line.center, self._frontmost()
         if ref is not None:
             snap, live = self._resolve(ref, kind)
             return live, snap.app or self._frontmost()
@@ -835,6 +864,221 @@ class Runtime:
         if display_id is None:
             display_id = int(self.driver.main_display_id())  # through the seam, not Quartz
         return Point(display_id=display_id, x=x, y=y), self._frontmost()
+
+    # -- OCR refs (o1..oN) ----------------------------------------------------
+
+    def _require_ocr(self) -> "ocr.OcrEngine":
+        engine = self._ocr_engine
+        if engine is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "no OCR engine is available on this platform (macOS uses the Vision "
+                "framework); use `screenshot` and coordinates instead",
+                detail={"hint": "install pyobjc-framework-Vision on macOS"},
+            )
+        return engine
+
+    def _ocr_epoch(
+        self,
+        display_id: int | None = None,
+        region: "Bounds | None" = None,
+        min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+    ) -> "ocr.ScreenText":
+        """Capture the display through the driver and OCR it into a fresh
+        `ocr.ScreenText`. Not gated by itself: callers run it inside a gated
+        ``execute`` (READ, screenshot verb, frontmost app), the same grant a
+        `screenshot` needs."""
+        engine = self._require_ocr()
+        shot = self.driver.screenshot(display_id)
+        png, display = shot.png, shot.display
+        offset = (0, 0)
+        target_size = None
+        if region is not None:
+            png, width, height, offset, target_size = ocr.crop_png(png, region, display)
+        else:
+            import io
+
+            from PIL import Image
+
+            with Image.open(io.BytesIO(png)) as image:
+                width, height = image.size
+        boxes = engine.recognize(png)
+        self._ocr_seq += 1
+        return ocr.build_screen_text(
+            boxes,
+            display=display,
+            image_width=width,
+            image_height=height,
+            text_id=f"ocr-{self._ocr_seq}",
+            min_confidence=min_confidence,
+            offset=offset,
+            target_size=target_size,
+            engine=getattr(engine, "name", ""),
+        )
+
+    def _ocr_anchor(self, ref: str, kind: str) -> "ocr.TextLine":
+        """Look up an ``o`` ref in the current OCR epoch; ``stale_ref`` (audited)
+        when there is no epoch or the ref was not issued by it."""
+        screen = self._screen_text
+        try:
+            if screen is None:
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"no OCR epoch exists yet; call screen_text before targeting {ref!r}",
+                    detail={"ref": ref, "reason": "not_found"},
+                )
+            try:
+                return screen.line(ref)
+            except KeyError:
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF,
+                    f"{ref} is not in the current OCR epoch {screen.text_id}; "
+                    "OCR refs are epoch-scoped — call screen_text again",
+                    detail={"ref": ref, "text_id": screen.text_id, "reason": "not_found"},
+                ) from None
+        except ComputerUseError as exc:
+            self._record_failure(
+                kind, app=self._frontmost(),
+                params={"ref": ref, "text_id": screen.text_id if screen else None,
+                        "reason": exc.detail.get("reason", "not_found")},
+                result=exc.code.value,
+            )
+            raise
+
+    def _resolve_ocr(self, ref: str, kind: str) -> "ocr.TextLine":
+        """Re-resolve an ``o`` ref: re-OCR the display and match the line by text
+        near its old centre (`ocr.rematch_line`). When the text is gone, raise
+        ``stale_ref`` with up to three candidates, audited like an ``e`` ref
+        miss. With ``A11Y_COMPUTER_USE_OCR_REMATCH=0`` the stored box is used."""
+        old = self._ocr_anchor(ref, kind)
+        if not OCR_REMATCH:
+            return old
+        live = self._ocr_epoch(old.bounds.display_id)
+        match, candidates = ocr.rematch_line(old, live)
+        if match is not None:
+            return match
+        exc = ComputerUseError(
+            ErrorCode.STALE_REF,
+            f"{ref} ({old.text!r}) is no longer on screen; call screen_text again",
+            detail={
+                "ref": ref,
+                "text": old.text,
+                "reason": "not_found",
+                "candidates": [
+                    {"text": c.text, "x": c.bounds.x, "y": c.bounds.y} for c in candidates
+                ],
+            },
+        )
+        self._record_failure(
+            kind, app=self._frontmost(),
+            params={"ref": ref, "text": old.text, "reason": "not_found"},
+            result=exc.code.value,
+        )
+        raise exc
+
+    def _label(self, ref: str | None, target: Target) -> str:
+        """`_describe` for the result message, naming an ``o`` ref and its text."""
+        if ocr.is_ocr_ref(ref) and self._screen_text is not None:
+            try:
+                return f"{ref} (text {self._screen_text.line(ref).text!r})"
+            except KeyError:
+                pass
+        return _describe(target)
+
+    @_serialized
+    def screen_text(
+        self,
+        display_id: int | None = None,
+        region: dict | None = None,
+        min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+    ) -> str:
+        """OCR the display (or ``region`` = {x, y, width, height} in physical
+        pixels) and publish the text lines as refs ``o1..oN``. Gated at READ
+        against the frontmost app with the screenshot verb, since it is a
+        capture. The result becomes the current OCR epoch."""
+        if not 0.0 <= float(min_confidence) <= 1.0:
+            raise ValueError("min_confidence must be between 0 and 1")
+        self._require_ocr()
+        bounds: Bounds | None = None
+        if region is not None:
+            try:
+                did = region.get("display_id", display_id)
+                if did is None:
+                    did = self.driver.main_display_id()
+                bounds = Bounds(
+                    display_id=int(did),
+                    x=int(region["x"]), y=int(region["y"]),
+                    width=int(region["width"]), height=int(region["height"]),
+                )
+            except (KeyError, TypeError, ValueError, AttributeError) as exc:
+                raise ValueError("region must be {x, y, width, height} in physical pixels") from exc
+            if bounds.width <= 0 or bounds.height <= 0:
+                raise ValueError("region width and height must be positive")
+
+        def execute() -> str:
+            screen = self._ocr_epoch(display_id, bounds, float(min_confidence))
+            self._screen_text = screen
+            return ocr.render_screen_text(screen)
+
+        app = self._frontmost()
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
+
+    def _ocr_find(self, text: str) -> str:
+        """`find(ocr=True)`: fresh OCR epoch, filtered to lines containing ``text``."""
+        self._require_ocr()
+
+        def execute() -> str:
+            screen = self._ocr_epoch()
+            self._screen_text = screen
+            matches = ocr.find_lines(screen, text)
+            rendered = ocr.render_screen_text(screen, matches)
+            if not matches:
+                return rendered.replace("(no text recognised)", f"no text line contains {text!r}")
+            return rendered
+
+        app = self._frontmost()
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
+
+    def _ocr_wait_for(self, ref: str, condition: WaitCondition, timeout_s: float) -> str:
+        """`wait_for` on an ``o`` ref: re-OCR until the text exists / is gone."""
+        old = self._ocr_anchor(ref, "waitfor")
+        want_present = condition in (WaitCondition.EXISTS, WaitCondition.ACTIONABLE)
+
+        def execute() -> str:
+            deadline = time.monotonic() + timeout_s
+            while True:
+                live = self._ocr_epoch(old.bounds.display_id)
+                match, _candidates = ocr.rematch_line(old, live)
+                if (match is not None) == want_present:
+                    return f"{ref} {condition.value}: satisfied"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ComputerUseError(
+                        ErrorCode.TIMEOUT,
+                        f"wait_for {condition.value} on {ref!r} ({old.text!r}) timed out after {timeout_s}s",
+                        detail={"ref": ref, "condition": condition.value, "timeout_s": timeout_s},
+                    )
+                time.sleep(min(OCR_WAIT_POLL_S, remaining))
+
+        app = self._frontmost()
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
+
+    def _auto_ocr_note(self, bundle: str) -> str:
+        """The escalation appended to an empty snapshot: OCR lines when allowed,
+        otherwise a pointer to `screen_text`. Never raises."""
+        if not AUTO_OCR or self._ocr_engine is None:
+            return ""
+        if self._frontmost() != bundle:
+            # The capture would show another app's pixels under this app's grant.
+            return "\nCall `screen_text` once this app is frontmost to get OCR refs (o1..oN)."
+        try:
+            screen = self._ocr_epoch()
+        except ComputerUseError as exc:
+            return f"\n(auto OCR unavailable: {exc.code.value})"
+        self._screen_text = screen
+        return "\n\n" + ocr.render_screen_text(screen) + (
+            "\nThese OCR refs are targetable now: click(ref=\"o7\") lands on that text."
+        )
 
     # -- secure fields (shared across drivers) ---------------------------------
 
@@ -920,7 +1164,7 @@ class Runtime:
                 snap, mode=self._view, budget=budget, include_bounds=include_bounds
             )
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
-                text = f"{text}\n\n{_VISION_HANDOFF_HINT}"
+                text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle)}"
             return text
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
@@ -934,6 +1178,7 @@ class Runtime:
         editable: bool | None = None,
         clickable: bool | None = None,
         scope: str = "window",
+        ocr: bool = False,
     ) -> str:
         """Snapshot ``app`` and return only the elements matching the filters.
 
@@ -941,6 +1186,10 @@ class Runtime:
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
         `desktop_snapshot`."""
+        if ocr:
+            if not text:
+                raise ValueError("find(ocr=True) needs text to search the screen for")
+            return self._ocr_find(text)
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app'")
         if text is None and role is None and editable is None and clickable is None:
@@ -993,6 +1242,14 @@ class Runtime:
                         f"; {len(m)} elements from the latest snapshot are marked with their "
                         "ref number — click/act on a ref you see rather than guessing pixels"
                     )
+            if marks and self._screen_text is not None:  # OCR refs, in blue
+                from a11y_computer_use import marks as _omarks
+
+                om = _omarks.ocr_marks_for(self._screen_text, scaled, display.display_id)
+                if om:
+                    scaled = dataclasses.replace(
+                        scaled, png=_omarks.draw_marks(scaled.png, om, color=_omarks.OCR_COLOR))
+                    text += f"; {len(om)} OCR text lines are marked in blue with their o-ref"
             return text, scaled
 
         app = self._frontmost()
@@ -1080,7 +1337,7 @@ class Runtime:
         self._run_gated(
             action, app, execute, recheck=partial(self._recheck_target, target=target), confirm=confirm
         )
-        msg = f"clicked {_describe(target)}"
+        msg = f"clicked {self._label(ref, target)}"
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
 
@@ -1138,8 +1395,8 @@ class Runtime:
             action, app, execute, recheck=partial(self._recheck_target, target=target)
         )
         if into_view:
-            return f"scrolled {_describe(target)} into view"
-        return f"scrolled {_describe(target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
+            return f"scrolled {self._label(ref, target)} into view"
+        return f"scrolled {self._label(ref, target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
 
     @_serialized
     def drag(
@@ -1166,7 +1423,7 @@ class Runtime:
             execute,
             recheck=partial(self._recheck_target, target=start),
         )
-        return f"dragged {_describe(start)} -> {_describe(end)}"
+        return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}"
 
     @_serialized
     def wait_for(self, ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:
@@ -1176,6 +1433,8 @@ class Runtime:
         # Clamp: the tool runs on a worker thread, but an unbounded poll would
         # still pin that thread (and the model's patience) for minutes.
         timeout_s = min(timeout_s, MAX_WAIT_TIMEOUT_S)
+        if ocr.is_ocr_ref(ref):
+            return self._ocr_wait_for(ref, parsed, timeout_s)
         snap, anchor = self._anchor_audited(ref, "waitfor")
         action = WaitFor(target=anchor, condition=parsed, timeout_s=timeout_s)
         self._run_gated(
@@ -1511,6 +1770,7 @@ class Runtime:
             "find": self.find,
             "screenshot": self.screenshot,
             "zoom": self.zoom,
+            "screen_text": self.screen_text,
             "console": self.console,
             "network": self.network,
             "click": partial(self.click, confirm=confirm),
@@ -1560,7 +1820,10 @@ _INSTRUCTIONS = (
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
     "snapshot — a stale_ref error means the UI changed, re-observe. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
-    "and mode='diff' to re-observe after an action. Actions are "
+    "and mode='diff' to re-observe after an action. When a snapshot has no "
+    "actionable elements (custom-drawn apps such as Telegram or After Effects), "
+    "call screen_text: on-device OCR returns text lines as refs o1..oN and "
+    "click(ref='o7') lands on that text, so you never guess coordinates. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
     "permission_denied_* errors, run `a11y_computer_use doctor`. In long tasks, "
@@ -1733,6 +1996,7 @@ def build_server(
         editable: bool | None = None,
         clickable: bool | None = None,
         scope: str = "window",
+        ocr: bool = False,
     ) -> str:
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
@@ -1742,8 +2006,14 @@ def build_server(
         capability. Give at least one filter. Returns each match's ref, role,
         title, value, flags, and bounds. Takes a fresh snapshot, so the returned
         refs (e1..eN) are the current epoch — act on them promptly and re-observe
-        after the UI changes. scope='window'|'app'. Tier 'read'."""
-        return await run(runtime.find, app, text, role, editable, clickable, scope)
+        after the UI changes. scope='window'|'app'. Tier 'read'.
+
+        ocr=true searches the TEXT ON SCREEN instead of the accessibility tree
+        (fresh on-device OCR of the display): returns matching lines as refs
+        o1..oN you can click, for apps with no tree. Needs text; the other
+        filters are ignored. Gated against the frontmost app; needs the Screen
+        Recording permission."""
+        return await run(runtime.find, app, text, role, editable, clickable, scope, ocr=ocr)
 
     @server.tool(name="screenshot")
     async def screenshot(
@@ -1772,6 +2042,27 @@ def build_server(
         png = await run(runtime.zoom, display_id, x, y, width, height)
         return [f"zoom of display {display_id} at ({x}, {y}) {width}x{height}", Image(data=png, format="png")]
 
+    @server.tool(name="screen_text")
+    async def screen_text(
+        display_id: int | None = None,
+        region: dict | None = None,
+        min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+    ) -> str:
+        """Read the text on screen with on-device OCR and return each line as a
+        ref (o1, o2, ...) with its rect, for apps whose accessibility tree is
+        empty or custom-drawn (Telegram, After Effects panels, canvases).
+        click(ref='o7') then lands on the centre of that text; find(ocr=true),
+        wait_for('o7') and screenshot(marks=true) understand o-refs too. Refs
+        are valid only against this latest call; acting on one re-reads the
+        screen and re-finds the text near its old position (stale_ref with
+        candidates when it moved away). region={x, y, width, height} in
+        physical pixels limits the capture. Prefer desktop_snapshot refs when
+        the app exposes a tree: OCR cannot see icon-only buttons and may
+        misread small text. Tier 'read' against the frontmost app; needs the
+        Screen Recording permission. macOS only today (Vision framework);
+        elsewhere returns unsupported."""
+        return await run(runtime.screen_text, display_id, region, min_confidence)
+
     @server.tool(name="click")
     async def click(
         ref: str | None = None,
@@ -1784,8 +2075,9 @@ def build_server(
         verify: bool = False,
     ) -> str:
         """Click an element ref from the latest desktop_snapshot (preferred;
-        re-resolved against the live tree) or a raw x/y point in physical
-        pixels (display_id defaults to the main display). button:
+        re-resolved against the live tree), an OCR text ref from the latest
+        screen_text (o7: the screen is re-read and the text re-found), or a raw
+        x/y point in physical pixels (display_id defaults to the main display). button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
@@ -1854,7 +2146,8 @@ def build_server(
 
     @server.tool(name="wait_for")
     async def wait_for(ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:
-        """Block until the element (ref from the latest snapshot) reaches
+        """Block until the element (ref from the latest snapshot, or an OCR
+        text ref o7 from screen_text) reaches
         condition 'exists', 'actionable', or 'gone', polling the live tree;
         raises a structured timeout error otherwise. timeout_s is clamped to
         60s. Prefer this over fixed sleeps. Tier 'read'."""

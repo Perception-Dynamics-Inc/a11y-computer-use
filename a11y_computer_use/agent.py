@@ -29,7 +29,8 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 #: Tools whose result is a fresh observation the planner acts on next.
 OBSERVATION_TOOLS = frozenset(
-    {"desktop_snapshot", "find", "screenshot", "zoom", "scroll_to_find", "console", "network"}
+    {"desktop_snapshot", "find", "screenshot", "zoom", "screen_text", "scroll_to_find",
+     "console", "network"}
 )
 
 #: The terminal tool the loop adds to the MCP surface.

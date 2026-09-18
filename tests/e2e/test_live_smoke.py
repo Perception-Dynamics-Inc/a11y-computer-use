@@ -25,12 +25,15 @@ import pytest
 
 from a11y_computer_use import safety, server
 from a11y_computer_use.schema import ComputerUseError, Element, Snapshot
-from tests.conftest import HAS_AX
+from tests.conftest import HAS_AX, HAS_DISPLAYS
 
-pytestmark = pytest.mark.skipif(
-    not HAS_AX,
-    reason="live smoke test needs the Accessibility TCC grant (run `a11y_computer_use doctor`)",
-)
+pytestmark = [
+    pytest.mark.skipif(not HAS_DISPLAYS, reason="needs an unlocked window-server session reporting a display"),
+    pytest.mark.skipif(
+        not HAS_AX,
+        reason="live smoke test needs the Accessibility TCC grant (run `a11y-computer-use doctor`)",
+    ),
+]
 
 TEXTEDIT = "com.apple.TextEdit"
 SMOKE_TEXT = "Hello from a11y-computer-use MVP"

@@ -388,6 +388,7 @@ def test_display_geometry_matches_capture_metadata() -> None:
     assert observed == captured
 
 
+@pytest.mark.skipif(not HAS_DISPLAYS, reason="needs an unlocked window-server session reporting a display")
 @pytest.mark.skipif(not HAS_AX, reason="Accessibility TCC grant missing")
 def test_snapshot_live_smoke() -> None:
     # Read-only: walks Finder's AX tree, injects nothing.

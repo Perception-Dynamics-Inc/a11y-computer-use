@@ -145,6 +145,7 @@ def test_wait_until_snapshot_text_and_unsupported_screen_text(tmp_path) -> None:
     out = json.loads(rt.call_tool("wait_until", {
         "condition": {"snapshot_text": "Save", "app": APP}, "timeout_s": 2, "poll_s": 0.05}))
     assert "'Save'" in out["matched"]
+    rt._ocr_engine = None  # no OCR engine (any OS off macOS): screen_text is unsupported
     with pytest.raises(ComputerUseError) as info:
         rt.call_tool("wait_until", {"condition": {"screen_text": "hi"}, "timeout_s": 1})
     assert info.value.code is ErrorCode.UNSUPPORTED
