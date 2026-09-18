@@ -22,7 +22,7 @@ jobs:
     name: macOS · full suite
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -38,7 +38,7 @@ jobs:
     name: Windows · full suite + live UIA
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -79,7 +79,7 @@ jobs:
     name: Browser · CDP backend (headless Chromium)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -171,7 +171,7 @@ jobs:
     name: Linux · full suite + live AT-SPI2 under a window manager
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The AT-SPI2 stack: the a11y bus (at-spi2-core), the GI typelibs the
       # driver imports (Atspi, Gtk3), apt's PyGObject (python3-gi), a virtual X
       # server + D-Bus session for the live run, a real window manager (openbox)
@@ -249,7 +249,7 @@ jobs:
     name: Package · wheel + sdist build, uvx smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v5
       - uses: actions/setup-python@v5
         with:
