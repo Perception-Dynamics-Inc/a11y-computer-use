@@ -7,7 +7,7 @@
 
 ## What COM-11 originally asked
 
-PLAN.md §6 *pre-committed* to a hybrid: a **Rust core** (schema, safety, pruning, MCP server) plus a **small Swift static library** for ScreenCaptureKit (SCKit) and TCC-adjacent code, linked into one binary. The stated rationale: SCKit is an async Swift-first API that is "genuinely painful through `objc2`." The ticket's ACs — "SCKit capture working from the chosen boundary" and "build produces one binary" — assume that rewrite is happening.
+docs/decisions/plan-2026-07.md §6 *pre-committed* to a hybrid: a **Rust core** (schema, safety, pruning, MCP server) plus a **small Swift static library** for ScreenCaptureKit (SCKit) and TCC-adjacent code, linked into one binary. The stated rationale: SCKit is an async Swift-first API that is "genuinely painful through `objc2`." The ticket's ACs — "SCKit capture working from the chosen boundary" and "build produces one binary" — assume that rewrite is happening.
 
 The Phase-0 MVP is evidence that changes the question from *"where's the Rust/Swift boundary?"* to *"do we need Rust at all yet?"*
 

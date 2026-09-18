@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, a11y-computer-use-mvp]
+    branches: [main]
   pull_request:
 
 # One run per branch: a new push cancels the run it supersedes.
@@ -271,4 +271,4 @@ jobs:
         run: |
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/pip install --quiet "$(ls dist/*.whl)"
-          /tmp/wheel-venv/bin/python -c "import a11y_computer_use, a11y_computer_use.server, a11y_computer_use.agent, a11y_computer_use.adapters, a11y_computer_use.h2h; print('wheel imports ok', a11y_computer_use.__version__ if hasattr(a11y-computer-use, '__version__') else '')"
+          /tmp/wheel-venv/bin/python -c "import a11y_computer_use, a11y_computer_use.server, a11y_computer_use.agent, a11y_computer_use.adapters, a11y_computer_use.h2h; print('wheel imports ok', a11y_computer_use.__version__ if hasattr(a11y_computer_use, '__version__') else '')"

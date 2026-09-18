@@ -6,8 +6,8 @@ a11y-computer-use injects pointer and keyboard input and reads the accessibility
 
 | Version | Where it lives | Status |
 |---|---|---|
-| 0.0.x | branch `a11y-computer-use-mvp` | Supported. Unreleased; install from a clone. Fixes land here as ordinary commits. |
-| 0.0.1 snapshot on `main` | branch `main` | Not supported. `main` last moved on 2026-07-13 and is behind `a11y-computer-use-mvp`. |
+| 0.0.x | branch `main` | Supported. Unreleased; install from a clone. Fixes land here as ordinary commits. |
+| 0.0.1 snapshot on `main` | branch `main` | Not supported. `main` last moved on 2026-07-13 and is behind `main`. |
 
 There are no git tags, no GitHub releases, and no package on PyPI (the name `a11y-computer-use` is not registered). `pip install a11y-computer-use` does not install this project. The only supported way to run it is from a clone of the repository, as the README describes. When a versioned release exists, this table will say which releases receive fixes.
 
@@ -34,7 +34,7 @@ A useful report contains:
 
 a11y-computer-use has a very small maintainer team and no dedicated security staff. A maintainer will acknowledge your report after reading it, tell you whether we consider it in scope, and keep you informed while a fix is prepared. We do not promise a fixed turnaround.
 
-Fixes land on `a11y-computer-use-mvp` as normal commits, since there is no release channel to backport to yet. When a fix lands we publish the advisory, and we credit you in it if you want credit. Please hold public details until then. If we go silent for an unreasonable time, publishing is your call.
+Fixes land on `main` as normal commits, since there is no release channel to backport to yet. When a fix lands we publish the advisory, and we credit you in it if you want credit. Please hold public details until then. If we go silent for an unreasonable time, publishing is your call.
 
 ## Scope and threat model
 
@@ -62,7 +62,7 @@ Same-window recheck. `type` and `key` re-read the frontmost app immediately befo
 
 Secure fields. Snapshots mark password fields and never emit their value: `AXSecureTextField` on macOS, the AT-SPI role `password text` on Linux, `<input type="password">` in the browser, and the UIA `IsPassword` property on Windows. Every backend's `press_element` and `set_value` refuse a secure element. The Runtime refuses pointer actions on secure fields on every backend: a ref that resolves to a secure element, and a raw coordinate whose point falls inside a secure element of the latest snapshot (the smallest element containing the point), for `click`, `drag` (either endpoint), and wheel `scroll`. `type` refuses when a password field has keyboard focus, probed per backend: macOS checks `IsSecureEventInputEnabled` and the system-wide focused AX element; the browser evaluates `document.activeElement` through open shadow roots and same-origin iframes; Linux checks the editable the driver focused and, before the XTEST path, walks the active window's tree for the node with `STATE_FOCUSED` (bounded to 400 nodes); Windows asks UIA for the focused control's `IsPassword`. The result is a structured `secure_field` error and the human types the secret. The browser probes were run live against headless Chrome on 2026-09-02; the Linux and Windows probes are unit-tested with fake AT-SPI and UIA modules and have not yet run on a real desktop.
 
-Confirmation gate. A ref click whose label contains one of `delete`, `move to trash`, `empty trash`, `trash`, `discard`, `erase`, `uninstall`, `permanently`, `wipe`, or `don't save` needs a human yes through MCP elicitation before it fires. When the host cannot elicit, the click is blocked with `confirmation_declined` rather than fired. `A11Y_COMPUTER_USE_CONFIRM=0` disables the gate. Details are in `docs/confirmation-gate.md`.
+Confirmation gate. A ref click whose label contains one of `delete`, `move to trash`, `empty trash`, `trash`, `discard`, `erase`, `uninstall`, `permanently`, `wipe`, or `don't save` needs a human yes through MCP elicitation before it fires. When the host cannot elicit, the click is blocked with `confirmation_declined` rather than fired. `A11Y_COMPUTER_USE_CONFIRM=0` disables the gate. Details are in `docs/decisions/confirmation-gate.md`.
 
 Audit log. Every gated call appends one JSON line to `~/.a11y-computer-use/audit/YYYY-MM-DD.jsonl`, named for the UTC day. The log is always on. There is no switch to disable it, only a constructor argument to relocate it. Typed text and key chords are replaced with `[REDACTED]` when the action hit a secure field. Clipboard-write text, and the `value` of any clicked or dragged element, are redacted unconditionally. Two refusals that happen before the gate are logged too, with `decision` set to `null`: a ref that no longer resolves (`result: "stale_ref"`, with the ref, the snapshot epoch, and the reason) and `set_value` on a secure field (`result: "secure_field"`, with the ref and role only, never the value).
 
@@ -71,7 +71,7 @@ Audit log. Every gated call appends one JSON line to `~/.a11y-computer-use/audit
 Each item below is verified in the code as of the commit this file was written against. They are known limits, not open vulnerabilities, and a report that only restates one of them will be closed with a pointer here.
 
 1. A model holding `full` on an app can do anything the operator can do in that app, including sending a message or deleting a file through a control whose label is not in the destructive list. Tiers bound which apps the model may touch, not what it intends.
-2. The confirmation classifier is a substring match on a ref click's label. It does not classify coordinate clicks, typed text, key chords (a destructive shortcut, say), drags, or `set_value`, and it knows nothing about app context. `docs/confirmation-gate.md` records these as Phase-1 follow-ups.
+2. The confirmation classifier is a substring match on a ref click's label. It does not classify coordinate clicks, typed text, key chords (a destructive shortcut, say), drags, or `set_value`, and it knows nothing about app context. `docs/decisions/confirmation-gate.md` records these as Phase-1 follow-ups.
 3. Secure-field handling is now the same shape on every backend, with these remaining limits:
 
    | Protection | macOS | Windows | Linux | Browser |

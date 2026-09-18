@@ -4,7 +4,7 @@
 
 ## The question
 
-The tier system (`read`/`click`/`full`) answers *"is this app allowed to receive input?"* It does **not** answer the orthogonal question: *"this specific click looks irreversible (Delete, Move to Trash, Erase…) — should a human explicitly okay it first?"* And when the MCP server runs headlessly inside a host, **who renders that prompt?** (PLAN.md §8.) This is load-bearing for the safety story, so Phase 0 settles it with a working prototype rather than a paragraph.
+The tier system (`read`/`click`/`full`) answers *"is this app allowed to receive input?"* It does **not** answer the orthogonal question: *"this specific click looks irreversible (Delete, Move to Trash, Erase…) — should a human explicitly okay it first?"* And when the MCP server runs headlessly inside a host, **who renders that prompt?** (docs/decisions/plan-2026-07.md §8.) This is load-bearing for the safety story, so Phase 0 settles it with a working prototype rather than a paragraph.
 
 ## Decision
 

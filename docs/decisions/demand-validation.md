@@ -1,4 +1,4 @@
-# Demand Validation — Failed-Automation Stories (PLAN.md §5)
+# Demand Validation — Failed-Automation Stories (docs/decisions/plan-2026-07.md §5)
 
 **Date:** 2026-07-12 · **Status:** Complete — kill criterion evaluated
 **Question:** Do at least 20 real, concrete "I tried to automate X native app and it failed" stories exist? (If not: reshape or kill the project.)
@@ -100,7 +100,7 @@ The purest demand signal: non-programmers are *already asking AI to drive native
 
 ### Theme T6 — A11y-first works, but the engineering is hard (5 stories)
 
-Direct validation of PLAN.md §6's contracts: ref lifecycle, display-qualified coordinates, supervised workers, TCC design.
+Direct validation of docs/decisions/plan-2026-07.md §6's contracts: ref lifecycle, display-qualified coordinates, supervised workers, TCC design.
 
 | # | Task | App | Failure | Source |
 |---|---|---|---|---|
@@ -117,10 +117,10 @@ Direct validation of PLAN.md §6's contracts: ref lifecycle, display-qualified c
 | Rank | Theme | Count | Intensity signal |
 |---|---|---|---|
 | 1 | **T2 — LLM+AppleScript dead end** | 6 (+3 trimmed corroborating) | Non-programmers already ask AI to drive Mac apps and fail after 20+ retries; experts build per-app bridges by hand; explicit "give AI a native control layer" asks. This is unserved demand stated in the users' own words. |
-| 2 | **T1 — A11y coverage gaps** | 6 | Silent, total failures (empty trees, no-op clicks) on exactly the apps people want automated (Zoom, Home, Electron). This is simultaneously the strongest argument *for* an a11y-first framework and its biggest technical risk — confirms PLAN.md's vision-fallback-as-core-deliverable. |
+| 2 | **T1 — A11y coverage gaps** | 6 | Silent, total failures (empty trees, no-op clicks) on exactly the apps people want automated (Zoom, Home, Electron). This is simultaneously the strongest argument *for* an a11y-first framework and its biggest technical risk — confirms docs/decisions/plan-2026-07.md's vision-fallback-as-core-deliverable. |
 | 3 | **T5 — Mainstream workflows too slow/unreliable/expensive** | 5 (+4 trimmed) | Hands-on reviewers with large audiences independently conclude the built-in agents are slower than manual work; ~50% success; $0.10/click. The head-to-head benchmark wedge lands directly on this pain. |
 | 4 | **T6 — A11y engineering is hard** | 5 | Builders who tried the a11y approach hit stale refs, modal sheets, multi-monitor coords, observer perf, TCC attribution — and one reports the a11y switch *fixed* reliability. Validates that a reusable framework (not another weekend MCP) is the product. |
-| 5 | **T3 — Untrustworthy input synthesis** | 4 | Highest severity per incident: silent false-confirms poison the whole agent loop. Directly validates the three-path `type()` spec and verification-on-write in PLAN.md §6. |
+| 5 | **T3 — Untrustworthy input synthesis** | 4 | Highest severity per incident: silent false-confirms poison the whole agent loop. Directly validates the three-path `type()` spec and verification-on-write in docs/decisions/plan-2026-07.md §6. |
 | 6 | **T4 — Pixel/coordinate fragility** | 4 (+quantitative evidence below) | Every macOS release (Retina, Tahoe 26) breaks coordinate mapping; custom-drawn UI defeats vision grounding. The "why a11y refs" half of the pitch. |
 
 ---
@@ -167,14 +167,14 @@ Selection criteria: (a) recurs across independent stories, (b) demoable in under
 - [dev.to CliGate](https://dev.to/codekingai/my-ai-assistant-could-code-but-it-couldnt-operate-my-desktop-4d97) — "the moment a workflow hit a real desktop app, the illusion broke."
 - [HN 43776085](https://news.ycombinator.com/item?id=43776085) — unprompted "this but for Windows" demand.
 
-**Local-model demand (launch hook per PLAN.md §4):** [r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/comments/1segtsi/replaced_perplexity_computer_with_a_local_llm/) — cloud agent burns credits, wants $200/mo; no working local-first alternative known to the community. Corroborated by kept story #28 (user wants a small local model to execute actions).
+**Local-model demand (launch hook per docs/decisions/plan-2026-07.md §4):** [r/LocalLLaMA](https://www.reddit.com/r/LocalLLaMA/comments/1segtsi/replaced_perplexity_computer_with_a_local_llm/) — cloud agent burns credits, wants $200/mo; no working local-first alternative known to the community. Corroborated by kept story #28 (user wants a small local model to execute actions).
 
 ---
 
 ## 6. Implications for the Plan
 
 1. **Kill criterion passed; proceed to the Phase 0 spike.** The §5 gate is cleared with headroom (30/20), and the stories are recent and first-person.
-2. **Hero workflows replace synthetic exit criteria** (per PLAN.md §5): Phase 0/1 exit = Calendar round-trip, System Settings toggle, and Music find-and-play completed end-to-end via refs alone, benchmarked against the pixel-loop reference.
-3. **The corpus independently re-derives PLAN.md §6's hard contracts** — stale refs/PID staleness (#26), display-qualified coordinates (#26, #28), Electron false-confirm verification (#14, #3), layout-aware typing (#15, #16, #13), observer perf budgets (#29), TCC responsible-process design (#30). None of these were invented risks.
+2. **Hero workflows replace synthetic exit criteria** (per docs/decisions/plan-2026-07.md §5): Phase 0/1 exit = Calendar round-trip, System Settings toggle, and Music find-and-play completed end-to-end via refs alone, benchmarked against the pixel-loop reference.
+3. **The corpus independently re-derives docs/decisions/plan-2026-07.md §6's hard contracts** — stale refs/PID staleness (#26), display-qualified coordinates (#26, #28), Electron false-confirm verification (#14, #3), layout-aware typing (#15, #16, #13), observer perf budgets (#29), TCC responsible-process design (#30). None of these were invented risks.
 4. **Beta cohort recruiting list:** the authors behind stories #1, #4, #11, #12, #22, #25, #26, #27 are builders or power users with demonstrated willingness to invest effort; they are the first 8 outreach targets for the 10-20 person cohort.
 5. **Honest caveat:** three stories predate 2024 (#2, #3, #17) and are kept because their failure modes are confirmed still-live by 2026 stories in the same theme. If a stricter recency filter (≥2024) were applied, 27 stories remain — still above threshold.

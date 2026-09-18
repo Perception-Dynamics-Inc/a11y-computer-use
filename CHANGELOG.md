@@ -159,11 +159,11 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 
 ### Docs
 
-- PLAN.md reframed after the COM-6 token measurements: the wedge is refs, not token savings (0af7c04, 2026-07-12).
+- docs/decisions/plan-2026-07.md reframed after the COM-6 token measurements: the wedge is refs, not token savings (0af7c04, 2026-07-12).
 - Launch-ready README with the a11y-first positioning (6a34ee3, 2026-07-12).
 - COM-3: the name `a11y-computer-use` is kept (445f0b2, 2026-07-12).
-- COM-11: language boundary decision, stay Python for Phase 1 and defer Rust/Swift; `docs/language-boundary.md` (c86cdb4, 2026-07-13).
-- COM-12: Phase 0 go/no-go review with verdict GO to Phase 1; `docs/phase-0-review.md` (d07630e, 2026-07-13).
+- COM-11: language boundary decision, stay Python for Phase 1 and defer Rust/Swift; `docs/decisions/language-boundary.md` (c86cdb4, 2026-07-13).
+- COM-12: Phase 0 go/no-go review with verdict GO to Phase 1; `docs/decisions/phase-0-review.md` (d07630e, 2026-07-13).
 - README and PLAN reframed around embedding into AI-platform products, with the host app owning signing and TCC grants (23a7856, 2026-07-13).
 - `examples/`: in-process Python embed, Node MCP-subprocess embed, and a README (6e97131, 2026-07-13).
 - Hero demo GIF (`docs/hero-demo.gif`) and a measured-results section in the README (bad6136, 2026-07-13).
@@ -174,5 +174,5 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 
 Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag; nothing is published on PyPI.
 
-[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.1.0...a11y-computer-use-mvp
+[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.1.0...main
 [0.1.0]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.0

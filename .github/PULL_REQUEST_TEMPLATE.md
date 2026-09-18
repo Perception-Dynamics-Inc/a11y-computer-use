@@ -36,7 +36,7 @@ If a tool was added or removed: `tests/test_server.py` pins the tool list in `EX
 - [ ] README.md
 - [ ] docs/ (name the file)
 - [ ] Docstrings and the MCP tool descriptions in a11y_computer_use/server.py
-- [ ] PLAN.md, where the roadmap status changed
+- [ ] docs/decisions/plan-2026-07.md, where the roadmap status changed
 - [ ] No doc change needed (say why)
 
 ## Claims

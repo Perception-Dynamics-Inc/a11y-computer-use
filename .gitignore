@@ -22,3 +22,6 @@ artifacts/
 
 # Claude Code session exports
 /*-this-session-is-being-continued-*.txt
+
+# macOS
+.DS_Store

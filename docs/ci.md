@@ -1,7 +1,7 @@
 # Continuous integration
 
 `.github/workflows/ci.yml` runs five jobs on every push to `main` and
-`a11y-computer-use-mvp` and on every pull request. Every job runs the full hermetic
+`main` and on every pull request. Every job runs the full hermetic
 test suite with `pytest -q -rs -p no:cacheprovider`; tests that need a platform,
 a TCC grant, a display, or a Chrome DevTools endpoint skip themselves and `-rs`
 prints each skip with its reason, so a green job also tells you what it did not
