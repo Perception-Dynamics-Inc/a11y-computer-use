@@ -68,7 +68,12 @@ def _require_frontmost() -> None:
 def _refocus(rt: server.Runtime) -> None:
     """Re-assert TextEdit focus right before an action, so a concurrent app
     (e.g. a browser stealing the foreground) doesn't abort the smoke test."""
-    rt.app("focus", TEXTEDIT)
+    try:
+        rt.app("focus", TEXTEDIT)
+    except ComputerUseError:
+        # Honest focus: on a CI Mac with no user session in front the app never
+        # becomes frontmost. _require_frontmost still guards input injection.
+        pass
     time.sleep(0.3)
 
 
