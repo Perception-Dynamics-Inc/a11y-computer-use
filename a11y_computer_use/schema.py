@@ -485,6 +485,52 @@ class ObserveOp:
     app: str | None = None
 
 
+class MenuVerb(str, Enum):
+    LIST = "list"
+    PRESS = "press"
+
+
+@dataclass(frozen=True, slots=True)
+class MenuOp:
+    """Drive an application's menu bar through the accessibility tree.
+
+    Menu bars stay accessible even in apps whose content is custom-drawn
+    (After Effects, Figma, games), so a menu path is the reliable way to
+    reach Export, Render, or Preferences there.
+
+    Attributes:
+        verb: LIST returns the items of the menu at ``path``; PRESS activates
+            the item at ``path``.
+        app: Bundle id or display name the menu bar belongs to.
+        path: Menu titles separated by ``>``, e.g.
+            ``"File > Export > Add to Render Queue"``. Matching is
+            case-insensitive and ignores a trailing ellipsis.
+    """
+
+    verb: MenuVerb
+    app: str
+    path: str
+
+
+class FileDialogVerb(str, Enum):
+    OPEN = "open"
+    SAVE = "save"
+
+
+@dataclass(frozen=True, slots=True)
+class FileDialogOp:
+    """Drive the frontmost macOS open or save panel to a path.
+
+    Attributes:
+        verb: OPEN selects ``path`` in an NSOpenPanel; SAVE saves as ``path``
+            in an NSSavePanel (directory plus filename).
+        path: Absolute file system path.
+    """
+
+    verb: FileDialogVerb
+    path: str
+
+
 class ClipboardVerb(str, Enum):
     READ = "read"
     WRITE = "write"
@@ -516,6 +562,8 @@ Action: TypeAlias = (
     | WindowOp
     | AppOp
     | ClipboardOp
+    | MenuOp
+    | FileDialogOp
 )
 
 

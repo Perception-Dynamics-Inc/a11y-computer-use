@@ -134,6 +134,20 @@ class MacOSDriver:
         running, _bundle = server._window_running(window_id)
         server._activate(running)
 
+    # -- menus and panels (accessible even in custom-drawn apps) -------------
+    def menu_items(self, app: str, path: str | None) -> list[dict]:
+        from a11y_computer_use import menus
+        return menus.macos_menu_items(app, path)
+
+    def menu_press(self, app: str, path: str) -> str:
+        from a11y_computer_use import menus
+        return menus.macos_menu_press(app, path)
+
+    def file_dialog(self, verb: object, path: str, app: str) -> dict:
+        from a11y_computer_use import menus
+        from a11y_computer_use.schema import FileDialogVerb
+        return menus.macos_file_dialog(FileDialogVerb(verb), path, app)
+
     def read_clipboard(self) -> str | None:
         from a11y_computer_use import server
         return server._read_clipboard()

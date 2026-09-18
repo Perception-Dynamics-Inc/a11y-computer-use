@@ -59,6 +59,7 @@ if sys.platform == "darwin":
     )
 
 from a11y_computer_use import conditions, drivers, notes, observe, ocr, safety
+from a11y_computer_use.menus import parse_path as menus_parse
 
 #: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
 #: the (pyobjc-backed) capture module at build time on non-macOS.
@@ -75,7 +76,11 @@ from a11y_computer_use.schema import (
     Drag,
     Element,
     ErrorCode,
+    FileDialogOp,
+    FileDialogVerb,
     KeyChord,
+    MenuOp,
+    MenuVerb,
     MouseButton,
     ObserveOp,
     ObserveVerb,
@@ -1641,18 +1646,65 @@ class Runtime:
         # complete before a later iteration fails; the outer row is observation.
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
 
+    #: How long `app launch` waits for the app's first window, and `app focus`
+    #: for the app to become frontmost, before reporting what it saw.
+    APP_LAUNCH_WAIT_S = 20.0
+    APP_FOCUS_WAIT_S = 5.0
+
+    def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
+        needle = identifier.lower()
+        for key in ("app", "bundle_id", "name"):
+            value = row.get(key)
+            if isinstance(value, str) and value and (
+                value.lower() == needle or (bundle and value.lower() == bundle.lower())
+            ):
+                return True
+        return False
+
+    def _wait_first_window(self, identifier: str, timeout_s: float) -> str | None:
+        """Poll the driver's window list until ``identifier`` owns a window.
+
+        Returns its title (possibly empty without the Screen Recording grant),
+        or None when nothing appeared within ``timeout_s``."""
+        deadline = time.monotonic() + timeout_s
+        bundle: str | None = None
+        while True:
+            try:
+                if bundle is None and not self._resolves_apps():
+                    _running, bundle = _running_app(identifier)
+            except ComputerUseError:
+                bundle = None
+            try:
+                rows = self.driver.windows()
+            except ComputerUseError:
+                rows = []
+            for row in rows:
+                if self._app_matches(row, identifier, bundle):
+                    return str(row.get("title") or "")
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.25)
+
+    def _wait_frontmost(self, bundle: str, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
+            if front and front.lower() == bundle.lower():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
     @_serialized
     def app(self, action: str, name: str | None = None) -> str:
         # Routed through the driver (running_apps/launch_app/activate_app), so the
         # browser backend lists/opens/focuses TABS and Windows/Linux use their own
-        # backends — the macOS driver delegates to the same module helpers, so its
-        # behavior is unchanged.
+        # backends. Launch waits for the first window and focus waits for the app
+        # to come to the front, so the next observation sees a ready app.
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
             rows = self._run_gated(AppOp(verb=verb), self._frontmost(), self.driver.running_apps)
             return json.dumps(rows)
-        if verb is AppVerb.QUIT:
-            raise ValueError("app quit is not exposed in the MVP tool surface")
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
@@ -1663,13 +1715,90 @@ class Runtime:
                     _, gate_key = self._resolve_app(name)
                 except ComputerUseError:
                     gate_key = name  # not running yet: the identifier is the best key
-            self._run_gated(AppOp(verb=verb, app=gate_key), gate_key,
-                            lambda: self.driver.launch_app(name))
-            return f"launched {name}"
+
+            def launch() -> str | None:
+                self.driver.launch_app(name)
+                if self._resolves_apps():
+                    return None
+                return self._wait_first_window(name, self.APP_LAUNCH_WAIT_S)
+
+            title = self._run_gated(AppOp(verb=verb, app=gate_key), gate_key, launch)
+            if self._resolves_apps():
+                return f"launched {name}"
+            if title is None:
+                return f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s"
+            return f"launched {name}; first window: {title!r}"
+        if verb is AppVerb.QUIT:
+            _running, bundle = self._resolve_app(name)
+
+            def quit_app() -> str:
+                # cmd+q through the driver after bringing the app to the front;
+                # a sheet that stays up afterwards means the app is asking about
+                # unsaved changes, which is the human's call, not the agent's.
+                self.driver.activate_app(name)
+                self._wait_frontmost(bundle, 2.0)
+                self.driver.key_chord("cmd+q")
+                time.sleep(self.QUIT_SETTLE_S)
+                try:
+                    running = [r for r in self.driver.running_apps()
+                               if self._app_matches(r, name, bundle)]
+                except ComputerUseError:
+                    running = []
+                if not running:
+                    return f"quit {bundle}"
+                try:
+                    snap = self.driver.snapshot(Scope.APP, bundle)
+                    sheet = any(el.role in ("AXSheet", "AXDialog") for el in snap.elements)
+                except ComputerUseError:
+                    sheet = False
+                if sheet:
+                    return (f"sent quit to {bundle}; it is showing a dialog (likely unsaved "
+                            "changes) and needs a human decision")
+                return f"sent quit to {bundle}; it is still running"
+
+            return self._run_gated(AppOp(verb=verb, app=bundle), bundle, quit_app)
         _running, bundle = self._resolve_app(name)  # FOCUS
-        self._run_gated(AppOp(verb=verb, app=bundle), bundle,
-                        lambda: self.driver.activate_app(name))
-        return f"focused {bundle}"
+
+        def focus() -> bool:
+            self.driver.activate_app(name)
+            if self._resolves_apps():
+                return True
+            return self._wait_frontmost(bundle, self.APP_FOCUS_WAIT_S)
+
+        front = self._run_gated(AppOp(verb=verb, app=bundle), bundle, focus)
+        if front:
+            return f"focused {bundle}"
+        return f"activated {bundle}, but it is not frontmost yet (another app may hold focus)"
+
+    #: Pause after cmd+q before checking whether the app is still running.
+    QUIT_SETTLE_S = 0.6
+
+    @_serialized
+    def menu(self, app: str, path: str | None = None, action: str = "press",
+             *, confirm: "Confirmer | None" = None) -> str:
+        """List or press a menu item by path through the accessibility menu bar."""
+        verb = MenuVerb(action)
+        _running, bundle = self._resolve_app(app)
+        if verb is MenuVerb.LIST:
+            rows = self._run_gated(MenuOp(verb=verb, app=bundle, path=path or ""), bundle,
+                                   lambda: self.driver.menu_items(app, path))
+            return json.dumps(rows)
+        if not path:
+            raise ValueError("menu press requires path, e.g. 'File > Save'")
+        menus_parse(path)  # validate before gating, so a malformed path fails fast
+        title = self._run_gated(MenuOp(verb=verb, app=bundle, path=path), bundle,
+                                lambda: self.driver.menu_press(app, path), confirm=confirm)
+        return f"pressed menu item {title!r} in {bundle}"
+
+    @_serialized
+    def file_dialog(self, action: str, path: str, app: str | None = None) -> str:
+        """Drive the frontmost open/save panel of ``app`` (default: frontmost) to ``path``."""
+        verb = FileDialogVerb(action)
+        bundle = self._frontmost() if app is None else self._resolve_app(app)[1]
+        result = self._run_gated(FileDialogOp(verb=verb, path=path), bundle,
+                                 lambda: self.driver.file_dialog(verb.value, path, app or bundle),
+                                 recheck=self._recheck_frontmost_app)
+        return json.dumps(result)
 
     @_serialized
     def window(self, action: str, window_id: int | None = None) -> str:
@@ -1774,7 +1903,7 @@ class Runtime:
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
     #: need a live snapshot epoch, which a one-shot process never has.
     RUN_ONCE_TOOLS = frozenset(
-        {"click", "type", "key", "scroll", "drag", "app", "window", "clipboard"}
+        {"click", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
     )
 
     @_serialized
@@ -1811,6 +1940,8 @@ class Runtime:
             "app": self.app,
             "window": self.window,
             "clipboard": self.clipboard,
+            "menu": partial(self.menu, confirm=confirm),
+            "file_dialog": self.file_dialog,
             "notes": self.notes,
             "wait_until": self.wait_until,
         }
@@ -2233,9 +2364,12 @@ def build_server(
     @server.tool(name="app")
     async def app(action: str, name: str | None = None) -> str:
         """Application verbs: action='list' returns running GUI apps as JSON
-        (bundle_id, name, pid, frontmost); 'launch' and 'focus' take name (a
-        bundle id, preferred — permission grants are keyed by bundle id — or
-        a display name). launch/focus are gated at tier 'click'."""
+        (bundle_id, name, pid, frontmost). 'launch' starts name and waits up to
+        20 s for its first window (returns the title); 'focus' brings it to the
+        front and waits until it is frontmost; 'quit' sends cmd+q and reports
+        whether a dialog (unsaved changes) is still showing. name is a bundle
+        id (preferred; grants are keyed by bundle id) or a display name.
+        launch/focus are tier 'click', quit is tier 'full'."""
         return await run(runtime.app, action, name)
 
     @server.tool(name="window")
@@ -2255,6 +2389,30 @@ def build_server(
         typing path). Gated against the frontmost app. The clipboard is
         cross-app: reads may return content copied from any app."""
         return await run(runtime.clipboard, action, text)
+
+    @server.tool(name="menu")
+    async def menu(app: str, path: str | None = None, action: str = "press") -> str:
+        """Drive an app's menu bar through accessibility, which works even when
+        the app's content is custom-drawn (After Effects, Figma, games).
+        action='press' activates the item at path, written like a manual:
+        'File > Export > Add to Render Queue' (case-insensitive, trailing
+        ellipsis ignored, unique prefixes accepted). action='list' returns the
+        items of the menu at path as JSON (title, enabled, shortcut, submenu,
+        checked); omit path to list the top-level menus. Destructive labels
+        (Delete, Move to Trash, Discard) ask the host for confirmation. Tier
+        'read' to list, 'click' to press; gated against app. macOS only today."""
+        return await run(runtime.menu, app, path, action, confirm=_confirmer_for(server.get_context()))
+
+    @server.tool(name="file_dialog")
+    async def file_dialog(action: str, path: str, app: str | None = None) -> str:
+        """Point the frontmost open or save panel at an absolute path, without
+        clicking through folders: action='open' selects and opens path in an
+        Open panel; action='save' saves as path (directory plus file name) in a
+        Save panel. Trigger the panel first (menu 'File > Open…' or 'File >
+        Save As…'), then call this. Returns JSON with the steps taken; a
+        structured `unsupported` error names the problem when no panel is
+        showing or it is the other kind. Tier 'full' (it types). macOS only."""
+        return await run(runtime.file_dialog, action, path, app)
 
     @server.tool(name="notes")
     async def notes_tool(action: str, text: str | None = None) -> str:
