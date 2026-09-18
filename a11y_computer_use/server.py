@@ -173,6 +173,9 @@ Confirmer = Callable[[str], bool]
 #: handoff signal (PLAN §6 / COM-12). Custom-drawn apps (Telegram, some games,
 #: Electron before AXManualAccessibility) yield a shell with nothing to click,
 #: so the agent should switch to the pixel path.
+#: Roles whose bounds describe an app's on-screen windows (used to crop OCR).
+_WINDOW_ROLES = frozenset({"AXWindow", "AXSheet", "AXDialog", "AXDrawer", "AXPopover"})
+
 _VISION_HANDOFF_HINT = (
     "note: no interactive elements were found in this app's accessibility tree — "
     "it is likely custom-drawn (e.g. Telegram, some games/Electron apps), so the "
@@ -1043,15 +1046,27 @@ class Runtime:
         display_id: int | None = None,
         region: dict | None = None,
         min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+        app: str | None = None,
     ) -> str:
         """OCR the display (or ``region`` = {x, y, width, height} in physical
-        pixels) and publish the text lines as refs ``o1..oN``. Gated at READ
-        against the frontmost app with the screenshot verb, since it is a
-        capture. The result becomes the current OCR epoch."""
+        pixels, or ``app``'s windows) and publish the text lines as refs
+        ``o1..oN``. Gated at READ against the frontmost app with the screenshot
+        verb, since it is a capture. The result becomes the current OCR epoch."""
         if not 0.0 <= float(min_confidence) <= 1.0:
             raise ValueError("min_confidence must be between 0 and 1")
+        if app is not None and region is not None:
+            raise ValueError("give either app or region, not both")
         self._require_ocr()
         bounds: Bounds | None = None
+        cropped_note = ""
+        if app is not None:
+            _running, bundle = self._resolve_app(app)
+            bounds = self._app_window_region(bundle, self._current)
+            if bounds is None:
+                cropped_note = f"\n(no window rect known for {bundle}: OCR covers the whole display)"
+            else:
+                cropped_note = f"\n(OCR cropped to {bundle}'s windows)"
+                display_id = bounds.display_id
         if region is not None:
             try:
                 did = region.get("display_id", display_id)
@@ -1070,10 +1085,10 @@ class Runtime:
         def execute() -> str:
             screen = self._ocr_epoch(display_id, bounds, float(min_confidence))
             self._screen_text = screen
-            return ocr.render_screen_text(screen)
+            return ocr.render_screen_text(screen) + cropped_note
 
-        app = self._frontmost()
-        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
+        front = self._frontmost()
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=front), front, execute)
 
     def _ocr_find(self, text: str) -> str:
         """`find(ocr=True)`: fresh OCR epoch, filtered to lines containing ``text``."""
@@ -1115,22 +1130,97 @@ class Runtime:
         app = self._frontmost()
         return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
 
-    def _auto_ocr_note(self, bundle: str) -> str:
+    @staticmethod
+    def _union(rects: list[Bounds]) -> Bounds | None:
+        """The smallest rect covering ``rects`` on the first rect's display."""
+        rects = [r for r in rects if r.width > 0 and r.height > 0]
+        if not rects:
+            return None
+        did = rects[0].display_id
+        same = [r for r in rects if r.display_id == did]
+        x0 = min(r.x for r in same)
+        y0 = min(r.y for r in same)
+        x1 = max(r.x + r.width for r in same)
+        y1 = max(r.y + r.height for r in same)
+        return Bounds(display_id=did, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+
+    def _app_window_region(self, bundle: str, snap: "Snapshot | None" = None) -> Bounds | None:
+        """Union of ``bundle``'s window rects: from ``snap``'s window elements
+        when given, else from the driver's window list. None when unknown."""
+        rects: list[Bounds] = []
+        if snap is not None and snap.app == bundle:
+            rects = [el.bounds for el in snap.elements if el.role in _WINDOW_ROLES]
+        if not rects:
+            try:
+                rows = self.driver.windows()
+            except (ComputerUseError, NotImplementedError, OSError):
+                rows = []
+            for row in rows:
+                owner = str(row.get("bundle") or row.get("app") or "")
+                b = row.get("bounds")
+                if not b or (owner != bundle and owner.lower() not in bundle.lower()):
+                    continue
+                try:
+                    rects.append(Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
+                                        int(b["width"]), int(b["height"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return self._union(rects)
+
+    def _auto_ocr_note(self, bundle: str, snap: "Snapshot | None" = None) -> str:
         """The escalation appended to an empty snapshot: OCR lines when allowed,
-        otherwise a pointer to `screen_text`. Never raises."""
+        otherwise a pointer to `screen_text`. Crops to the app's windows so the
+        menu bar and other apps' pixels stay out of the refs; falls back to the
+        whole display, and says so, when no window rect is known. Never raises."""
         if not AUTO_OCR or self._ocr_engine is None:
             return ""
         if self._frontmost() != bundle:
             # The capture would show another app's pixels under this app's grant.
             return "\nCall `screen_text` once this app is frontmost to get OCR refs (o1..oN)."
+        region = self._app_window_region(bundle, snap)
         try:
-            screen = self._ocr_epoch()
+            screen = self._ocr_epoch(region.display_id if region else None, region)
         except ComputerUseError as exc:
             return f"\n(auto OCR unavailable: {exc.code.value})"
         self._screen_text = screen
-        return "\n\n" + ocr.render_screen_text(screen) + (
+        scope_note = (
+            f"\n(OCR cropped to this app's window{'s' if snap and sum(1 for el in snap.elements if el.role in _WINDOW_ROLES) > 1 else ''})"
+            if region else "\n(no window rect known for this app: OCR covers the whole display)"
+        )
+        return "\n\n" + ocr.render_screen_text(screen) + scope_note + (
             "\nThese OCR refs are targetable now: click(ref=\"o7\") lands on that text."
         )
+
+    def _dismiss_open_menu(self, app: str) -> str:
+        """Close a menu left open in ``app`` so the next keystroke or click is not
+        swallowed by menu tracking. Returns a note for the result, or "".
+        Never raises: backends without menu bars report no open menu."""
+        state_fn = getattr(self.driver, "menu_state", None)
+        close_fn = getattr(self.driver, "menu_close", None)
+        if state_fn is None or close_fn is None:
+            return ""
+        try:
+            state = state_fn(app)
+            if not state or not state.get("open"):
+                return ""
+            path = close_fn(app) or state.get("path") or []
+        except (ComputerUseError, NotImplementedError, OSError):
+            return ""
+        return f" (closed open menu {' > '.join(str(t) for t in path)} first)" if path else ""
+
+    def _open_menu_header(self, app: str) -> str:
+        """``open menu: File > Font`` for the snapshot header, or ""."""
+        state_fn = getattr(self.driver, "menu_state", None)
+        if state_fn is None:
+            return ""
+        try:
+            state = state_fn(app)
+        except (ComputerUseError, NotImplementedError, OSError):
+            return ""
+        if not state or not state.get("open"):
+            return ""
+        path = " > ".join(str(t) for t in state.get("path") or [])
+        return f"\nopen menu: {path} (key chords go to this menu until it is closed; menu(action='close') dismisses it)"
 
     # -- secure fields (shared across drivers) ---------------------------------
 
@@ -1215,8 +1305,12 @@ class Runtime:
             text = observe.render_text(
                 snap, mode=self._view, budget=budget, include_bounds=include_bounds
             )
+            header = self._open_menu_header(bundle)
+            if header:
+                first, _nl, rest = text.partition("\n")
+                text = f"{first}{header}\n{rest}" if rest else f"{first}{header}"
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
-                text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle)}"
+                text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle, snap)}"
             return text
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
@@ -1370,8 +1464,11 @@ class Runtime:
         target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
 
+        menu_note: list[str] = []
+
         def execute() -> None:
             self._refuse_secure(target)  # audited refusal, every driver
+            menu_note.append(self._dismiss_open_menu(app))
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
             # count, or modifier semantics goes through synthesized mouse events.
@@ -1389,17 +1486,22 @@ class Runtime:
         self._run_gated(
             action, app, execute, recheck=partial(self._recheck_target, target=target), confirm=confirm
         )
-        msg = f"clicked {self._label(ref, target)}"
+        msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
 
     @_serialized
     def type_text(self, text: str) -> str:
         action = TypeText(text=text)
-        self._run_gated(
-            action, self._frontmost(), lambda: self.driver.type_text(text), recheck=self._recheck_frontmost_app
-        )
-        return f"typed {len(text)} characters"
+        front = self._frontmost()
+        note: list[str] = []
+
+        def execute() -> None:
+            note.append(self._dismiss_open_menu(front))
+            self.driver.type_text(text)
+
+        self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
+        return f"typed {len(text)} characters{''.join(note)}"
 
     @_serialized
     def key(self, chord: str) -> str:
@@ -1408,10 +1510,15 @@ class Runtime:
 
             act.parse_chord(chord)  # validate before gating, so bad chords fail fast
         action = KeyChord(chord=chord)
-        self._run_gated(
-            action, self._frontmost(), lambda: self.driver.key_chord(chord), recheck=self._recheck_frontmost_app
-        )
-        return f"pressed {chord}"
+        front = self._frontmost()
+        note: list[str] = []
+
+        def execute() -> None:
+            note.append(self._dismiss_open_menu(front))
+            self.driver.key_chord(chord)
+
+        self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
+        return f"pressed {chord}{''.join(note)}"
 
     @_serialized
     def scroll(
@@ -1830,6 +1937,15 @@ class Runtime:
             rows = self._run_gated(MenuOp(verb=verb, app=bundle, path=path or ""), bundle,
                                    lambda: self.driver.menu_items(app, path))
             return json.dumps(rows)
+        if verb is MenuVerb.STATE:
+            state = self._run_gated(MenuOp(verb=verb, app=bundle, path=""), bundle,
+                                    lambda: self.driver.menu_state(app))
+            return json.dumps(state)
+        if verb is MenuVerb.CLOSE:
+            closed = self._run_gated(MenuOp(verb=verb, app=bundle, path=""), bundle,
+                                     lambda: self.driver.menu_close(app))
+            return (f"closed menu {' > '.join(closed)} in {bundle}" if closed
+                    else f"no menu was open in {bundle}")
         if not path:
             raise ValueError("menu press requires path, e.g. 'File > Save'")
         menus_parse(path)  # validate before gating, so a malformed path fails fast
@@ -2251,6 +2367,7 @@ def build_server(
         display_id: int | None = None,
         region: dict | None = None,
         min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+        app: str | None = None,
     ) -> str:
         """Read the text on screen with on-device OCR and return each line as a
         ref (o1, o2, ...) with its rect, for apps whose accessibility tree is
@@ -2260,12 +2377,13 @@ def build_server(
         are valid only against this latest call; acting on one re-reads the
         screen and re-finds the text near its old position (stale_ref with
         candidates when it moved away). region={x, y, width, height} in
-        physical pixels limits the capture. Prefer desktop_snapshot refs when
+        physical pixels limits the capture; app='Telegram' crops to that app's
+        windows instead (the usual choice). Prefer desktop_snapshot refs when
         the app exposes a tree: OCR cannot see icon-only buttons and may
         misread small text. Tier 'read' against the frontmost app; needs the
         Screen Recording permission. macOS only today (Vision framework);
         elsewhere returns unsupported."""
-        return await run(runtime.screen_text, display_id, region, min_confidence)
+        return await run(runtime.screen_text, display_id, region, min_confidence, app)
 
     @server.tool(name="click")
     async def click(
@@ -2445,9 +2563,12 @@ def build_server(
         'File > Export > Add to Render Queue' (case-insensitive, trailing
         ellipsis ignored, unique prefixes accepted). action='list' returns the
         items of the menu at path as JSON (title, enabled, shortcut, submenu,
-        checked); omit path to list the top-level menus. Destructive labels
-        (Delete, Move to Trash, Discard) ask the host for confirmation. Tier
-        'read' to list, 'click' to press; gated against app. macOS only today."""
+        checked); omit path to list the top-level menus. action='state' reports
+        whether a menu is open and its path; action='close' dismisses it (an
+        open menu swallows key chords; click/type/key close one automatically
+        and say so). Destructive labels (Delete, Move to Trash, Discard) ask the
+        host for confirmation. Tier 'read' to list or state, 'click' to press or
+        close; gated against app. macOS only today."""
         return await run(runtime.menu, app, path, action, confirm=_confirmer_for(server.get_context()))
 
     @server.tool(name="file_dialog")

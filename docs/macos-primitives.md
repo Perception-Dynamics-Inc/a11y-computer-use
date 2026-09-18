@@ -106,3 +106,22 @@ page controls by ref).
   element) while menu-bar elements do. They are covered hermetically only;
   run `file_dialog` against a real Save As panel from a terminal with a GUI
   session before relying on it.
+
+## Open menus
+
+A menu left open swallows key chords: with TextEdit's Format > Font menu
+showing, cmd+n, cmd+w and cmd+q did nothing during the live trials, and the
+planner could not see why. Three things now cover that:
+
+- `menu(app, action="state")` returns `{"open": bool, "path": [...]}`;
+  `menu(app, action="close")` dismisses the open menu (tier `click`).
+- `desktop_snapshot` prints `open menu: File > Font` under its header while a
+  menu is showing.
+- `click`, `type`, and `key` (standalone or as `act` steps) close an open menu
+  in the gated app before acting and add `(closed open menu File first)` to
+  their result.
+
+Detection reads the menu bar: the tracked `AXMenuBarItem` is `AXSelected`, or
+its `AXMenu` is laid out with a non-zero size. Listing a closed menu's items
+does not open it, and a closed menu still lists items, so item presence is not
+used as the signal. Non-macOS drivers report no open menu.

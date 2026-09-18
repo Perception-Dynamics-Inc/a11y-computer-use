@@ -143,6 +143,18 @@ class MacOSDriver:
         from a11y_computer_use import menus
         return menus.macos_menu_press(app, path)
 
+    def menu_state(self, app: str) -> dict:
+        from a11y_computer_use import menus
+        from a11y_computer_use.schema import ComputerUseError
+        try:
+            return menus.macos_menu_state(app)
+        except ComputerUseError:
+            return {"open": False, "path": []}
+
+    def menu_close(self, app: str) -> list[str]:
+        from a11y_computer_use import menus
+        return menus.macos_menu_close(app)
+
     def file_dialog(self, verb: object, path: str, app: str) -> dict:
         from a11y_computer_use import menus
         from a11y_computer_use.schema import FileDialogVerb

@@ -94,3 +94,14 @@ escalation and its opt-out, `wait_for` on `o` refs, blue marks on screenshots,
 Live on macOS: the Vision engine reads a rendered PNG (no grant needed) and
 the live screen (Screen Recording granted). Not yet verified live: driving a
 real custom-drawn app end to end through `o` refs; that is the agency demo's job.
+
+## Cropping to the app
+
+The automatic escalation (an empty snapshot appending OCR lines) reads only the
+target app's windows: the union of the window rects in the snapshot, or, when
+the tree has none, of the driver's window list for that app. The menu bar and
+other apps' pixels stay out of the refs. When no window rect is known at all,
+the whole display is read and the reply says so. `screen_text(app="Telegram")`
+does the same crop on request; `region` is still available for a hand-picked
+rect, and the two cannot be combined. Found live: before this, an empty
+TextEdit snapshot came back with Telegram's chat list as `o` refs.

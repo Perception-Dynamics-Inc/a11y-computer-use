@@ -182,7 +182,8 @@ def required_tier(action: Action) -> Tier:
         # Quit sends cmd+q, a key injection, so it sits with the typing tier.
         return Tier.FULL if action.verb is AppVerb.QUIT else Tier.CLICK
     if isinstance(action, MenuOp):
-        return Tier.READ if action.verb is MenuVerb.LIST else Tier.CLICK
+        # list and state observe; press and close act on the menu bar.
+        return Tier.READ if action.verb in (MenuVerb.LIST, MenuVerb.STATE) else Tier.CLICK
     if isinstance(action, FileDialogOp):
         return Tier.FULL  # it types a path and a filename
     if isinstance(action, (WaitFor, ObserveOp)):
