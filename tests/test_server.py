@@ -1033,3 +1033,48 @@ def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
     assert "found after 1 scroll(s)" in out and anchors == ["e6"]
     with pytest.raises(server.ComputerUseError):  # a ref the current snapshot never issued
         rt.scroll_to_find("app", text="Reykjavik", ref="e999")
+
+
+# --- drag path (strokes) -----------------------------------------------------
+
+
+def test_drag_path_reaches_the_driver_as_waypoints_on_the_start_display(tmp_path) -> None:
+    from a11y_computer_use.schema import Point
+
+    calls: list = []
+
+    class _D:
+        resolves_apps = True
+        name = "fake"
+        def ensure_trusted(self): return None
+        def frontmost_app(self): return ("com.test", 1)
+        def main_display_id(self): return 7
+        def drag(self, start, end, *, button=None, path=(), pre_check=None, dry_run=False):
+            calls.append((start, end, tuple(path)))
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    out = rt.drag(start_x=10, start_y=10, end_x=90, end_y=90, path=[[30, 60], [60, 30]])
+    assert "via 2 waypoints" in out
+    start, end, path = calls[0]
+    assert path == (Point(7, 30, 60), Point(7, 60, 30))
+    assert start.display_id == 7 and end.display_id == 7
+
+
+def test_drag_path_rejects_bad_waypoints(tmp_path) -> None:
+    class _D:
+        resolves_apps = True
+        name = "fake"
+        def ensure_trusted(self): return None
+        def frontmost_app(self): return ("com.test", 1)
+        def main_display_id(self): return 0
+        def drag(self, *a, **k): raise AssertionError("must not be called")
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    with pytest.raises(ValueError, match=r"path\[0\]"):
+        rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1]])
+    with pytest.raises(ValueError, match="256"):
+        rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1, 1]] * 257)

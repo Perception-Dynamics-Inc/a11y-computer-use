@@ -88,7 +88,8 @@ class Driver(Protocol):
     ) -> object: ...
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
-             pre_check: Callable | None = None, dry_run: bool = False) -> object: ...
+             path: Sequence[Target] = (), pre_check: Callable | None = None,
+             dry_run: bool = False) -> object: ...
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,

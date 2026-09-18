@@ -13,7 +13,7 @@ protocol is already complete so the Windows port has the full contract.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from a11y_computer_use import act, capture, observe
 from a11y_computer_use.schema import (
@@ -62,8 +62,9 @@ class MacOSDriver:
                          pre_check=pre_check, dry_run=dry_run)
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
-             pre_check: Callable | None = None, dry_run: bool = False) -> object:
-        return act.drag(start, end, button=button, pre_check=pre_check, dry_run=dry_run)
+             path: Sequence[Target] = (), pre_check: Callable | None = None,
+             dry_run: bool = False) -> object:
+        return act.drag(start, end, button=button, path=path, pre_check=pre_check, dry_run=dry_run)
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,

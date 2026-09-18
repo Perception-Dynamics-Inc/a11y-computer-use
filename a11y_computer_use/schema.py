@@ -344,11 +344,17 @@ class Click:
 
 @dataclass(frozen=True, slots=True)
 class Drag:
-    """Press at ``start``, move to ``end``, release."""
+    """Press at ``start``, move through ``path`` (optional waypoints), release at ``end``.
+
+    ``path`` turns the drag into a stroke: the pointer is interpolated from
+    ``start`` through each waypoint to ``end`` while the button stays down,
+    which is how a painting canvas receives a curve in one gesture.
+    """
 
     start: Target
     end: Target
     button: MouseButton = MouseButton.LEFT
+    path: tuple[Target, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,5 +532,9 @@ def action_to_dict(action: Action) -> dict[str, object]:
             value = value.value
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             value = dataclasses.asdict(value)
+        elif isinstance(value, (tuple, list)):
+            # e.g. Drag.path: a tuple of Points (dataclasses) or plain values
+            value = [dataclasses.asdict(v) if dataclasses.is_dataclass(v) and not isinstance(v, type) else v
+                     for v in value]
         payload[f.name] = value
     return payload

@@ -1408,14 +1408,16 @@ class Runtime:
         end_x: int | None = None,
         end_y: int | None = None,
         display_id: int | None = None,
+        path: list | None = None,
     ) -> str:
         start, start_app = self._target(start_ref, start_x, start_y, display_id, kind="drag")
         end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
-        action = Drag(start=start, end=end)
+        waypoints = self._drag_path(path, start, display_id)
+        action = Drag(start=start, end=end, path=waypoints)
 
         def execute() -> None:
-            self._refuse_secure(start, end)  # neither endpoint may be a secure field
-            self.driver.drag(start, end)
+            self._refuse_secure(start, end, *waypoints)  # no point of the stroke may be a secure field
+            self.driver.drag(start, end, path=waypoints)
 
         self._run_gated(
             action,
@@ -1423,7 +1425,31 @@ class Runtime:
             execute,
             recheck=partial(self._recheck_target, target=start),
         )
-        return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}"
+        via = f" via {len(waypoints)} waypoints" if waypoints else ""
+        return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
+
+    def _drag_path(self, path: list | None, start: Target, display_id: int | None) -> tuple[Point, ...]:
+        """Turn ``[[x, y], ...]`` into display-qualified waypoints on the start's display.
+
+        A drag with waypoints is one continuous stroke (button held), which is
+        what a painting canvas or a lasso needs. Up to 256 waypoints.
+        """
+        if not path:
+            return ()
+        if len(path) > 256:
+            raise ValueError("path holds at most 256 waypoints")
+        disp = display_id
+        if disp is None:
+            disp = start.display_id if isinstance(start, Point) else self.driver.main_display_id()
+        out = []
+        for i, pt in enumerate(path):
+            if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
+                raise ValueError(f"path[{i}] must be an [x, y] pair")
+            x, y = pt
+            if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
+                raise ValueError(f"path[{i}] must hold finite numbers")
+            out.append(Point(disp, int(x), int(y)))
+        return tuple(out)
 
     @_serialized
     def wait_for(self, ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:
@@ -1514,7 +1540,7 @@ class Runtime:
         if do == "drag":
             return self.drag(step.get("start_ref"), step.get("start_x"), step.get("start_y"),
                              step.get("end_ref"), step.get("end_x"), step.get("end_y"),
-                             step.get("display_id"))
+                             step.get("display_id"), step.get("path"))
         if do == "wait_for":
             timeout_s = step.get("timeout_s", 10.0)
             if not math.isfinite(timeout_s) or timeout_s < 0:
@@ -2137,12 +2163,15 @@ def build_server(
         end_x: int | None = None,
         end_y: int | None = None,
         display_id: int | None = None,
+        path: list[list[int]] | None = None,
     ) -> str:
         """Press at the start target, move, and release at the end target.
         Each target is an element ref from the latest snapshot or an x/y
-        point in physical pixels. Gated at tier 'click' against the app under
-        the start target."""
-        return await run(runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y, display_id)
+        point in physical pixels. `path` is an optional list of [x, y]
+        waypoints (same display as the start) the pointer passes through with
+        the button held: one call paints a whole curve on a canvas or draws a
+        lasso. Gated at tier 'click' against the app under the start target."""
+        return await run(runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path)
 
     @server.tool(name="wait_for")
     async def wait_for(ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:

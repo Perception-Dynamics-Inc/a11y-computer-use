@@ -31,7 +31,7 @@ import ctypes.util
 import math
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
@@ -511,13 +511,16 @@ def drag(
     end: Target,
     *,
     button: MouseButton = MouseButton.LEFT,
+    path: Sequence[Target] = (),
     pre_check: PreCheck | None = None,
     dry_run: bool = False,
 ) -> list[BuiltEvent]:
-    """Press at ``start``, move to ``end`` in interpolated steps, release.
+    """Press at ``start``, move through ``path`` then to ``end`` in interpolated steps, release.
 
-    The dragged path is linear with roughly one move per `DRAG_STEP_PT`
-    global points (always >= 2 steps; the last lands exactly on ``end``).
+    Each leg (start -> waypoint -> ... -> end) is linear with roughly one move
+    per `DRAG_STEP_PT` global points (always >= 2 steps per leg; the last move
+    of a leg lands exactly on its waypoint), so a canvas sees one continuous
+    stroke through every waypoint.
 
     Returns:
         The built events: move, down, N drag moves, up.
@@ -525,23 +528,27 @@ def drag(
     Raises:
         ComputerUseError / ValueError: as for `click`.
     """
-    action = Drag(start=start, end=end, button=button)
+    action = Drag(start=start, end=end, button=button, path=tuple(path))
     if pre_check is not None:
         pre_check(action)
     if not dry_run:
         _require_ax()
     x0, y0 = _point_to_global(_resolve_point(start))
-    x1, y1 = _point_to_global(_resolve_point(end))
+    waypoints = [_point_to_global(_resolve_point(p)) for p in path]
+    waypoints.append(_point_to_global(_resolve_point(end)))
     events = [
         BuiltEvent("mouse_move", _mouse_event(Quartz.kCGEventMouseMoved, (x0, y0), button)),
         BuiltEvent("mouse_down", _mouse_event(_MOUSE_DOWN[button], (x0, y0), button, click_state=1)),
     ]
-    steps = max(2, math.ceil(math.hypot(x1 - x0, y1 - y0) / DRAG_STEP_PT))
-    for i in range(1, steps + 1):
-        t = i / steps
-        pos = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-        events.append(BuiltEvent("mouse_drag", _mouse_event(_MOUSE_DRAG[button], pos, button)))
-    events.append(BuiltEvent("mouse_up", _mouse_event(_MOUSE_UP[button], (x1, y1), button, click_state=1)))
+    cx, cy = x0, y0
+    for x1, y1 in waypoints:
+        steps = max(2, math.ceil(math.hypot(x1 - cx, y1 - cy) / DRAG_STEP_PT))
+        for i in range(1, steps + 1):
+            t = i / steps
+            pos = (cx + (x1 - cx) * t, cy + (y1 - cy) * t)
+            events.append(BuiltEvent("mouse_drag", _mouse_event(_MOUSE_DRAG[button], pos, button)))
+        cx, cy = x1, y1
+    events.append(BuiltEvent("mouse_up", _mouse_event(_MOUSE_UP[button], (cx, cy), button, click_state=1)))
     _post(events, dry_run=dry_run)
     return events
 

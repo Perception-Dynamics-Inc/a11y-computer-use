@@ -17,7 +17,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from a11y_computer_use.schema import (
     Bounds,
@@ -208,7 +208,8 @@ class LinuxDriver:
         return None
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
-             pre_check: Callable | None = None, dry_run: bool = False) -> object:
+             path: Sequence[Target] = (), pre_check: Callable | None = None,
+             dry_run: bool = False) -> object:
         if dry_run:
             return None
         if _on_wayland():

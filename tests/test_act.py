@@ -650,3 +650,18 @@ def test_live_post_mouse_move_to_current_position():
     current = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
     event = act._mouse_event(Quartz.kCGEventMouseMoved, (current.x, current.y), MouseButton.LEFT)
     act._post([act.BuiltEvent("mouse_move", event)], dry_run=False)
+
+
+def test_drag_path_interpolates_through_every_waypoint() -> None:
+    """A stroke visits each waypoint exactly before heading to the next one."""
+    from a11y_computer_use.schema import Point
+
+    disp = act.primary_display() if hasattr(act, "primary_display") else None
+    did = disp.display_id if disp is not None else Quartz.CGMainDisplayID()
+    events = act.drag(Point(did, 0, 0), Point(did, 100, 0), path=[Point(did, 0, 50), Point(did, 100, 50)], dry_run=True)
+    kinds = [e.kind for e in events]
+    assert kinds[:2] == ["mouse_move", "mouse_down"] and kinds[-1] == "mouse_up"
+    drags = [e for e in events if e.kind == "mouse_drag"]
+    pts = [Quartz.CGEventGetLocation(e.event) for e in drags]
+    hit = lambda x, y: any(abs(p.x - gx) < 0.01 and abs(p.y - gy) < 0.01 for p in pts for gx, gy in [act._point_to_global(Point(did, x, y))])
+    assert hit(0, 50) and hit(100, 50) and hit(100, 0)

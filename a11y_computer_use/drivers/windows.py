@@ -13,7 +13,7 @@ mirroring the macOS backend.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from a11y_computer_use.schema import (
     Bounds,
@@ -177,7 +177,8 @@ class WindowsDriver:
         raise _todo("SendInput(MOUSEINPUT) at physical px; prefer UIA InvokePattern for refs")
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
-             pre_check: Callable | None = None, dry_run: bool = False) -> object:
+             path: Sequence[Target] = (), pre_check: Callable | None = None,
+             dry_run: bool = False) -> object:
         raise _todo("SendInput mouse down/move/up")
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,

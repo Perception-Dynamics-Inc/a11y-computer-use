@@ -106,7 +106,7 @@ class FakeDriver:
     def click(self, target, *, button, count, modifiers, pre_check=None, dry_run=False):
         self.calls["click"].append((target, button.value, count, tuple(modifiers)))
 
-    def drag(self, start, end, *, button=None, pre_check=None, dry_run=False):
+    def drag(self, start, end, *, button=None, path=(), pre_check=None, dry_run=False):
         self.calls["drag"].append((start, end))
 
     def scroll(self, target, *, dx=0, dy=0, unit=None, pre_check=None, dry_run=False):

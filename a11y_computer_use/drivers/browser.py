@@ -24,7 +24,7 @@ import math
 import os
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from itertools import islice
 from typing import TYPE_CHECKING
 
@@ -407,7 +407,8 @@ class BrowserDriver:
         return None
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
-             pre_check: Callable | None = None, dry_run: bool = False) -> object:
+             path: Sequence[Target] = (), pre_check: Callable | None = None,
+             dry_run: bool = False) -> object:
         if dry_run:
             return None
         if pre_check is not None:
