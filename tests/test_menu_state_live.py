@@ -35,9 +35,18 @@ def _runtime():
 
 
 def _window_count() -> int:
-    out = subprocess.run(["/usr/bin/osascript", "-e", 'tell application "TextEdit" to count windows'],
-                         capture_output=True, text=True, check=False).stdout.strip()
-    return int(out or 0)
+    """Count TextEdit's windows through accessibility, not AppleScript.
+
+    ``osascript ... count windows`` blocks for minutes while a menu is tracking
+    and then answers 0, which produced a false baseline; AXWindows answers at
+    once in either state.
+    """
+    from a11y_computer_use import observe
+
+    app_el, _accessor, _bundle = menus._macos_app_element("TextEdit")
+    ax = observe._appservices()
+    err, windows = ax.AXUIElementCopyAttributeValue(app_el, "AXWindows", None)
+    return len(windows or ()) if err == 0 else 0
 
 
 def test_open_menu_is_reported_closed_and_stops_swallowing_chords() -> None:
