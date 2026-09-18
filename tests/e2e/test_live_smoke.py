@@ -98,7 +98,12 @@ def _wait_for_document(rt: server.Runtime, title_marker: str) -> Element:
     deadline = time.monotonic() + WINDOW_TIMEOUT_S
     while time.monotonic() < deadline:
         try:
+            # Best effort: on a CI Mac without a user session in front, focus
+            # honestly reports focus_changed; the snapshot does not need it.
             rt.app("focus", TEXTEDIT)
+        except ComputerUseError:
+            pass
+        try:
             snap = _snapshot_epoch(rt)
         except ComputerUseError:
             time.sleep(POLL_S)

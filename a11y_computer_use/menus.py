@@ -13,6 +13,8 @@ and accept a unique prefix, so ``"File > Save As"`` finds ``"Save As…"``.
 
 from __future__ import annotations
 
+import sys
+
 import os
 import time
 from collections import deque
@@ -578,6 +580,11 @@ class AXMenuAccessor:
 
 
 def _macos_app_element(app: str) -> tuple[object, AXMenuAccessor, str]:
+    if sys.platform != "darwin":
+        # The macOS driver is also used as a platform-neutral seam in tests on
+        # Linux and Windows; menu queries there must read as "no menu", never
+        # as a missing pyobjc module.
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "menu bar access needs macOS accessibility APIs")
     from a11y_computer_use import observe
 
     observe.ensure_trusted()
