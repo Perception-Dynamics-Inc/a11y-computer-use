@@ -11,6 +11,7 @@ day-rotated JSONL audit log that never writes secure-field content to disk.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
 import re
@@ -210,6 +211,7 @@ class PermissionStore:
         self.path = path if path is not None else Path.home() / ".a11y-computer-use" / "permissions.json"
         self._lock = threading.RLock()
         self._load_error: str | None = None
+        self._error_digest: bytes | None = None
         self._load()
 
     def _load(self) -> None:
@@ -255,6 +257,12 @@ class PermissionStore:
         except (OSError, ValueError, TypeError, RecursionError):
             self._stamp = before
             self._load_error = "permission configuration is invalid or unreadable"
+            # While the file is broken, metadata alone cannot be trusted to
+            # notice a repair: a same-size rewrite within one filesystem
+            # timestamp tick (common on Windows) keeps the stamp identical.
+            # Remember the bytes, so _refresh reloads on any content change
+            # and still never re-parses unchanged invalid content.
+            self._error_digest = self._content_digest()
 
     @staticmethod
     def _validate_app(bundle_id: str) -> None:
@@ -264,6 +272,13 @@ class PermissionStore:
     @staticmethod
     def _stat_stamp(stat: os.stat_result) -> tuple[int, ...]:
         return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+
+    def _content_digest(self) -> bytes | None:
+        """SHA-256 of the file bytes; None for an absent or unreadable file."""
+        try:
+            return hashlib.sha256(self.path.read_bytes()).digest()
+        except OSError:
+            return None
 
     def _file_stamp(self) -> tuple[int, ...] | None:
         """Use the same metadata API as loading; None only for an absent file.
@@ -284,6 +299,8 @@ class PermissionStore:
             changed = self._file_stamp() != self._stamp
         except OSError:
             changed = True
+        if not changed and self._load_error is not None:
+            changed = self._content_digest() != self._error_digest
         if changed:
             self._load()
 
