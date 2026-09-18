@@ -30,6 +30,7 @@ APP = "com.test.app"
 EXPECTED_TOOLS = {
     "desktop_snapshot", "find", "screenshot", "zoom", "click", "type", "key", "scroll", "drag",
     "wait_for", "act", "set_value", "scroll_to_find", "app", "window", "clipboard",
+    "menu", "file_dialog",
 }
 
 

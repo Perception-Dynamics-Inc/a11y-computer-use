@@ -673,6 +673,15 @@ class BrowserDriver:
     def raise_window(self, window_id: int) -> None:
         raise _no_window_ids(window_id)
 
+    def menu_items(self, app: str, path: str | None) -> list[dict]:
+        raise _no_menus("menu_items")
+
+    def menu_press(self, app: str, path: str) -> str:
+        raise _no_menus("menu_press")
+
+    def file_dialog(self, verb: object, path: str, app: str) -> dict:
+        raise _no_menus("file_dialog")
+
     def read_clipboard(self) -> str | None:
         return None  # navigator.clipboard needs a user gesture/permission; not exposed via CDP
 
@@ -685,6 +694,15 @@ class BrowserDriver:
 
 def _looks_like_url(s: str) -> bool:
     return "://" in s or s.startswith(("about:", "data:", "file:", "chrome:"))
+
+
+def _no_menus(op: str) -> ComputerUseError:
+    """A page has no native menu bar or file panel; those belong to the browser."""
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{op}: a browser tab has no native menu bar or file panel",
+        detail={"hint": "drive page controls by ref; use the OS driver for the browser's own menus"},
+    )
 
 
 def _no_window_ids(window_id: int) -> ComputerUseError:

@@ -426,6 +426,18 @@ class LinuxDriver:
         if not _linux_system.raise_window(window_id):
             raise _no_such_window(window_id)
 
+    # TODO: AT-SPI exposes menu bars (role "menu bar" / "menu item" with the
+    # "click" action), so menu_items/menu_press can be implemented on Linux the
+    # way the macOS driver does over AX. Not built yet.
+    def menu_items(self, app: str, path: str | None) -> list[dict]:
+        raise _no_menus("menu_items")
+
+    def menu_press(self, app: str, path: str) -> str:
+        raise _no_menus("menu_press")
+
+    def file_dialog(self, verb: object, path: str, app: str) -> dict:
+        raise _no_menus("file_dialog")
+
     def read_clipboard(self) -> str | None:
         from a11y_computer_use.drivers import _linux_system
 
@@ -435,6 +447,14 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_system
 
         _linux_system.write_clipboard(text)
+
+
+def _no_menus(op: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{op} is not implemented on the Linux backend yet",
+        detail={"hint": "AT-SPI menu bars can back this; press the item by ref meanwhile"},
+    )
 
 
 def _wayland_window_error(op: str) -> ComputerUseError:

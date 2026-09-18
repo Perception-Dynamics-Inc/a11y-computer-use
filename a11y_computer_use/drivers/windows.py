@@ -251,6 +251,15 @@ class WindowsDriver:
     def raise_window(self, window_id: int) -> None:
         raise _unsupported_window("raise_window", "SetForegroundWindow")
 
+    def menu_items(self, app: str, path: str | None) -> list[dict]:
+        raise _unsupported_window("menu_items", "UIA MenuBar / MenuItem patterns")
+
+    def menu_press(self, app: str, path: str) -> str:
+        raise _unsupported_window("menu_press", "UIA MenuItem InvokePattern")
+
+    def file_dialog(self, verb: object, path: str, app: str) -> dict:
+        raise _unsupported_window("file_dialog", "the common file dialog's UIA tree")
+
     def read_clipboard(self) -> str | None:
         raise _todo("OpenClipboard/GetClipboardData(CF_UNICODETEXT)")
 

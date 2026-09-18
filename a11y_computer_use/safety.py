@@ -43,6 +43,9 @@ from a11y_computer_use.schema import (
     WindowOp,
     WindowVerb,
     action_to_dict,
+    FileDialogOp,
+    MenuOp,
+    MenuVerb,
 )
 
 #: Placeholder written into audit entries in place of secure-field content.
@@ -174,7 +177,14 @@ def required_tier(action: Action) -> Tier:
     if isinstance(action, WindowOp):
         return Tier.READ if action.verb is WindowVerb.LIST else Tier.CLICK
     if isinstance(action, AppOp):
-        return Tier.READ if action.verb is AppVerb.LIST else Tier.CLICK
+        if action.verb is AppVerb.LIST:
+            return Tier.READ
+        # Quit sends cmd+q, a key injection, so it sits with the typing tier.
+        return Tier.FULL if action.verb is AppVerb.QUIT else Tier.CLICK
+    if isinstance(action, MenuOp):
+        return Tier.READ if action.verb is MenuVerb.LIST else Tier.CLICK
+    if isinstance(action, FileDialogOp):
+        return Tier.FULL  # it types a path and a filename
     if isinstance(action, (WaitFor, ObserveOp)):
         return Tier.READ
     raise TypeError(f"not a schema.Action: {type(action).__name__}")
@@ -529,6 +539,17 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
         A confirmation question to route to the host (e.g. via MCP
         elicitation), or None when the action needs no extra confirmation.
     """
+    if isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS:
+        # The last path component is the label the user would read.
+        title = action.path.split(">")[-1].strip()
+        lowered = title.lower()
+        match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+        if match is None:
+            return None
+        return (
+            f'Confirm a potentially irreversible action: choose the menu item "{title}" in '
+            f"{target_app}? (matched \u201c{match}\u201d)"
+        )
     if not isinstance(action, Click) or not isinstance(action.target, Element):
         return None
     title = action.target.title.strip()

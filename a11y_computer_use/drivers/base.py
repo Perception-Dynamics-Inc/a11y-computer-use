@@ -149,6 +149,21 @@ class Driver(Protocol):
         never returns normally for a no-op (the Runtime reports success)."""
         ...
 
+    def menu_items(self, app: str, path: str | None) -> list[dict]:
+        """Items of the menu at ``path`` in ``app``'s menu bar (top-level menus
+        when ``path`` is empty): dicts with title, enabled, shortcut, submenu,
+        checked. Backends without an accessible menu bar raise a structured
+        ``unsupported``."""
+        ...
+
+    def menu_press(self, app: str, path: str) -> str:
+        """Activate the menu item at ``path``; returns its title."""
+        ...
+
+    def file_dialog(self, verb: object, path: str, app: str) -> dict:
+        """Drive the frontmost open/save panel of ``app`` to ``path``."""
+        ...
+
     def read_clipboard(self) -> str | None: ...
 
     def write_clipboard(self, text: str) -> None: ...

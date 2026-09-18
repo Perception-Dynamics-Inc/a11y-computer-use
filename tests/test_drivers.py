@@ -29,7 +29,7 @@ _METHODS = (
     "click", "drag", "scroll", "type_text", "key_chord", "wait_for",
     "screenshot", "zoom_region", "main_display_id", "frontmost_app", "app_at_point",
     "running_apps", "launch_app", "activate_app", "windows", "window_owner", "raise_window",
-    "read_clipboard", "write_clipboard",
+    "read_clipboard", "write_clipboard", "menu_items", "menu_press", "file_dialog",
 )
 
 

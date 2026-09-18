@@ -44,6 +44,8 @@ EXPECTED_TOOLS = {
     "app",
     "window",
     "clipboard",
+    "menu",
+    "file_dialog",
 }
 
 
