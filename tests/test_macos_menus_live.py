@@ -1,0 +1,70 @@
+"""Live macOS menu tests against TextEdit (need the Accessibility grant).
+
+Menu bars are process-level accessibility objects, so these run even in a
+shell that has no window-server session (where window and display calls
+fail). They verify presses by their effect on menu titles, which macOS
+validates when a menu opens: after ``Show Fonts`` succeeds, the same menu
+offers ``Hide Fonts``, and a second ``Hide Fonts`` is refused because the
+item now reads ``Show Fonts`` again.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+import time
+
+import pytest
+
+from tests.conftest import HAS_AX
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin" or not HAS_AX,
+    reason="live menu tests need macOS and the Accessibility TCC grant",
+)
+
+from a11y_computer_use import menus  # noqa: E402
+from a11y_computer_use.schema import ComputerUseError, ErrorCode  # noqa: E402
+
+SETTLE_S = 1.0
+
+
+@pytest.fixture(scope="module", autouse=True)
+def textedit_running():
+    subprocess.run(["/usr/bin/open", "-a", "TextEdit"], check=False)
+    time.sleep(1.0)
+    yield
+    # Leave TextEdit as we found it as far as menus go: make sure the Fonts panel is closed.
+    try:
+        menus.macos_menu_press("TextEdit", "Format > Font > Hide Fonts")
+    except ComputerUseError:
+        pass
+
+
+def _press(path: str) -> bool:
+    try:
+        menus.macos_menu_press("TextEdit", path)
+        return True
+    except ComputerUseError as exc:
+        assert exc.code is ErrorCode.APP_NOT_FOUND, exc
+        return False
+
+
+def test_menu_list_of_file_names_real_items_with_shortcuts() -> None:
+    top = [i["title"] for i in menus.macos_menu_items("TextEdit", None)]
+    assert "File" in top and "Format" in top
+    rows = {i["title"]: i for i in menus.macos_menu_items("TextEdit", "File")}
+    assert rows["New"]["shortcut"] == "cmd+n"
+    assert rows["Open…"]["shortcut"] == "cmd+o"
+    assert rows["Open Recent"]["submenu"] is True
+
+
+def test_show_then_hide_fonts_each_take_effect() -> None:
+    _press("Format > Font > Hide Fonts")  # normalise: panel closed, whatever the start state
+    time.sleep(SETTLE_S)
+    assert _press("Format > Font > Show Fonts"), "Show Fonts should be offered while the panel is closed"
+    time.sleep(SETTLE_S)
+    assert _press("Format > Font > Hide Fonts"), "Hide Fonts should be offered once the panel is open"
+    time.sleep(SETTLE_S)
+    with pytest.raises(ComputerUseError) as exc:
+        menus.macos_menu_press("TextEdit", "Format > Font > Hide Fonts")
+    assert "Show Fonts" in exc.value.detail["available"]

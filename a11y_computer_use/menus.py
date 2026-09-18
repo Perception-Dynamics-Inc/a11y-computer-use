@@ -32,6 +32,9 @@ _PANEL_FANOUT = 40
 #: How long the go-to-folder sheet and a panel refresh are given to settle.
 DIALOG_SETTLE_S = 0.35
 
+#: Pause after opening a menu level before pressing the next one.
+MENU_OPEN_SETTLE_S = 0.12
+
 
 class MenuAccessor(Protocol):
     """The four AX primitives menu and panel driving needs."""
@@ -40,6 +43,9 @@ class MenuAccessor(Protocol):
     def children(self, node: object) -> Sequence[object]: ...
     def press(self, node: object) -> bool: ...
     def set_value(self, node: object, value: str) -> bool: ...
+    def cancel(self) -> None:
+        """Close an open menu level (Escape)."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,34 +229,83 @@ def list_items(accessor: MenuAccessor, app_el: object, path: str | None) -> list
     return [_item(accessor, n) for n in _entries(accessor, menu)]
 
 
-def press_path(accessor: MenuAccessor, app_el: object, path: str) -> str:
+def press_path(
+    accessor: MenuAccessor,
+    app_el: object,
+    path: str,
+    *,
+    settle: Callable[[float], None] = time.sleep,
+) -> str:
     """Activate the item at ``path``; returns its title.
 
-    Pressing the leaf directly works for most apps and keeps the menus
-    closed on screen. When that is refused, every level is pressed in turn,
-    which is what a user does.
+    Menus are opened level by level, the way a user does, and each level's
+    items are read again after it opens: apps rebuild menu items on open and
+    validate their titles and enabled state only then (``Show Fonts`` becomes
+    ``Hide Fonts``), so handles captured beforehand can be dead or stale. A
+    direct ``AXPress`` on a deep item is accepted by many apps yet does
+    nothing while its menu is closed. If a level refuses, Escape closes what
+    was opened.
     """
     components = parse_path(path)
-    nodes = walk(accessor, app_el, components)
-    leaf = nodes[-1]
-    title = _title(accessor, leaf)
-    enabled = accessor.attr(leaf, "AXEnabled")
-    if enabled is not None and not bool(enabled):
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            f"menu item {title!r} is disabled right now",
-            detail={"path": path, "reason": "disabled"},
-        )
-    if accessor.press(leaf):
-        return title
-    for node in nodes:
+    container = menu_bar(accessor, app_el)
+    opened = 0
+    for depth, wanted in enumerate(components):
+        entries = _entries(accessor, container)
+        titles = [_title(accessor, n) for n in entries]
+        try:
+            index = match_title(wanted, titles)
+        except LookupError as exc:
+            for _ in range(opened):
+                accessor.cancel()
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"menu path component {depth + 1} ({wanted!r}): {exc}",
+                detail={"component": wanted, "available": titles},
+            ) from None
+        node = entries[index]
+        title = titles[index]
+        last = depth == len(components) - 1
+        if last:
+            enabled = accessor.attr(node, "AXEnabled")
+            if enabled is not None and not bool(enabled):
+                for _ in range(opened):
+                    accessor.cancel()
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"menu item {title!r} is disabled right now",
+                    detail={"path": path, "reason": "disabled"},
+                )
+        if _menu_of(accessor, node) is None and not last:
+            for _ in range(opened):
+                accessor.cancel()
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"{title!r} has no submenu",
+                detail={"component": wanted},
+            )
         if not accessor.press(node):
+            for _ in range(opened):
+                accessor.cancel()
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
-                f"the app refused to press {_title(accessor, node)!r}",
-                detail={"path": path, "reason": "press_failed"},
+                f"the app refused to press {title!r}",
+                detail={"path": path, "reason": "press_failed", "level": depth},
             )
-    return title
+        if last:
+            return title
+        opened += 1
+        settle(MENU_OPEN_SETTLE_S)
+        submenu = _menu_of(accessor, node)
+        if submenu is None:
+            for _ in range(opened):
+                accessor.cancel()
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{title!r} did not open its submenu",
+                detail={"path": path, "reason": "submenu_missing", "level": depth},
+            )
+        container = submenu
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # --------------------------------------------------------------------------- #
@@ -424,6 +479,14 @@ class AXMenuAccessor:
             return self._ax.AXUIElementSetAttributeValue(node, "AXValue", value) == 0
         except Exception:
             return False
+
+    def cancel(self) -> None:
+        from a11y_computer_use import act
+
+        try:
+            act.key_chord("escape")
+        except Exception:
+            pass
 
 
 def _macos_app_element(app: str) -> tuple[object, AXMenuAccessor, str]:
