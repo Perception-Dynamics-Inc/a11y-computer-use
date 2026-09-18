@@ -39,8 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="a11y_computer_use",
+    parser = argparse.ArgumentParser(prog="a11y-computer-use",
         description=(
             "Accessibility-first computer use for AI agents on macOS, Windows, Linux, "
             "and Chromium (CDP)."
