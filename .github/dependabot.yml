@@ -9,7 +9,7 @@ updates:
     commit-message:
       prefix: deps
     ignore:
-      # computeruse/server.py imports FastMCP from mcp.server.fastmcp, which
+      # a11y_computer_use/server.py imports FastMCP from mcp.server.fastmcp, which
       # mcp 2.0 removed; pyproject.toml pins mcp<2 for that reason. Skip the
       # major bump until the import is migrated.
       - dependency-name: mcp

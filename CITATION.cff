@@ -1,11 +1,11 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata from this file."
 type: software
-title: computerUse
-version: 0.1.0
-date-released: 2026-09-02
+title: a11y-computer-use
+version: 0.1.1
+date-released: 2026-09-18
 authors:
   - name: "Perception Dynamics, Inc."
 license: Apache-2.0
-repository-code: "https://github.com/Perception-Dynamics-Inc/computerUse"
+repository-code: "https://github.com/Perception-Dynamics-Inc/a11y-computer-use"
 abstract: "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned a11y-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."

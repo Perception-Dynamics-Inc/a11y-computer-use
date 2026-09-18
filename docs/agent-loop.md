@@ -1,6 +1,6 @@
 # The reference agent loop
 
-`computeruse agent --task "..."` runs a complete observe, plan, act, verify loop with a model of your choice. It exists so a newcomer can see computerUse work end to end in one command, and so cu-arena has a planner harness that treats every observation strategy the same way. The loop lives in `computeruse/agent.py`; the planners live in `computeruse/providers.py`.
+`a11y-computer-use agent --task "..."` runs a complete observe, plan, act, verify loop with a model of your choice. It exists so a newcomer can see a11y-computer-use work end to end in one command, and so cu-arena has a planner harness that treats every observation strategy the same way. The loop lives in `a11y_computer_use/agent.py`; the planners live in `a11y_computer_use/providers.py`.
 
 ## What it does
 
@@ -18,16 +18,16 @@ The tool list the planner sees is derived from the same registrations `build_ser
 ```bash
 # Browser backend: any Chromium with a debugging port
 google-chrome --headless=new --remote-debugging-port=9222 about:blank &
-COMPUTERUSE_DRIVER=browser COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222 \
-  computeruse agent --grant full --task "Type hello in the Name field and press Submit"
+A11Y_COMPUTER_USE_DRIVER=browser A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222 \
+  a11y-computer-use agent --grant full --task "Type hello in the Name field and press Submit"
 
 # macOS: the frontmost app, or --app by bundle id or name
-computeruse agent --app TextEdit --grant full --task "Type a two-line greeting"
+a11y-computer-use agent --app TextEdit --grant full --task "Type a two-line greeting"
 
 # Pick a planner explicitly
-computeruse agent --provider anthropic --task "..."
-computeruse agent --provider openai --model gpt-5 --task "..."
-computeruse agent --provider claude-cli --task "..."
+a11y-computer-use agent --provider anthropic --task "..."
+a11y-computer-use agent --provider openai --model gpt-5 --task "..."
+a11y-computer-use agent --provider claude-cli --task "..."
 ```
 
 `--grant full` stores a permission tier for the target app in the normal permission store, the same grant the MCP server would need. Without a grant the first observation returns `needs_permission` and the planner is told to stop. `--json` prints the full result, including every step and the planner token usage; the human-readable step log goes to stderr.
@@ -43,7 +43,7 @@ When the CLI runs in a terminal it answers the confirmation gate itself: a plaus
 | Claude Code CLI | `claude-cli` | A logged-in `claude` command, no key | One stateless `claude -p` call per turn, built-in tools disabled, the model replies with one JSON action. Cannot view images, so screenshots are described rather than seen |
 | Scripted | (Python only) | none | A fixed list of turns for tests and demos; used by the test suite and the live browser test |
 
-With no `--provider`, the CLI reads `COMPUTERUSE_PROVIDER`, then picks the first backend the environment supports: an Anthropic key, then an OpenAI key or base URL, then the `claude` command.
+With no `--provider`, the CLI reads `A11Y_COMPUTER_USE_PROVIDER`, then picks the first backend the environment supports: an Anthropic key, then an OpenAI key or base URL, then the `claude` command.
 
 All providers use the standard library only (`urllib`, `subprocess`), so the loop adds no dependency to the package.
 
@@ -53,14 +53,14 @@ All providers use the standard library only (`urllib`, `subprocess`), so the loo
 ollama serve &
 ollama pull llama3.1
 OPENAI_BASE_URL=http://localhost:11434/v1 \
-  computeruse agent --provider openai --model llama3.1 --task "..."
+  a11y-computer-use agent --provider openai --model llama3.1 --task "..."
 ```
 
 A local model works because the observation is text with refs, not pixels. This recipe was not run here; the OpenAI provider is verified against a fake transport (see "Verification status" below).
 
 ## Token accounting
 
-Each step records the planner's token usage for the turn that produced it (a turn with several tool calls counts its tokens once, on the first call). The loop also writes `agent_step` and `agent_run` rows to the audit log with `planner_input_tokens` and `planner_output_tokens`, and `computeruse bench audit` sums them next to the observation cost it already reports, so one report shows what the model read and what the tools cost.
+Each step records the planner's token usage for the turn that produced it (a turn with several tool calls counts its tokens once, on the first call). The loop also writes `agent_step` and `agent_run` rows to the audit log with `planner_input_tokens` and `planner_output_tokens`, and `a11y-computer-use bench audit` sums them next to the observation cost it already reports, so one report shows what the model read and what the tools cost.
 
 `input_tokens` includes cached input. For `claude-cli` that means the Claude Code system prompt the CLI adds on every call (about 23k tokens per turn in the run below), which is why its input numbers are far higher than the observation itself.
 
@@ -73,9 +73,9 @@ The Anthropic provider never edits earlier turns, because current Claude models 
 ## Embedding the loop
 
 ```python
-from computeruse import agent, providers, safety, server
+from a11y_computer_use import agent, providers, safety, server
 
-runtime = server.Runtime()                       # driver from COMPUTERUSE_DRIVER or the OS
+runtime = server.Runtime()                       # driver from A11Y_COMPUTER_USE_DRIVER or the OS
 provider = providers.get_provider()              # or AnthropicProvider(), OpenAIProvider("gpt-5"), ...
 app = runtime._frontmost()
 runtime.store.set_tier(app, safety.Tier.FULL)   # your product decides this policy
@@ -92,8 +92,8 @@ print(result.success, result.summary, result.usage)
 Run on 2026-09-02 on this Mac against headless Chrome 152 over the browser backend, with the `claude-cli` provider (the local Claude Code CLI, no API key). The page was a data: URL with a heading, a `Name` text field, and a `Submit` button whose click sets the document title to `SUBMITTED:` plus the field value.
 
 ```
-$ COMPUTERUSE_DRIVER=browser COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9333 \
-    computeruse agent --provider claude-cli --grant full --max-steps 8 --json \
+$ A11Y_COMPUTER_USE_DRIVER=browser A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9333 \
+    a11y-computer-use agent --provider claude-cli --grant full --max-steps 8 --json \
     --task "Type hello in the text field and press the submit button"
 granted 7EF807899265B7A84509FBF92739E493 tier full
 [step 1] act {"steps": [{"do": "click", "ref": "e7"}, {"do": "type", "text": "hello"},

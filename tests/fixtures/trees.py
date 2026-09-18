@@ -1,7 +1,7 @@
 """Dict-backed synthetic a11y trees standing in for live AXUIElement handles.
 
 Nodes are plain dicts (`ax` builds them); `DictAccessor` adapts them to the
-`computeruse.observe.TreeAccessor` protocol so `build_snapshot` can walk them
+`a11y_computer_use.observe.TreeAccessor` protocol so `build_snapshot` can walk them
 without any TCC grant. Geometry is authored in the same global *point* space
 the AX APIs use; `GEOMETRY` is one 2x display so tests also exercise the
 point -> physical-pixel projection.
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from computeruse.observe import DisplayGeometry, RawNode
-from computeruse.schema import Display
+from a11y_computer_use.observe import DisplayGeometry, RawNode
+from a11y_computer_use.schema import Display
 
 #: One Retina display: 1440x900 points at scale 2.0 -> 2880x1800 physical px.
 DISPLAY = Display(display_id=1, width=2880, height=1800, scale=2.0, is_main=True)

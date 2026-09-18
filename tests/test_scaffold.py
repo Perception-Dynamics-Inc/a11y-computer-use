@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-from computeruse import act, capture, cli, doctor, observe, safety, schema, server
-from computeruse.schema import (
+from a11y_computer_use import act, capture, cli, doctor, observe, safety, schema, server
+from a11y_computer_use.schema import (
     Bounds,
     Click,
     ComputerUseError,
@@ -82,7 +82,7 @@ def test_every_module_imports() -> None:
     # Scaffold-era stub checks retired at integration: all modules are now
     # implemented, so the shared contract here is that they import cleanly.
     for module in (act, capture, cli, doctor, observe, safety, schema, server):
-        assert module.__name__.startswith("computeruse.")
+        assert module.__name__.startswith("a11y_computer_use.")
 
 
 def test_schema_exports_action_union() -> None:

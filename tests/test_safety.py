@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from computeruse.safety import (
+from a11y_computer_use.safety import (
     REDACTED,
     AuditLog,
     PermissionStore,
@@ -26,7 +26,7 @@ from computeruse.safety import (
     frontmost_app,
     required_tier,
 )
-from computeruse.schema import (
+from a11y_computer_use.schema import (
     AppOp,
     AppVerb,
     Bounds,
@@ -188,7 +188,7 @@ def test_check_action_default_store_reads_home_config(home: Path) -> None:
 
 def test_config_round_trip(home: Path) -> None:
     store = PermissionStore()
-    assert store.path == home / ".computeruse" / "permissions.json"
+    assert store.path == home / ".a11y-computer-use" / "permissions.json"
     assert not store.path.exists(), "file is created on first write, not load"
     assert store.get_tier(APP) is None, "ungranted apps default to ask"
 
@@ -250,7 +250,7 @@ def test_audit_entry_written_and_shaped(home: Path) -> None:
     log = AuditLog()
     path = log.record_action(TYPE, app=APP, decision=decision, result="ok")
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    assert path == home / ".computeruse" / "audit" / f"{today}.jsonl"
+    assert path == home / ".a11y-computer-use" / "audit" / f"{today}.jsonl"
 
     entry = json.loads(path.read_text().splitlines()[0])
     assert entry["app"] == APP

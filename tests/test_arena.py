@@ -15,9 +15,9 @@ import types
 
 import pytest
 
-import computeruse.observe as _observe
-from computeruse import arena
-from computeruse.schema import (
+import a11y_computer_use.observe as _observe
+from a11y_computer_use import arena
+from a11y_computer_use.schema import (
     Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot,
 )
 from tests.conftest import HAS_AX, HAS_SCREEN
@@ -111,9 +111,9 @@ def test_format_report_handles_empty() -> None:
 # live: real headless Chromium (opt-in)
 # --------------------------------------------------------------------------- #
 def _live_endpoint() -> str | None:
-    from computeruse.drivers import _cdp
+    from a11y_computer_use.drivers import _cdp
 
-    endpoint = os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+    endpoint = os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222")
     try:
         _cdp.page_targets(endpoint)
         return endpoint
@@ -122,10 +122,10 @@ def _live_endpoint() -> str | None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_arena_measures_real_costs() -> None:
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     page = ("data:text/html,<h1>Title</h1><button>A</button><button>B</button>"
@@ -250,10 +250,10 @@ def test_format_desktop_report_handles_empty() -> None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_desktop_task_on_browser_costs_all_views() -> None:
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     d.navigate("data:text/html,<h1>Title</h1><p>Some prose to fold</p><button>A</button>"
@@ -269,7 +269,7 @@ def test_live_desktop_task_on_browser_costs_all_views() -> None:
 @pytest.mark.skipif(not (HAS_AX and HAS_SCREEN),
                     reason="needs the Accessibility and Screen Recording grants")
 def test_live_desktop_task_on_finder_costs_all_views() -> None:
-    from computeruse.drivers import get_driver
+    from a11y_computer_use.drivers import get_driver
 
     rep = arena.run_desktop_task(get_driver("macos"), "com.apple.finder", rounds=2, scope=Scope.APP)
     assert rep.modes["full"].avg_tokens > 0 and rep.modes["interactive"].avg_tokens > 0

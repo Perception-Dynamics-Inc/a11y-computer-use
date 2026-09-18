@@ -1,9 +1,9 @@
-# computerUse — Project Plan
+# a11y-computer-use — Project Plan
 
 > **Status (2026-09):** this plan is a dated design record. The front-matter below (v0.2, 2026-07-02) and the section 9 outcomes (through 2026-07-13) predate the Windows observe/act loop (later on 2026-07-13), the Linux/AT-SPI2 backend (2026-08-23) and the browser/CDP backend (2026-08-29), and have not been revised for them. For the current state see [README.md](./README.md) and [CHANGELOG.md](./CHANGELOG.md); for the newer backends see [docs/windows-port.md](./docs/windows-port.md), [docs/linux-port.md](./docs/linux-port.md) and [docs/browser-backend.md](./docs/browser-backend.md). Where this file says "~12 tools" (section 8), the server registers 16, plus `console` and `network` on the browser backend; where it calls Windows a "mapped skeleton" (section 6), `drivers/windows.py` now implements snapshot, press, scroll-into-view, set_value, typing and key chords, with its remaining 15 methods still raising `NotImplementedError`.
 
 **Status:** v0.2 — revised after adversarial review (3 independent critiques) · **Date:** 2026-07-02
-**Vision (from README):** an open-source, **embeddable computer-use SDK for AI-platform builders** on macOS & Windows — integrate native desktop control into your product instead of building your own. The host app owns the identity (signing, entitlements, OS permissions); computerUse is the layer, not the end-user product.
+**Vision (from README):** an open-source, **embeddable computer-use SDK for AI-platform builders** on macOS & Windows — integrate native desktop control into your product instead of building your own. The host app owns the identity (signing, entitlements, OS permissions); a11y-computer-use is the layer, not the end-user product.
 
 All landscape facts were pulled from the GitHub API and official vendor docs on 2026-07-02 and independently fact-checked. Sources linked inline.
 
@@ -17,7 +17,7 @@ The world does not need another screenshot-loop browser agent — that market is
 
 **The shape:** macOS-first MVP shipped as an **embeddable library + MCP server + CLI** (integrators embed it and sign *their own* app — we ship no certificate), then Windows as the second launch beat. A11y-tree-first, vision/pixel fallback. Apache-2.0, rug-pull-proof governance.
 
-**Two things to do before writing more code:** (1) validate demand with real failed-automation stories (§5) — ✅ done (COM-1); (2) ~~pick a distinct name~~ — **decided (COM-3, 2026-07-12): keep "computerUse"** (owner's call); mitigate the un-Googleable/branding-collision risk with a distinct SEO tagline (§10).
+**Two things to do before writing more code:** (1) validate demand with real failed-automation stories (§5) — ✅ done (COM-1); (2) ~~pick a distinct name~~ — **decided (COM-3, 2026-07-12): keep "a11y-computer-use"** (owner's call); mitigate the un-Googleable/branding-collision risk with a distinct SEO tagline (§10).
 
 ---
 
@@ -117,7 +117,7 @@ The **model** only emits structured actions — it never touches the machine. Th
 
 *Phase-0 measured reality (COM-6, 2026-07-12):* real pruned window snapshots on the hero apps came in at ~680–1,460 tokens (Calendar's month grid: ~3,220 — dense grids need per-widget pruning tuning in Phase 1). One screenshot costs ~1,100–1,600 tokens. So "fraction of the token cost" is dead as the headline; refs-not-coordinates, any-model, deterministic+auditable is the wedge.
 
-**Who it's for:** teams **building AI platforms** who need native desktop control as a *capability in their product* — they embed computerUse (their app, their signing identity, their branding) instead of building and maintaining a computer-use stack themselves. We are the layer, not the end-user product — infrastructure, in the Stripe/Twilio sense.
+**Who it's for:** teams **building AI platforms** who need native desktop control as a *capability in their product* — they embed a11y-computer-use (their app, their signing identity, their branding) instead of building and maintaining a computer-use stack themselves. We are the layer, not the end-user product — infrastructure, in the Stripe/Twilio sense.
 
 **Why us and not the built-in?** (the question every platform builder will ask): Claude Desktop's computer use is Anthropic-only, closed, **app-not-library**, and un-scriptable — you can't embed it in *your* product. We are **model-agnostic** (any MCP host, any provider loop, local models via Ollama), **embeddable** (in-process library or MCP subprocess, any language; the host owns signing/permissions), and **scriptable/auditable** (trajectory logs, deterministic refs). Same answer applies to Microsoft's MXC/Agent Workspace on Windows later.
 
@@ -199,17 +199,17 @@ Actions:
 
 ### Platform seam: one `Driver` protocol per OS (cross-platform by construction)
 
-**Shipped 2026-07-13.** Everything OS-specific — walking the a11y tree, synthesizing input, capturing pixels, enumerating windows — lives behind the `Driver` protocol (`computeruse/drivers/`). The schema, pruning engine, safety layer, and MCP server are platform-free and **shared across OSes**. macOS is implemented (`AXUIElement`/`CGEvent`/Quartz, live-verified through the seam); Windows is a **mapped skeleton** (`IUIAutomation`/`SendInput`/DXGI, unverified) — every method names the native API it will use. `get_driver()` selects by OS and the Runtime routes every platform op through it, so **adding an OS is "implement `Driver`", never "touch the core".** Port guide: [docs/windows-port.md](./docs/windows-port.md).
+**Shipped 2026-07-13.** Everything OS-specific — walking the a11y tree, synthesizing input, capturing pixels, enumerating windows — lives behind the `Driver` protocol (`a11y_computer_use/drivers/`). The schema, pruning engine, safety layer, and MCP server are platform-free and **shared across OSes**. macOS is implemented (`AXUIElement`/`CGEvent`/Quartz, live-verified through the seam); Windows is a **mapped skeleton** (`IUIAutomation`/`SendInput`/DXGI, unverified) — every method names the native API it will use. `get_driver()` selects by OS and the Runtime routes every platform op through it, so **adding an OS is "implement `Driver`", never "touch the core".** Port guide: [docs/windows-port.md](./docs/windows-port.md).
 
 ---
 
 ## 7. Distribution & trust (launch blockers, not polish)
 
-**Audience reframe (2026-07-13): computerUse is an embeddable SDK for AI-platform builders, not an end-user app.** We don't ship a signed consumer binary — integrators embed us in *their* app and sign it with *their* Developer ID. That flips the signing burden off us and onto a party who already has it, and it's the correct model (Playwright/browser-use don't ship their own signing identity either). Our job is to be cleanly embeddable and to document the host's checklist.
+**Audience reframe (2026-07-13): a11y-computer-use is an embeddable SDK for AI-platform builders, not an end-user app.** We don't ship a signed consumer binary — integrators embed us in *their* app and sign it with *their* Developer ID. That flips the signing burden off us and onto a party who already has it, and it's the correct model (Playwright/browser-use don't ship their own signing identity either). Our job is to be cleanly embeddable and to document the host's checklist.
 
-- **macOS TCC reality — inherited from the host.** Accessibility + Screen Recording grants key off code-signing identity and are attributed to the *responsible process* = **the integrator's app**. computerUse runs under that identity (in-process, or as a child the host spawns) and inherits its grants; **we need no certificate of our own**. The integrator: signs with their Developer ID, requests the permissions, and — for the subprocess model — ensures TCC responsibility resolves to their signed app (embed in-process, or ship the helper signed with their Team ID at a stable path). Hardened-runtime **library validation** is the host's to satisfy (embed in-process / sign bundled components with their Team ID / `disable-library-validation`). `doctor` detects, from inside the host, which app holds the grant and what's missing.
+- **macOS TCC reality — inherited from the host.** Accessibility + Screen Recording grants key off code-signing identity and are attributed to the *responsible process* = **the integrator's app**. a11y-computer-use runs under that identity (in-process, or as a child the host spawns) and inherits its grants; **we need no certificate of our own**. The integrator: signs with their Developer ID, requests the permissions, and — for the subprocess model — ensures TCC responsibility resolves to their signed app (embed in-process, or ship the helper signed with their Team ID at a stable path). Hardened-runtime **library validation** is the host's to satisfy (embed in-process / sign bundled components with their Team ID / `disable-library-validation`). `doctor` detects, from inside the host, which app holds the grant and what's missing.
 - **Windows (Phase 2) — same inheritance.** No TCC, but Authenticode/SmartScreen reputation and UIPI/elevation are governed by the **host app's** signature and integrity level; the integrator signs with their EV cert. We ship no Windows certificate. (An unsigned input-injecting/screen-reading binary is a textbook malware signature — which is exactly why the identity must be the integrator's trusted app, not ours.)
-- **Distribution is developer-first:** PyPI/`uvx` for Python hosts (in-process import or `computeruse mcp` subprocess), then language bindings / a C-ABI core so non-Python hosts (Swift, Electron, Go, Rust agents) embed in-process cleanly. No consumer `.app`, no our-side notarization.
+- **Distribution is developer-first:** PyPI/`uvx` for Python hosts (in-process import or `a11y-computer-use mcp` subprocess), then language bindings / a C-ABI core so non-Python hosts (Swift, Electron, Go, Rust agents) embed in-process cleanly. No consumer `.app`, no our-side notarization.
 - **Integration docs are a launch deliverable** — the host checklist (sign, entitle, request TCC, library validation, responsible-process for the subprocess model), with `doctor` as the in-process verifier. This replaces the old "signed helper we ship" plan.
 
 ## 8. MCP tool surface v1 (~12 tools — the front door, designed not implied)
@@ -246,7 +246,7 @@ Actions:
 
 ## 10. Launch plan
 
-1. **Name — decided: keep "computerUse"** (COM-3, 2026-07-12, owner's call). The known downside stands (un-Googleable; collides with Anthropic's `computer-use` MCP; reads as a fan clone), so the mitigation is mandatory: **lead every public surface with a distinct tagline** — "computerUse — the accessibility-first computer-use framework for macOS" — so search and disambiguation ride on the tagline, not the bare name. (A vetted rename shortlist — axreach / axweave / axwright / axgrove / treewright, all registry-free — is parked on COM-3 if we ever reconsider.)
+1. **Name — decided: keep "a11y-computer-use"** (COM-3, 2026-07-12, owner's call). The known downside stands (un-Googleable; collides with Anthropic's `computer-use` MCP; reads as a fan clone), so the mitigation is mandatory: **lead every public surface with a distinct tagline** — "a11y-computer-use — the accessibility-first computer-use framework for macOS" — so search and disambiguation ride on the tagline, not the bare name. (A vetted rename shortlist — axreach / axweave / axwright / axgrove / treewright, all registry-free — is parked on COM-3 if we ever reconsider.)
 2. Benchmark blog post → **Show HN** ("Show HN: X — give any LLM native control of your Mac via the accessibility tree, with head-to-head token numbers") → **r/LocalLLaMA** post leading with Ollama/local-model support.
 3. Submit to every MCP registry the week of launch (registry.modelcontextprotocol.io, Smithery, PulseMCP, mcp.so, Cursor/Cline directories) — free, high-intent distribution.
 4. `examples/` gallery with 5 copy-paste recipes against apps people feel (Mail, Spotify, Slack, System Settings, Finder).

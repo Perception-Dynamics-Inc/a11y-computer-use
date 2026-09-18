@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-from computeruse import observe
-from computeruse.observe import ax_handle_for, build_snapshot, press_element
-from computeruse.schema import Bounds, Element, Scope
+from a11y_computer_use import observe
+from a11y_computer_use.observe import ax_handle_for, build_snapshot, press_element
+from a11y_computer_use.schema import Bounds, Element, Scope
 from tests.fixtures.trees import GEOMETRY, DictAccessor, ax, button
 
 

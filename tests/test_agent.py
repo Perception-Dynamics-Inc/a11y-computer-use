@@ -20,9 +20,9 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image as PILImage
 
-from computeruse import agent, cli, providers, safety, server
-from computeruse.providers import PlannerTurn, ProviderError, ScriptedProvider, ToolCall, Usage, done_turn, tool_turn
-from computeruse.schema import ComputerUseError, Display, ErrorCode
+from a11y_computer_use import agent, cli, providers, safety, server
+from a11y_computer_use.providers import PlannerTurn, ProviderError, ScriptedProvider, ToolCall, Usage, done_turn, tool_turn
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 from tests.conftest import build_synthetic_snapshot
 
 APP = "com.test.app"
@@ -510,9 +510,9 @@ def test_cli_agent_reports_failure_with_exit_1_and_provider_errors_with_exit_2(t
 
 
 def _live_endpoint() -> str | None:
-    from computeruse.drivers import _cdp
+    from a11y_computer_use.drivers import _cdp
 
-    endpoint = os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+    endpoint = os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222")
     try:
         _cdp.page_targets(endpoint)
         return endpoint
@@ -528,14 +528,14 @@ def _latest_observation(messages: list[dict]) -> str:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_browser_agent_loop_fills_and_clicks_by_ref(tmp_path) -> None:
     """A scripted planner drives the real browser backend through the loop:
     set_value on the input, click the button, done; the page proves both."""
     import urllib.parse
 
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     sess = d._connect()

@@ -105,7 +105,7 @@ body:
     id: web_a11y
     attributes:
       label: Chromium or Electron apps only, did the accessibility force-enable help?
-      description: On macOS computerUse sets `AXManualAccessibility` and `AXEnhancedUserInterface` on the app element once per process; on Linux it sets `org.a11y.Status` on the session bus. Set `COMPUTERUSE_NO_WEB_A11Y=1` to compare with it off; `examples/web_a11y_demo.py` prints a before and after on macOS.
+      description: On macOS a11y-computer-use sets `AXManualAccessibility` and `AXEnhancedUserInterface` on the app element once per process; on Linux it sets `org.a11y.Status` on the session bus. Set `A11Y_COMPUTER_USE_NO_WEB_A11Y=1` to compare with it off; `examples/web_a11y_demo.py` prints a before and after on macOS.
       options:
         - Not applicable, the app is not Chromium or Electron
         - Yes, the tree populated after the first snapshot
@@ -130,18 +130,18 @@ body:
     id: actions
     attributes:
       label: Which actions worked and which did not
-      description: For example `click(ref)` through the a11y press versus a synthetic click with `COMPUTERUSE_AX_CLICKS=0`, `set_value`, `type`, `scroll` with `into_view=true`. Paste the error strings.
+      description: For example `click(ref)` through the a11y press versus a synthetic click with `A11Y_COMPUTER_USE_AX_CLICKS=0`, `set_value`, `type`, `scroll` with `into_view=true`. Paste the error strings.
 
   - type: textarea
     id: native_inspector
     attributes:
       label: What a native accessibility inspector shows
-      description: Accessibility Inspector (Xcode) on macOS, Accessibility Insights on Windows, Accerciser on Linux, `chrome://accessibility` for Chromium. Does the native inspector see more than computerUse did? A screenshot of the inspector helps.
+      description: Accessibility Inspector (Xcode) on macOS, Accessibility Insights on Windows, Accerciser on Linux, `chrome://accessibility` for Chromium. Does the native inspector see more than a11y-computer-use did? A screenshot of the inspector helps.
 
   - type: textarea
     id: doctor
     attributes:
-      label: Output of computeruse doctor
+      label: Output of a11y-computer-use doctor
       render: text
 
   - type: checkboxes

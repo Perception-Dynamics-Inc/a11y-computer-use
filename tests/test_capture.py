@@ -17,8 +17,8 @@ import sys
 import pytest
 from PIL import Image
 
-from computeruse import capture
-from computeruse.schema import Bounds, ComputerUseError, Display, ErrorCode
+from a11y_computer_use import capture
+from a11y_computer_use.schema import Bounds, ComputerUseError, Display, ErrorCode
 from tests.conftest import HAS_DISPLAYS, HAS_SCREEN
 
 
@@ -186,7 +186,7 @@ def test_screenshot_permission_denied_is_structured(monkeypatch) -> None:
         capture.screenshot()
     error = exc_info.value
     assert error.code is ErrorCode.PERMISSION_DENIED_SCREEN
-    assert "computeruse doctor" in str(error.detail["doctor_hint"])
+    assert "a11y_computer_use doctor" in str(error.detail["doctor_hint"])
     assert error.to_dict()["error"] == "permission_denied_screen"
 
 

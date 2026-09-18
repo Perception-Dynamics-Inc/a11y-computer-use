@@ -15,8 +15,8 @@ import threading
 
 import pytest
 
-from computeruse import providers
-from computeruse.providers import (
+from a11y_computer_use import providers
+from a11y_computer_use.providers import (
     AnthropicProvider,
     ClaudeCLIProvider,
     OpenAIProvider,
@@ -420,7 +420,7 @@ def test_planner_turn_assistant_message_carries_text_calls_and_raw() -> None:
 
 def test_get_provider_selection(monkeypatch) -> None:
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-                "COMPUTERUSE_PROVIDER"):
+                "A11Y_COMPUTER_USE_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(providers.shutil, "which", lambda name: None)
     with pytest.raises(ProviderError, match="no planner available"):
@@ -431,7 +431,7 @@ def test_get_provider_selection(monkeypatch) -> None:
     assert isinstance(get_provider(model="llama3.1"), OpenAIProvider)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
     assert isinstance(get_provider(), AnthropicProvider)
-    monkeypatch.setenv("COMPUTERUSE_PROVIDER", "claude-cli")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_PROVIDER", "claude-cli")
     assert isinstance(get_provider(), ClaudeCLIProvider)
     assert isinstance(get_provider("scripted"), ScriptedProvider)
     with pytest.raises(ProviderError, match="unknown provider"):

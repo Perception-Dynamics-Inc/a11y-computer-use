@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from computeruse import safety
-from computeruse.schema import TypeText
+from a11y_computer_use import safety
+from a11y_computer_use.schema import TypeText
 
 
 APP = "test.app"

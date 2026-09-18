@@ -16,7 +16,7 @@
 #      self-skips without a window manager)
 set -euo pipefail
 
-REPO="${REPO:-$HOME/computerUse}"
+REPO="${REPO:-$HOME/a11y-computer-use}"
 cd "$REPO"
 
 echo "== 1. desktop session environment"

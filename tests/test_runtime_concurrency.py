@@ -17,8 +17,8 @@ import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from computeruse import safety, server
-from computeruse.schema import ComputerUseError, ErrorCode, Scope, Snapshot
+from a11y_computer_use import safety, server
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 

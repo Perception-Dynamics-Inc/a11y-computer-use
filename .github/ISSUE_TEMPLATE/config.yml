@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and ideas
-    url: https://github.com/Perception-Dynamics-Inc/computerUse/issues
-    about: Search existing issues first. Ask how to embed computerUse, share an integration, or discuss the roadmap by opening an issue that starts from PLAN.md.
+    url: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues
+    about: Search existing issues first. Ask how to embed a11y-computer-use, share an integration, or discuss the roadmap by opening an issue that starts from PLAN.md.
   - name: Security vulnerabilities
-    url: https://github.com/Perception-Dynamics-Inc/computerUse/security/policy
+    url: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/security/policy
     about: Do not open a public issue for a vulnerability. SECURITY.md describes how to report one privately.

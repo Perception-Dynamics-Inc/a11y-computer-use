@@ -10,13 +10,13 @@ body:
 
         Redact secrets. The audit log keeps typed text and key chords in the clear unless the field was secure; clipboard writes and secure fields are already written as `[REDACTED]`. Read every paste before you submit.
 
-        Known gaps are not bugs. Raw coordinate input (click, drag, scroll, key chords) returns `unsupported` on native Wayland by design; ref-based press, `set_value` and typing into a focused field still work there (docs/linux-port.md). A `NotImplementedError` raised from `computeruse/drivers/windows.py` names the native API that primitive will use and marks a known gap. `window` supports `list` and `raise` only, and `app quit` is not exposed; both raise `ValueError`. For any of these, open a feature request instead.
+        Known gaps are not bugs. Raw coordinate input (click, drag, scroll, key chords) returns `unsupported` on native Wayland by design; ref-based press, `set_value` and typing into a focused field still work there (docs/linux-port.md). A `NotImplementedError` raised from `a11y_computer_use/drivers/windows.py` names the native API that primitive will use and marks a known gap. `window` supports `list` and `raise` only, and `app quit` is not exposed; both raise `ValueError`. For any of these, open a feature request instead.
 
   - type: dropdown
     id: backend
     attributes:
       label: Backend
-      description: The driver the server ran on. The default is the current OS; `COMPUTERUSE_DRIVER=browser` selects the browser backend explicitly.
+      description: The driver the server ran on. The default is the current OS; `A11Y_COMPUTER_USE_DRIVER=browser` selects the browser backend explicitly.
       options:
         - macOS (AXUIElement, CGEvent)
         - Windows (UI Automation, SendInput)
@@ -68,12 +68,12 @@ body:
         - clipboard
         - console (browser backend only)
         - network (browser backend only)
-        - computeruse mcp (server startup or handshake)
-        - computeruse doctor
-        - computeruse snapshot
-        - computeruse run-once
-        - computeruse bench
-        - computeruse agent (the reference agent loop)
+        - a11y-computer-use mcp (server startup or handshake)
+        - a11y-computer-use doctor
+        - a11y-computer-use snapshot
+        - a11y-computer-use run-once
+        - a11y-computer-use bench
+        - a11y-computer-use agent (the reference agent loop)
         - Python API (server.Runtime, safety, drivers)
         - Not sure
     validations:
@@ -106,8 +106,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: computeruse version and commit
-      description: computeruse is not published on PyPI, so name the commit you installed from (`git rev-parse --short HEAD`) and the extras you installed.
+      label: a11y-computer-use version and commit
+      description: a11y-computer-use is not published on PyPI, so name the commit you installed from (`git rev-parse --short HEAD`) and the extras you installed.
       placeholder: 0.0.1 at <short sha>, pip install -e '.[dev,browser]'
     validations:
       required: true
@@ -115,8 +115,8 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: Output of computeruse doctor
-      description: Run `computeruse doctor` (from a clone, `.venv/bin/computeruse doctor`) in the same host context that runs the server. On macOS the grants attach to the responsible app, and the report names it. Paste the whole output. If doctor itself fails on your platform, paste that traceback instead.
+      label: Output of a11y-computer-use doctor
+      description: Run `a11y-computer-use doctor` (from a clone, `.venv/bin/a11y-computer-use doctor`) in the same host context that runs the server. On macOS the grants attach to the responsible app, and the report names it. Paste the whole output. If doctor itself fails on your platform, paste that traceback instead.
       render: text
     validations:
       required: true
@@ -163,17 +163,17 @@ body:
     id: audit
     attributes:
       label: Audit log entry
-      description: The JSONL line(s) for the failing action. The log is at `~/.computeruse/audit/<YYYY-MM-DD>.jsonl`, one file per UTC day, and every gated call is written, including refusals. Redact `params.text` and `params.chord` if they contain anything private.
+      description: The JSONL line(s) for the failing action. The log is at `~/.a11y-computer-use/audit/<YYYY-MM-DD>.jsonl`, one file per UTC day, and every gated call is written, including refusals. Redact `params.text` and `params.chord` if they contain anything private.
       render: json
 
   - type: textarea
     id: environment
     attributes:
       label: Environment variables and host
-      description: Any `COMPUTERUSE_*` variables in effect and the MCP host that started the server (Claude Code via `claude mcp add`, a Node client, an in-process `server.Runtime`, `computeruse run-once`, `computeruse agent`). `COMPUTERUSE_AX_CLICKS` and `COMPUTERUSE_CONFIRM` are read once when `computeruse.server` is imported, so they must be set in the host process before it spawns the server.
+      description: Any `A11Y_COMPUTER_USE_*` variables in effect and the MCP host that started the server (Claude Code via `claude mcp add`, a Node client, an in-process `server.Runtime`, `a11y-computer-use run-once`, `a11y-computer-use agent`). `A11Y_COMPUTER_USE_AX_CLICKS` and `A11Y_COMPUTER_USE_CONFIRM` are read once when `a11y_computer_use.server` is imported, so they must be set in the host process before it spawns the server.
       placeholder: |
-        COMPUTERUSE_DRIVER=browser
-        COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222
+        A11Y_COMPUTER_USE_DRIVER=browser
+        A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222
         host = Claude Code
 
   - type: checkboxes

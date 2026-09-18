@@ -1,6 +1,6 @@
 # Box test bed findings
 
-First real-desktop Linux run of computerUse on a [Box](https://box.ascii.dev)
+First real-desktop Linux run of a11y-computer-use on a [Box](https://box.ascii.dev)
 VM, on 2026-09-02. The value of this over the Xvfb CI job is a real window
 manager with real pointer and focus semantics, a real (non-headless) Chrome, and
 an Electron app. That combination surfaced four bugs that Xvfb hides (three in
@@ -64,7 +64,7 @@ cu-arena  observations=2  elements=11  frame=945x920px
 ```
 
 ```
-computeruse bench web https://example.com --rounds 3
+a11y-computer-use bench web https://example.com --rounds 3
   a11y (text)           285 tok  (95/obs)
   screenshot (img)     3477 tok  (1159/obs)
   -> a11y-first is 12.2x cheaper per observation.
@@ -112,7 +112,7 @@ it is for.
 
 ### 1. The Linux coordinate click uses a relative pointer warp as if absolute
 
-`computeruse/drivers/_linux_input.py` positions the pointer with
+`a11y_computer_use/drivers/_linux_input.py` positions the pointer with
 `display.warp_pointer(x, y)` in `click`, `drag`, and `scroll`. Measured on the
 box: with the pointer at (810, 394), `warp_pointer(500, 500)` moved it to
 (1310, 894), that is by +500/+500. python-xlib's `warp_pointer` is relative to
@@ -134,7 +134,7 @@ a real-desktop run (Box) would catch a regression that Xvfb cannot.
 
 ### 2. Runtime.click with x/y and no display_id crashes off macOS
 
-`Runtime._target` in `computeruse/server.py` fills a missing `display_id` with
+`Runtime._target` in `a11y_computer_use/server.py` fills a missing `display_id` with
 `int(Quartz.CGMainDisplayID())` unconditionally. On Linux this raises
 `NameError: name 'Quartz' is not defined` (Quartz is imported only on macOS), so
 `Runtime.click(x=.., y=..)` without an explicit `display_id` fails on Linux and
@@ -155,7 +155,7 @@ Box id `bx_fh2cm8n2`, one `default` box, well within the 2-hour TTL.
 ## Fixes verified
 
 Second run, later the same day, on a fresh box created from the saved template
-(`box new --from computeruse-linux-testbed --ttl 3600`, box `bx_ngdszs3k`, same
+(`box new --from a11y_computer_use-linux-testbed --ttl 3600`, box `bx_ngdszs3k`, same
 Budgie on Xorg image). The fixes below were synced from the fix branch and
 verified with `scripts/box/verify-pointer.sh` (which runs
 `scripts/box/pointer_probe.py`, then the live pytest suite under the real window
@@ -164,14 +164,14 @@ session bus and a11y bus, no window manager).
 
 What changed:
 
-1. `computeruse/drivers/_linux_input.py`: `click`, `drag`, and `scroll` position
+1. `a11y_computer_use/drivers/_linux_input.py`: `click`, `drag`, and `scroll` position
    the pointer with an absolute XTEST `MotionNotify` (`_move`) instead of the
    relative `Display.warp_pointer`.
-2. `computeruse/server.py`: `Runtime._target` takes the default display from the
+2. `a11y_computer_use/server.py`: `Runtime._target` takes the default display from the
    new `Driver.main_display_id()` seam (macOS returns `CGMainDisplayID`; the
    Linux, Windows, and browser drivers return 0) instead of calling Quartz.
 3. A third bug, visible only once the first two were fixed:
-   `computeruse/drivers/_linux_system.py` `_geometry_on_root` translated the
+   `a11y_computer_use/drivers/_linux_system.py` `_geometry_on_root` translated the
    root origin into window coordinates (`win.translate_coords(root, 0, 0)`),
    which is the negated window position. Every window not at (0, 0) therefore
    failed the act-time hit-test and the full-screen desktop window
@@ -222,11 +222,11 @@ Trial usage for this run: about 10 minutes of box time (create from template,
 sync, two verification passes, stop); 42.5 minutes of the 25 trial hours are
 used in total. The old box `bx_fh2cm8n2` was deleted afterwards (its box-scoped
 token had appeared in a command output); `bx_ngdszs3k` is stopped and carries
-the `computeruse-linux-testbed` template, which is what `box new --from` restores.
+the `a11y-computer-use-linux-testbed` template, which is what `box new --from` restores.
 
 ## Whole suite and keyboard input on the desktop
 
-A later run on a box created from the `computeruse-linux-testbed` template
+A later run on a box created from the `a11y-computer-use-linux-testbed` template
 (after the fixes above) ran the complete test suite inside the desktop session,
 not just the driver seam:
 
@@ -235,7 +235,7 @@ not just the driver seam:
 ```
 
 The skips are the macOS TCC live tests, the Windows UIA live test, and the
-desktop-live tests when the step runs headless. `computeruse doctor` reported 8
+desktop-live tests when the step runs headless. `a11y-computer-use doctor` reported 8
 of 8 on the box:
 
 ```
@@ -267,9 +267,9 @@ characters not on the active keymap (accented Latin, CJK) and control
 characters (newline, tab). The fix binds spare keycodes to the missing keysyms
 for the duration of the operation, the way xdotool does, and maps control
 characters to their key keysyms; chords now accept punctuation names, F13 to
-F24, and shift-level keys (`computeruse/drivers/_linux_input.py`, commit
+F24, and shift-level keys (`a11y_computer_use/drivers/_linux_input.py`, commit
 5267da2). The same pass gave `doctor` real Linux and Windows checks instead of
-reporting macOS grants that do not exist there, and made `computeruse snapshot`
+reporting macOS grants that do not exist there, and made `a11y-computer-use snapshot`
 resolve its backend through the driver seam.
 
 ## Recommended CI follow-up

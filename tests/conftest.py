@@ -13,7 +13,7 @@ Exposes:
         though it needs no TCC grant; live display-enumeration tests must be
         guarded with it.
     synthetic_snapshot / snapshot_builder — an in-memory a11y tree matching
-        `computeruse.schema` exactly, for tests that need no real permissions.
+        `a11y_computer_use.schema` exactly, for tests that need no real permissions.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
 
 def _detect_permissions() -> tuple[bool, bool]:
@@ -175,10 +175,10 @@ if sys.platform == "win32":
     def _home_follows_HOME(monkeypatch):
         """Make ``Path.home()`` honour ``HOME`` on Windows for the test session.
 
-        The package resolves ``~/.computeruse`` through ``Path.home()``, which
+        The package resolves ``~/.a11y_computer_use`` through ``Path.home()``, which
         on Windows reads ``USERPROFILE`` and ignores ``HOME``. Tests isolate
         state by pointing ``HOME`` at ``tmp_path``; without this shim they would
-        read and write the runner's real ``~/.computeruse`` and leak grants and
+        read and write the runner's real ``~/.a11y_computer_use`` and leak grants and
         audit rows between tests.
         """
         real_home = Path.home

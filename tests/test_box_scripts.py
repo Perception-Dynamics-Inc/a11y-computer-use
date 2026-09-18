@@ -51,8 +51,8 @@ _load_spec.loader.exec_module(_load)
 
 def _fake_worker(monkeypatch, *, apply: bool, close_error: bool = False) -> list[str]:
     """Fake only the browser/runtime boundary; exercise real load-worker logic."""
-    from computeruse import safety, server
-    from computeruse.drivers import browser
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import browser
 
     requests: list[str] = []
 

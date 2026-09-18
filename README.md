@@ -1,14 +1,15 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="computerUse" width="100%">
+  <img src="docs/assets/banner.png" alt="a11y-computer-use" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/Perception-Dynamics-Inc/computerUse/actions/workflows/ci.yml"><img src="https://github.com/Perception-Dynamics-Inc/computerUse/actions/workflows/ci.yml/badge.svg?branch=computeruse-mvp" alt="CI"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml"><img src="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/actions/workflows/ci.yml/badge.svg?branch=a11y-computer-use-mvp" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20Browser-lightgrey" alt="Platforms: macOS, Windows, Linux, Browser">
   <img src="https://img.shields.io/badge/MCP-stdio%20server-black" alt="MCP stdio server">
-  <a href="https://github.com/Perception-Dynamics-Inc/computerUse/releases/tag/v0.1.0"><img src="https://img.shields.io/badge/release-v0.1.0-2A8CFF" alt="Release v0.1.0"></a>
+  <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.1"><img src="https://img.shields.io/badge/release-v0.1.1-2A8CFF" alt="Release v0.1.1"></a>
 </p>
 
 <p align="center"><b>Accessibility-first computer use for AI agents. The model clicks <code>e14</code>, a real UI element, instead of a guessed pixel. macOS, Windows, Linux, and Chromium, one core.</b></p>
@@ -17,35 +18,40 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#connect-an-mcp-host">MCP hosts</a> ·
   <a href="#tool-surface">Tools</a> ·
-  <a href="#why-computeruse">Why</a> ·
+  <a href="#why-a11y-computer-use">Why</a> ·
   <a href="#platform-support">Platforms</a> ·
-  <a href="#embedding-computeruse">Embedding</a> ·
+  <a href="#embedding-a11y-computer-use">Embedding</a> ·
   <a href="#safety-model">Safety</a> ·
   <a href="#measured">Measured</a> ·
   <a href="#docs">Docs</a>
 </p>
 
-![computerUse driving TextEdit through accessibility refs](docs/hero-demo.gif)
+![a11y-computer-use driving TextEdit through accessibility refs](docs/hero-demo.gif)
 
-*A real capture. computerUse finds the text box as element ref `e3`, activates it through the accessibility API, and types. The glowing cursor is the standalone overlay module drawn for the demo; ref actions leave your real pointer alone.*
+*A real capture. a11y-computer-use finds the text box as element ref `e3`, activates it through the accessibility API, and types. The glowing cursor is the standalone overlay module drawn for the demo; ref actions leave your real pointer alone.*
 
-> **Status: v0.1.0**, installed from git, not yet on PyPI. Four `Driver` backends share one core. macOS is the most complete; Linux and the browser backend run live in CI and Linux was also verified on a real Ubuntu desktop; Windows is partial (observe, press, type, key chords). Every gate is listed under [Platform support](#platform-support).
+> **Status: v0.1.1**, on PyPI as `a11y-computer-use` (the import and CLI stay `a11y-computer-use`). Four `Driver` backends share one core. macOS is the most complete; Linux and the browser backend run live in CI and Linux was also verified on a real Ubuntu desktop; Windows is partial (observe, press, type, key chords). Every gate is listed under [Platform support](#platform-support).
 
 ## Quickstart
 
-Python 3.11 or newer. Clone, install, and run the driver for your platform.
+Python 3.11 or newer.
 
 ```bash
-git clone https://github.com/Perception-Dynamics-Inc/computerUse.git && cd computerUse
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"      # or: uv venv && uv pip install -e ".[dev]"
+uvx --from a11y-computer-use a11y-computer-use doctor        # try it without installing (uv)
+pip install a11y-computer-use                          # or install; the import and the CLI are `a11y-computer-use`
+pip install "a11y-computer-use[browser]"               # extras: browser, windows, linux, dev
+
+# from source
+git clone https://github.com/Perception-Dynamics-Inc/a11y-computer-use.git && cd a11y-computer-use
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
 **macOS**
 
 ```bash
-.venv/bin/computeruse doctor                          # names the app that needs the Accessibility and Screen Recording grants
-.venv/bin/computeruse snapshot --app TextEdit         # the pruned accessibility tree, one line per element, refs e1..eN
-.venv/bin/computeruse snapshot --app TextEdit --mode interactive --budget 800
+.venv/bin/a11y-computer-use doctor                          # names the app that needs the Accessibility and Screen Recording grants
+.venv/bin/a11y-computer-use snapshot --app TextEdit         # the pruned accessibility tree, one line per element, refs e1..eN
+.venv/bin/a11y-computer-use snapshot --app TextEdit --mode interactive --budget 800
 ```
 
 `doctor` prints System Settings deep links for the two one-time TCC grants. Relaunch the granting app afterwards.
@@ -55,7 +61,7 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"      # or: uv venv &&
 ```bash
 sudo apt install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi xclip
 python3 -m venv --system-site-packages .venv && .venv/bin/pip install -e ".[dev]" python-xlib
-.venv/bin/computeruse doctor && .venv/bin/computeruse mcp
+.venv/bin/a11y-computer-use doctor && .venv/bin/a11y-computer-use mcp
 ```
 
 Accessibility actions, typing, coordinate input, and capture are verified on X11. On native Wayland explicit accessibility actions such as `set_value` work and `grim` captures; implicit typing needs a verified frontmost app, while coordinate clicks and key chords return `unsupported` ([docs/linux-port.md](./docs/linux-port.md)).
@@ -63,7 +69,7 @@ Accessibility actions, typing, coordinate input, and capture are verified on X11
 **Windows (partial)**
 
 ```bash
-pip install -e ".[dev,windows]" && computeruse mcp
+pip install -e ".[dev,windows]" && a11y-computer-use mcp
 ```
 
 Observe, press, type, and key chords are CI-verified against Notepad. Ref re-resolution, capture, and coordinate input still raise `NotImplementedError` ([docs/windows-port.md](./docs/windows-port.md)).
@@ -73,15 +79,15 @@ Observe, press, type, and key chords are CI-verified against Notepad. Ref re-res
 ```bash
 pip install -e ".[dev,browser]"
 google-chrome --headless=new --remote-debugging-port=9222 about:blank &
-COMPUTERUSE_DRIVER=browser COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222 computeruse mcp
+A11Y_COMPUTER_USE_DRIVER=browser A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222 a11y-computer-use mcp
 ```
 
-Tabs are the "apps". Never selected by OS; always opt in with `COMPUTERUSE_DRIVER=browser` ([docs/browser-backend.md](./docs/browser-backend.md)).
+Tabs are the "apps". Never selected by OS; always opt in with `A11Y_COMPUTER_USE_DRIVER=browser` ([docs/browser-backend.md](./docs/browser-backend.md)).
 
 **Run an agent**
 
 ```bash
-computeruse agent --provider claude-cli --grant full --task "Type hello in the Name field and press Submit"
+a11y-computer-use agent --provider claude-cli --grant full --task "Type hello in the Name field and press Submit"
 ```
 
 The reference loop observes, plans, acts, and verifies through the same gated Runtime as the MCP server. Planners: `anthropic`, `openai` (any OpenAI-compatible endpoint, Ollama included), or `claude-cli`, which needs no API key ([docs/agent-loop.md](./docs/agent-loop.md)).
@@ -89,15 +95,16 @@ The reference loop observes, plans, acts, and verifies through the same gated Ru
 **Bench it**
 
 ```bash
-computeruse bench web https://example.com --rounds 3     # accessibility snapshot vs screenshot, per observation
-computeruse bench desktop --app Finder                   # the same for a running desktop app, every snapshot view
-computeruse bench h2h --provider claude-cli              # same planner, refs vs pixels, 13 instrumented tasks
+a11y-computer-use bench web https://example.com --rounds 3     # accessibility snapshot vs screenshot, per observation
+a11y-computer-use bench desktop --app Finder                   # the same for a running desktop app, every snapshot view
+a11y-computer-use bench h2h --provider claude-cli              # same planner, refs vs pixels, 13 instrumented tasks
 ```
 
 ## Connect an MCP host
 
 ```bash
-claude mcp add computeruse -- "$(pwd)/.venv/bin/computeruse" mcp
+claude mcp add a11y-computer-use -- uvx --from a11y-computer-use a11y-computer-use mcp     # from PyPI
+claude mcp add a11y-computer-use -- "$(pwd)/.venv/bin/a11y-computer-use" mcp             # from a clone
 ```
 
 For hosts that read an `mcpServers` block (Claude Desktop, Cursor):
@@ -105,10 +112,10 @@ For hosts that read an `mcpServers` block (Claude Desktop, Cursor):
 ```json
 {
   "mcpServers": {
-    "computeruse": {
-      "command": "/absolute/path/to/computerUse/.venv/bin/computeruse",
+    "a11y-computer-use": {
+      "command": "/absolute/path/to/a11y-computer-use/.venv/bin/a11y-computer-use",
       "args": ["mcp"],
-      "env": { "COMPUTERUSE_DRIVER": "browser", "COMPUTERUSE_CDP_ENDPOINT": "http://127.0.0.1:9222" }
+      "env": { "A11Y_COMPUTER_USE_DRIVER": "browser", "A11Y_COMPUTER_USE_CDP_ENDPOINT": "http://127.0.0.1:9222" }
     }
   }
 }
@@ -118,11 +125,11 @@ Drop the `env` block for the OS driver. On macOS the host is the responsible pro
 
 | Variable | Effect | Default |
 |---|---|---|
-| `COMPUTERUSE_DRIVER` | `macos`, `windows`, `linux`, or `browser` | current OS |
-| `COMPUTERUSE_CDP_ENDPOINT` | DevTools endpoint for the browser driver | `http://127.0.0.1:9222` |
-| `COMPUTERUSE_CONFIRM` | `0` disables the destructive-click confirmation gate | `1` |
-| `COMPUTERUSE_AX_CLICKS` | `0` forces synthetic mouse events instead of accessibility press | `1` |
-| `COMPUTERUSE_PROVIDER` | planner for `computeruse agent` and `bench h2h` | first one the environment supports |
+| `A11Y_COMPUTER_USE_DRIVER` | `macos`, `windows`, `linux`, or `browser` | current OS |
+| `A11Y_COMPUTER_USE_CDP_ENDPOINT` | DevTools endpoint for the browser driver | `http://127.0.0.1:9222` |
+| `A11Y_COMPUTER_USE_CONFIRM` | `0` disables the destructive-click confirmation gate | `1` |
+| `A11Y_COMPUTER_USE_AX_CLICKS` | `0` forces synthetic mouse events instead of accessibility press | `1` |
+| `A11Y_COMPUTER_USE_PROVIDER` | planner for `a11y-computer-use agent` and `bench h2h` | first one the environment supports |
 
 The remaining variables are listed in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
@@ -148,11 +155,11 @@ The remaining variables are listed in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 Errors are wire-stable strings: `stale_ref` (with up to three candidates from the live tree), `secure_field`, `focus_changed`, `permission_denied_accessibility`, `permission_denied_screen`, `app_not_found`, `timeout`, `confirmation_declined`, `unsupported`, `busy`, `closed`.
 
-## Why computerUse
+## Why a11y-computer-use
 
 Mainstream computer-use agents drive a machine the same way: screenshot, have the model regress an (x, y) pair, click, screenshot again. That needs a vision model on every step, aims at a number the model estimated rather than an object the OS already knows, moves the user's pointer, and leaves a trail of coordinates nobody can audit.
 
-The browser world moved on years ago: [Playwright MCP](https://github.com/microsoft/playwright-mcp) hands the model the accessibility tree and lets it say `click e14`. computerUse does that for native desktop apps and for Chromium, with one core under four drivers.
+The browser world moved on years ago: [Playwright MCP](https://github.com/microsoft/playwright-mcp) hands the model the accessibility tree and lets it say `click e14`. a11y-computer-use does that for native desktop apps and for Chromium, with one core under four drivers.
 
 ```text
 [snap-7] com.apple.TextEdit (window)
@@ -167,7 +174,7 @@ This is not a token-savings pitch on the desktop: a pruned window snapshot of a 
 
 ### Why not the alternatives?
 
-<p align="center"><img src="docs/assets/alternatives.png" alt="Comparison of computerUse with other computer-use approaches" width="92%"></p>
+<p align="center"><img src="docs/assets/alternatives.png" alt="Comparison of a11y-computer-use with other computer-use approaches" width="92%"></p>
 
 | | Approach | Native desktop? | Model-agnostic? | Embeddable? |
 |---|---|---|---|---|
@@ -175,7 +182,7 @@ This is not a token-savings pitch on the desktop: a pruned window snapshot of a 
 | **browser-use / Playwright MCP** | a11y tree | ❌ browser only | ✅ | ✅ |
 | **UI-TARS-desktop** | pixel / vision | ✅ | partial | app, pivoted to an agent stack |
 | **Windows-MCP / Terminator** | a11y (UIA) | Windows only | ✅ | ✅ |
-| **computerUse** | **a11y tree (AX, UIA, AT-SPI2, CDP) with a vision fallback** | ✅ macOS, Linux, Windows (partial), Chromium | ✅ any LLM, local models included | ✅ MCP server, CLI, Python `Runtime`, adapters for Anthropic and OpenAI computer-use actions |
+| **a11y-computer-use** | **a11y tree (AX, UIA, AT-SPI2, CDP) with a vision fallback** | ✅ macOS, Linux, Windows (partial), Chromium | ✅ any LLM, local models included | ✅ MCP server, CLI, Python `Runtime`, adapters for Anthropic and OpenAI computer-use actions |
 
 We deliberately do not build another browser agent (use Playwright MCP or browser-use), sandbox infrastructure (integrate E2B, cua, or Docker), or a foundation model. See [Non-goals](#non-goals).
 
@@ -202,52 +209,52 @@ We deliberately do not build another browser agent (use Playwright MCP or browse
 - Windows: `resolve_ref`, capture, coordinate input, app and window enumeration, and clipboard raise `NotImplementedError`, so ref clicks through the Runtime fail there today.
 - Browser: same-process iframes are stitched into the snapshot; cross-origin ones are skipped. Per-job evidence is in [docs/ci.md](./docs/ci.md).
 
-## Embedding computerUse
+## Embedding a11y-computer-use
 
 For concurrent workloads, use one Runtime and isolated target per worker. See the [production guide](./docs/production.md) for backpressure, cancellation, state retention and load validation, and the [concurrency contract](./docs/concurrency.md) for exact limits.
 
-computerUse is infrastructure for agent products. Two shapes, and in both your app is the identity the OS trusts.
+a11y-computer-use is infrastructure for agent products. Two shapes, and in both your app is the identity the OS trusts.
 
 | | In-process | MCP subprocess |
 |---|---|---|
-| Shape | `import computeruse`, construct `server.Runtime()` | spawn `computeruse mcp`, speak MCP over stdio |
+| Shape | `import a11y_computer_use`, construct `server.Runtime()` | spawn `a11y-computer-use mcp`, speak MCP over stdio |
 | Host language | Python 3.11+ | any |
 | Identity | runs as your process | child of your process; TCC's responsible process is your signed app |
 | Confirmation channel | a `confirm` callback | MCP elicitation, rendered by the host |
 | Example | [`examples/inprocess_python.py`](./examples/inprocess_python.py) | [`examples/mcp_subprocess.mjs`](./examples/mcp_subprocess.mjs) |
 
 ```python
-from computeruse import safety, server
+from a11y_computer_use import safety, server
 
-store = safety.PermissionStore()                       # ~/.computeruse/permissions.json
+store = safety.PermissionStore()                       # ~/.a11y-computer-use/permissions.json
 store.set_tier("com.apple.TextEdit", safety.Tier.FULL)
 
-runtime = server.Runtime(store=store)                  # audit log defaults to ~/.computeruse/audit/
+runtime = server.Runtime(store=store)                  # audit log defaults to ~/.a11y-computer-use/audit/
 print(runtime.desktop_snapshot("com.apple.TextEdit", mode="interactive"))
 print(runtime.click(ref="e3", verify=True))            # accessibility press, then the post-click diff
 ```
 
 ```js
-const transport = new StdioClientTransport({ command: "computeruse", args: ["mcp"] });
+const transport = new StdioClientTransport({ command: "a11y-computer-use", args: ["mcp"] });
 const client = new Client({ name: "my-ai-platform", version: "0.1.0" });
 await client.connect(transport);
 const snap = await client.callTool({ name: "desktop_snapshot", arguments: { app: "com.apple.finder" } });
 ```
 
-Existing pixel-loop agents can adopt it without prompt changes: `computeruse.adapters` executes Anthropic (`computer_toolset_20260801` and older shapes) and OpenAI (`computer`) actions through the gated Runtime, and a plain left click on a known element becomes a ref press ([docs/provider-adapters.md](./docs/provider-adapters.md)).
+Existing pixel-loop agents can adopt it without prompt changes: `a11y_computer_use.adapters` executes Anthropic (`computer_toolset_20260801` and older shapes) and OpenAI (`computer`) actions through the gated Runtime, and a plain left click on a known element becomes a ref press ([docs/provider-adapters.md](./docs/provider-adapters.md)).
 
-Integrator checklist (macOS): sign with your own Developer ID (computerUse ships no certificate); request Accessibility, and Screen Recording only if you use the vision fallback; handle hardened-runtime library validation; make sure TCC's responsible process is your signed app. `computeruse doctor` prints which app that is.
+Integrator checklist (macOS): sign with your own Developer ID (a11y-computer-use ships no certificate); request Accessibility, and Screen Recording only if you use the vision fallback; handle hardened-runtime library validation; make sure TCC's responsible process is your signed app. `a11y-computer-use doctor` prints which app that is.
 
 ## Observation engine
 
-One engine in `computeruse/observe.py`; each driver only supplies the tree accessor and the native primitives.
+One engine in `a11y_computer_use/observe.py`; each driver only supplies the tree accessor and the native primitives.
 
 - **Refs and epochs.** Refs are valid against their own snapshot. Targeting an older one returns `stale_ref` with up to three same-role candidates.
 - **Stable ids.** `AXIdentifier`, `AutomationId`, `accessible-id`, or the backend DOM node id win outright; otherwise a title, path, and bounds ladder decides, and ties are reported as ambiguous rather than guessed.
 - **Views.** `full`, `interactive` (actionable elements plus their containers, static text folded to one line each, same refs), and `diff`. `budget=N` truncates deterministically and says how many elements were omitted.
 - **Effect Receipts.** `verify=true` on `click` and `act` re-snapshots and appends the diff, so the model sees what it changed without another call.
 - **Set-of-Mark.** `screenshot(marks=true)` labels clickable and editable elements with their refs so a vision model can still answer `click e7`. Unit-tested with a fake driver; not live-verified.
-- **Electron and Chromium.** Accessibility trees are force-enabled per process (`AXManualAccessibility` on macOS, `org.a11y.Status` on Linux); opt out with `COMPUTERUSE_NO_WEB_A11Y`.
+- **Electron and Chromium.** Accessibility trees are force-enabled per process (`AXManualAccessibility` on macOS, `org.a11y.Status` on Linux); opt out with `A11Y_COMPUTER_USE_NO_WEB_A11Y`.
 - **Vision handoff.** A snapshot with zero interactive elements says so and points the model at `screenshot` plus coordinates. Telegram is the reference case.
 
 ## Safety model
@@ -260,11 +267,11 @@ One engine in `computeruse/observe.py`; each driver only supplies the tree acces
 | `click` | read plus pointer actions | `click`, `scroll`, `drag`, `scroll_to_find`, `app launch`, `app focus`, `window raise` |
 | `full` | everything | `type`, `key`, `set_value`, `clipboard write` |
 
-- **Grants** live in `~/.computeruse/permissions.json`, keyed by bundle id, process name, or CDP tab id. An ungranted app is refused even for `read`. No tool can grant a tier; only a human edits the file, calls `PermissionStore.set_tier`, or passes `--grant` to `computeruse agent`.
+- **Grants** live in `~/.a11y-computer-use/permissions.json`, keyed by bundle id, process name, or CDP tab id. An ungranted app is refused even for `read`. No tool can grant a tier; only a human edits the file, calls `PermissionStore.set_tier`, or passes `--grant` to `a11y-computer-use agent`.
 - **Rechecks.** `type` and `key` compare the gated app to the frontmost app right before injecting; `click`, `scroll`, `drag`, and `set_value` hit-test the target point. A mismatch returns `focus_changed`.
 - **Secure fields.** Password fields are never read, never typed into, never clicked by coordinate, and `set_value` refuses them, on every driver.
-- **Confirmation gate.** A ref click whose label reads like an irreversible action (delete, move to trash, erase, wipe, don't save) asks the host through MCP elicitation. No channel means blocked, not fired. `COMPUTERUSE_CONFIRM=0` disables it ([docs/confirmation-gate.md](./docs/confirmation-gate.md)).
-- **Audit log.** Always on, one JSONL file per UTC day in `~/.computeruse/audit/`: app, action, params, decision, result, duration, token estimate. Typed text is redacted when it hit a secure field or the clipboard; element values are always redacted. Pre-gate refusals (`stale_ref`, `secure_field`) are logged too. `computeruse bench audit` aggregates it.
+- **Confirmation gate.** A ref click whose label reads like an irreversible action (delete, move to trash, erase, wipe, don't save) asks the host through MCP elicitation. No channel means blocked, not fired. `A11Y_COMPUTER_USE_CONFIRM=0` disables it ([docs/confirmation-gate.md](./docs/confirmation-gate.md)).
+- **Audit log.** Always on, one JSONL file per UTC day in `~/.a11y-computer-use/audit/`: app, action, params, decision, result, duration, token estimate. Typed text is redacted when it hit a secure field or the clipboard; element values are always redacted. Pre-gate refusals (`stale_ref`, `secure_field`) are logged too. `a11y-computer-use bench audit` aggregates it.
 
 Report safety bugs privately: [SECURITY.md](./SECURITY.md).
 
@@ -293,7 +300,7 @@ flowchart TB
     SC["schema.py: Action, Element, ErrorCode wire types"]
   end
   D["drivers/base.py: the Driver protocol"]
-  subgraph drv["Four drivers, selected by COMPUTERUSE_DRIVER or the OS"]
+  subgraph drv["Four drivers, selected by A11Y_COMPUTER_USE_DRIVER or the OS"]
     M["macos.py: AXUIElement, CGEvent"]
     W["windows.py: UI Automation, SendInput (partial)"]
     L["linux.py: AT-SPI2, XTEST, grim"]
@@ -353,6 +360,6 @@ The model never touches the machine. It emits structured actions; the client exe
 Licensed under [Apache-2.0](./LICENSE) with a [NOTICE](./NOTICE) file.
 
 <p align="center">
-  <img src="docs/assets/logo.png" alt="computerUse logo" width="48"><br>
+  <img src="docs/assets/logo.png" alt="a11y-computer-use logo" width="48"><br>
   Copyright 2026 Perception Dynamics, Inc.
 </p>

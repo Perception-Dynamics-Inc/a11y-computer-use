@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "computeruse"
-version = "0.1.0"
+name = "a11y-computer-use"
+version = "0.1.1"
 description = "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned accessibility-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -72,17 +72,17 @@ linux = [
 browser = ["websocket-client"]
 
 [project.scripts]
-computeruse = "computeruse.cli:main"
+a11y-computer-use = "a11y_computer_use.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Perception-Dynamics-Inc/computerUse"
-Repository = "https://github.com/Perception-Dynamics-Inc/computerUse"
-Issues = "https://github.com/Perception-Dynamics-Inc/computerUse/issues"
-Changelog = "https://github.com/Perception-Dynamics-Inc/computerUse/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/Perception-Dynamics-Inc/computerUse/tree/main/docs"
+Homepage = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use"
+Repository = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use"
+Issues = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use/issues"
+Changelog = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use/tree/main/docs"
 
 [tool.hatch.build.targets.wheel]
-packages = ["computeruse"]
+packages = ["a11y_computer_use"]
 
 # The sdist ships the source, tests, and docs, not the brand media or the Box
 # VM scripts (3 MB of PNGs otherwise dominate the archive).

@@ -21,10 +21,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from computeruse import safety, server  # noqa: E402
-from computeruse.drivers import _linux_input  # noqa: E402
-from computeruse.drivers.linux import LinuxDriver  # noqa: E402
-from computeruse.schema import Point, Scope  # noqa: E402
+from a11y_computer_use import safety, server  # noqa: E402
+from a11y_computer_use.drivers import _linux_input  # noqa: E402
+from a11y_computer_use.drivers.linux import LinuxDriver  # noqa: E402
+from a11y_computer_use.schema import Point, Scope  # noqa: E402
 from tests.test_linux_live import _APP, _GTK_APP  # noqa: E402
 
 

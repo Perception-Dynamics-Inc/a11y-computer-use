@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from computeruse.drivers import _cdp, browser
-from computeruse.schema import ComputerUseError, ErrorCode
+from a11y_computer_use.drivers import _cdp, browser
+from a11y_computer_use.schema import ComputerUseError, ErrorCode
 from tests.test_browser import ScriptedTransport, _CDPError, _driver_on, _fixture_responder
 
 

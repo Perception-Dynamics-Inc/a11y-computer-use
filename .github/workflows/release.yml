@@ -1,9 +1,9 @@
 name: Release
 
-# Publishes computeruse to PyPI when a version tag is pushed, using PyPI
+# Publishes a11y-computer-use to PyPI when a version tag is pushed, using PyPI
 # trusted publishing (OIDC): no API token lives in the repo. One-time setup on
-# pypi.org: project "computeruse" -> Publishing -> add a trusted publisher for
-# owner Perception-Dynamics-Inc, repository computerUse, workflow release.yml,
+# pypi.org: project "a11y-computer-use" -> Publishing -> add a trusted publisher for
+# owner Perception-Dynamics-Inc, repository a11y-computer-use, workflow release.yml,
 # environment pypi. Until that exists the publish step fails with a clear
 # "trusted publisher not configured" error and nothing else is affected.
 
@@ -29,7 +29,7 @@ jobs:
           T="${GITHUB_REF_NAME#v}"
           if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "$V" != "$T" ]; then echo "::error::tag v$T != pyproject version $V"; exit 1; fi
       - name: smoke the wheel through uvx
-        run: uvx --from "$(ls dist/*.whl)" computeruse --help
+        run: uvx --from "$(ls dist/*.whl)" a11y-computer-use --help
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -53,4 +53,4 @@ jobs:
       - name: attach the files to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "computerUse $GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY" || gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "a11y-computer-use $GITHUB_REF_NAME" --notes "See CHANGELOG.md."

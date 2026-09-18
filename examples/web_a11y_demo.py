@@ -2,7 +2,7 @@
 
 Chrome, Slack, VS Code / Cursor, Discord, Spotify, Teams and most Electron apps
 expose only an empty AXWebArea shell until a screen-reader-like client sets
-`AXEnhancedUserInterface` / `AXManualAccessibility`. computerUse does this
+`AXEnhancedUserInterface` / `AXManualAccessibility`. a11y-computer-use does this
 automatically on the first snapshot — turning "0 interactive refs, fall back to
 blind pixel-clicking" into a full, ref-addressable a11y tree.
 
@@ -21,8 +21,8 @@ from __future__ import annotations
 import os
 import sys
 
-from computeruse import observe
-from computeruse.schema import ComputerUseError, Scope
+from a11y_computer_use import observe
+from a11y_computer_use.schema import ComputerUseError, Scope
 
 # Common Chromium/Electron apps (bundle id → display name), tried in order.
 _CANDIDATES = [
@@ -62,9 +62,9 @@ def _count(app: str, *, force_enable: bool) -> tuple[int, int, list[str]]:
     """(total elements, interactive count, sample interactive lines) for a fresh
     snapshot with the web-a11y force-enable on or off."""
     if force_enable:
-        os.environ.pop("COMPUTERUSE_NO_WEB_A11Y", None)
+        os.environ.pop("A11Y_COMPUTER_USE_NO_WEB_A11Y", None)
     else:
-        os.environ["COMPUTERUSE_NO_WEB_A11Y"] = "1"
+        os.environ["A11Y_COMPUTER_USE_NO_WEB_A11Y"] = "1"
     observe._WEB_A11Y_ENABLED.clear()  # re-probe/enable this run (demo only)
     snap = observe.snapshot(Scope.APP, app=app)
     interactive = [el for el in snap.elements if el.clickable or el.editable]

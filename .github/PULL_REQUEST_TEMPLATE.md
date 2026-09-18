@@ -5,10 +5,10 @@ What changed and why. Link the issue if there is one.
 ## Platforms touched
 
 - [ ] Platform-free core (observe, act, safety, schema, server, cli)
-- [ ] macOS driver (computeruse/drivers/macos.py and the observe, act, capture modules it delegates to)
-- [ ] Windows driver (computeruse/drivers/windows.py, _uia, _win_input, _win_system)
-- [ ] Linux driver (computeruse/drivers/linux.py, _atspi, _linux_input, _linux_system)
-- [ ] Browser driver (computeruse/drivers/browser.py, _cdp, _cdp_ax)
+- [ ] macOS driver (a11y_computer_use/drivers/macos.py and the observe, act, capture modules it delegates to)
+- [ ] Windows driver (a11y_computer_use/drivers/windows.py, _uia, _win_input, _win_system)
+- [ ] Linux driver (a11y_computer_use/drivers/linux.py, _atspi, _linux_input, _linux_system)
+- [ ] Browser driver (a11y_computer_use/drivers/browser.py, _cdp, _cdp_ax)
 - [ ] CI workflow (.github/workflows/ci.yml)
 - [ ] Docs or examples only
 
@@ -23,10 +23,10 @@ Paste the summary line of each run and name the skips you saw.
 
 Live runs, where the change touches them:
 
-- [ ] macOS live tests ran with the Accessibility and Screen Recording grants held by the test process. Without the grants they skip with "Accessibility TCC grant missing"; `computeruse doctor` shows the grant state.
+- [ ] macOS live tests ran with the Accessibility and Screen Recording grants held by the test process. Without the grants they skip with "Accessibility TCC grant missing"; `a11y-computer-use doctor` shows the grant state.
 - [ ] Windows live UIA tests: `pytest tests/test_windows_live.py -q -s` on Windows.
 - [ ] Linux live AT-SPI2 tests: `pytest tests/test_linux_live.py` under `xvfb-run` and `dbus-run-session`, the way the linux job in ci.yml runs them.
-- [ ] Browser live tests: `pytest tests/test_browser.py -k live` and `pytest tests/test_arena.py -k live` against a Chromium started with `--remote-debugging-port=9222`, with `COMPUTERUSE_CDP_ENDPOINT` pointing at it.
+- [ ] Browser live tests: `pytest tests/test_browser.py -k live` and `pytest tests/test_arena.py -k live` against a Chromium started with `--remote-debugging-port=9222`, with `A11Y_COMPUTER_USE_CDP_ENDPOINT` pointing at it.
 - [ ] Not applicable, the change has no live path.
 
 If a tool was added or removed: `tests/test_server.py` pins the tool list in `EXPECTED_TOOLS`, and `tests/test_browser.py` asserts that `console` and `network` exist only on the browser backend. Update both, and every doc that states the count.
@@ -35,7 +35,7 @@ If a tool was added or removed: `tests/test_server.py` pins the tool list in `EX
 
 - [ ] README.md
 - [ ] docs/ (name the file)
-- [ ] Docstrings and the MCP tool descriptions in computeruse/server.py
+- [ ] Docstrings and the MCP tool descriptions in a11y_computer_use/server.py
 - [ ] PLAN.md, where the roadmap status changed
 - [ ] No doc change needed (say why)
 

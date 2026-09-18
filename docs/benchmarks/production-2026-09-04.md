@@ -70,13 +70,13 @@ profiles or boxes. Each native desktop needs a single workflow owner.
 ## Saved boxes and reproduction
 
 - `bx_4c4s3kdb`: source checkout and `.venv` under
-  `/home/user/computerUse-hardening`; template `computeruse-hardened-2026-09-04`.
+  `/home/user/a11y-computer-use-hardening`; template `a11y-computer-use-hardened-2026-09-04`.
 - `bx_pguvxg3x`: same checkout plus installed wheel in `.release-venv`;
-  template `computeruse-wheel-2026-09-04`.
+  template `a11y-computer-use-wheel-2026-09-04`.
 
 ```bash
-box new --from computeruse-hardened-2026-09-04 --no-env --ttl 3600
-box exec <id> --detach -- 'REPO=/home/user/computerUse-hardening LOAD_WORKERS=8 LOAD_ITERATIONS=1000 bash /home/user/computerUse-hardening/scripts/box/run-live.sh'
+box new --from a11y_computer_use-hardened-2026-09-04 --no-env --ttl 3600
+box exec <id> --detach -- 'REPO=/home/user/a11y-computer-use-hardening LOAD_WORKERS=8 LOAD_ITERATIONS=1000 bash /home/user/a11y-computer-use-hardening/scripts/box/run-live.sh'
 box exec <id> --status <pid>
 ```
 

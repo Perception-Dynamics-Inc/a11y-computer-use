@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, computeruse-mvp]
+    branches: [main, a11y-computer-use-mvp]
   pull_request:
 
 # One run per branch: a new push cancels the run it supersedes.
@@ -49,8 +49,8 @@ jobs:
       - run: pip install -e ".[dev,windows,browser]"
       - name: import + driver selection smoke
         run: >
-          python -c "import computeruse;
-          from computeruse.drivers import get_driver, current_platform;
+          python -c "import a11y_computer_use;
+          from a11y_computer_use.drivers import get_driver, current_platform;
           d = get_driver();
           print('platform:', current_platform(), '| driver:', d.name);
           assert d.name == 'windows', d.name"
@@ -62,12 +62,12 @@ jobs:
         run: pytest -q -rs -p no:cacheprovider
       # The MCP server (Runtime + the full 16-tool surface; console/network are
       # added only on the browser backend) must import and build on Windows: an
-      # agent has to be able to run `computeruse mcp` there.
+      # agent has to be able to run `a11y-computer-use mcp` there.
       - name: MCP server imports + builds on Windows
         run: >
-          python -c "import computeruse.server as s;
+          python -c "import a11y_computer_use.server as s;
           srv = s.build_server();
-          assert srv is not None and srv.name == 'computeruse', srv;
+          assert srv is not None and srv.name == 'a11y-computer-use', srv;
           print('MCP server built on Windows:', srv.name)"
       # The live Windows backend on a real windows-latest runner: UIA snapshot of
       # Notepad through the SHARED pruning engine, a11y press + SendInput typing,
@@ -103,7 +103,7 @@ jobs:
           # --disable-dev-shm-usage: the runner's /dev/shm is tiny and headless
           # Chrome crashes on startup without it (the classic CI flake).
           "$CHROME" --headless=new --remote-debugging-port=9222 \
-            --remote-debugging-address=127.0.0.1 --user-data-dir="$RUNNER_TEMP/computeruse-chrome" \
+            --remote-debugging-address=127.0.0.1 --user-data-dir="$RUNNER_TEMP/a11y-computer-use-chrome" \
             --no-sandbox --disable-gpu --disable-dev-shm-usage \
             --no-first-run --no-default-browser-check --window-size=1280,800 about:blank >/tmp/chrome.log 2>&1 &
           for _ in $(seq 1 60); do
@@ -116,40 +116,40 @@ jobs:
           curl -s http://127.0.0.1:9222/json/version
       - name: browser backend (live headless Chromium)
         env:
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
         # The live paths: observe->act->verify, iframe content stitched from a child
         # frame (getFullAXTree per frame + owner-offset geometry), console capture,
         # and network outcomes (status codes + failures).
         run: pytest tests/test_browser.py -k live -q -rs -p no:cacheprovider
       - name: cu-arena (a11y-vs-vision observation cost, live number)
         env:
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
         # Prints the honest per-observation token comparison to the CI log (-s).
         run: pytest tests/test_arena.py -k live -q -rs -s -p no:cacheprovider
       # Provider executor adapters: an Anthropic-style pixel click on a real page
       # snaps to the element's accessibility ref and executes without coordinates.
       - name: provider adapters (live)
         env:
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
         run: pytest tests/test_adapters.py -k live -q -rs -p no:cacheprovider
       # Reference agent loop: a scripted planner observes, acts by ref, verifies,
       # and stops, through the same gated Runtime the MCP server uses.
       - name: agent loop (live, scripted planner)
         env:
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
         run: pytest tests/test_agent.py -k live -q -rs -p no:cacheprovider
       # Head-to-head harness: scripted planner solves tasks in refs mode and in
       # pixels mode, and misclicks are counted by the instrumented pages.
       - name: cu-arena head-to-head harness (live, scripted planner)
         env:
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
         run: pytest tests/test_h2h.py -k live -q -rs -p no:cacheprovider
       # Every snapshot view of the bound tab against one screenshot, printed.
       - name: bench desktop on the browser driver (printed)
         env:
-          COMPUTERUSE_DRIVER: browser
-          COMPUTERUSE_CDP_ENDPOINT: http://127.0.0.1:9222
-        run: computeruse bench desktop --rounds 2
+          A11Y_COMPUTER_USE_DRIVER: browser
+          A11Y_COMPUTER_USE_CDP_ENDPOINT: http://127.0.0.1:9222
+        run: a11y-computer-use bench desktop --rounds 2
       - name: isolated browser workers (verified load smoke)
         timeout-minutes: 5
         run: |
@@ -186,7 +186,7 @@ jobs:
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;
-      # gi/Atspi resolve from apt, everything else (computeruse, pytest,
+      # gi/Atspi resolve from apt, everything else (a11y-computer-use, pytest,
       # python-xlib, pillow, websocket-client) from pip. The [linux] extra is
       # skipped so pip never tries to build PyGObject from source.
       - name: venv with system gi
@@ -196,8 +196,8 @@ jobs:
           .venv/bin/pip install -e ".[dev,browser]" python-xlib
       - name: import + driver selection smoke
         run: >
-          .venv/bin/python -c "import computeruse;
-          from computeruse.drivers import get_driver, current_platform;
+          .venv/bin/python -c "import a11y_computer_use;
+          from a11y_computer_use.drivers import get_driver, current_platform;
           d = get_driver();
           print('platform:', current_platform(), '| driver:', d.name);
           assert d.name == 'linux', d.name"
@@ -209,12 +209,12 @@ jobs:
         run: .venv/bin/pytest -q -rs -p no:cacheprovider
       # The MCP server (Runtime + the full 16-tool surface; console/network are
       # added only on the browser backend) must import and build on Linux: an
-      # agent has to be able to run `computeruse mcp` there.
+      # agent has to be able to run `a11y-computer-use mcp` there.
       - name: MCP server imports + builds on Linux
         run: >
-          .venv/bin/python -c "import computeruse.server as s;
+          .venv/bin/python -c "import a11y_computer_use.server as s;
           srv = s.build_server();
-          assert srv is not None and srv.name == 'computeruse', srv;
+          assert srv is not None and srv.name == 'a11y-computer-use', srv;
           print('MCP server built on Linux:', srv.name)"
       # The live Linux backend on a real ubuntu-latest runner. Headless AT-SPI
       # needs three buses brought up in order: Xvfb (X server), dbus-run-session
@@ -264,11 +264,11 @@ jobs:
             echo "::error::sdist contains media that should be excluded"; exit 1
           fi
       # The wheel installs and the console script runs from an isolated
-      # environment, the way `uvx computeruse mcp` will once it is on PyPI.
+      # environment, the way `uvx a11y-computer-use mcp` will once it is on PyPI.
       - name: uvx from the built wheel
-        run: uvx --from "$(ls dist/*.whl)" computeruse --help
+        run: uvx --from "$(ls dist/*.whl)" a11y-computer-use --help
       - name: import the wheel in a fresh venv
         run: |
           python -m venv /tmp/wheel-venv
           /tmp/wheel-venv/bin/pip install --quiet "$(ls dist/*.whl)"
-          /tmp/wheel-venv/bin/python -c "import computeruse, computeruse.server, computeruse.agent, computeruse.adapters, computeruse.h2h; print('wheel imports ok', computeruse.__version__ if hasattr(computeruse, '__version__') else '')"
+          /tmp/wheel-venv/bin/python -c "import a11y_computer_use, a11y_computer_use.server, a11y_computer_use.agent, a11y_computer_use.adapters, a11y_computer_use.h2h; print('wheel imports ok', a11y_computer_use.__version__ if hasattr(a11y-computer-use, '__version__') else '')"

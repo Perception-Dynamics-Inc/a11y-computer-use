@@ -1,4 +1,4 @@
-"""Unit tests for computeruse.act.
+"""Unit tests for a11y_computer_use.act.
 
 Every test uses ``dry_run=True`` (events are built, never posted) except the
 single `HAS_AX`-guarded live test, which posts one mouse-move to the cursor's
@@ -17,8 +17,8 @@ import pytest
 # collection (the full suite runs on every CI runner).
 Quartz = pytest.importorskip("Quartz", reason="macOS CGEvent executor needs pyobjc (Quartz)")
 
-from computeruse import act
-from computeruse.schema import (
+from a11y_computer_use import act
+from a11y_computer_use.schema import (
     MODIFIER_KEYS,
     Bounds,
     Click,

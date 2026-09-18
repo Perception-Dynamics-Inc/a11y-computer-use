@@ -12,7 +12,7 @@ The tier system (`read`/`click`/`full`) answers *"is this app allowed to receive
 
 When an action is flagged as plausibly irreversible, the server issues an [MCP elicitation](https://modelcontextprotocol.io) request (`ctx.elicit`) and the **host** (Claude Code, Claude Desktop, any elicitation-capable client) renders the yes/no. The prompt appears in the surface the user is already looking at; there is no second always-running process to sign, notarize, keep alive, or wire over IPC.
 
-**2. Fail-safe when there is no channel.** If nothing can render the prompt (an MCP client that doesn't advertise elicitation, or an in-process `Runtime.click(...)` call with no `confirm` callback), the irreversible action is **blocked** with a structured `confirmation_declined` error, never fired unconfirmed. The CLI `run-once` one-shot never reaches the gate: it accepts only x/y coordinate targets, and coordinate clicks carry no label for the classifier. Escape hatch: `COMPUTERUSE_CONFIRM=0` disables the gate wholesale for automation that has accepted the risk.
+**2. Fail-safe when there is no channel.** If nothing can render the prompt (an MCP client that doesn't advertise elicitation, or an in-process `Runtime.click(...)` call with no `confirm` callback), the irreversible action is **blocked** with a structured `confirmation_declined` error, never fired unconfirmed. The CLI `run-once` one-shot never reaches the gate: it accepts only x/y coordinate targets, and coordinate clicks carry no label for the classifier. Escape hatch: `A11Y_COMPUTER_USE_CONFIRM=0` disables the gate wholesale for automation that has accepted the risk.
 
 **3. Revisit a tray/menubar helper only when earned** — specifically if we ship a non-MCP embedding (direct SDK use in someone's own agent loop) that has no host to render prompts, or if real hosts turn out to render elicitation poorly. Until then a tray app is cost (a second signed process, its own TCC surface, cross-host inconsistency) without a matching benefit for a 1–2 person team.
 
@@ -39,7 +39,7 @@ Driven end-to-end over the real MCP in-memory transport with client elicitation 
 - `test_destructive_click_proceeds_when_confirmed` — accept → the click executes.
 - `test_destructive_click_blocked_when_declined` — decline → `confirmation_declined`, driver never called, audited.
 - `test_destructive_click_fails_safe_without_elicitation` — no elicitation channel → blocked (fail-safe), not fired.
-- `test_destructive_click_gate_can_be_disabled` — `COMPUTERUSE_CONFIRM=0` → proceeds without a prompt.
+- `test_destructive_click_gate_can_be_disabled` — `A11Y_COMPUTER_USE_CONFIRM=0` → proceeds without a prompt.
 - `test_safe_click_never_triggers_confirmation` — a "Save" click never elicits.
 - `safety` unit tests cover the classifier (destructive vs safe labels, case-insensitivity, coordinate/non-click actions return `None`).
 

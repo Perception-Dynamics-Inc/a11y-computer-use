@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from computeruse import bench
+from a11y_computer_use import bench
 
 
 def _write(d, rows):

@@ -1,9 +1,9 @@
 # Browser backend: accessibility-first control of Chromium over CDP
 
-The fourth `Driver` (`computeruse/drivers/browser.py`), and the first that is not
+The fourth `Driver` (`a11y_computer_use/drivers/browser.py`), and the first that is not
 an OS backend: it drives a **running Chromium** through the Chrome DevTools
 Protocol. It is selected explicitly (`get_driver("browser")` or
-`COMPUTERUSE_DRIVER=browser computeruse mcp`), never by platform, so it runs the
+`A11Y_COMPUTER_USE_DRIVER=browser a11y-computer-use mcp`), never by platform, so it runs the
 same on macOS, Windows, and Linux.
 
 The ref-based path is coordinate-free: observe reads the page's accessibility
@@ -71,7 +71,7 @@ Four opt-in live tests
 `test_live_network_reports_status_and_failures`), plus
 `tests/test_arena.py::test_live_arena_measures_real_costs`, exercise headless
 Chromium end to end. They skip unless a CDP endpoint is reachable
-(`COMPUTERUSE_CDP_ENDPOINT`, default `http://127.0.0.1:9222`); the `browser` CI job
+(`A11Y_COMPUTER_USE_CDP_ENDPOINT`, default `http://127.0.0.1:9222`); the `browser` CI job
 runs them against headless Chrome.
 
 ## Running it
@@ -80,11 +80,11 @@ runs them against headless Chrome.
 # 1. start Chromium with a debugging port (headless=new works in CI)
 google-chrome --headless=new --remote-debugging-port=9222 about:blank &
 
-# 2. point computerUse at it
+# 2. point a11y-computer-use at it
 pip install -e '.[browser]'               # from a clone (not on PyPI yet); adds websocket-client (only extra dep)
-COMPUTERUSE_DRIVER=browser \
-COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222 \
-computeruse mcp
+A11Y_COMPUTER_USE_DRIVER=browser \
+A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222 \
+a11y-computer-use mcp
 ```
 
 The endpoint defaults to `http://127.0.0.1:9222`. Target discovery uses stdlib
@@ -101,7 +101,7 @@ in `test_live_observe_act_verify`.
 
 ## Measuring the moat: cu-arena
 
-`computeruse bench web <url> [--mode full|interactive] [--json]` (module `computeruse/arena.py`) reports the honest
+`a11y-computer-use bench web <url> [--mode full|interactive] [--json]` (module `a11y_computer_use/arena.py`) reports the honest
 per-observation token cost of the a11y-first snapshot vs the screenshot a vision
 agent would send instead. Both raw numbers, no rigging: the a11y cost is the
 real rendered snapshot, the image cost is the real captured frame's dimensions
@@ -113,8 +113,8 @@ screenshot pays its full image cost every step. Both figures are estimates
 (chars/4 and w*h/750, not tokenizer counts). The a11y cost grows with the element
 count while the screenshot cost is fixed by the frame, so the ratio depends on the
 page; the diff advantage does not. The browser CI job prints the numbers on every
-run. `computeruse bench audit` aggregates the JSONL audit log (cu-meter:
-per-action latency p50/p95 + tokens). `computeruse bench desktop` runs the same
-per-view measurement on the current platform driver (or `COMPUTERUSE_DRIVER=browser`
-for the bound tab); method and numbers in docs/observation-cost.md. `computeruse
+run. `a11y-computer-use bench audit` aggregates the JSONL audit log (cu-meter:
+per-action latency p50/p95 + tokens). `a11y-computer-use bench desktop` runs the same
+per-view measurement on the current platform driver (or `A11Y_COMPUTER_USE_DRIVER=browser`
+for the bound tab); method and numbers in docs/observation-cost.md. `a11y-computer-use
 bench h2h` is the task-level head-to-head on this backend (docs/benchmark.md).

@@ -20,16 +20,16 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from computeruse import capture, safety, server
-from computeruse.adapters import (
+from a11y_computer_use import capture, safety, server
+from a11y_computer_use.adapters import (
     AnthropicComputerAdapter,
     OpenAIComputerAdapter,
     Result,
     openai_keys_to_chords,
     xdotool_to_chord,
 )
-from computeruse.adapters import anthropic_computer, openai_computer
-from computeruse.schema import (
+from a11y_computer_use.adapters import anthropic_computer, openai_computer
+from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
     Display,
@@ -702,7 +702,7 @@ def test_openai_handle_call_stops_at_the_first_failure_and_still_screenshots(ope
 
 
 def test_anthropic_adapter_on_the_browser_driver_snaps_to_a_dom_click(tmp_path) -> None:
-    from computeruse.drivers import _cdp, browser
+    from a11y_computer_use.drivers import _cdp, browser
     from tests.test_browser import ScriptedTransport, _fixture_responder
 
     real_png = _png(800, 600)
@@ -739,9 +739,9 @@ def test_anthropic_adapter_on_the_browser_driver_snaps_to_a_dom_click(tmp_path) 
 
 
 def _live_endpoint() -> str | None:
-    from computeruse.drivers import _cdp
+    from a11y_computer_use.drivers import _cdp
 
-    endpoint = os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+    endpoint = os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222")
     try:
         _cdp.page_targets(endpoint)
         return endpoint
@@ -761,10 +761,10 @@ _LIVE_PAGE = (
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port)")
 def test_live_anthropic_adapter_snaps_a_pixel_click_to_the_button(tmp_path) -> None:
-    from computeruse.drivers import browser
+    from a11y_computer_use.drivers import browser
 
     d = browser.BrowserDriver(endpoint=_live_endpoint())
     tab = d.frontmost_app()[0]

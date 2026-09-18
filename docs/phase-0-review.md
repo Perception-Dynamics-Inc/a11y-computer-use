@@ -42,7 +42,7 @@ Two "partials" (token budget on dense grids; signing) are engineering tasks, not
 1. **Wedge is reliability + any-model + non-intrusiveness + auditability — NOT token savings.** Snapshots ≈ one screenshot. The real wins: exact clickable refs (no coordinate hallucination), works with cheap non-vision/local models, deterministic + fully audited, and — proven this phase — **ref actions activate via the AX API without moving the user's pointer** (COM-55), a property a pixel-loop agent structurally cannot have.
 2. **The product is a hybrid, and the hybrid is real.** a11y-first where a tree exists (fast, deterministic, verifiable, cursor-free); **vision fallback** (screenshot → coordinate click) everywhere else. Both are live-proven. This makes "control any app" true today — the screenshot tools already shipped; the vision loop is just the host agent reading the PNG.
 3. **Stay Python for Phase 1** (COM-11). The working MVP is the strongest evidence against a premature Rust rewrite.
-4. **Governance settled:** Apache-2.0 (COM-4); name kept as "computerUse" with a tagline-led SEO strategy (COM-3).
+4. **Governance settled:** Apache-2.0 (COM-4); name kept as "a11y-computer-use" with a tagline-led SEO strategy (COM-3).
 
 ## Confirmed / revised Phase-1 scope
 

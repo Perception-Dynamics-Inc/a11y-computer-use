@@ -1,6 +1,6 @@
 """Drop-in executor for an Anthropic computer-use loop.
 
-The model keeps its native ``computer`` toolset; computerUse executes each
+The model keeps its native ``computer`` toolset; a11y-computer-use executes each
 action through the gated Runtime and, when a click lands on an element of the
 accessibility tree, snaps it to that element's ref (no cursor movement).
 
@@ -13,8 +13,8 @@ replays a scripted action sequence through the adapter instead, so the wiring
 and the result shapes are visible with nothing but this repo.
 
 Backend selection is the Runtime's: the OS driver by default, or
-``COMPUTERUSE_DRIVER=browser COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9222``
-for a Chromium tab. ``COMPUTERUSE_APP`` names the app whose tree backs
+``A11Y_COMPUTER_USE_DRIVER=browser A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222``
+for a Chromium tab. ``A11Y_COMPUTER_USE_APP`` names the app whose tree backs
 snap-to-ref (default: the frontmost app, or the bound tab on the browser).
 """
 
@@ -24,8 +24,8 @@ import json
 import os
 import sys
 
-from computeruse import server
-from computeruse.adapters import AnthropicComputerAdapter
+from a11y_computer_use import server
+from a11y_computer_use.adapters import AnthropicComputerAdapter
 
 MODEL = "claude-opus-5"  # supports computer_toolset_20260801 without a beta header
 MAX_TURNS = 40
@@ -33,7 +33,7 @@ MAX_TURNS = 40
 _SCRIPTED = [
     ("screenshot", {}),
     ("left_click", {"coordinate": [100, 100]}),
-    ("type", {"text": "hello from computerUse"}),
+    ("type", {"text": "hello from a11y-computer-use"}),
     ("key", {"text": "Return"}),
     ("scroll", {"coordinate": [400, 300], "scroll_direction": "down", "scroll_amount": 2}),
     ("screenshot", {}),
@@ -96,7 +96,7 @@ def live(adapter: AnthropicComputerAdapter, task: str) -> None:
 
 def main() -> int:
     runtime = server.Runtime()
-    adapter = AnthropicComputerAdapter(runtime, app=os.environ.get("COMPUTERUSE_APP"))
+    adapter = AnthropicComputerAdapter(runtime, app=os.environ.get("A11Y_COMPUTER_USE_APP"))
     task = " ".join(sys.argv[1:]) or "Take a screenshot and describe what you see."
     try:
         import anthropic  # noqa: F401

@@ -5,7 +5,7 @@ workflow completed end-to-end via element refs alone).
 The whole module is skipif-gated on the Accessibility TCC grant: on an
 ungranted machine every test here skips, and the graceful permission-error
 path is covered by tests/e2e/test_mcp_stdio.py and tests/test_cli.py. Grant
-Accessibility to the host app named by ``computeruse doctor`` and this suite
+Accessibility to the host app named by ``a11y_computer_use doctor`` and this suite
 arms itself automatically — no code changes needed.
 
 Scope discipline (non-negotiable): every click and keystroke targets a
@@ -23,17 +23,17 @@ from pathlib import Path
 
 import pytest
 
-from computeruse import safety, server
-from computeruse.schema import ComputerUseError, Element, Snapshot
+from a11y_computer_use import safety, server
+from a11y_computer_use.schema import ComputerUseError, Element, Snapshot
 from tests.conftest import HAS_AX
 
 pytestmark = pytest.mark.skipif(
     not HAS_AX,
-    reason="live smoke test needs the Accessibility TCC grant (run `computeruse doctor`)",
+    reason="live smoke test needs the Accessibility TCC grant (run `a11y_computer_use doctor`)",
 )
 
 TEXTEDIT = "com.apple.TextEdit"
-SMOKE_TEXT = "Hello from computerUse MVP"
+SMOKE_TEXT = "Hello from a11y-computer-use MVP"
 WINDOW_TIMEOUT_S = 20.0
 VERIFY_TIMEOUT_S = 10.0
 POLL_S = 0.5
@@ -43,7 +43,7 @@ POLL_S = 0.5
 def runtime(tmp_path: Path) -> server.Runtime:
     """A Runtime with TextEdit pre-granted FULL in a throwaway store + audit.
 
-    The real ``~/.computeruse`` is never touched: grants and the JSONL audit
+    The real ``~/.a11y_computer_use`` is never touched: grants and the JSONL audit
     log live under pytest's temp dir and evaporate with it.
     """
     store = safety.PermissionStore(tmp_path / "permissions.json")
@@ -152,7 +152,7 @@ def _close_smoke_window(rt: server.Runtime) -> None:
 
 
 def test_textedit_type_and_ax_verify(runtime: server.Runtime, tmp_path: Path) -> None:
-    doc = tmp_path / "computeruse-smoke.txt"
+    doc = tmp_path / "a11y_computer_use-smoke.txt"
     doc.write_text("")
     # Open OUR temp file (plain text, no prompts) so every subsequent
     # keystroke lands in a document this test created and owns.

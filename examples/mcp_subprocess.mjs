@@ -1,12 +1,12 @@
-// MCP-subprocess embed (non-Python host): spawn `computeruse mcp` and drive it
+// MCP-subprocess embed (non-Python host): spawn `a11y-computer-use mcp` and drive it
 // over stdio with the Model Context Protocol. This is the integration shape for
 // ANY language. Node is shown here; any language with an MCP stdio client
 // follows the same shape, though only the Python client is exercised in this
 // repo (tests/e2e/test_mcp_stdio.py).
 //
 // The child runs under YOUR app: TCC/Gatekeeper attribute to the responsible
-// process (your signed app), so computerUse inherits your grants. You ship no
-// computerUse certificate.
+// process (your signed app), so a11y-computer-use inherits your grants. You ship no
+// a11y-computer-use certificate.
 //
 // Setup:
 //   npm i @modelcontextprotocol/sdk
@@ -18,7 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const transport = new StdioClientTransport({
-  command: "computeruse", // your app spawns this child; sign+entitle the parent
+  command: "a11y-computer-use", // your app spawns this child; sign+entitle the parent
   args: ["mcp"],
 });
 

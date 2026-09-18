@@ -15,8 +15,8 @@ import sys
 
 import pytest
 
-from computeruse import doctor
-from computeruse.doctor import (
+from a11y_computer_use import doctor
+from a11y_computer_use.doctor import (
     ACCESSIBILITY_SETTINGS_URL,
     SCREEN_RECORDING_SETTINGS_URL,
     CheckResult,

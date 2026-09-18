@@ -12,8 +12,8 @@ import sys
 
 import pytest
 
-from computeruse import observe
-from computeruse.observe import (
+from a11y_computer_use import observe
+from a11y_computer_use.observe import (
     MAX_CHILDREN,
     MAX_DEPTH,
     build_snapshot,
@@ -22,7 +22,7 @@ from computeruse.observe import (
     resolve_ref,
     snapshot,
 )
-from computeruse.schema import Bounds, ComputerUseError, Element, ErrorCode, Scope, Snapshot
+from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode, Scope, Snapshot
 from tests.conftest import HAS_AX, HAS_DISPLAYS
 from tests.fixtures.trees import (
     GEOMETRY,
@@ -381,7 +381,7 @@ def test_display_geometry_matches_capture_metadata() -> None:
     pixels" means: observe delegates to capture.displays, so a Retina main
     display reports scale 2.0 (not the CGDisplayPixelsWide points bug) in
     both modules."""
-    from computeruse import capture
+    from a11y_computer_use import capture
 
     observed = {g.display.display_id: g.display for g in observe._display_geometry()}
     captured = {d.display_id: d for d in capture.displays()}
@@ -555,7 +555,7 @@ class _FakeAcc:
 
 def test_web_a11y_enabled_on_chromium_like_app(monkeypatch) -> None:
     observe._WEB_A11Y_ENABLED.clear()
-    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_NO_WEB_A11Y", raising=False)
     monkeypatch.setattr(observe.time, "sleep", lambda _s: None)
     ax = _FakeAx()
     observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1234)
@@ -566,7 +566,7 @@ def test_web_a11y_enabled_on_chromium_like_app(monkeypatch) -> None:
 
 def test_web_a11y_skipped_on_native_app_but_marked_handled(monkeypatch) -> None:
     observe._WEB_A11Y_ENABLED.clear()
-    monkeypatch.delenv("COMPUTERUSE_NO_WEB_A11Y", raising=False)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_NO_WEB_A11Y", raising=False)
     ax = _FakeAx()
     observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWindow"), pid=999)
     assert ax.calls == []  # no web area -> nothing set
@@ -575,7 +575,7 @@ def test_web_a11y_skipped_on_native_app_but_marked_handled(monkeypatch) -> None:
 
 def test_web_a11y_opt_out(monkeypatch) -> None:
     observe._WEB_A11Y_ENABLED.clear()
-    monkeypatch.setenv("COMPUTERUSE_NO_WEB_A11Y", "1")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_NO_WEB_A11Y", "1")
     ax = _FakeAx()
     observe._maybe_enable_web_a11y(ax, object(), _FakeAcc("AXWebArea"), pid=1)
     assert ax.calls == []

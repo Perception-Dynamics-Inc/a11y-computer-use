@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Prepare a Box (box.ascii.dev) Ubuntu desktop VM as a computerUse Linux test bed.
+# Prepare a Box (box.ascii.dev) Ubuntu desktop VM as a a11y-computer-use Linux test bed.
 #
 # Runs ON the box, as the desktop user. Idempotent: re-running only updates.
-# Assumes the repo tree was synced to $REPO (default ~/computerUse) first; see
+# Assumes the repo tree was synced to $REPO (default ~/a11y-computer-use) first; see
 # scripts/box/README.md for the sync command.
 #
 # What this installs mirrors the `linux` job in .github/workflows/ci.yml, plus
@@ -10,7 +10,7 @@
 # manager can prove.
 set -euo pipefail
 
-REPO="${REPO:-$HOME/computerUse}"
+REPO="${REPO:-$HOME/a11y-computer-use}"
 export DEBIAN_FRONTEND=noninteractive
 
 echo "== system deps (AT-SPI2 bus + GI typelibs + apt PyGObject + X11 helpers)"
@@ -37,8 +37,8 @@ cd "$REPO"
 .venv/bin/pip install -e ".[dev,browser]" python-xlib -q
 
 echo "== smoke"
-.venv/bin/python -c "import computeruse; from computeruse.drivers import get_driver, current_platform; d = get_driver(); print('platform:', current_platform(), '| driver:', d.name); assert d.name == 'linux', d.name"
-.venv/bin/python -c "import computeruse.server as s; srv = s.build_server(); assert srv.name == 'computeruse'; print('MCP server built:', srv.name)"
+.venv/bin/python -c "import a11y_computer_use; from a11y_computer_use.drivers import get_driver, current_platform; d = get_driver(); print('platform:', current_platform(), '| driver:', d.name); assert d.name == 'linux', d.name"
+.venv/bin/python -c "import a11y_computer_use.server as s; srv = s.build_server(); assert srv.name == 'a11y-computer-use'; print('MCP server built:', srv.name)"
 
 echo "== desktop session"
 # Budgie on this image ships toolkit-accessibility off; GTK apps only publish

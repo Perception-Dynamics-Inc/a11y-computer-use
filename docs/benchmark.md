@@ -1,15 +1,15 @@
 # cu-arena head-to-head: refs versus pixels, same planner, same tasks
 
-`computeruse bench web` measures what one observation costs. `computeruse bench h2h`
+`a11y-computer-use bench web` measures what one observation costs. `a11y-computer-use bench h2h`
 measures what a whole task costs and whether it gets done. The same planner model
 runs a fixed suite of browser tasks twice (three times if you include the hybrid),
 and the harness scores every run the same way:
 
 | mode | what the planner sees | how actions execute |
 |---|---|---|
-| `refs` | the pruned accessibility snapshot with element refs (the reference agent loop, `computeruse.agent.run_task`) | `click(ref)`, `set_value(ref)`, `type`, `key`, `act`, through the gated Runtime with Effect Receipts |
+| `refs` | the pruned accessibility snapshot with element refs (the reference agent loop, `a11y_computer_use.agent.run_task`) | `click(ref)`, `set_value(ref)`, `type`, `key`, `act`, through the gated Runtime with Effect Receipts |
 | `pixels` | a PNG screenshot only, plus a fresh screenshot after every action | pixel coordinates executed by the Anthropic computer-use adapter as raw coordinate clicks (the incumbent loop) |
-| `pixels+snap` | the same screenshot-only loop | the same coordinates, but a click that lands inside a known accessibility element executes as a ref click (`snap_to_refs`, what a pixel client gets for free from `computeruse.adapters`) |
+| `pixels+snap` | the same screenshot-only loop | the same coordinates, but a click that lands inside a known accessibility element executes as a ref click (`snap_to_refs`, what a pixel client gets for free from `a11y_computer_use.adapters`) |
 
 Observation isolation is strict. The refs planner never receives a screenshot:
 its tool surface is the MCP surface, and in the recorded runs it never called
@@ -20,8 +20,8 @@ same instruction, the same planner, the same planner-turn budget, and a freshly
 loaded page. The harness cannot make the accessibility path win; it can only
 count.
 
-The implementation is `computeruse/h2h.py`. The task suite is
-`computeruse/arena_tasks/` (shipped inside the package).
+The implementation is `a11y_computer_use/h2h.py`. The task suite is
+`a11y_computer_use/arena_tasks/` (shipped inside the package).
 
 ## What is measured
 
@@ -53,7 +53,7 @@ does not paint the open select popup into screenshots, so a screenshot-only
 planner cannot see the options at all. Its twin `dropdown_custom` renders the
 options as ordinary DOM elements and is comparable in every mode.
 
-`computeruse bench h2h --render a.json b.json` re-renders saved results (merging
+`a11y-computer-use bench h2h --render a.json b.json` re-renders saved results (merging
 several runs) with the manifests' current comparability notes, which is how a
 finished run picks up a flag added afterwards.
 
@@ -92,17 +92,17 @@ You need a Chromium with remote debugging and a planner.
 ```bash
 # 1. a private headless Chrome
 google-chrome --headless=new --remote-debugging-port=9666 --window-size=1280,800 about:blank &
-export COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9666
+export A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9666
 
 # 2. the suite, all modes, with the local Claude Code CLI as planner (no API key)
-computeruse bench h2h --provider claude-cli --out docs/benchmarks/latest
+a11y-computer-use bench h2h --provider claude-cli --out docs/benchmarks/latest
 
 # a subset, two modes, three rounds, with an API planner and prices for the estimate
-computeruse bench h2h --tasks form_fill,menu --modes refs,pixels --rounds 3 \
+a11y-computer-use bench h2h --tasks form_fill,menu --modes refs,pixels --rounds 3 \
   --provider anthropic --model claude-sonnet-5 --price-in 3 --price-out 15
 
-computeruse bench h2h --list        # the suite
-computeruse bench h2h --json        # machine-readable report on stdout
+a11y-computer-use bench h2h --list        # the suite
+a11y-computer-use bench h2h --json        # machine-readable report on stdout
 ```
 
 `--out DIR` writes `h2h.md` and `h2h.json`. The exit code is 0 when every mode
@@ -117,7 +117,7 @@ with `--strict-mcp-config`, so none of your configured MCP servers load into the
 planner's context.
 
 The benchmark uses its own permission store and audit log under a temporary
-directory (the `workdir` in the JSON meta). It never touches `~/.computeruse`.
+directory (the `workdir` in the JSON meta). It never touches `~/.a11y-computer-use`.
 
 The Runtime's confirmation gate (the prompt before a plausibly irreversible
 click, such as a button titled "Delete") is auto-approved in both loops. A ref
@@ -129,7 +129,7 @@ approving is safe here. A real agent should route that prompt to a human.
 
 ## Adding a task
 
-1. Write `computeruse/arena_tasks/<id>.html`: include `<link rel="stylesheet"
+1. Write `a11y_computer_use/arena_tasks/<id>.html`: include `<link rel="stylesheet"
    href="_style.css">` and `<script src="_cu.js"></script>` in the head, give every
    legitimate target an `id`, and make the success condition observable (set
    `document.title` or a status element).
@@ -153,7 +153,7 @@ If the page has an iframe, the frame must forward clicks to the parent (see
   have denser layouts, more text and slower loads, which affect both modes.
 - Desktop applications. The head-to-head runs on the browser backend so it is
   reproducible in a container. Desktop observation cost is measured separately
-  (`computeruse bench desktop`).
+  (`a11y-computer-use bench desktop`).
 - Cross-origin iframes. The browser backend skips out-of-process frames; the
   suite only uses a same-origin frame.
 - Statistical significance. One round per task is a single sample per cell. Use

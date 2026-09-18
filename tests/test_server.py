@@ -19,8 +19,8 @@ from mcp.shared.memory import create_connected_server_and_client_session as clie
 from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
-from computeruse import act, capture, observe, safety, server
-from computeruse.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Point, Scope, Snapshot
+from a11y_computer_use import act, capture, observe, safety, server
+from a11y_computer_use.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Point, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 pytestmark = pytest.mark.anyio
@@ -61,7 +61,7 @@ def _macos_driver_seams(monkeypatch: pytest.MonkeyPatch) -> None:
     macOS; only its native calls need pyobjc, and those are exactly what the
     fixtures replace. Tests that build a Runtime with an explicit ``driver=``
     are unaffected."""
-    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_DRIVER", "macos")
 
 
 @pytest.fixture
@@ -724,8 +724,8 @@ def test_act_batch_dispatch_stop_and_errors() -> None:
 
     import pytest
 
-    from computeruse import server
-    from computeruse.schema import ComputerUseError, ErrorCode
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     rt = server.Runtime.__new__(server.Runtime)  # bare instance; stub the dispatch targets
     calls: list = []
@@ -757,8 +757,8 @@ def test_effect_receipt_appends_post_action_diff() -> None:
     separate desktop_snapshot round-trip. Off by default (backward compat)."""
     import json as _json
 
-    from computeruse import server
-    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
     def snap(sid: str, extra: bool) -> Snapshot:
         els = [Element(ref="e1", role="AXButton", title="Save", value=None,
@@ -800,8 +800,8 @@ def test_effect_receipt_appends_post_action_diff() -> None:
 def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
     """set_value: one a11y op via the driver; focus+type fallback when the app
     can't set a value; secure fields refused."""
-    from computeruse import server
-    from computeruse.schema import Bounds, Element, ErrorCode
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Element, ErrorCode
 
     rt = server.Runtime.__new__(server.Runtime)
     el = Element(ref="e1", role="AXTextField", title="Name", value="",
@@ -844,8 +844,8 @@ def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
 
 
 def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
-    from computeruse import server
-    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
     def mk(has_target: bool) -> Snapshot:
         els = [Element(ref="e1", role="AXScrollArea", title="", value=None,
@@ -960,8 +960,8 @@ def test_scroll_anchor_prefers_a_scroll_container_below_the_window() -> None:
     """The browser backend exposes an overflow <ul> as AXList (CDP has no
     scroll-area role). Wheeling over the window scrolls nothing there, so the
     anchor must be the list, not the webarea; AXScrollArea still wins when present."""
-    from computeruse import server
-    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
     def el(ref, role, x, y, w, h):
         return Element(ref=ref, role=role, title="", value=None,
@@ -987,8 +987,8 @@ def test_scroll_anchor_prefers_a_scroll_container_below_the_window() -> None:
 
 
 def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
-    from computeruse import server
-    from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
     def mk(has_target: bool) -> Snapshot:
         els = [Element(ref="e1", role="AXWebArea", title="", value=None,

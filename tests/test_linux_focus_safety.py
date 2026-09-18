@@ -9,9 +9,9 @@ from contextlib import nullcontext
 
 import pytest
 
-from computeruse import drivers, observe, safety, server
-from computeruse.drivers import _atspi, _linux_system, linux
-from computeruse.schema import ComputerUseError, ErrorCode, Point
+from a11y_computer_use import drivers, observe, safety, server
+from a11y_computer_use.drivers import _atspi, _linux_system, linux
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Point
 from tests.conftest import build_synthetic_snapshot
 
 
@@ -34,7 +34,7 @@ def focus_driver(monkeypatch):
     monkeypatch.setattr(_atspi, "set_text", lambda acc, text: True)
     monkeypatch.setattr(_atspi, "insert_text", lambda acc, text: inserted.append((acc, text)) or True)
     monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
-    fake_input = types.ModuleType("computeruse.drivers._linux_input")
+    fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.held = lambda modifiers: nullcontext()
     fake_input.click = lambda *args, **kwargs: None
     fake_input.drag = lambda *args, **kwargs: None
@@ -42,7 +42,7 @@ def focus_driver(monkeypatch):
     fake_input.press_chord = lambda chord: None
     fake_input.validate_chord = lambda chord: None
     fake_input.type_string = typed.append
-    monkeypatch.setitem(sys.modules, "computeruse.drivers._linux_input", fake_input)
+    monkeypatch.setitem(sys.modules, "a11y_computer_use.drivers._linux_input", fake_input)
     monkeypatch.setattr(drivers, "_linux_input", fake_input, raising=False)
     monkeypatch.setattr(_linux_system, "activate_app", lambda app: app)
     monkeypatch.setattr(_linux_system, "launch_app", lambda app: None)

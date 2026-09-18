@@ -16,8 +16,8 @@ import os
 
 import pytest
 
-from computeruse.drivers import _cdp, _cdp_ax, browser
-from computeruse.schema import ComputerUseError, ErrorCode, Scope
+from a11y_computer_use.drivers import _cdp, _cdp_ax, browser
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
 
 
 # --------------------------------------------------------------------------- #
@@ -382,7 +382,7 @@ def test_browser_scroll_wheel_sign_follows_the_tool_contract() -> None:
     """Positive dy scrolls content up (reader moves down): CDP wants a POSITIVE
     deltaY for that, so the driver must not negate. cu-arena's long_list task
     caught the inverted sign (every scroll down at the top of a list did nothing)."""
-    from computeruse.schema import ScrollUnit
+    from a11y_computer_use.schema import ScrollUnit
 
     d, t = _driver_on()
     snap = d.snapshot(Scope.WINDOW, "TAB1")
@@ -441,7 +441,7 @@ def test_gated_runtime_runs_on_the_browser_driver(tmp_path) -> None:
     """The WHOLE gated Runtime — grants, ref resolution, recheck, verify, audit —
     runs on the browser backend, with app identity resolved through the driver
     (tabs), not the OS system-ops. Mirrors the Windows/Linux full-Runtime proof."""
-    from computeruse import safety, server
+    from a11y_computer_use import safety, server
 
     d, t = _driver_on()
     store = safety.PermissionStore(tmp_path / "perm.json")
@@ -486,7 +486,7 @@ def test_console_messages_drains_accumulates_and_clears() -> None:
 
 
 def test_runtime_console_gated_on_browser_and_unsupported_elsewhere(tmp_path) -> None:
-    from computeruse import safety, server
+    from a11y_computer_use import safety, server
 
     d, _ = _driver_on(lambda m, p: {})
     d._session._events = [{"method": "Runtime.consoleAPICalled",
@@ -522,7 +522,7 @@ def test_network_requests_join_status_and_failures() -> None:
 
 
 def test_runtime_network_gated_and_unsupported_elsewhere(tmp_path) -> None:
-    from computeruse import safety, server
+    from a11y_computer_use import safety, server
 
     d, _ = _driver_on(lambda m, p: {})
     d._session._events = [
@@ -552,12 +552,12 @@ def test_cdp_session_event_buffer_is_bounded() -> None:
 
 
 def test_mcp_server_exposes_console_and_network_only_on_browser(monkeypatch) -> None:
-    """`COMPUTERUSE_DRIVER=browser computeruse mcp` registers the browser-only
+    """`A11Y_COMPUTER_USE_DRIVER=browser a11y_computer_use mcp` registers the browser-only
     feeds; the OS surfaces don't grow. Proves the conditional registration end
     to end, without a live browser."""
     import asyncio
 
-    from computeruse import drivers, server
+    from a11y_computer_use import drivers, server
 
     async def names(srv):
         return {t.name for t in await srv.list_tools()}
@@ -578,8 +578,8 @@ def test_browser_app_window_clipboard_tools_via_runtime(tmp_path, monkeypatch) -
     launch navigates, clipboard degrades cleanly."""
     import json as _json
 
-    from computeruse import safety, server
-    from computeruse.drivers import _cdp
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _cdp
 
     def responder(m, p):
         if m == "Page.navigate":
@@ -666,7 +666,7 @@ def test_browser_missing_websocket_client_is_structured(monkeypatch) -> None:
 # live: real headless Chromium (opt-in — only when an endpoint is reachable)
 # --------------------------------------------------------------------------- #
 def _live_endpoint() -> str | None:
-    endpoint = os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+    endpoint = os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222")
     try:
         _cdp.page_targets(endpoint)
         return endpoint
@@ -675,7 +675,7 @@ def _live_endpoint() -> str | None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_observe_act_verify() -> None:
     import urllib.parse
@@ -705,7 +705,7 @@ def test_live_observe_act_verify() -> None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_iframe_content_is_observable_and_actionable() -> None:
     import urllib.parse
@@ -727,7 +727,7 @@ def test_live_iframe_content_is_observable_and_actionable() -> None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_console_captures_logs_and_exceptions() -> None:
     import urllib.parse
@@ -745,7 +745,7 @@ def test_live_console_captures_logs_and_exceptions() -> None:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_network_reports_status_and_failures() -> None:
     import urllib.parse

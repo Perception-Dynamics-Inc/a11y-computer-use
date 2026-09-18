@@ -1,7 +1,7 @@
 """CLI smoke tests: doctor, the snapshot permission path, run-once, mcp wiring.
 
 Everything runs in-process through `cli.main` (plus one subprocess smoke test
-of the ``python -m computeruse`` wiring). Permission-dependent paths are
+of the ``python -m a11y_computer_use`` wiring). Permission-dependent paths are
 monkeypatched so they are deterministic on granted and ungranted machines;
 the one live ungranted-path test is skipif-guarded in the reverse direction.
 """
@@ -15,9 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from computeruse import act, cli, doctor, drivers, observe, safety, server
-from computeruse.drivers import browser
-from computeruse.schema import ComputerUseError, Display, ErrorCode
+from a11y_computer_use import act, cli, doctor, drivers, observe, safety, server
+from a11y_computer_use.drivers import browser
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 from tests.conftest import HAS_AX, build_synthetic_snapshot
 from tests.test_arena import _png
 from tests.test_doctor import TERMINAL_PS, _canned
@@ -60,7 +60,7 @@ def test_doctor_exits_zero_and_names_responsible_app(capsys, monkeypatch) -> Non
 
 def test_doctor_subprocess_smoke() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "computeruse", "doctor"], capture_output=True, text=True
+        [sys.executable, "-m", "a11y_computer_use", "doctor"], capture_output=True, text=True
     )
     assert result.returncode == 0
     assert _FIRST_CHECK in result.stdout
@@ -151,18 +151,18 @@ def test_run_once_ungranted_app_is_refused_and_audited(capsys, home, fake_front)
     err = capsys.readouterr().err
     assert "needs_permission" in err
     assert FRONT in err
-    audit_files = list((home / ".computeruse" / "audit").glob("*.jsonl"))
+    audit_files = list((home / ".a11y-computer-use" / "audit").glob("*.jsonl"))
     assert audit_files, "refused action was not audit-logged"
 
 
 def test_run_once_granted_action_executes(capsys, home, fake_front, monkeypatch) -> None:
-    safety.PermissionStore(home / ".computeruse" / "permissions.json").set_tier(
+    safety.PermissionStore(home / ".a11y-computer-use" / "permissions.json").set_tier(
         FRONT, safety.Tier.FULL
     )
     pressed: list[str] = []
     # the Runtime routes key through the driver, which delegates to act.key_chord
     # on the macOS driver; select it explicitly so the seam is the same on every OS.
-    monkeypatch.setenv("COMPUTERUSE_DRIVER", "macos")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_DRIVER", "macos")
     monkeypatch.setattr(act, "key_chord", lambda chord, **kw: pressed.append(chord) or [])
     assert cli.main(["run-once", '{"tool": "key", "chord": "cmd+s"}']) == 0
     assert capsys.readouterr().out.strip() == "pressed cmd+s"

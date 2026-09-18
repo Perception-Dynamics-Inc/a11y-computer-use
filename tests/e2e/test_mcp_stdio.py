@@ -1,4 +1,4 @@
-"""End-to-end MCP transport tests: spawn ``computeruse mcp`` as a real
+"""End-to-end MCP transport tests: spawn ``a11y_computer_use mcp`` as a real
 subprocess and drive initialize / tools/list / tools/call over stdio with the
 official ``mcp`` client SDK.
 
@@ -7,7 +7,7 @@ mocked here: these assert that the shipped entry point speaks MCP end-to-end,
 exposes the full PLAN.md §8 v1 tool surface with documentation, and converts
 driver failures into structured tool errors instead of crashing the server.
 HOME points at a pytest temp dir so the subprocess can never read or write
-the real ``~/.computeruse`` state.
+the real ``~/.a11y_computer_use`` state.
 """
 
 from __future__ import annotations
@@ -49,10 +49,10 @@ EXPECTED_TOOLS = {
 
 
 def _server_params(home: Path) -> StdioServerParameters:
-    """The real entry point (``python -m computeruse mcp``), HOME-isolated."""
+    """The real entry point (``python -m a11y_computer_use mcp``), HOME-isolated."""
     return StdioServerParameters(
         command=sys.executable,
-        args=["-m", "computeruse", "mcp"],
+        args=["-m", "a11y_computer_use", "mcp"],
         env={"HOME": str(home), "PATH": os.environ.get("PATH", "")},
     )
 
@@ -78,7 +78,7 @@ def _drive(
 
 def test_initialize_identifies_server(tmp_path: Path) -> None:
     init, _tools, _ = _drive(tmp_path)
-    assert init.serverInfo.name == "computeruse"
+    assert init.serverInfo.name == "a11y-computer-use"
     # The server ships usage instructions (ref lifecycle, doctor pointer).
     assert init.instructions and "desktop_snapshot" in init.instructions
 
@@ -101,7 +101,7 @@ def test_desktop_snapshot_permission_error_is_a_tool_result(tmp_path: Path) -> N
     assert call is not None and call.isError is True
     text = call.content[0].text
     assert "permission_denied_accessibility:" in text
-    assert "doctor" in text, "remediation hint must point at `computeruse doctor`"
+    assert "doctor" in text, "remediation hint must point at `a11y_computer_use doctor`"
 
 
 @pytest.mark.skipif(not HAS_AX, reason="requires the Accessibility TCC grant")
@@ -112,7 +112,7 @@ def test_desktop_snapshot_succeeds_when_granted(tmp_path: Path) -> None:
     seed a 'read' tier for Finder, otherwise the tier gate (correctly) returns
     needs_permission before AX is ever consulted.
     """
-    store = tmp_path / ".computeruse" / "permissions.json"
+    store = tmp_path / ".a11y-computer-use" / "permissions.json"
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text(json.dumps({"apps": {"com.apple.finder": {"tier": "read"}}}))
     _init, _tools, call = _drive(

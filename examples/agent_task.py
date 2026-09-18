@@ -1,7 +1,7 @@
 """Run one task end to end with the reference agent loop, in process.
 
-The loop is the same one behind ``computeruse agent``. Embedding it means you
-pick the planner (any `computeruse.providers.Provider`) and keep the gated
+The loop is the same one behind ``a11y_computer_use agent``. Embedding it means you
+pick the planner (any `a11y_computer_use.providers.Provider`) and keep the gated
 Runtime, so permission tiers, the confirmation gate, Effect Receipts, and the
 audit log apply exactly as they do under the MCP server.
 
@@ -9,14 +9,14 @@ audit log apply exactly as they do under the MCP server.
     python examples/agent_task.py "Open the File menu and read the first item"
 
     # Browser backend: any Chromium with --remote-debugging-port=9222
-    COMPUTERUSE_DRIVER=browser python examples/agent_task.py "Fill Name with Alice and press Go"
+    A11Y_COMPUTER_USE_DRIVER=browser python examples/agent_task.py "Fill Name with Alice and press Go"
 
     # Other planners
-    ANTHROPIC_API_KEY=... COMPUTERUSE_PROVIDER=anthropic python examples/agent_task.py "..."
-    OPENAI_BASE_URL=http://localhost:11434/v1 COMPUTERUSE_PROVIDER=openai python examples/agent_task.py "..." llama3.1
+    ANTHROPIC_API_KEY=... A11Y_COMPUTER_USE_PROVIDER=anthropic python examples/agent_task.py "..."
+    OPENAI_BASE_URL=http://localhost:11434/v1 A11Y_COMPUTER_USE_PROVIDER=openai python examples/agent_task.py "..." llama3.1
 
 The target app needs a permission grant first (``full`` lets the planner type):
-``computeruse agent --grant full --task ...`` does it from the CLI, or call
+``a11y_computer_use agent --grant full --task ...`` does it from the CLI, or call
 ``runtime.store.set_tier(app_id, safety.Tier.FULL)`` as below.
 """
 
@@ -24,11 +24,11 @@ from __future__ import annotations
 
 import sys
 
-from computeruse import agent, providers, safety, server
+from a11y_computer_use import agent, providers, safety, server
 
 
 def main(task: str, model: str | None = None) -> int:
-    runtime = server.Runtime()  # driver from COMPUTERUSE_DRIVER or the OS
+    runtime = server.Runtime()  # driver from A11Y_COMPUTER_USE_DRIVER or the OS
     provider = providers.get_provider(model=model)  # anthropic | openai | claude-cli
 
     app = runtime._frontmost()  # bundle id, process name, or the bound tab id

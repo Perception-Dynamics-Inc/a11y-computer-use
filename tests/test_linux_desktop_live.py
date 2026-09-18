@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux desktop only")
 
-from computeruse.schema import Point, Scope  # noqa: E402
+from a11y_computer_use.schema import Point, Scope  # noqa: E402
 
 _APP = "cuatestapp"
 _APP_SRC = """
@@ -52,7 +52,7 @@ def _has_wm_and_bus() -> tuple[bool, str]:
     except Exception as ex:  # noqa: BLE001
         return False, f"cannot open the X display: {ex}"
     try:
-        from computeruse.drivers.linux import LinuxDriver
+        from a11y_computer_use.drivers.linux import LinuxDriver
 
         LinuxDriver().ensure_trusted()
     except Exception as ex:  # noqa: BLE001
@@ -76,7 +76,7 @@ def app(tmp_path):
     script.write_text(_APP_SRC)
     proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        from computeruse.drivers.linux import LinuxDriver
+        from a11y_computer_use.drivers.linux import LinuxDriver
 
         driver = LinuxDriver()
         driver.ensure_trusted()
@@ -184,7 +184,7 @@ def test_key_chords_select_all_and_replace(app) -> None:
 @requires_desktop
 def test_chord_with_punctuation_key_is_accepted(app) -> None:
     driver, _snap = app
-    from computeruse.drivers import _linux_input
+    from a11y_computer_use.drivers import _linux_input
 
     for chord in ("ctrl+/", "ctrl+minus", "ctrl+plus", "alt+.", "shift+tab", "f13"):
         _linux_input.validate_chord(chord)  # no event sent; must parse
@@ -260,12 +260,12 @@ def test_screenshot_matches_display(app) -> None:
 
 @requires_desktop
 def test_gated_runtime_coordinate_path(app, tmp_path, monkeypatch) -> None:
-    """What `computeruse run-once` and the MCP tools go through: click(x, y)
+    """What `a11y_computer_use run-once` and the MCP tools go through: click(x, y)
     with no display_id, type, key, observe — all through the safety gate."""
     driver, snap = app
     monkeypatch.setenv("HOME", str(tmp_path))  # fresh permission store + audit log
-    from computeruse import safety, server
-    from computeruse.drivers import _linux_system
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
 
     rt = server.Runtime()
     app_id = _linux_system.frontmost_app_id()

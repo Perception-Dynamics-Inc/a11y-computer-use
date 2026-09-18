@@ -6,8 +6,8 @@ import io
 
 from PIL import Image
 
-from computeruse import marks
-from computeruse.schema import Bounds, Display, Element, Scope, Snapshot
+from a11y_computer_use import marks
+from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
 
 
 def _png(w: int = 40, h: int = 30) -> bytes:

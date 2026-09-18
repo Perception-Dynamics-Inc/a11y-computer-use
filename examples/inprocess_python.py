@@ -1,9 +1,9 @@
-"""In-process embed (Python host): import computerUse and drive the desktop
+"""In-process embed (Python host): import a11y-computer-use and drive the desktop
 directly, under YOUR app's identity and permission grants.
 
-This is the cleanest integration for a Python AI platform — computerUse runs
+This is the cleanest integration for a Python AI platform — a11y-computer-use runs
 *as* your process, so its code-signing identity, entitlements, and TCC grants
-are simply your app's. You never ship a computerUse binary or certificate.
+are simply your app's. You never ship a a11y-computer-use binary or certificate.
 
 Run (needs Accessibility granted to whatever launches this):
 
@@ -13,7 +13,7 @@ It takes a read-only accessibility snapshot of Finder (always running), then
 shows the shape of the act calls. Nothing is clicked or typed.
 """
 
-from computeruse import safety, server
+from a11y_computer_use import safety, server
 
 APP = "com.apple.finder"  # always running; a READ-tier snapshot is side-effect-free
 
@@ -21,7 +21,7 @@ APP = "com.apple.finder"  # always running; a READ-tier snapshot is side-effect-
 def main() -> None:
     # YOUR app owns the permission store and the audit log. Grant per app, per
     # tier: READ = observe/screenshot; CLICK = pointer; FULL = typing/keys.
-    store = safety.PermissionStore()  # defaults to ~/.computeruse/permissions.json
+    store = safety.PermissionStore()  # defaults to ~/.a11y-computer-use/permissions.json
     store.set_tier(APP, safety.Tier.READ)
 
     runtime = server.Runtime(store=store)

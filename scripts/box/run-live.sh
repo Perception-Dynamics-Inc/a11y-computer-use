@@ -2,13 +2,13 @@
 # Run on an ASCII Box: fail on errors AND on missing live coverage.
 set -euo pipefail
 
-REPO="${REPO:-$HOME/computerUse}"
+REPO="${REPO:-$HOME/a11y-computer-use}"
 CDP_PORT="${CDP_PORT:-9222}"
 cd "$REPO"
 source scripts/box/session.sh
 REPORT_DIR="${REPORT_DIR:-$REPO/artifacts/box-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$REPORT_DIR"
-export COMPUTERUSE_CDP_ENDPOINT="http://127.0.0.1:$CDP_PORT"
+export A11Y_COMPUTER_USE_CDP_ENDPOINT="http://127.0.0.1:$CDP_PORT"
 
 chrome_pid=""
 chrome_profile=""
@@ -33,19 +33,19 @@ xdpyinfo >/dev/null
 gsettings set org.gnome.desktop.interface toolkit-accessibility true
 
 # Reuse the local CDP port; otherwise launch and clean up only our own Chrome.
-if ! curl -fsS --connect-timeout 1 --max-time 2 "$COMPUTERUSE_CDP_ENDPOINT/json/version" >/dev/null 2>&1; then
+if ! curl -fsS --connect-timeout 1 --max-time 2 "$A11Y_COMPUTER_USE_CDP_ENDPOINT/json/version" >/dev/null 2>&1; then
   chrome_bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
-  chrome_profile=$(mktemp -d /tmp/computeruse-chrome.XXXXXX)
+  chrome_profile=$(mktemp -d /tmp/a11y-computer-use-chrome.XXXXXX)
   "$chrome_bin" --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
     --no-first-run --no-default-browser-check --password-store=basic \
     --user-data-dir="$chrome_profile" about:blank >"$REPORT_DIR/chrome.log" 2>&1 &
   chrome_pid=$!
   for _ in $(seq 1 60); do
-    if curl -fsS --connect-timeout 1 --max-time 2 "$COMPUTERUSE_CDP_ENDPOINT/json/version" >/dev/null 2>&1; then break; fi
+    if curl -fsS --connect-timeout 1 --max-time 2 "$A11Y_COMPUTER_USE_CDP_ENDPOINT/json/version" >/dev/null 2>&1; then break; fi
     kill -0 "$chrome_pid" || { cat "$REPORT_DIR/chrome.log"; exit 1; }
     sleep 0.5
   done
-  curl -fsS --connect-timeout 1 --max-time 2 "$COMPUTERUSE_CDP_ENDPOINT/json/version" >/dev/null
+  curl -fsS --connect-timeout 1 --max-time 2 "$A11Y_COMPUTER_USE_CDP_ENDPOINT/json/version" >/dev/null
 fi
 
 # Preserve all diagnostics and exit statuses, including errors before the summary.
@@ -59,10 +59,10 @@ timeout -k 5 300 .venv/bin/pytest tests/test_browser.py tests/test_adapters.py \
   -k 'live and not finder' -q -rs -p no:cacheprovider \
   --junitxml="$REPORT_DIR/browser.xml" 2>&1 | tee "$REPORT_DIR/browser.log"
 .venv/bin/python scripts/box/check_results.py "$REPORT_DIR/browser.xml"
-.venv/bin/computeruse doctor | tee "$REPORT_DIR/doctor.log"
+.venv/bin/a11y-computer-use doctor | tee "$REPORT_DIR/doctor.log"
 if [[ "${LOAD_ITERATIONS:-0}" != "0" ]]; then
   timeout -k 5 600 .venv/bin/python scripts/box/load_browser.py \
     --workers "${LOAD_WORKERS:-4}" --iterations "$LOAD_ITERATIONS" \
-    --endpoint "$COMPUTERUSE_CDP_ENDPOINT" --output "$REPORT_DIR/load.json"
+    --endpoint "$A11Y_COMPUTER_USE_CDP_ENDPOINT" --output "$REPORT_DIR/load.json"
 fi
 echo "Verified. Reports: $REPORT_DIR"

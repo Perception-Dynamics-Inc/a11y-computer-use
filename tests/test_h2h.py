@@ -1,4 +1,4 @@
-"""cu-arena head-to-head (`computeruse.h2h`).
+"""cu-arena head-to-head (`a11y_computer_use.h2h`).
 
 Hermetic tests pin the task suite (every manifest valid, every target a real
 id), the scoring math (misclicks, wasted actions, aggregates, cost), the report
@@ -17,10 +17,10 @@ import re
 
 import pytest
 
-from computeruse import cli, h2h, safety, server
-from computeruse.agent import Step
-from computeruse.providers import PlannerTurn, ScriptedProvider, Usage, done_turn, tool_turn
-from computeruse.schema import Scope
+from a11y_computer_use import cli, h2h, safety, server
+from a11y_computer_use.agent import Step
+from a11y_computer_use.providers import PlannerTurn, ScriptedProvider, Usage, done_turn, tool_turn
+from a11y_computer_use.schema import Scope
 
 from tests.test_browser import _AX_NODES, _DOM_SNAPSHOT, ScriptedTransport, _driver_on
 
@@ -470,9 +470,9 @@ def test_cli_bench_h2h_list_and_bad_arguments(capsys) -> None:
 
 
 def _live_endpoint() -> str | None:
-    from computeruse.drivers import _cdp
+    from a11y_computer_use.drivers import _cdp
 
-    endpoint = os.environ.get("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222")
+    endpoint = os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222")
     try:
         _cdp.page_targets(endpoint)
         return endpoint
@@ -489,12 +489,12 @@ def _center(sess, selector: str) -> tuple[int, int]:
 
 
 @pytest.mark.skipif(_live_endpoint() is None,
-                    reason="no live CDP endpoint (set COMPUTERUSE_CDP_ENDPOINT / run Chrome "
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
                            "--remote-debugging-port=9222)")
 def test_live_h2h_scripted_planners_in_both_modes(tmp_path) -> None:
     """Scripted planners solve real fixtures through both loops; a deliberate
     wrong click proves misclick counting on the real instrumentation."""
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     sess = d._connect()
@@ -559,7 +559,7 @@ def test_live_scroll_to_find_reaches_an_item_deep_in_an_overflow_list(tmp_path) 
     so it is pruned from the first snapshot; scroll_to_find must scroll the LIST
     (wheel over it, positive dy = down) until the item is observable, then a ref
     click selects it."""
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     sess = d._connect()
@@ -588,7 +588,7 @@ def test_live_scroll_to_find_reaches_an_item_deep_in_an_overflow_list(tmp_path) 
 
 @pytest.mark.skipif(_live_endpoint() is None, reason="no live CDP endpoint")
 def test_live_every_fixture_loads_and_success_predicate_is_false_initially() -> None:
-    from computeruse.drivers.browser import BrowserDriver
+    from a11y_computer_use.drivers.browser import BrowserDriver
 
     d = BrowserDriver(endpoint=_live_endpoint())
     sess = d._connect()

@@ -1,7 +1,7 @@
 # Provider executor adapters
 
-`computeruse.adapters` lets an agent that already speaks a provider's native
-computer-use tool run on computerUse without changing its prompt or loop. The
+`a11y_computer_use.adapters` lets an agent that already speaks a provider's native
+computer-use tool run on a11y-computer-use without changing its prompt or loop. The
 model keeps emitting Anthropic or OpenAI computer actions; the adapter executes
 each one through the gated `Runtime` and returns the screenshot the provider
 expects. Every action passes the same permission tiers, frontmost recheck,
@@ -23,10 +23,10 @@ Sources for the wire shapes below:
 ## Usage
 
 ```python
-from computeruse import server
-from computeruse.adapters import AnthropicComputerAdapter, OpenAIComputerAdapter
+from a11y_computer_use import server
+from a11y_computer_use.adapters import AnthropicComputerAdapter, OpenAIComputerAdapter
 
-runtime = server.Runtime()                       # OS driver, or COMPUTERUSE_DRIVER=browser
+runtime = server.Runtime()                       # OS driver, or A11Y_COMPUTER_USE_DRIVER=browser
 anthropic = AnthropicComputerAdapter(runtime, app="com.apple.TextEdit")
 tools = [anthropic.tool_definition()]            # {"type": "computer_toolset_20260801"}
 tool_result = anthropic.handle_tool_use(block)   # a tool_use block -> a tool_result dict

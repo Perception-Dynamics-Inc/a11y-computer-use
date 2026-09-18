@@ -70,7 +70,7 @@ scopes are not a safe way to abort a desktop action.
 Use the Runtime as a context manager, or call `close()` in your worker's cleanup:
 
 ```python
-from computeruse.server import Runtime, build_server
+from a11y_computer_use.server import Runtime, build_server
 
 with Runtime(driver=driver, store=permissions, audit=audit) as runtime:
     runtime.desktop_snapshot(app="your-app")

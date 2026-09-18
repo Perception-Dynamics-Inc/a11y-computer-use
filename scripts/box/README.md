@@ -2,7 +2,7 @@
 
 A [Box](https://box.ascii.dev) is a persistent Ubuntu VM with a real desktop
 session (Budgie on Xorg on the current image, streamed at 1920x1080), SSH, and
-Chrome preinstalled. It is the cheapest way we have found to test computerUse's
+Chrome preinstalled. It is the cheapest way we have found to test a11y-computer-use's
 Linux backend under a real window manager, which the Xvfb-based CI job cannot do:
 focus-dependent XTEST input, non-headless Chrome, and Electron apps.
 
@@ -31,11 +31,11 @@ box limits                                    # hours used so far
 ## 2. Sync the working tree (no .git, no credentials, no assets)
 
 ```bash
-cd /path/to/computerUse
+cd /path/to/a11y-computer-use
 COPYFILE_DISABLE=1 tar czf - --exclude='./.venv' --exclude='./.git' --exclude='./scratch' \
     --exclude='./.pytest_cache' --exclude='./.remember' --exclude='./.claude' \
     --exclude='./docs/assets' --exclude='./*.txt' --exclude='__pycache__' . \
-  | box ssh <id> 'mkdir -p ~/computerUse && tar xzf - -C ~/computerUse'
+  | box ssh <id> 'mkdir -p ~/a11y-computer-use && tar xzf - -C ~/a11y-computer-use'
 box scp scripts/box/bootstrap.sh <id>:/tmp/bootstrap.sh   # or rely on the synced copy
 # COPYFILE_DISABLE=1 stops macOS tar from adding AppleDouble ._* sidecar files to the archive.
 ```
@@ -43,8 +43,8 @@ box scp scripts/box/bootstrap.sh <id>:/tmp/bootstrap.sh   # or rely on the synce
 ## 3. Bootstrap (on the box)
 
 ```bash
-box ssh <id> 'bash ~/computerUse/scripts/box/bootstrap.sh'
-box ssh <id> 'INSTALL_VSCODE=1 bash ~/computerUse/scripts/box/bootstrap.sh'   # add VS Code for the Electron probe
+box ssh <id> 'bash ~/a11y-computer-use/scripts/box/bootstrap.sh'
+box ssh <id> 'INSTALL_VSCODE=1 bash ~/a11y-computer-use/scripts/box/bootstrap.sh'   # add VS Code for the Electron probe
 ```
 
 Installs the AT-SPI2 stack (`at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0
@@ -55,7 +55,7 @@ venv so apt's PyGObject is importable, installs the package with the `dev` and
 ## 4. Run the verification (on the box)
 
 ```bash
-box ssh <id> 'bash ~/computerUse/scripts/box/run-live.sh'
+box ssh <id> 'bash ~/a11y-computer-use/scripts/box/run-live.sh'
 ```
 
 `run-live.sh` discovers the desktop session environment (DISPLAY, XAUTHORITY,
@@ -66,7 +66,7 @@ the session D-Bus address) from a live session process, then runs:
 | hermetic tests | the platform-free core and the driver seam on the box's Python |
 | `tests/test_linux_live.py` | AT-SPI2 observe, a11y press, a11y text entry against a real GTK3 window under Budgie's Mutter |
 | `tests/test_browser.py -k live` | the CDP backend against a real, non-headless Chrome window |
-| `tests/test_arena.py -k live` and `computeruse bench web` | the a11y-vs-screenshot observation cost on a 1920x1080 display |
+| `tests/test_arena.py -k live` and `a11y-computer-use bench web` | the a11y-vs-screenshot observation cost on a 1920x1080 display |
 
 Use `box exec <id> --timeout 600 -- '...'` instead of `box ssh` for
 anything that launches GUI apps: `box ssh` waits for every child that inherits
@@ -76,8 +76,8 @@ Redirect launched apps to `/dev/null` or use `--detach`.
 ## 4b. Verify coordinate input under a real pointer (on the box)
 
 ```bash
-box exec <id> --timeout 600 -- 'bash ~/computerUse/scripts/box/verify-pointer.sh'
-box exec <id> --timeout 600 -- 'XVFB=1 bash ~/computerUse/scripts/box/verify-pointer.sh'   # also run the CI shape
+box exec <id> --timeout 600 -- 'bash ~/a11y-computer-use/scripts/box/verify-pointer.sh'
+box exec <id> --timeout 600 -- 'XVFB=1 bash ~/a11y-computer-use/scripts/box/verify-pointer.sh'   # also run the CI shape
 ```
 
 `verify-pointer.sh` (with `pointer_probe.py`) parks the pointer away from the
@@ -91,7 +91,7 @@ every window and the pointer start at (0, 0) there.
 ## 5. Save a template and stop
 
 ```bash
-box snapshot <id> computeruse-linux-testbed   # named snapshot, reusable with: box new --from computeruse-linux-testbed
+box snapshot <id> a11y-computer-use-linux-testbed   # named snapshot, reusable with: box new --from a11y_computer_use-linux-testbed
 box stop <id>                                 # snapshots and pauses billing
 ```
 
@@ -115,7 +115,7 @@ a foreground command is still running. Use the returned pid to inspect status.
 Pass the complete shell command as one argument (the CLI joins arguments):
 
 ```bash
-box exec <id> --detach -- 'REPO=/home/user/computerUse LOAD_WORKERS=4 LOAD_ITERATIONS=100 bash /home/user/computerUse/scripts/box/run-live.sh'
+box exec <id> --detach -- 'REPO=/home/user/a11y-computer-use LOAD_WORKERS=4 LOAD_ITERATIONS=100 bash /home/user/a11y-computer-use/scripts/box/run-live.sh'
 box exec <id> --status <pid>
 ```
 

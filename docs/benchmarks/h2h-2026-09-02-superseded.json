@@ -599,7 +599,7 @@
           "verify": true
         },
         "ok": false,
-        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set COMPUTERUSE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
+        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set A11Y_COMPUTER_USE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
         "error_code": "confirmation_declined",
         "duration_ms": 6.336875027045608,
         "usage": {
@@ -810,7 +810,7 @@
     "output_tokens": 460,
     "cost_reported_usd": 0.26725425,
     "wall_s": 31.209883999894373,
-    "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+    "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with A11Y_COMPUTER_USE_CONFIRM=0 to proceed.",
     "model": "claude-fable-5-1",
     "error": null,
     "steps": [
@@ -822,7 +822,7 @@
           "y": 183
         },
         "ok": false,
-        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set COMPUTERUSE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
+        "result": "confirmation_declined: Confirm a potentially irreversible action: click \"Delete\" in 418BCD00897B3025BD097682B2E0C82C? (matched \u201cdelete\u201d) \u2014 no confirmation channel available; blocked. Confirm via a host that supports elicitation, or set A11Y_COMPUTER_USE_CONFIRM=0 to disable the gate. | detail: {\"app\": \"418BCD00897B3025BD097682B2E0C82C\", \"confirmable\": false}",
         "error_code": "confirmation_declined",
         "duration_ms": 52.349249948747456,
         "usage": {
@@ -834,11 +834,11 @@
         "index": 2,
         "tool": "done",
         "params": {
-          "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+          "summary": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with A11Y_COMPUTER_USE_CONFIRM=0 to proceed.",
           "success": false
         },
         "ok": true,
-        "result": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with COMPUTERUSE_CONFIRM=0 to proceed.",
+        "result": "Could not delete project 'Orion': the click on its Delete button was blocked by the irreversible-action confirmation gate (no confirmation channel available); the page still shows 3 projects. Re-run in a host that supports elicitation or with A11Y_COMPUTER_USE_CONFIRM=0 to proceed.",
         "error_code": null,
         "duration_ms": 0.0,
         "usage": {

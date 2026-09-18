@@ -1,19 +1,19 @@
 # Observation cost: what a snapshot costs, and how to pay less
 
-computerUse's claim is not "the accessibility tree is always smaller than a
+a11y-computer-use's claim is not "the accessibility tree is always smaller than a
 screenshot". It is that the tree is *text*, so it can be cut down to what the
 agent needs and, after the first look, re-observed as a diff. This page records
 what the estimator counts, the measured numbers on real pages, and which of the
 four ways of observing (`full`, `interactive`, `find`, `diff`) to use when.
 
-Every number below was produced by `computeruse bench`, which is the same code
+Every number below was produced by `a11y-computer-use bench`, which is the same code
 path as the MCP tools, on 2026-09-02 against headless Chrome 152 with
 `--remote-debugging-port=9555`. Rerun the commands to reproduce them; pages
 change, so expect the dense-page numbers to move.
 
 ## What the estimator counts
 
-`computeruse/arena.py` prices both sides of one observation of the same UI state:
+`a11y_computer_use/arena.py` prices both sides of one observation of the same UI state:
 
 - The a11y side is the rendered snapshot text divided by 4 characters per token,
   rounded up. This is the basis cu-meter already uses for `tokens_est` in the
@@ -70,11 +70,11 @@ when the agent already knows what it is looking for.
 Commands (a Chrome with `--remote-debugging-port=9555` was already running):
 
 ```bash
-export COMPUTERUSE_CDP_ENDPOINT=http://127.0.0.1:9555
-computeruse bench web https://example.com --rounds 3
-computeruse bench web https://example.com --rounds 3 --mode interactive
-computeruse bench web https://news.ycombinator.com --rounds 3
-COMPUTERUSE_DRIVER=browser computeruse bench desktop --rounds 3   # every view of the bound tab
+export A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9555
+a11y-computer-use bench web https://example.com --rounds 3
+a11y-computer-use bench web https://example.com --rounds 3 --mode interactive
+a11y-computer-use bench web https://news.ycombinator.com --rounds 3
+A11Y_COMPUTER_USE_DRIVER=browser a11y-computer-use bench desktop --rounds 3   # every view of the bound tab
 ```
 
 | Page | Elements | Screenshot | Full view | Interactive view | Re-observe diff |
@@ -107,7 +107,7 @@ screenshot price zero times.
 
 ### Desktop
 
-`computeruse bench desktop --app Finder` on this machine returned
+`a11y-computer-use bench desktop --app Finder` on this machine returned
 `permission_denied_accessibility`: the shell that ran it (Ghostty) does not hold
 the Accessibility grant, and the screenshot side needs Screen Recording. The
 command runs on any Mac that has both grants; until then the desktop side has

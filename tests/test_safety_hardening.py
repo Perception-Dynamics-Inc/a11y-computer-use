@@ -28,10 +28,10 @@ from pathlib import Path
 
 import pytest
 
-from computeruse import safety, server
-from computeruse.drivers import _atspi, _linux_system, _uia, linux, windows
-from computeruse.observe import DisplayGeometry, build_snapshot
-from computeruse.schema import (
+from a11y_computer_use import safety, server
+from a11y_computer_use.drivers import _atspi, _linux_system, _uia, linux, windows
+from a11y_computer_use.observe import DisplayGeometry, build_snapshot
+from a11y_computer_use.schema import (
     ComputerUseError,
     Display,
     ErrorCode,
@@ -448,14 +448,14 @@ def test_atspi_focused_secure_asks_the_collection_interface_first(fake_atspi, mo
 @pytest.fixture
 def linux_x11(monkeypatch):
     """A LinuxDriver on X11 (not Wayland) with the XTEST typing module faked."""
-    from computeruse import drivers as pkg
+    from a11y_computer_use import drivers as pkg
 
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setenv("DISPLAY", ":0")
     typed: list[str] = []
-    fake_input = types.ModuleType("computeruse.drivers._linux_input")
+    fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.type_string = typed.append
-    monkeypatch.setitem(sys.modules, "computeruse.drivers._linux_input", fake_input)
+    monkeypatch.setitem(sys.modules, "a11y_computer_use.drivers._linux_input", fake_input)
     monkeypatch.setattr(pkg, "_linux_input", fake_input, raising=False)
     d = linux.LinuxDriver()
     monkeypatch.setattr(d, "frontmost_app", lambda: ("gedit", 42))
@@ -536,16 +536,16 @@ def test_uia_password_edit_maps_to_secure_and_its_value_is_never_read() -> None:
 
 @pytest.fixture
 def fake_uiautomation(monkeypatch):
-    from computeruse import drivers as pkg
+    from a11y_computer_use import drivers as pkg
 
     state = {"focused": None}
     auto = types.ModuleType("uiautomation")
     auto.GetFocusedControl = lambda: state["focused"]
     monkeypatch.setitem(sys.modules, "uiautomation", auto)
     typed: list[str] = []
-    fake_input = types.ModuleType("computeruse.drivers._win_input")
+    fake_input = types.ModuleType("a11y_computer_use.drivers._win_input")
     fake_input.type_unicode = typed.append
-    monkeypatch.setitem(sys.modules, "computeruse.drivers._win_input", fake_input)
+    monkeypatch.setitem(sys.modules, "a11y_computer_use.drivers._win_input", fake_input)
     monkeypatch.setattr(pkg, "_win_input", fake_input, raising=False)
     return state, typed
 
@@ -701,7 +701,7 @@ def test_linux_window_verbs_are_unsupported_on_native_wayland(monkeypatch) -> No
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS driver imports pyobjc")
 def test_macos_window_raise_activates_the_owning_app(monkeypatch) -> None:
-    from computeruse.drivers.macos import MacOSDriver
+    from a11y_computer_use.drivers.macos import MacOSDriver
 
     running = object()
     activated: list[object] = []

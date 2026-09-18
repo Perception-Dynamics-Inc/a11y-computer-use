@@ -16,7 +16,7 @@ from types import SimpleNamespace as _NS
 
 import pytest
 
-from computeruse.drivers import _linux_system
+from a11y_computer_use.drivers import _linux_system
 
 
 class _FakeXWin:

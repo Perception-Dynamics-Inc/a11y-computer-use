@@ -43,9 +43,9 @@ def peak_rss_mb() -> float | None:
 
 def run_worker(endpoint: str, worker: int, iterations: int, directory: str) -> WorkerResult:
     """Return verified iteration counts and timing samples for one isolated tab."""
-    from computeruse.drivers.browser import BrowserDriver
-    from computeruse.safety import AuditLog, PermissionStore, Tier
-    from computeruse.server import Runtime
+    from a11y_computer_use.drivers.browser import BrowserDriver
+    from a11y_computer_use.safety import AuditLog, PermissionStore, Tier
+    from a11y_computer_use.server import Runtime
 
     result = WorkerResult(worker=worker)
     target_id: str | None = None
@@ -118,7 +118,7 @@ def percentile(samples: list[float], quantile: float) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--endpoint", default=os.getenv("COMPUTERUSE_CDP_ENDPOINT", "http://127.0.0.1:9222"))
+    parser.add_argument("--endpoint", default=os.getenv("A11Y_COMPUTER_USE_CDP_ENDPOINT", "http://127.0.0.1:9222"))
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--output", type=Path, required=True)
@@ -127,7 +127,7 @@ def main() -> int:
         parser.error("workers must be 1..32; iterations must be 1..10000")
     started = time.perf_counter()
     results: list[WorkerResult] = []
-    with tempfile.TemporaryDirectory(prefix="computeruse-load-") as directory:
+    with tempfile.TemporaryDirectory(prefix="a11y_computer_use-load-") as directory:
         try:
             with ProcessPoolExecutor(max_workers=args.workers,
                                      mp_context=multiprocessing.get_context("spawn")) as pool:

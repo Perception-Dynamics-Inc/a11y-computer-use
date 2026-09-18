@@ -6,13 +6,13 @@ body:
   - type: markdown
     attributes:
       value: |
-        computerUse is an embeddable Driver plus an MCP surface: pruned accessibility snapshots, element refs, and a safety layer. PLAN.md section 4 lists what the project deliberately does not build and section 9 lists the roadmap phases. Skim both first so the proposal lands in the right place.
+        a11y-computer-use is an embeddable Driver plus an MCP surface: pruned accessibility snapshots, element refs, and a safety layer. PLAN.md section 4 lists what the project deliberately does not build and section 9 lists the roadmap phases. Skim both first so the proposal lands in the right place.
 
   - type: textarea
     id: problem
     attributes:
       label: Problem
-      description: What are you trying to make an agent do that computerUse cannot do today? Name the app and the platform.
+      description: What are you trying to make an agent do that a11y-computer-use cannot do today? Name the app and the platform.
     validations:
       required: true
 

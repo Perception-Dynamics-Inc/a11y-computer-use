@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from computeruse import observe, safety, server
-from computeruse.schema import Bounds, ComputerUseError, Element, ErrorCode, Scope, Snapshot
+from a11y_computer_use import observe, safety, server
+from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
 

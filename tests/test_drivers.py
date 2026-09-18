@@ -12,17 +12,17 @@ import sys
 
 import pytest
 
-from computeruse import drivers
-from computeruse.drivers.base import Driver
-from computeruse.drivers.linux import LinuxDriver  # lazy a11y imports; safe on any OS
-from computeruse.drivers.windows import WindowsDriver  # schema-only; safe on any OS
+from a11y_computer_use import drivers
+from a11y_computer_use.drivers.base import Driver
+from a11y_computer_use.drivers.linux import LinuxDriver  # lazy a11y imports; safe on any OS
+from a11y_computer_use.drivers.windows import WindowsDriver  # schema-only; safe on any OS
 
 IS_MACOS = sys.platform == "darwin"
 
 # The macOS backend imports pyobjc (act/capture), so only import it on macOS —
 # this file must collect on a Windows/Linux CI runner too.
 if IS_MACOS:
-    from computeruse.drivers.macos import MacOSDriver
+    from a11y_computer_use.drivers.macos import MacOSDriver
 
 _METHODS = (
     "ensure_trusted", "snapshot", "resolve_ref", "press_element", "scroll_into_view", "set_value",

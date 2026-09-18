@@ -27,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
-from computeruse.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
 
 _APP = "cuatestapp"
 
@@ -86,13 +86,13 @@ def _wait_for_snapshot(driver, timeout_s: float = 15.0):
 
 
 def test_linux_driver_reports_its_name() -> None:
-    from computeruse.drivers import get_driver
+    from a11y_computer_use.drivers import get_driver
 
     assert get_driver().name == "linux"
 
 
 def test_linux_atspi_snapshot_of_gtk_app(tmp_path) -> None:
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
@@ -114,7 +114,7 @@ def test_linux_a11y_press_button(tmp_path) -> None:
     """The a11y-first activation path: press the Save button through the AT-SPI
     action API (no pointer movement); its handler sets the entry to 'SAVED',
     confirmed by a re-snapshot."""
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
@@ -138,7 +138,7 @@ def test_linux_a11y_type_text(tmp_path) -> None:
     """Ref typing needs a verified app owner, but not widget focus. A desktop
     with no window manager must refuse implicit typing instead of trusting an
     old handle; explicit set_value is verified separately below."""
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
@@ -171,7 +171,7 @@ def test_linux_a11y_type_text(tmp_path) -> None:
 
 def test_linux_explicit_set_value_without_frontmost(tmp_path, monkeypatch) -> None:
     """An explicit element target remains usable on a headless desktop."""
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
@@ -197,7 +197,7 @@ def test_linux_forces_a11y_status() -> None:
     gi.require_version("Atspi", "2.0")
     from gi.repository import GLib, Gio
 
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)  # ensure_trusted() -> enable_a11y_status()
@@ -233,9 +233,9 @@ def test_linux_coordinate_click_lands_with_pointer_away_from_origin(tmp_path) ->
     starts at the origin, where a relative warp and an absolute move coincide,
     which is how a relative `warp_pointer` shipped unnoticed until a real desktop
     (Budgie/Xorg, docs/box-testbed.md) put every click at pointer + (x, y)."""
-    from computeruse.drivers import _linux_input
-    from computeruse.drivers.linux import LinuxDriver
-    from computeruse.schema import Point
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Point
 
     driver = LinuxDriver()
     _require_bus(driver)
@@ -273,9 +273,9 @@ def test_linux_runtime_click_without_display_id(tmp_path) -> None:
     through the driver (it used to call Quartz unconditionally and raise
     NameError off macOS). Needs a window manager so the GTK app is the active
     window the gate keys on; self-skips when there is none (Xvfb without a WM)."""
-    from computeruse import safety, server
-    from computeruse.drivers import _linux_input
-    from computeruse.drivers.linux import LinuxDriver
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)

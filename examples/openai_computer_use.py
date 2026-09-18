@@ -1,6 +1,6 @@
 """Drop-in executor for an OpenAI computer-use loop (Responses API).
 
-The model keeps its native ``computer`` tool; computerUse executes each
+The model keeps its native ``computer`` tool; a11y-computer-use executes each
 ``computer_call`` through the gated Runtime, snapping clicks to accessibility
 refs when one is under the point, and answers with a ``computer_call_output``.
 
@@ -14,7 +14,7 @@ a scripted ``computer_call`` through the adapter instead.
 ``OPENAI_COMPUTER_MODEL`` picks the model (default from the docs at the time of
 writing: ``gpt-5.4``). ``OPENAI_COMPUTER_PREVIEW=1`` switches to the deprecated
 ``computer_use_preview`` tool shape with the ``computer-use-preview`` model.
-Backend selection is the Runtime's (``COMPUTERUSE_DRIVER``, ``COMPUTERUSE_APP``).
+Backend selection is the Runtime's (``A11Y_COMPUTER_USE_DRIVER``, ``A11Y_COMPUTER_USE_APP``).
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ import json
 import os
 import sys
 
-from computeruse import server
-from computeruse.adapters import OpenAIComputerAdapter
+from a11y_computer_use import server
+from a11y_computer_use.adapters import OpenAIComputerAdapter
 
 MAX_TURNS = 40
 
@@ -35,7 +35,7 @@ _SCRIPTED_CALL = {
     "actions": [
         {"type": "screenshot"},
         {"type": "click", "x": 100, "y": 100, "button": "left"},
-        {"type": "type", "text": "hello from computerUse"},
+        {"type": "type", "text": "hello from a11y-computer-use"},
         {"type": "keypress", "keys": ["ENTER"]},
         {"type": "scroll", "x": 400, "y": 300, "scroll_x": 0, "scroll_y": 200},
     ],
@@ -98,7 +98,7 @@ def live(adapter: OpenAIComputerAdapter, task: str) -> None:
 
 def main() -> int:
     runtime = server.Runtime()
-    adapter = OpenAIComputerAdapter(runtime, app=os.environ.get("COMPUTERUSE_APP"))
+    adapter = OpenAIComputerAdapter(runtime, app=os.environ.get("A11Y_COMPUTER_USE_APP"))
     task = " ".join(sys.argv[1:]) or "Take a screenshot and describe what you see."
     try:
         import openai  # noqa: F401

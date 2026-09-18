@@ -16,7 +16,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows backend")
 
-from computeruse.schema import Scope  # noqa: E402
+from a11y_computer_use.schema import Scope  # noqa: E402
 
 
 def _open_notepad() -> subprocess.Popen:
@@ -35,7 +35,7 @@ def _open_notepad() -> subprocess.Popen:
 
 
 def test_windows_uia_snapshot_of_notepad() -> None:
-    from computeruse.drivers.windows import WindowsDriver
+    from a11y_computer_use.drivers.windows import WindowsDriver
 
     driver = WindowsDriver()
     proc = _open_notepad()
@@ -55,7 +55,7 @@ def test_windows_uia_snapshot_of_notepad() -> None:
 
 
 def test_windows_driver_reports_its_name() -> None:
-    from computeruse.drivers import get_driver
+    from a11y_computer_use.drivers import get_driver
 
     assert get_driver().name == "windows"
 
@@ -63,7 +63,7 @@ def test_windows_driver_reports_its_name() -> None:
 def test_windows_uia_type_into_notepad() -> None:
     """Full Windows act loop: focus the edit via a UIA pattern, type via
     SendInput, and confirm the text via a re-snapshot — all through the driver."""
-    from computeruse.drivers.windows import WindowsDriver
+    from a11y_computer_use.drivers.windows import WindowsDriver
 
     driver = WindowsDriver()
     proc = _open_notepad()
@@ -74,12 +74,12 @@ def test_windows_uia_type_into_notepad() -> None:
 
         assert driver.press_element(edit)  # focus the edit area (UIA SetFocus)
         time.sleep(0.4)
-        driver.type_text("computerUse on Windows")  # SendInput Unicode
+        driver.type_text("a11y-computer-use on Windows")  # SendInput Unicode
         time.sleep(0.4)
 
         after = driver.snapshot(Scope.WINDOW, "notepad")
         values = [el.value for el in after.elements if el.value]
-        assert any("computerUse" in (v or "") for v in values), f"typed text missing; values={values}"
+        assert any("a11y-computer-use" in (v or "") for v in values), f"typed text missing; values={values}"
     finally:
         proc.terminate()
 
@@ -87,7 +87,7 @@ def test_windows_uia_type_into_notepad() -> None:
 def test_windows_key_chord_select_all() -> None:
     """Prove key chords work: type 'abc', Ctrl+A to select all, type 'X' to
     replace — the edit should end up 'X', not 'abcX'."""
-    from computeruse.drivers.windows import WindowsDriver
+    from a11y_computer_use.drivers.windows import WindowsDriver
 
     driver = WindowsDriver()
     proc = _open_notepad()
@@ -116,8 +116,8 @@ def test_windows_runtime_end_to_end(tmp_path) -> None:
     """The full server stack on Windows: Runtime + safety gating (backed by the
     Windows system ops) + driver — snapshot Notepad, type through the *gated*
     Runtime, and confirm via a re-snapshot."""
-    from computeruse import safety, server
-    from computeruse.drivers import _win_system
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _win_system
 
     proc = _open_notepad()
     try:

@@ -1,6 +1,6 @@
 # Running concurrent agent workflows
 
-computerUse is the execution component inside a worker. Scale with isolated
+a11y-computer-use is the execution component inside a worker. Scale with isolated
 workers; keep each observe → act → verify sequence on the same Runtime. A
 Runtime retains one current snapshot and its refs. Serializing tool calls
 protects an operation or batch, but does not make two independent agents share
