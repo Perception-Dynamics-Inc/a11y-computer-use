@@ -14,6 +14,8 @@ import io
 import json
 from pathlib import Path
 
+import sys
+
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session as client_session
 from mcp.types import ElicitResult
@@ -1080,3 +1082,41 @@ def test_drag_path_rejects_bad_waypoints(tmp_path) -> None:
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1]])
     with pytest.raises(ValueError, match="256"):
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1, 1]] * 257)
+
+
+# --- verified activation ------------------------------------------------------
+
+
+def test_activate_verifies_frontmost_and_escalates(monkeypatch) -> None:
+    """activateWithOptions_ is advisory; _activate must confirm or raise."""
+    if sys.platform != "darwin":
+        pytest.skip("macOS activation path")
+    monkeypatch.setattr(server, "_ACTIVATE_WAIT_S", 0.05)
+    calls: list[str] = []
+
+    class _Running:
+        def bundleIdentifier(self): return "com.test.app"
+        def processIdentifier(self): return 4242
+        def activateWithOptions_(self, opts): calls.append("activate"); return True
+
+    # 1. happy path: frontmost right after activation
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.app")
+    server._activate(_Running())
+    assert calls == ["activate"]
+
+    # 2. never frontmost: escalates through open -b and AX, then raises focus_changed
+    calls.clear()
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.other.app")
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: calls.append("open") or None)
+
+    class _AX:
+        def AXUIElementCreateApplication(self, pid): calls.append(f"ax-app-{pid}"); return "app"
+        def AXUIElementSetAttributeValue(self, el, name, value): calls.append(f"set-{name}"); return 0
+        def AXUIElementCopyAttributeValue(self, el, name, _): return (0, "win")
+        def AXUIElementPerformAction(self, el, action): calls.append(f"perform-{action}"); return 0
+
+    monkeypatch.setattr(server.observe, "_appservices", lambda: _AX())
+    with pytest.raises(ComputerUseError) as info:
+        server._activate(_Running())
+    assert info.value.code is ErrorCode.FOCUS_CHANGED
+    assert calls == ["activate", "open", "ax-app-4242", "set-AXFrontmost", "perform-AXRaise"]

@@ -323,8 +323,55 @@ def _running_app(identifier: str) -> tuple[object, str]:
     )
 
 
+#: How long `_activate` waits for the target to become frontmost per attempt.
+_ACTIVATE_WAIT_S = 1.5
+
+
 def _activate(running: object) -> None:
+    """Bring ``running`` (an NSRunningApplication) to the front, and verify it.
+
+    ``activateWithOptions_`` is advisory on macOS 14+: the WindowServer may keep
+    the current app (another app's fullscreen Space, a modal, a Stage Manager
+    set) and report success anyway, so callers used to get "focused X" while
+    X's window stayed buried and every later click hit `focus_changed`. Escalate
+    through LaunchServices (``open -b``) and the accessibility switches
+    (``AXFrontmost`` on the app, ``AXRaise`` on its main window), and raise a
+    structured `FOCUS_CHANGED` when none of them takes.
+    """
+    bundle = str(running.bundleIdentifier() or "")
+
+    def frontmost() -> bool:
+        deadline = time.monotonic() + _ACTIVATE_WAIT_S
+        while time.monotonic() < deadline:
+            if not bundle or _frontmost_bundle() == bundle:
+                return True
+            time.sleep(0.1)
+        return False
+
     running.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    if frontmost():
+        return
+    if bundle:
+        subprocess.run(["/usr/bin/open", "-b", bundle], capture_output=True)
+        if frontmost():
+            return
+    try:
+        ax = observe._appservices()
+        app_el = ax.AXUIElementCreateApplication(int(running.processIdentifier()))
+        ax.AXUIElementSetAttributeValue(app_el, "AXFrontmost", True)
+        err, window = ax.AXUIElementCopyAttributeValue(app_el, "AXMainWindow", None)
+        if err == 0 and window is not None:
+            ax.AXUIElementPerformAction(window, "AXRaise")
+    except Exception:  # noqa: BLE001 - best effort; the verification below decides
+        pass
+    if frontmost():
+        return
+    raise ComputerUseError(
+        ErrorCode.FOCUS_CHANGED,
+        f"could not bring {bundle or 'the app'} to the front; the frontmost app is still "
+        f"{_frontmost_bundle()} (another app's fullscreen Space or a modal may be active)",
+        detail={"app": bundle, "frontmost_app": _frontmost_bundle()},
+    )
 
 
 def _launch_app(identifier: str) -> None:
