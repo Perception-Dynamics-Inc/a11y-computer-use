@@ -21,6 +21,8 @@ meaningful against their own epoch; `resolve_ref` re-resolves an element in a
 
 from __future__ import annotations
 
+import dataclasses
+
 import itertools
 import math
 import os
@@ -929,16 +931,24 @@ def _prune_root(
 ) -> _PNode:
     """Prune the tree at ``node``, force-keeping the root itself."""
     raw = accessor.read(node)
+    main = next((g for g in geometry if g.display.is_main), geometry[0])
+    if raw.position is None or raw.size is None:
+        # An AXApplication root often has no geometry at all (every Electron
+        # app, some native ones). Without it `_prune_inner` would drop the
+        # whole subtree and the snapshot would show an empty app while the
+        # windows sit right there under it. Give the root the main display's
+        # rect in points so the walk proceeds; the root's own bounds are
+        # cosmetic.
+        raw = dataclasses.replace(
+            raw,
+            position=main.origin,
+            size=(main.display.width / main.display.scale, main.display.height / main.display.scale),
+        )
     pruned = _prune_inner(node, raw, accessor, geometry, depth=0, kept_depth=0)
     if pruned is not None:
         return pruned
-    # Roots survive even without usable geometry (AXApplication has none):
-    # project against the main display, or cover it entirely.
-    main = next((g for g in geometry if g.display.is_main), geometry[0])
-    if raw.position is not None and raw.size is not None:
-        bounds = _project(raw.position, raw.size, main)
-    else:
-        bounds = Bounds(main.display.display_id, 0, 0, main.display.width, main.display.height)
+    # Roots survive even when pruning would drop them (offscreen/decorative).
+    bounds = _project(raw.position, raw.size, main)
     return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False, node=node)
 
 
@@ -1400,7 +1410,22 @@ class _AXAccessor:
         )
 
     def children(self, node: object) -> Sequence[object]:
-        return tuple(self._attr(node, "AXChildren") or ())
+        kids = tuple(self._attr(node, "AXChildren") or ())
+        if self._attr(node, "AXRole") == "AXApplication":
+            # Chromium/Electron (Figma, Slack, VS Code, ...) list only menu bars
+            # under the application's AXChildren; the windows are reachable
+            # solely through AXWindows. Native apps list both, so dedupe.
+            # AXWindows itself is flaky on Electron (sometimes an empty array
+            # while AXMainWindow/AXFocusedWindow still answer), so union all three.
+            windows = list(self._attr(node, "AXWindows") or ())
+            for attr in ("AXMainWindow", "AXFocusedWindow"):
+                single = self._attr(node, attr)
+                if single is not None:
+                    windows.append(single)
+            for w in windows:
+                if not any(_ax_same(w, k) for k in kids):
+                    kids = kids + (w,)
+        return kids
 
     def _attr(self, node: object, name: str) -> object | None:
         err, value = self._ax.AXUIElementCopyAttributeValue(node, name, None)
@@ -1457,12 +1482,28 @@ _WEB_PROBE_MAX_NODES = 240  #: bound the shallow BFS for a web area
 _WEB_PROBE_FANOUT = 20  #: children inspected per node while probing
 
 
+def _ax_same(a: object, b: object) -> bool:
+    """Identity of two AXUIElement handles (CFEqual semantics; pyobjc maps == to it)."""
+    try:
+        return bool(a == b)
+    except Exception:
+        return a is b
+
+
 def _has_web_area(accessor: "_AXAccessor", app_el: object) -> bool:
     """Shallow, bounded BFS for an AXWebArea/AXWebView under the app — the tell
     that this is a Chromium/Electron app (the shell exists even before the tree
-    is populated)."""
+    is populated). An application element that advertises the Chromium-only
+    ``AXManualAccessibility`` attribute counts as well, so the switch is flipped
+    even while the render tree is still an empty shell."""
     from collections import deque
 
+    try:
+        err, names = accessor._ax.AXUIElementCopyAttributeNames(app_el, None)
+        if err == 0 and names and "AXManualAccessibility" in tuple(str(n) for n in names):
+            return True
+    except Exception:
+        pass
     queue = deque([app_el])
     seen = 0
     while queue and seen < _WEB_PROBE_MAX_NODES:

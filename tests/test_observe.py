@@ -909,3 +909,85 @@ def test_interactive_diff_empty_and_budget() -> None:
                          children=[_btn(f"B{i}", (10.0, 10.0 + 30.0 * i)) for i in range(12)]))
     cut = observe.render_diff(observe.diff_snapshots(big_old, big_new), budget=20)
     assert cut.splitlines()[-1].startswith("… truncated at ~20 tokens")
+
+
+# --- Electron: windows only under AXWindows --------------------------------------
+
+
+class _AXStub:
+    """Minimal ax module stub: attribute dict per node handle."""
+
+    kAXValueCGPointType = 1
+    kAXValueCGSizeType = 2
+
+    def __init__(self, attrs: dict, names: dict | None = None) -> None:
+        self.attrs = attrs
+        self.names = names or {}
+        self.set_calls: list = []
+
+    def AXUIElementCopyAttributeValue(self, node, name, _):
+        node_attrs = self.attrs.get(node, {})
+        return (0, node_attrs[name]) if name in node_attrs else (-25205, None)
+
+    def AXUIElementCopyAttributeNames(self, node, _):
+        return (0, list(self.names.get(node, self.attrs.get(node, {}).keys())))
+
+    def AXUIElementCopyActionNames(self, node, _):
+        return (0, [])
+
+    def AXUIElementSetAttributeValue(self, node, name, value):
+        self.set_calls.append((node, name, value))
+        return 0
+
+
+def test_ax_accessor_merges_axwindows_under_the_application_node() -> None:
+    """Electron apps list only menu bars under AXChildren; windows live in AXWindows."""
+    app, menubar, window = "app", "menubar", "window"
+    ax = _AXStub({
+        app: {"AXRole": "AXApplication", "AXChildren": [menubar], "AXWindows": [window]},
+        menubar: {"AXRole": "AXMenuBar"},
+        window: {"AXRole": "AXWindow", "AXTitle": "allmetrix"},
+    })
+    acc = observe._AXAccessor(ax)
+    assert tuple(acc.children(app)) == (menubar, window)
+    # native apps list the window in both; it must not be duplicated
+    ax.attrs[app]["AXChildren"] = [menubar, window]
+    assert tuple(acc.children(app)) == (menubar, window)
+    # non-application nodes are untouched
+    assert tuple(acc.children(window)) == ()
+
+
+def test_has_web_area_recognises_chromium_by_the_manual_accessibility_attribute() -> None:
+    app = "app"
+    ax = _AXStub({app: {"AXRole": "AXApplication", "AXChildren": []}},
+                 names={app: ["AXRole", "AXChildren", "AXManualAccessibility"]})
+    assert observe._has_web_area(observe._AXAccessor(ax), app) is True
+    ax_native = _AXStub({app: {"AXRole": "AXApplication", "AXChildren": []}}, names={app: ["AXRole"]})
+    assert observe._has_web_area(observe._AXAccessor(ax_native), app) is False
+
+
+def test_application_root_without_geometry_still_walks_its_windows(snapshot_builder=None) -> None:
+    """Electron app elements report no AXPosition/AXSize; the walk must still descend."""
+    from a11y_computer_use.schema import Display
+
+    class _Acc:
+        def read(self, n):
+            if n == "app":
+                return observe.RawNode(role="AXApplication", subrole=None, title="Figma", value=None, description="",
+                                       enabled=True, focused=False, position=None, size=None, actions=(),
+                                       checked=None, selected=False, expanded=None, placeholder="", stable_id=None)
+            if n == "win":
+                return observe.RawNode(role="AXWindow", subrole=None, title="Design", value=None, description="",
+                                       enabled=True, focused=True, position=(100.0, 50.0), size=(800.0, 600.0), actions=(),
+                                       checked=None, selected=False, expanded=None, placeholder="", stable_id=None)
+            return observe.RawNode(role="AXButton", subrole=None, title="Sign in", value=None, description="",
+                                   enabled=True, focused=False, position=(200.0, 300.0), size=(120.0, 40.0), actions=("AXPress",),
+                                   checked=None, selected=False, expanded=None, placeholder="", stable_id=None)
+        def children(self, n):
+            return {"app": ("win",), "win": ("btn",)}.get(n, ())
+
+    geom = (observe.DisplayGeometry(display=Display(1, 3024, 1964, 2.0, True), origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot("app", _Acc(), scope=Scope.APP, app="com.figma.Desktop", pid=1, geometry=geom)
+    roles = [e.role for e in snap.elements]
+    assert roles == ["AXApplication", "AXWindow", "AXButton"], roles
+    assert snap.elements[0].bounds.width == 3024 and snap.elements[2].clickable
