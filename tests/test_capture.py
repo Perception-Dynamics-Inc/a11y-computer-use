@@ -227,6 +227,7 @@ def test_screenshot_real_permission_error_path() -> None:
     assert exc_info.value.code is ErrorCode.PERMISSION_DENIED_SCREEN
 
 
+@pytest.mark.skipif(not HAS_DISPLAYS, reason="needs an unlocked window-server session reporting a display")
 @pytest.mark.skipif(not HAS_SCREEN, reason="needs the Screen Recording TCC grant")
 def test_screenshot_live_dimensions_match_display() -> None:
     shot = capture.screenshot()

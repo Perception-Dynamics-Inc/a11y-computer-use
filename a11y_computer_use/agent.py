@@ -18,6 +18,7 @@ edits; the Anthropic provider bounds context server-side instead).
 from __future__ import annotations
 
 import base64
+import json
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -28,7 +29,8 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 #: Tools whose result is a fresh observation the planner acts on next.
 OBSERVATION_TOOLS = frozenset(
-    {"desktop_snapshot", "find", "screenshot", "zoom", "scroll_to_find", "console", "network"}
+    {"desktop_snapshot", "find", "screenshot", "zoom", "screen_text", "scroll_to_find",
+     "console", "network"}
 )
 
 #: The terminal tool the loop adds to the MCP surface.
@@ -80,11 +82,12 @@ class AgentResult:
     model: str | None
     success: bool
     summary: str
-    stopped: str  #: done | max_steps | provider_error | no_action
+    stopped: str  #: done | max_steps | provider_error | no_action | deadline
     steps: list[Step] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     wall_time_s: float = 0.0
     audit_dir: str = ""
+    compactions: int = 0  #: how many times the history was compacted (long tasks)
 
     def to_dict(self) -> dict:
         return {
@@ -95,12 +98,21 @@ class AgentResult:
                       "output_tokens": self.usage.output_tokens},
             "wall_time_s": round(self.wall_time_s, 2),
             "audit_dir": self.audit_dir,
+            "compactions": self.compactions,
         }
 
 
 def tool_specs(runtime: server.Runtime) -> list[dict]:
     """The planner's tool list: the MCP surface for ``runtime``'s driver plus ``done``."""
     return server.tool_specs(runtime) + [DONE_TOOL]
+
+
+def notes_block(runtime: server.Runtime) -> str:
+    """The agent's notes, rendered for the system prompt (empty when there are none)."""
+    store = getattr(runtime, "notes_store", None)
+    if store is None or not store.all():
+        return ""
+    return "\nYour notes so far (facts you recorded with the notes tool):\n" + store.render()
 
 
 def system_prompt(runtime: server.Runtime, app: str | None) -> str:
@@ -121,7 +133,12 @@ def system_prompt(runtime: server.Runtime, app: str | None) -> str:
         "steps into one call.\n"
         "When the task is complete, or cannot be completed, call done with a one-sentence "
         "summary and success true or false. Never claim success without evidence from an "
-        "observation. Call done by itself in its own turn, never alongside other tool calls."
+        "observation. Call done by itself in its own turn, never alongside other tool calls.\n"
+        "In long tasks, record facts you will need later (file paths, URLs, ids) with "
+        "notes(action='add', text=...): older parts of this conversation may be compacted, "
+        "your notes are shown to you on every turn. Use wait_until for renders, downloads, "
+        "uploads, and deploys instead of taking repeated snapshots."
+        + notes_block(runtime)
     )
 
 
@@ -232,6 +249,76 @@ def _bound_history(messages: list[dict]) -> None:
                 block["content"].append({"type": "text", "text": "[image dropped: superseded]"})
 
 
+def _estimate_tokens(messages: list[dict]) -> int:
+    """Cheap size estimate of the history (chars / 4; images count a fixed 1,000)."""
+    total = 0
+    for message in messages:
+        for block in message.get("content", []):
+            if block.get("type") == "image":
+                total += 1000
+            elif block.get("type") == "tool_result":
+                for inner in block.get("content", []):
+                    total += 1000 if inner.get("type") == "image" else len(str(inner.get("text", ""))) // 4
+            else:
+                total += len(str(block.get("text", ""))) // 4
+            if block.get("type") == "tool_use":
+                total += len(str(block.get("input", ""))) // 4
+    return total
+
+
+def _first_line(text: str, limit: int = 160) -> str:
+    line = str(text).strip().splitlines()[0] if str(text).strip() else ""
+    return line[:limit]
+
+
+def compact_history(messages: list[dict], task: str) -> list[dict]:
+    """Collapse everything but the latest exchange into one deterministic
+    "so far" block, keeping the newest observation in full.
+
+    The planner keeps: the task, one line per earlier tool call (tool, params
+    excerpt, first line of its result), the newest observation text, and the
+    last assistant turn with its tool results (tool_use ids must stay paired).
+    Notes are not in the history at all (the system prompt carries them), so
+    nothing the agent recorded is lost.
+    """
+    if len(messages) < 4:
+        return messages
+    # Locate the last assistant message; everything from it on is kept verbatim.
+    last_assistant = max(i for i, m in enumerate(messages) if m["role"] == "assistant")
+    head, tail = messages[:last_assistant], messages[last_assistant:]
+    calls: dict[str, dict] = {}
+    lines: list[str] = []
+    newest_observation = ""
+    for message in head:
+        for block in message.get("content", []):
+            if message["role"] == "assistant" and block.get("type") == "tool_use":
+                calls[block.get("id", "")] = block
+                lines.append(f"- {block.get('name')} {json.dumps(block.get('input', {}))[:120]}")
+            elif block.get("type") == "tool_result":
+                text = _text_of(block.get("content", []))
+                if block.get("observation") and not block.get("elided"):
+                    newest_observation = text
+                status = "error" if block.get("is_error") else "ok"
+                if lines:
+                    lines[-1] += f" -> {status}: {_first_line(text)}"
+            elif block.get("observation") and not block.get("elided"):
+                newest_observation = str(block.get("text", ""))
+    # The tail's observation, if any, supersedes the head's.
+    for message in tail:
+        for block in message.get("content", []):
+            if block.get("type") == "tool_result" and block.get("observation") and not block.get("elided"):
+                newest_observation = ""
+    summary = "\n".join(lines) if lines else "(no earlier actions)"
+    content: list[dict] = [
+        {"type": "text", "text": f"Task: {task}"},
+        {"type": "text", "text": "Earlier in this task (compacted history, oldest first):\n" + summary},
+    ]
+    if newest_observation:
+        content.append({"type": "text", "text": f"Latest observation before the last turn:\n{newest_observation}",
+                        "observation": True})
+    return [{"role": "user", "content": content}, *tail]
+
+
 def _audit(runtime: server.Runtime, app: str, action: str, params: dict, result: str,
            duration_ms: float, usage: Usage) -> None:
     """cu-meter row for the planner side: `a11y_computer_use bench audit` sums
@@ -259,6 +346,8 @@ def run_task(
     verify: bool = True,
     on_step: Callable[[Step], None] | None = None,
     confirm: Callable[[str], bool] | None = None,
+    context_budget: int | None = 60_000,
+    deadline_s: float | None = None,
 ) -> AgentResult:
     """Drive ``task`` to completion (or a bounded stop) with ``provider`` as the planner.
 
@@ -269,11 +358,17 @@ def run_task(
         app: Target app (bundle id or name; a tab id on the browser backend).
             Defaults to the frontmost app / bound tab.
         max_steps: Maximum planner turns. Each turn may run several tool calls.
+            Missions use hundreds; the history is compacted to stay bounded.
         verify: Ask for Effect Receipts on click/act so the planner sees the
             post-action diff without a separate observation.
         on_step: Called after every executed step (progress logging).
         confirm: Human-confirmation callback for plausibly irreversible actions;
             without one they fail safe (``confirmation_declined``).
+        context_budget: Approximate token size of the history above which older
+            turns are compacted into a summary (providers that allow history
+            edits only). None disables compaction.
+        deadline_s: Wall-clock budget for the whole run; the loop stops with
+            ``stopped="deadline"`` once it is exceeded between turns.
     """
     started = time.perf_counter()
     if app is None:
@@ -284,13 +379,13 @@ def run_task(
         except ComputerUseError:
             pass  # keep the identifier; the first snapshot reports app_not_found
     tools = tool_specs(runtime)
-    system = system_prompt(runtime, app)
     model = getattr(provider, "model", None)
 
     steps: list[Step] = []
     usage = Usage()
     stopped, success, summary = "max_steps", False, ""
     nudges = 0
+    compactions = 0
 
     observation, _ok = _observe(runtime, app)
     messages: list[dict] = [{"role": "user", "content": [
@@ -299,6 +394,10 @@ def run_task(
     ]}]
 
     for _turn in range(max_steps):
+        if deadline_s is not None and time.perf_counter() - started >= deadline_s:
+            stopped, summary = "deadline", f"stopped at the {deadline_s:g}s deadline without a done call"
+            break
+        system = system_prompt(runtime, app)  # notes change between turns
         try:
             turn: PlannerTurn = provider.plan(messages, tools, system=system)
         except ProviderError as exc:
@@ -379,18 +478,22 @@ def run_task(
         messages.append({"role": "user", "content": results})
         if provider.history_edits_ok:
             _bound_history(messages)
+            if context_budget is not None and _estimate_tokens(messages) > context_budget:
+                messages = compact_history(messages, task)
+                compactions += 1
 
     if stopped == "max_steps" and not summary:
         summary = f"stopped after {max_steps} planner turns without a done call"
     wall = time.perf_counter() - started
     _audit(runtime, app, "agent_run",
            {"task": task, "provider": provider.name, "model": model, "steps": len(steps),
-            "stopped": stopped, "success": success},
+            "stopped": stopped, "success": success, "compactions": compactions},
            "ok" if success else stopped, wall * 1000.0, usage)
     return AgentResult(task=task, app=app, provider=provider.name, model=model,
                        success=success, summary=summary, stopped=stopped, steps=steps,
-                       usage=usage, wall_time_s=wall, audit_dir=str(runtime.audit.dir_path))
+                       usage=usage, wall_time_s=wall, audit_dir=str(runtime.audit.dir_path),
+                       compactions=compactions)
 
 
-__all__ = ["AgentResult", "DONE_TOOL", "OBSERVATION_TOOLS", "Step", "run_task",
-           "system_prompt", "tool_specs"]
+__all__ = ["AgentResult", "DONE_TOOL", "OBSERVATION_TOOLS", "Step", "compact_history",
+           "notes_block", "run_task", "system_prompt", "tool_specs"]

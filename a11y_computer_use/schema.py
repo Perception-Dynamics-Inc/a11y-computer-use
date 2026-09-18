@@ -457,6 +457,8 @@ class ObserveVerb(str, Enum):
     ZOOM = "zoom"
     CONSOLE = "console"  # browser: console output + uncaught exceptions
     NETWORK = "network"  # browser: request outcomes (status/failure)
+    NOTES = "notes"  # the agent's own scratchpad (list/add/clear)
+    WAIT_UNTIL = "wait_until"  # poll a file / URL / on-screen text condition
 
 
 @dataclass(frozen=True, slots=True)

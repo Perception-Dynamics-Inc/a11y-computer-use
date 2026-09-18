@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
     "find",
     "screenshot",
     "zoom",
+    "screen_text",
     "click",
     "type",
     "key",
@@ -46,6 +47,8 @@ EXPECTED_TOOLS = {
     "clipboard",
     "menu",
     "file_dialog",
+    "notes",
+    "wait_until",
 }
 
 

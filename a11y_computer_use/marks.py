@@ -20,13 +20,25 @@ _LABEL_BG = (255, 40, 40)
 _LABEL_FG = (255, 255, 255)
 
 
-def draw_marks(png: bytes, marks: Sequence[tuple[str, int, int, int, int]]) -> bytes:
+#: OCR refs (o1..oN) are drawn in blue so a vision model can tell the two ref
+#: families apart at a glance; accessibility refs stay red.
+OCR_COLOR = (42, 140, 255)
+
+
+def draw_marks(
+    png: bytes,
+    marks: Sequence[tuple[str, int, int, int, int]],
+    *,
+    color: tuple[int, int, int] = _OUTLINE,
+) -> bytes:
     """Return a new PNG with each mark drawn on ``png``.
 
     Each mark is ``(label, x, y, w, h)`` in the image's own pixel space: a
     rectangle around the element and its label (the element ref) in a small chip
     at the top-left corner. Marks whose rectangle is fully outside the image are
-    skipped. Empty ``marks`` returns the original bytes unchanged.
+    skipped. Empty ``marks`` returns the original bytes unchanged. ``color`` is
+    the outline and chip colour (red for accessibility refs, `OCR_COLOR` for
+    OCR refs).
     """
     if not marks:
         return png
@@ -38,10 +50,10 @@ def draw_marks(png: bytes, marks: Sequence[tuple[str, int, int, int, int]]) -> b
     for label, x, y, w, h in marks:
         if x + w < 0 or y + h < 0 or x > iw or y > ih:
             continue  # fully offscreen
-        draw.rectangle([x, y, x + w, y + h], outline=_OUTLINE, width=2)
+        draw.rectangle([x, y, x + w, y + h], outline=color, width=2)
         chip_w = 6 * len(label) + 4
         cy = max(0, y)
-        draw.rectangle([x, cy, x + chip_w, cy + 12], fill=_LABEL_BG)
+        draw.rectangle([x, cy, x + chip_w, cy + 12], fill=color)
         draw.text((x + 2, cy + 1), label, fill=_LABEL_FG)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -61,5 +73,19 @@ def marks_for(snap, scaled, display_id: int) -> list[tuple[str, int, int, int, i
             continue
         x, y = scaled.from_source(b.x, b.y)
         marks.append((el.ref, x, y, max(1, round(b.width * scaled.scale)),
+                      max(1, round(b.height * scaled.scale))))
+    return marks
+
+
+def ocr_marks_for(screen, scaled, display_id: int) -> list[tuple[str, int, int, int, int]]:
+    """Map an OCR epoch's text lines on ``display_id`` to marks in a downscaled
+    screenshot's pixel space (label = the ``o`` ref)."""
+    marks: list[tuple[str, int, int, int, int]] = []
+    for line in screen.lines:
+        b = line.bounds
+        if b.display_id != display_id:
+            continue
+        x, y = scaled.from_source(b.x, b.y)
+        marks.append((line.ref, x, y, max(1, round(b.width * scaled.scale)),
                       max(1, round(b.height * scaled.scale))))
     return marks

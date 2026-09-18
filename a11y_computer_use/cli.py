@@ -183,6 +183,32 @@ def _build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--json", action="store_true", help="print the result as JSON")
     agent.set_defaults(handler=_cmd_agent)
 
+    mission = sub.add_parser(
+        "mission",
+        help="run a long, multi-app task as verified phases (see docs/missions.md)",
+        description="A mission file (TOML) lists phases: each is one agent run with its "
+                    "own task, the apps it may drive, a step budget, and checks the runner "
+                    "evaluates afterwards (files, URLs, on-screen text, notes). Failed "
+                    "checks re-run the phase with the failure in the agent's notes. "
+                    "Artifacts land under runs/<mission>/<timestamp>/.",
+    )
+    mission_sub = mission.add_subparsers(required=True)
+    mission_validate = mission_sub.add_parser("validate", help="parse and check a mission file")
+    mission_validate.add_argument("file", help="mission TOML file")
+    mission_validate.set_defaults(handler=_cmd_mission_validate)
+    mission_run = mission_sub.add_parser("run", help="run a mission")
+    mission_run.add_argument("file", help="mission TOML file")
+    mission_run.add_argument("--provider", choices=("anthropic", "openai", "claude-cli"),
+                             help="planner backend (default: $A11Y_COMPUTER_USE_PROVIDER, else auto)")
+    mission_run.add_argument("--model", help="model id for the provider")
+    mission_run.add_argument("--from-phase", type=int, default=1, metavar="N",
+                             help="start at phase N (1-based); earlier phases are skipped")
+    mission_run.add_argument("--runs-dir", default="runs", help="where artifacts go (default: runs/)")
+    mission_run.add_argument("--dry-run", action="store_true",
+                             help="validate and print the phase plan without running anything")
+    mission_run.add_argument("--json", action="store_true", help="print the result as JSON")
+    mission_run.set_defaults(handler=_cmd_mission_run)
+
     return parser
 
 
@@ -386,6 +412,62 @@ def _cmd_agent(args: argparse.Namespace) -> int:
               f"out={result.usage.output_tokens} wall={result.wall_time_s:.1f}s "
               f"audit={result.audit_dir}")
     return 0 if result.success else 1
+
+
+def _cmd_mission_validate(args: argparse.Namespace) -> int:
+    from a11y_computer_use import mission as mission_mod
+
+    try:
+        mission = mission_mod.load(args.file)
+    except (OSError, ValueError) as exc:
+        print(f"mission: {exc}", file=sys.stderr)
+        return 2
+    print(f"{mission.name}: {len(mission.phases)} phases"
+          + (f", deadline {mission.deadline_s:g}s" if mission.deadline_s else ""))
+    for i, phase in enumerate(mission.phases, 1):
+        print(f"  {i}. {phase.name}: tier {phase.tier}, {phase.max_steps} steps, "
+              f"{phase.retries} retries, {len(phase.checks)} checks, apps {phase.apps or '-'}")
+    return 0
+
+
+def _cmd_mission_run(args: argparse.Namespace) -> int:
+    from a11y_computer_use import agent, mission as mission_mod, providers, server
+
+    try:
+        mission = mission_mod.load(args.file)
+    except (OSError, ValueError) as exc:
+        print(f"mission: {exc}", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        return _cmd_mission_validate(args)
+    try:
+        provider = providers.get_provider(args.provider, model=args.model)
+    except providers.ProviderError as exc:
+        print(f"provider: {exc}", file=sys.stderr)
+        return 2
+    runtime = server.Runtime()
+
+    def on_step(phase: str, step: agent.Step) -> None:
+        status = "ok" if step.ok else step.error_code
+        first_line = step.result.splitlines()[0] if step.result else ""
+        print(f"[{phase} step {step.index}] {step.tool} {json.dumps(step.params)[:120]} -> "
+              f"{status}: {first_line[:120]} ({step.duration_ms:.0f} ms)", file=sys.stderr)
+
+    confirm = None
+    if sys.stdin.isatty():
+        def confirm(prompt: str) -> bool:
+            return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+
+    result = mission_mod.run(mission, runtime, provider, runs_dir=args.runs_dir,
+                             from_phase=args.from_phase, on_step=on_step, confirm=confirm)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+    else:
+        for phase in result.phases:
+            print(f"{phase.name}: {'passed' if phase.passed else 'failed'} "
+                  f"after {phase.attempts} attempt(s), {phase.finished_at - phase.started_at:.0f}s")
+        print(f"{'completed' if result.passed else result.stopped}: artifacts in {result.run_dir}")
+    return 0 if result.passed else 1
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

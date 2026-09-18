@@ -20,7 +20,7 @@ from a11y_computer_use import arena
 from a11y_computer_use.schema import (
     Bounds, ComputerUseError, Display, Element, ErrorCode, Scope, Snapshot,
 )
-from tests.conftest import HAS_AX, HAS_SCREEN
+from tests.conftest import HAS_AX, HAS_DISPLAYS, HAS_SCREEN
 
 
 def _png(width: int, height: int) -> bytes:
@@ -268,6 +268,7 @@ def test_live_desktop_task_on_browser_costs_all_views() -> None:
 
 @pytest.mark.skipif(not (HAS_AX and HAS_SCREEN),
                     reason="needs the Accessibility and Screen Recording grants")
+@pytest.mark.skipif(not HAS_DISPLAYS, reason="needs an unlocked window-server session reporting a display")
 def test_live_desktop_task_on_finder_costs_all_views() -> None:
     from a11y_computer_use.drivers import get_driver
 

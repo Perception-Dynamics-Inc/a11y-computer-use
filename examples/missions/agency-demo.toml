@@ -1,0 +1,103 @@
+# The design agency reel (docs/missions/agency-demo.md), as a mission.
+#
+# One inbound Telegram message, one delivered website, no human in between.
+# Run:   a11y-computer-use mission run examples/missions/agency-demo.toml --provider claude-cli
+# Check: a11y-computer-use mission validate examples/missions/agency-demo.toml
+#
+# Bundle ids below were read from /Applications on the owner's Mac with
+# `mdls -name kMDItemCFBundleIdentifier`. After Effects and Media Encoder are
+# not installed there yet (only Adobe Creative Cloud is), so their ids are the
+# documented ones and that phase will fail its checks until they are installed.
+
+[mission]
+name = "agency-demo"
+deadline_s = 3600
+
+[mission.record]
+# Screen Studio has no documented CLI or URL scheme at the time of writing;
+# these hooks are placeholders. Any shell command works here.
+start = "echo start-recording"
+stop = "echo stop-recording"
+
+[[phase]]
+name = "brief"
+task = """Open the newest chat in Telegram and read the client's latest message.
+Telegram exposes no accessibility tree, so use screenshot and coordinates.
+Record the brief as a note starting with 'brief:' (what they sell, what they want,
+any deadline), then call done."""
+apps = ["ru.keepcoder.Telegram"]
+tier = "read"
+max_steps = 40
+retries = 1
+checks = [{ notes_contain = "brief:" }]
+
+[[phase]]
+name = "design"
+task = """In Figma, create a new design file named 'Supercar landing' with a frame
+named 'Landing' (1440 wide): hero with a headline and a video placeholder, a
+three-car grid, a contact section. Record the file's share URL as a note starting
+with 'figma:'."""
+apps = ["com.figma.Desktop"]
+tier = "full"
+max_steps = 120
+retries = 1
+checks = [{ notes_contain = "figma:" }]
+
+[[phase]]
+name = "video"
+task = """In Google Chrome, open higgsfield.ai, generate a 10 to 15 second cinematic
+video of a red supercar on a coastal road at golden hour, wait for the render, and
+download it. Record the downloaded file's path as a note starting with 'video:'."""
+apps = ["com.google.Chrome"]
+tier = "full"
+max_steps = 120
+retries = 1
+check_timeout_s = 60
+checks = [
+  { file_stable = "~/Downloads/*.mp4", seconds = 5, min_bytes = 1000000 },
+  { notes_contain = "video:" },
+]
+
+[[phase]]
+name = "edit"
+task = """Open the prepared template project in After Effects, replace the placeholder
+footage with the downloaded video from your notes, set the title text to the shop's
+name from the brief, add the composition to the Media Encoder queue, and export an
+H.264 mp4 to ~/Movies/supercar-reel.mp4. Use the menu bar (File, Composition) and
+keyboard shortcuts; panels may need screenshot and coordinates. Record the exported
+path as a note starting with 'reel:'."""
+apps = ["com.adobe.AfterEffects", "com.adobe.ame.application"]
+tier = "full"
+max_steps = 200
+retries = 1
+check_timeout_s = 900
+checks = [
+  { file_stable = "~/Movies/supercar-reel.mp4", seconds = 10, min_bytes = 1000000 },
+  { notes_contain = "reel:" },
+]
+
+[[phase]]
+name = "site"
+task = """In Google Chrome, build the landing page with Higgsfield's website builder
+from the Figma design in your notes, place the exported reel from your notes in the
+hero, publish it, and record the public URL as a note starting with 'site:'. Also
+create a Stripe TEST MODE payment link for a deposit and record it as a note
+starting with 'stripe-test:'. Never create a live payment link."""
+apps = ["com.google.Chrome"]
+tier = "full"
+max_steps = 160
+retries = 1
+check_timeout_s = 120
+checks = [{ notes_contain = "site:" }, { notes_contain = "stripe-test:" }]
+
+[[phase]]
+name = "reply"
+task = """Back in Telegram, reply to the client in the same chat with two short
+sentences, the site URL from your notes, and the test-mode payment link from your
+notes. Confirm the message shows as sent before calling done."""
+apps = ["ru.keepcoder.Telegram"]
+tier = "full"
+max_steps = 40
+retries = 1
+checks = [{ snapshot_text = "https://", app = "ru.keepcoder.Telegram" }]
+on_fail_notes = "Telegram has no accessibility tree; a screenshot shows whether the message is in the chat."
