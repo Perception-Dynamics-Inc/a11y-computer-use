@@ -113,6 +113,7 @@ def test_wait_until_file_stable_waits_for_growth_to_stop(tmp_path, monkeypatch) 
 
 
 def test_wait_until_url_status_and_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")  # the test server is loopback
     class Handler(http.server.BaseHTTPRequestHandler):
         hits = 0
 
@@ -392,3 +393,39 @@ def test_mission_cli_run_with_scripted_provider(tmp_path, monkeypatch, capsys) -
     code = cli.main(["mission", "run", str(m_path), "--runs-dir", str(tmp_path / "runs"), "--json"])
     out = json.loads(capsys.readouterr().out)
     assert code == 0 and out["passed"] is True and len(out["phases"]) == 2
+
+
+def test_url_status_refuses_non_public_hosts_unless_allowed(monkeypatch) -> None:
+    from a11y_computer_use import conditions
+
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", raising=False)
+    for url in ("http://127.0.0.1:9/x", "http://169.254.169.254/latest/meta-data/", "http://10.0.0.1/", "http://[::1]/"):
+        with pytest.raises(ValueError, match="non-public"):
+            conditions._url_status(url, timeout_s=1)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    assert conditions._url_status("http://127.0.0.1:9/x", timeout_s=0.5) is None  # refused connection, not a ValueError
+
+
+def test_url_status_does_not_follow_redirects(monkeypatch) -> None:
+    import http.server
+    import threading
+
+    from a11y_computer_use import conditions
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/private")
+            self.end_headers()
+
+        def log_message(self, *a):  # noqa: D401
+            return None
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+        assert conditions._url_status(f"http://127.0.0.1:{srv.server_port}/", timeout_s=2) == 302
+    finally:
+        srv.shutdown()

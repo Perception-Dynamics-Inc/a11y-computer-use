@@ -129,3 +129,7 @@ deterministic compaction, the deadline stop, mission validation, and a
 two-phase run with a retry, grant restoration, and the artifact set. No mission
 has been run against real apps on a granted machine yet; the example file is a
 plan, not a recorded result.
+
+## URL checks and local servers
+
+`url_status` refuses hosts that resolve to loopback, private, link-local, multicast, or reserved addresses, and it does not follow redirects. A planner can be steered by page content, so probing internal addresses would turn the check into a reachability oracle. Set `A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1` when a mission checks a development server on this machine.

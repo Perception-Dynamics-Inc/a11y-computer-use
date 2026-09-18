@@ -22,10 +22,13 @@ so a planner cannot use the checker to probe the file system.
 from __future__ import annotations
 
 import glob
+import ipaddress
 import json
 import os
+import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -78,18 +81,54 @@ def _newest_match(pattern: Path, min_bytes: int) -> Path | None:
     return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def _url_status(url: object, timeout_s: float) -> int | None:
-    if not str(url).startswith(("http://", "https://")):
-        raise ValueError("url_status needs an http:// or https:// URL")
-    request = urllib.request.Request(
-        str(url), method="GET", headers={"User-Agent": "a11y-computer-use"}
-    )
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Return the 3xx as-is so every hop goes through the address check."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+def _public_host(url: str) -> None:
+    """Refuse URLs whose host resolves to a non-public address.
+
+    ``wait_until`` runs on the planner's request, and a planner can be steered
+    by page content, so probing loopback, link-local (cloud metadata), private
+    or multicast addresses would turn it into a reachability oracle for services
+    on this machine and network. ``A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1`` opts
+    out for local development servers.
+    """
+    if os.environ.get("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS") == "1":
+        return
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        raise ValueError("url_status needs a host")
     try:
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as exc:
+        raise ValueError(f"url_status could not resolve {host!r}") from exc
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast
+                or addr.is_reserved or addr.is_unspecified):
+            raise ValueError(
+                f"url_status refuses non-public address {addr} for {host!r} "
+                "(set A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1 for local servers)"
+            )
+
+
+def _url_status(url: object, timeout_s: float) -> int | None:
+    target = str(url)
+    if not target.startswith(("http://", "https://")):
+        raise ValueError("url_status needs an http:// or https:// URL")
+    _public_host(target)
+    request = urllib.request.Request(target, method="GET", headers={"User-Agent": "a11y-computer-use"})
+    opener = urllib.request.build_opener(_NoRedirects)
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
             return int(response.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError):
         return None
 
 
