@@ -45,6 +45,8 @@ EXPECTED_TOOLS = {
     "app",
     "window",
     "clipboard",
+    "notes",
+    "wait_until",
 }
 
 
