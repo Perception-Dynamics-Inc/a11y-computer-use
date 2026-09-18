@@ -889,8 +889,9 @@ class Runtime:
         shot = self.driver.screenshot(display_id)
         png, display = shot.png, shot.display
         offset = (0, 0)
+        target_size = None
         if region is not None:
-            png, width, height, offset = ocr.crop_png(png, region, display)
+            png, width, height, offset, target_size = ocr.crop_png(png, region, display)
         else:
             import io
 
@@ -908,6 +909,7 @@ class Runtime:
             text_id=f"ocr-{self._ocr_seq}",
             min_confidence=min_confidence,
             offset=offset,
+            target_size=target_size,
             engine=getattr(engine, "name", ""),
         )
 

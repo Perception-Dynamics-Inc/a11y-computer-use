@@ -187,11 +187,11 @@ def test_build_screen_text_scales_image_pixels_onto_the_display_and_filters_conf
 def test_build_screen_text_applies_a_region_offset() -> None:
     screen = ocr.build_screen_text([_box("Send", 0, 0, w=100, h=40)], display=DISPLAY,
                                    image_width=200, image_height=80, text_id="ocr-9",
-                                   offset=(500, 700))
-    # A 200x80 crop of a 1600x1000 display: 8x horizontal, 12.5x vertical.
+                                   offset=(500, 700), target_size=(100, 40))
+    # A 200x80 image of a 100x40 display-pixel region: half scale, plus the offset.
     line = screen.line("o1")
     assert (line.bounds.x, line.bounds.y) == (500, 700)
-    assert (line.bounds.width, line.bounds.height) == (800, 500)
+    assert (line.bounds.width, line.bounds.height) == (50, 20)
 
 
 def test_render_lists_refs_text_rect_and_confidence() -> None:

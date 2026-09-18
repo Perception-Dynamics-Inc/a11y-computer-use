@@ -257,6 +257,7 @@ def build_screen_text(
     text_id: str,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
     offset: tuple[int, int] = (0, 0),
+    target_size: tuple[int, int] | None = None,
     engine: str = "",
     created_at: float | None = None,
 ) -> ScreenText:
@@ -266,11 +267,14 @@ def build_screen_text(
     boxes are scaled onto ``display.width``/``display.height`` so a capture at
     the backing scale and a capture at nominal resolution both yield the same
     display-qualified rects (the contract every `Point`/`Bounds` follows).
-    ``offset`` shifts the result when the image was a crop (``region``), in
-    display pixels. Boxes under ``min_confidence`` are dropped before grouping.
+    When the image is a crop, ``target_size`` is the crop's size in display
+    pixels (the scaling target instead of the whole display) and ``offset``
+    is its top-left corner in display pixels. Boxes under ``min_confidence``
+    are dropped before grouping.
     """
-    sx = display.width / max(1, image_width)
-    sy = display.height / max(1, image_height)
+    target_w, target_h = target_size if target_size is not None else (display.width, display.height)
+    sx = target_w / max(1, image_width)
+    sy = target_h / max(1, image_height)
     kept = [b for b in boxes if b.confidence >= min_confidence and b.text.strip()]
     lines: list[TextLine] = []
     for index, group in enumerate(group_lines(kept), start=1):
@@ -368,12 +372,15 @@ def rematch_line(old: TextLine, live: ScreenText) -> tuple[TextLine | None, tupl
     return None, tuple(scored[:3])
 
 
-def crop_png(png: bytes, region: Bounds, display: Display) -> tuple[bytes, int, int, tuple[int, int]]:
+def crop_png(
+    png: bytes, region: Bounds, display: Display
+) -> tuple[bytes, int, int, tuple[int, int], tuple[int, int]]:
     """Crop ``png`` (a capture of ``display``) to ``region`` (display pixels).
 
-    Returns the cropped PNG, its pixel size, and the display-space offset of
-    its top-left corner, for `build_screen_text`'s ``offset``. The capture may
-    not be at display resolution, so the crop box is rescaled onto the image.
+    Returns the cropped PNG, its pixel size, the display-space offset of its
+    top-left corner, and the clamped region's display-space size, for
+    `build_screen_text`'s ``offset`` and ``target_size``. The capture may not
+    be at display resolution, so the crop box is rescaled onto the image.
     """
     from PIL import Image
 
@@ -389,7 +396,7 @@ def crop_png(png: bytes, region: Bounds, display: Display) -> tuple[bytes, int, 
     crop = image.crop((round(left * rx), round(top * ry), round(right * rx), round(bottom * ry)))
     buffer = io.BytesIO()
     crop.save(buffer, format="PNG")
-    return buffer.getvalue(), crop.width, crop.height, (left, top)
+    return buffer.getvalue(), crop.width, crop.height, (left, top), (right - left, bottom - top)
 
 
 __all__ = [
