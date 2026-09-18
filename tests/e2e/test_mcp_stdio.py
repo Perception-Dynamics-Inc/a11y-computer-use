@@ -33,6 +33,7 @@ EXPECTED_TOOLS = {
     "find",
     "screenshot",
     "zoom",
+    "screen_text",
     "click",
     "type",
     "key",
