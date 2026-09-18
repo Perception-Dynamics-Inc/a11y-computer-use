@@ -488,6 +488,8 @@ class ObserveOp:
 class MenuVerb(str, Enum):
     LIST = "list"
     PRESS = "press"
+    STATE = "state"
+    CLOSE = "close"
 
 
 @dataclass(frozen=True, slots=True)

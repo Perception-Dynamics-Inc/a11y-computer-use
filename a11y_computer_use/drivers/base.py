@@ -161,6 +161,17 @@ class Driver(Protocol):
         """Activate the menu item at ``path``; returns its title."""
         ...
 
+    def menu_state(self, app: str) -> dict:
+        """``{"open": bool, "path": [titles]}`` for the menu currently showing
+        in ``app``'s menu bar. Backends without menu bars return
+        ``{"open": False, "path": []}`` rather than raising: the Runtime asks
+        before every keystroke."""
+        ...
+
+    def menu_close(self, app: str) -> list[str]:
+        """Close the open menu; returns the path that was open (empty if none)."""
+        ...
+
     def file_dialog(self, verb: object, path: str, app: str) -> dict:
         """Drive the frontmost open/save panel of ``app`` to ``path``."""
         ...

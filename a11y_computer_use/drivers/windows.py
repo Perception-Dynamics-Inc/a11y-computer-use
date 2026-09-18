@@ -258,6 +258,12 @@ class WindowsDriver:
     def menu_press(self, app: str, path: str) -> str:
         raise _unsupported_window("menu_press", "UIA MenuItem InvokePattern")
 
+    def menu_state(self, app: str) -> dict:
+        return {"open": False, "path": []}  # no accessible menu bar on this backend
+
+    def menu_close(self, app: str) -> list[str]:
+        return []
+
     def file_dialog(self, verb: object, path: str, app: str) -> dict:
         raise _unsupported_window("file_dialog", "the common file dialog's UIA tree")
 

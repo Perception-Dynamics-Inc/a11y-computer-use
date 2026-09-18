@@ -313,6 +313,84 @@ def press_path(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+def _size_of(accessor: MenuAccessor, node: object) -> tuple[float, float] | None:
+    """(width, height) of ``AXSize`` when the node is laid out on screen."""
+    size = accessor.attr(node, "AXSize")
+    if size is None:
+        return None
+    try:
+        if hasattr(size, "width"):
+            return float(size.width), float(size.height)
+        w, h = size  # a (w, h) pair or a pyobjc NSSize-like sequence
+        return float(w), float(h)
+    except (TypeError, ValueError):
+        return None
+
+
+def _menu_is_open(accessor: MenuAccessor, item: object) -> bool:
+    """Whether a menu bar item's menu is showing.
+
+    Closed menus still list their items over accessibility (that is how
+    ``menu list`` works without opening anything), so item presence says
+    nothing. The tracked bar item reads ``AXSelected`` while its menu is
+    open, and an open ``AXMenu`` is laid out with a non-zero size."""
+    menu = _menu_of(accessor, item)
+    if menu is None:
+        return False
+    if accessor.attr(item, "AXSelected") is True:
+        return True
+    size = _size_of(accessor, menu)
+    return bool(size and size[0] > 0 and size[1] > 0)
+
+
+def open_path(accessor: MenuAccessor, app_el: object) -> list[str]:
+    """Titles of the menus currently open, top level first (empty when none).
+
+    Follows the open ``AXMenu`` down: a selected submenu item whose menu has
+    entries is the next open level."""
+    try:
+        bar = menu_bar(accessor, app_el)
+    except ComputerUseError:
+        return []
+    for item in _entries(accessor, bar):
+        if not _menu_is_open(accessor, item):
+            continue
+        path = [_title(accessor, item)]
+        container = _menu_of(accessor, item)
+        while container is not None:
+            nxt = None
+            for n in _entries(accessor, container):
+                sub = _menu_of(accessor, n)
+                if sub is None:
+                    continue
+                size = _size_of(accessor, sub)
+                if accessor.attr(n, "AXSelected") is True or (size and size[0] > 0 and size[1] > 0):
+                    nxt = n
+                    break
+            if nxt is None:
+                break
+            path.append(_title(accessor, nxt))
+            container = _menu_of(accessor, nxt)
+        return path
+    return []
+
+
+def close_open_menu(accessor: MenuAccessor, app_el: object) -> list[str]:
+    """Close whatever menu is open in ``app_el``'s menu bar; returns the path
+    that was open (empty when nothing was). Closing the top-level menu ends
+    the whole tracking session; `MenuAccessor.close` tries ``AXCancel`` on the
+    menu and falls back to pressing the bar item again."""
+    path = open_path(accessor, app_el)
+    if not path:
+        return []
+    bar = menu_bar(accessor, app_el)
+    for item in _entries(accessor, bar):
+        if _title(accessor, item) == path[0]:
+            accessor.close(item)
+            break
+    return path
+
+
 # --------------------------------------------------------------------------- #
 # Open / save panels
 # --------------------------------------------------------------------------- #
@@ -518,6 +596,17 @@ def macos_menu_items(app: str, path: str | None) -> list[dict[str, object]]:
 def macos_menu_press(app: str, path: str) -> str:
     app_el, accessor, _bundle = _macos_app_element(app)
     return press_path(accessor, app_el, path)
+
+
+def macos_menu_state(app: str) -> dict[str, object]:
+    app_el, accessor, _bundle = _macos_app_element(app)
+    path = open_path(accessor, app_el)
+    return {"open": bool(path), "path": path}
+
+
+def macos_menu_close(app: str) -> list[str]:
+    app_el, accessor, _bundle = _macos_app_element(app)
+    return close_open_menu(accessor, app_el)
 
 
 def macos_file_dialog(verb: FileDialogVerb, path: str, app: str) -> dict[str, object]:
