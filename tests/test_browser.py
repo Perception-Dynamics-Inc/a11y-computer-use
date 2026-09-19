@@ -759,3 +759,79 @@ def test_live_network_reports_status_and_failures() -> None:
     assert any(r.get("status") == 200 for r in reqs)  # the main document / data fetch
     assert any("error" in r for r in reqs)  # the unsafe-port fetch failed
     d._reset()
+
+
+# --- a live reorder under a ref (the incident-gauntlet failure) ------------- #
+def _list_page(rows: list[tuple[int, str]], first_y: int = 40):
+    """AX + DOMSnapshot payloads for a list of rows: (backendDOMNodeId, title)."""
+    nodes = [_ax("1", "RootWebArea", backend=100, children=["L"]),
+             _ax("L", "list", "Services", backend=101, parent="1",
+                 children=[f"r{i}" for i in range(len(rows))])]
+    ids, bounds = [100, 101], [[0, 0, 800, 600], [0, first_y - 8, 400, 500]]
+    for i, (backend, title) in enumerate(rows):
+        nodes.append(_ax(f"r{i}", "row", title, backend=backend, parent="L",
+                         props={"focusable": True}))
+        ids.append(backend)
+        bounds.append([8, first_y + 24 * i, 380, 22])
+    dom = {"strings": ["DIV"], "documents": [{
+        "contentWidth": 800, "contentHeight": 600,
+        "nodes": {"backendNodeId": ids, "nodeName": [-1] * len(ids),
+                  "attributes": [[] for _ in ids]},
+        "layout": {"nodeIndex": list(range(len(ids))), "bounds": bounds},
+    }]}
+    return nodes, dom
+
+
+def _phased_driver(before, after):
+    phase = {"nodes": before[0], "dom": before[1]}
+
+    def responder(method: str, params: dict):
+        if method == "Accessibility.getFullAXTree":
+            return {"nodes": phase["nodes"]}
+        if method == "DOMSnapshot.captureSnapshot":
+            return phase["dom"]
+        return _fixture_responder(method, params)
+
+    d, t = _driver_on(responder)
+
+    def flip():
+        phase["nodes"], phase["dom"] = after
+
+    return d, t, flip
+
+
+def test_click_after_a_live_reorder_is_stale_not_the_slot_occupant() -> None:
+    """Two snapshots of a virtualized list: after a refresh the rows are new DOM
+    nodes (new backend ids) in a new order and the target scrolled out of the
+    rendered window. The old ref must raise stale_ref naming the row that now
+    sits at that position, not resolve onto it."""
+    before = _list_page([(201, "auth-gateway production"), (202, "email-router production"),
+                         (203, "config-sync production")])
+    after = _list_page([(311, "payments-api staging"), (312, "config-sync production"),
+                        (313, "auth-gateway production")])
+    d, t, flip = _phased_driver(before, after)
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    target = next(el for el in snap.elements if el.title == "email-router production")
+    flip()
+    with pytest.raises(ComputerUseError) as exc:
+        d.resolve_ref(snap, target.ref)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "title_changed"
+    occupant = next(c for c in exc.value.detail["candidates"] if c.get("at_old_position"))
+    assert occupant["title"] == "config-sync production"
+    # Nothing was clicked: no mouse or DOM action reached the page.
+    assert "Input.dispatchMouseEvent" not in t.methods()
+    assert "DOM.resolveNode" not in t.methods()
+
+
+def test_after_a_reorder_the_ref_follows_the_title_when_the_row_is_still_rendered() -> None:
+    before = _list_page([(201, "auth-gateway production"), (202, "email-router production"),
+                         (203, "config-sync production")])
+    after = _list_page([(312, "config-sync production"), (313, "auth-gateway production"),
+                        (314, "payments-api staging"), (315, "email-router production")])
+    d, _t, flip = _phased_driver(before, after)
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    target = next(el for el in snap.elements if el.title == "email-router production")
+    flip()
+    live = d.resolve_ref(snap, target.ref)
+    assert live.title == "email-router production" and live.stable_id == "315"
