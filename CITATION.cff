@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata from this file."
 type: software
 title: a11y-computer-use
-version: 0.2.0
+version: 0.2.1
 date-released: 2026-09-19
 authors:
   - name: "Perception Dynamics, Inc."

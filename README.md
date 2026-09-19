@@ -7,7 +7,7 @@
   <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.0"><img src="https://img.shields.io/badge/release-v0.2.0-2A8CFF" alt="Release v0.2.0"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.1"><img src="https://img.shields.io/badge/release-v0.2.1-2A8CFF" alt="Release v0.2.1"></a>
 </p>
 
 Computer use for AI agents that clicks real UI elements instead of guessed pixels. The model reads a pruned accessibility tree and says `click e14`. Works on macOS, Windows, Linux, and Chromium, through one MCP server.

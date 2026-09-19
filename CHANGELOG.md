@@ -11,6 +11,26 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.2.1] - 2026-09-19
+
+Fixes from the first live desktop trials and the first gauntlet benchmark run.
+
+### Fixed
+
+- Ref re-resolution is bound to the element's text: a titled ref never resolves onto whatever element now occupies its old position after a live reorder; it follows the title anywhere in the tree, or returns `stale_ref` with `reason=title_changed`, closest-title candidates, and the element at the old position flagged `at_old_position`. Slot-based stable ids no longer beat the title on rows, cells, items, links, and static text. Found by the gauntlet: 18 of 20 Fable runs clicked the wrong row after the list reordered (8f944d4, 2026-09-19).
+- Observations of a granted app (`screen_text(app=...)`, `window list app=...`, the automatic OCR escalation) gate against that app, not against whatever app is frontmost (06507e4, 2026-09-19).
+- `app launch` by display name gates on the installed bundle id and waits up to `A11Y_COMPUTER_USE_LAUNCH_WAIT_S` (default 60) for the first window; `agent --grant` accepts an installed app that is not running yet (5179328, 9735d77, 06507e4, 2026-09-19).
+- `app focus` also trusts the WindowServer stacking order and waits through Stage Manager (83ade08, 2026-09-19).
+- A locked screen or sleeping display is a structured `unsupported` error from `agent` and `mission run`, checked only for the real macOS driver; `capture.displays()` raises a structured error instead of `RuntimeError`; a crashing tool becomes an `internal_error` tool result instead of ending the run (864d9dd, d56c535, 2026-09-19).
+- Menu-bar helpers read as `unsupported` off macOS, so the platform-neutral seam used by the server tests never imports pyobjc there (0c13c14, 2026-09-19).
+
+### Changed
+
+- `agent` and `mission run` hold the display awake with `caffeinate -dimsu` for the run (`A11Y_COMPUTER_USE_KEEP_AWAKE=0` opts out) (864d9dd, 2026-09-19).
+- The agency-demo mission edits the video with ffmpeg in Terminal instead of After Effects (e67803f, 2026-09-19).
+- Live TextEdit tests skip on runners that cannot bring an app to the foreground (4667dcf, b2258e2, 7ad1078, 2026-09-19).
+
+
 ## [0.2.0] - 2026-09-19
 
 The desktop release: apps without an accessibility tree, long multi-app missions, menus and file dialogs. The OCR path, TextEdit menus, and Figma's tree were verified live on a Mac; the agency mission in `docs/missions/` has not been run end to end.
@@ -218,7 +238,8 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 
 Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag; nothing is published on PyPI.
 
-[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.2.0...main
+[Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.2.1...main
+[0.2.1]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.1.0
