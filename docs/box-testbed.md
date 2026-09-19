@@ -280,3 +280,24 @@ the saved snapshot via the Box API and a `BOX_API_KEY` secret) that runs
 tests already unmask the pointer bug under Xvfb, but the hit-test bug (windows
 not at the origin) still needs a window manager: either add a lightweight one to
 the Xvfb job (`openbox` or `xfwm4`) or keep the real-desktop run.
+
+## Live trial: Krita on the Box, 2026-09-20
+
+Planner Fable 5.1 via the Claude Code CLI on the Mac, tool a11y-computer-use
+main (6ec0466 and later) on the Box through `agent --mcp-command`, task
+"launch Krita and draw a Mona Lisa-style sketch with the freehand brush, save
+it as PNG", 120-step budget.
+
+- First run (before 6ec0466): 116 steps, 11 waypoint drags reported `ok`,
+  `done` with a summary describing a face. The saved PNG held one dot: the
+  Linux driver sent press, one jump, release. Screenshots took 6 to 70 s
+  each (16 of them) on a link that moves about 170 KB/s.
+- Second run (after the drag fix): 100 steps, 22 strokes, `done`. The saved
+  PNG shows the sketch below (face, hair, eyes, nose, mouth, shoulders,
+  horizon). The planner's summary said it created a new 1024x1024 document;
+  it drew on the first run's 2480x3508 document (the run-1 dot is still in
+  the corner). The JPEG screenshot path (21878e3) was not in this run's
+  process; measured separately on the same link it cut a screenshot from 29
+  to 57 s to 9.5 to 13.6 s.
+
+![Krita sketch drawn on the Box over the remote backend](assets/box-krita-mona-lisa.png)
