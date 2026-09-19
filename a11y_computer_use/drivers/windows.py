@@ -75,6 +75,8 @@ class WindowsDriver:
     """The `Driver` protocol, to be backed by UI Automation + SendInput + DXGI."""
 
     name = "windows"
+    #: What `app quit` sends: Alt+F4 closes the active window on Windows.
+    quit_chord = "alt+f4"
 
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:

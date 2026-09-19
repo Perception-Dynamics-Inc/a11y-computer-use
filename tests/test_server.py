@@ -1183,6 +1183,34 @@ def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch) 
     assert launched == ["Krita"]
 
 
+def test_launch_wait_recognises_truncated_and_vendor_prefixed_linux_comm_names(tmp_path, monkeypatch) -> None:
+    """On the Box, `app launch gnome-terminal` and `app launch google-chrome` both
+    opened a window at once yet reported "no window appeared within 60s": the
+    window rows carry the process comm ("gnome-terminal-", cut at 15 bytes;
+    "chrome", the vendor prefix dropped), which never equalled the launched name."""
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    rows = [{"window_id": 1, "app": "gnome-terminal-", "title": "Terminal", "pid": 5},
+            {"window_id": 2, "app": "chrome", "title": "New Tab - Chromium", "pid": 6}]
+
+    class _D:
+        resolves_apps = False
+        name = "fake"
+        def ensure_trusted(self): return None
+        def frontmost_app(self): return ("gedit", 1)
+        def main_display_id(self): return 0
+        def windows(self): return rows
+
+    rt = server.Runtime(store=safety.PermissionStore(tmp_path / "p.json"),
+                        audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    monkeypatch.setattr(server, "_running_app", lambda ident: (None, ident))  # unresolved: echoed back
+    assert rt._wait_first_window("gnome-terminal", 0.5) == "Terminal"
+    assert rt._wait_first_window("google-chrome", 0.5) == "New Tab - Chromium"
+    assert rt._wait_first_window("krita", 0.3) is None  # still nothing for an app with no window
+    assert server._launched_as("chrome", "chromium-browser") is False  # no vendor prefix relation
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    assert server._launched_as("com.apple.textedit", "com.apple.textedit.helper") is False  # bundle ids stay exact
+
+
 # --- observations of a named app gate against that app ---------------------------
 
 

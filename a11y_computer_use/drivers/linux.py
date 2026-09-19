@@ -77,6 +77,8 @@ class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
     name = "linux"
+    #: What `app quit` sends: the desktop convention (cmd+q means Super+q on X, a nop).
+    quit_chord = "ctrl+q"
 
     def __init__(self) -> None:
         # The last editable element focused via press_element — type_text enters

@@ -380,6 +380,17 @@ def test_app_quit_is_full_tier_and_reports_a_lingering_dialog(tmp_path) -> None:
     assert "dialog" in rt.app("quit", APP)
 
 
+def test_app_quit_sends_the_drivers_own_chord(tmp_path) -> None:
+    """On the Box, `app quit gedit` pressed cmd+q (Super+q on X: nothing) and
+    reported "still running"; a driver names its desktop's quit chord."""
+    rt, driver, _store = make_runtime(tmp_path, safety.Tier.FULL)
+    rt.QUIT_SETTLE_S = 0.0
+    driver.quit_chord = "ctrl+q"
+    driver.apps = []
+    assert rt.app("quit", APP) == f"quit {APP}"
+    assert ("key", "ctrl+q") in driver.calls and ("key", "cmd+q") not in driver.calls
+
+
 def test_app_launch_and_focus_on_a_tab_driver_do_not_wait(tmp_path) -> None:
     rt, driver, _ = make_runtime(tmp_path, safety.Tier.CLICK)
     assert rt.app("launch", APP) == f"launched {APP}"

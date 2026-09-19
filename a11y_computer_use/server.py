@@ -308,6 +308,18 @@ def _list_apps() -> list[dict[str, object]]:
     return apps
 
 
+def _launched_as(app_id: str, command: str) -> bool:
+    """Whether a window owned by ``app_id`` plausibly belongs to the app
+    launched as ``command`` off macOS, where the id is a process comm name:
+    comm is cut at 15 bytes ("gnome-terminal-" for gnome-terminal-server, so
+    the launched name is its prefix) and a launcher name may carry a vendor
+    prefix the process drops ("google-chrome" runs as "chrome"). Bundle ids
+    on macOS are exact and never take this path."""
+    if sys.platform == "darwin" or len(command) < 4:
+        return False
+    return app_id.startswith(command) or command.endswith("-" + app_id) or command[:15] == app_id
+
+
 def _running_app(identifier: str) -> tuple[object, str]:
     """Resolve an identifier to (native app handle, app id).
 
@@ -2043,6 +2055,7 @@ class Runtime:
             value = row.get(key)
             if isinstance(value, str) and value and (
                 value.lower() == needle or (bundle and value.lower() == bundle.lower())
+                or _launched_as(value.lower(), needle)
             ):
                 return True
         return False
@@ -2051,12 +2064,14 @@ class Runtime:
         """Poll the driver's window list until ``identifier`` owns a window.
 
         Returns its title (possibly empty without the Screen Recording grant),
-        or None when nothing appeared within ``timeout_s``."""
+        or None when nothing appeared within ``timeout_s``. Off macOS the app
+        id is the process comm, which only exists once the app has a window,
+        so an unresolved id (the identifier echoed back) is retried each poll."""
         deadline = time.monotonic() + timeout_s
         bundle: str | None = None
         while True:
             try:
-                if bundle is None and not self._resolves_apps():
+                if (bundle is None or bundle.lower() == identifier.lower()) and not self._resolves_apps():
                     _running, bundle = _running_app(identifier)
             except ComputerUseError:
                 bundle = None
@@ -2144,7 +2159,9 @@ class Runtime:
                 # unsaved changes, which is the human's call, not the agent's.
                 self.driver.activate_app(name)
                 self._wait_frontmost(bundle, 2.0)
-                self.driver.key_chord("cmd+q")
+                # cmd+q on macOS; the driver names its desktop's chord (ctrl+q on
+                # Linux, alt+f4 on Windows), where cmd+q would press Super+q for nothing.
+                self.driver.key_chord(getattr(self.driver, "quit_chord", "cmd+q"))
                 time.sleep(self.QUIT_SETTLE_S)
                 try:
                     running = [r for r in self.driver.running_apps()
