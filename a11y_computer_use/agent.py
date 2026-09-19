@@ -104,6 +104,9 @@ class AgentResult:
 
 def tool_specs(runtime: server.Runtime) -> list[dict]:
     """The planner's tool list: the MCP surface for ``runtime``'s driver plus ``done``."""
+    remote = getattr(runtime, "remote_tool_specs", None)
+    if remote is not None:  # a RemoteRuntime: the server's own list over MCP
+        return list(remote()) + [DONE_TOOL]
     return server.tool_specs(runtime) + [DONE_TOOL]
 
 

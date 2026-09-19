@@ -181,6 +181,10 @@ def _build_parser() -> argparse.ArgumentParser:
                             "one the environment supports)")
     agent.add_argument("--model", help="model id for the provider (required for openai)")
     agent.add_argument("--max-steps", type=int, default=25, help="maximum planner turns (default 25)")
+    agent.add_argument("--mcp-command", metavar="CMD",
+                       help="drive a remote a11y-computer-use MCP server as the tool backend, for example "
+                            "'ssh -T host ~/computerUse/.venv/bin/a11y-computer-use mcp'; the planner "
+                            "runs here, every observation and action runs there under its own grants")
     agent.add_argument("--no-verify", action="store_true",
                        help="do not request Effect Receipts on click/act")
     agent.add_argument("--grant", choices=("read", "click", "full"),
@@ -488,7 +492,19 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     except providers.ProviderError as exc:
         print(f"provider: {exc}", file=sys.stderr)
         return 2
-    runtime = server.Runtime()
+    if getattr(args, "mcp_command", None):
+        from a11y_computer_use import remote
+        try:
+            runtime = remote.RemoteRuntime(args.mcp_command)
+        except ComputerUseError as exc:
+            print(server.error_text(exc), file=sys.stderr)
+            return 2
+        if args.grant:
+            print("note: --grant is ignored with --mcp-command; grants live on the remote machine",
+                  file=sys.stderr)
+            args.grant = None
+    else:
+        runtime = server.Runtime()
     app = args.app
     if args.grant:
         try:
