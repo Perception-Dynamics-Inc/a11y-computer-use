@@ -217,8 +217,8 @@ def test_blocked_windows_replace_has_deadline_and_preserves_old_grant(tmp_path: 
     monkeypatch.setattr(safety.time, "sleep", advance_time)
     with pytest.raises(PermissionError, match="remains blocked"):
         store.set_tier(APP, safety.Tier.FULL)
-    assert elapsed == pytest.approx(1.0)
-    assert 2 <= attempts <= 102
+    assert elapsed == pytest.approx(5.0)  # the bounded wait, safety._replace_file
+    assert 2 <= attempts <= 502  # one attempt per 10 ms sleep, plus the first
     assert path.read_bytes() == before
     assert store.get_tier(APP) is safety.Tier.READ
     assert list(tmp_path.glob(".permissions.json.*")) == []
