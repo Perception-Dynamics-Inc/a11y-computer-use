@@ -376,6 +376,7 @@ def _grant_target(runtime: "server.Runtime", app: str | None) -> str:
     bundle id is granted as given and a display name is looked up among the
     installed applications; only an identifier that matches nothing raises.
     """
+    from a11y_computer_use import server
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     target = app if app is not None else runtime._frontmost()
@@ -385,20 +386,9 @@ def _grant_target(runtime: "server.Runtime", app: str | None) -> str:
     except ComputerUseError as exc:
         if exc.code is not ErrorCode.APP_NOT_FOUND or app is None:
             raise
-    if "." in target:
-        return target  # a bundle id; grants are keyed by it whether or not it runs
-    if sys.platform == "darwin":
-        from AppKit import NSBundle, NSWorkspace
-
-        url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(target)
-        if url is None:
-            for folder in ("/Applications", os.path.expanduser("~/Applications"), "/System/Applications"):
-                candidate = os.path.join(folder, f"{target}.app")
-                if os.path.isdir(candidate):
-                    bundle = NSBundle.bundleWithPath_(candidate)
-                    ident = bundle.bundleIdentifier() if bundle is not None else None
-                    if ident:
-                        return str(ident)
+    installed = server._installed_bundle_id(target)
+    if installed:
+        return installed
     raise ComputerUseError(
         ErrorCode.APP_NOT_FOUND,
         f"no running or installed application matches {target!r}; pass its bundle id",

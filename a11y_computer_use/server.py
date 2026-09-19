@@ -402,6 +402,33 @@ def _activate(running: object) -> None:
     )
 
 
+
+def _installed_bundle_id(identifier: str) -> str | None:
+    """Bundle id of an INSTALLED (not necessarily running) macOS app.
+
+    A bundle id is returned as given; a display name is looked up through
+    LaunchServices, then the standard application folders. None when nothing
+    matches, so callers can keep the raw identifier as a last resort.
+    """
+    if sys.platform != "darwin" or not identifier:
+        return None
+    if "." in identifier:
+        return identifier
+    try:
+        from AppKit import NSBundle, NSWorkspace
+    except ImportError:
+        return None
+    for folder in ("/Applications", os.path.expanduser("~/Applications"), "/System/Applications",
+                   "/System/Applications/Utilities"):
+        candidate = os.path.join(folder, f"{identifier}.app")
+        if os.path.isdir(candidate):
+            bundle = NSBundle.bundleWithPath_(candidate)
+            ident = bundle.bundleIdentifier() if bundle is not None else None
+            if ident:
+                return str(ident)
+    url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(identifier)
+    return identifier if url is not None else None
+
 def _launch_app(identifier: str) -> None:
     """Launch by bundle id (``open -b``) or display name (``open -a``).
 
@@ -1827,7 +1854,7 @@ class Runtime:
 
     #: How long `app launch` waits for the app's first window, and `app focus`
     #: for the app to become frontmost, before reporting what it saw.
-    APP_LAUNCH_WAIT_S = 20.0
+    APP_LAUNCH_WAIT_S = 45.0  #: heavy apps (Krita, Figma) need well over 20 s to show a window
     APP_FOCUS_WAIT_S = 5.0
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
@@ -1893,7 +1920,10 @@ class Runtime:
                 try:  # gate by resolved id when possible, so grant keys stay unified
                     _, gate_key = self._resolve_app(name)
                 except ComputerUseError:
-                    gate_key = name  # not running yet: the identifier is the best key
+                    # Not running yet: key the gate by the installed app's bundle
+                    # id when the name resolves to one, so a grant for
+                    # "org.krita" also covers `app launch Krita`.
+                    gate_key = _installed_bundle_id(name) or name
 
             def launch() -> str | None:
                 self.driver.launch_app(name)

@@ -1136,3 +1136,25 @@ def test_activate_accepts_the_window_stack_when_nsworkspace_lags(monkeypatch) ->
         def activateWithOptions_(self, opts): return True
 
     server._activate(_Running())  # no raise: the target owns the top window
+
+
+def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch) -> None:
+    """A grant for the bundle id must cover `app launch <display name>` before the app runs."""
+    launched: list[str] = []
+
+    class _D:
+        resolves_apps = False
+        name = "fake"
+        def ensure_trusted(self): return None
+        def frontmost_app(self): return ("com.front", 1)
+        def main_display_id(self): return 0
+        def launch_app(self, ident): launched.append(ident)
+
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: "org.krita" if ident == "Krita" else None)
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("org.krita", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    monkeypatch.setattr(rt, "_resolve_app", lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "x")))
+    monkeypatch.setattr(rt, "_wait_first_window", lambda name, wait: "Krita")
+    assert "launched Krita" in rt.app("launch", "Krita")
+    assert launched == ["Krita"]
