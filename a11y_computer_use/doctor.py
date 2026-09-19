@@ -208,6 +208,39 @@ def _check_screen_recording(app: str | None) -> CheckResult:
     }
 
 
+SPEECH_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+MICROPHONE_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+
+
+def _speech_status() -> dict[str, str]:
+    from a11y_computer_use import voice
+
+    return voice.authorization_status()
+
+
+def _check_speech_recognition(app: str | None) -> CheckResult:
+    """Speech Recognition and Microphone grants for `a11y-computer-use voice`.
+
+    Both are TCC permissions attached to the responsible app, like
+    Accessibility. 'not_determined' means the first `voice` run will show the
+    system prompts; 'denied' needs the switch in System Settings.
+    """
+    status = _speech_status()
+    ok = status["speech"] == "authorized" and status["microphone"] == "authorized"
+    detail = f"speech recognition = {status['speech']}, microphone = {status['microphone']}"
+    if ok:
+        fix = None
+    elif status["speech"] == "unavailable":
+        fix = ("Install the Speech and AVFoundation wheels: pip install pyobjc-framework-Speech "
+               "pyobjc-framework-AVFoundation (only `voice` needs them; `--text` works without).")
+    else:
+        who = app or "your terminal"
+        fix = (f"Run `a11y-computer-use voice` once to get the system prompts, or enable {who} under "
+               f"System Settings > Privacy & Security > Speech Recognition ({SPEECH_SETTINGS_URL}) and "
+               f"Microphone ({MICROPHONE_SETTINGS_URL}). `voice --text` needs neither.")
+    return {"check": "speech_recognition_grant", "ok": ok, "detail": detail, "fix": fix}
+
+
 def _check_python() -> CheckResult:
     ok = sys.version_info >= _MIN_PYTHON
     wanted = ".".join(str(part) for part in _MIN_PYTHON)
@@ -415,7 +448,7 @@ def run_doctor() -> list[CheckResult]:
     """Run the environment checks for THIS platform and return their results.
 
     macOS: responsible host app, Accessibility grant, Screen Recording grant,
-    Python, pyobjc, mcp. Linux: graphical session, window manager, AT-SPI2
+    Speech Recognition and Microphone grants (for `voice`), Python, pyobjc, mcp. Linux: graphical session, window manager, AT-SPI2
     bindings, a11y bus, XTEST coordinate input, clipboard tool, Python, mcp.
     Windows: uiautomation, Python, mcp. Never raises for a failed check —
     failures are data, not exceptions.
@@ -426,6 +459,7 @@ def run_doctor() -> list[CheckResult]:
             _check_responsible_app(app),
             _check_accessibility(app),
             _check_screen_recording(app),
+            _check_speech_recognition(app),
             _check_python(),
             _check_pyobjc(),
             _check_mcp(),

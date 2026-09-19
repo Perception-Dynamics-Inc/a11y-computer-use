@@ -11,6 +11,8 @@ Subcommands (PLAN.md §9, Phase 1):
     bench     cu-meter (``audit``) and cu-arena (``web``) numbers.
     agent     Run a task end to end with a model (`agent.run_task`): the
               reference observe -> plan -> act -> verify loop.
+    voice     The reflex layer: spoken (or ``--text``) commands routed straight
+              to a skill, no planning (`reflex.ReflexRunner`).
 
 Exit codes: 0 success; 1 structured failure (a `schema.ComputerUseError` or
 a safety refusal, rendered on stderr); 2 usage errors (argparse, malformed
@@ -28,6 +30,7 @@ import contextlib
 import subprocess
 import os
 import sys
+import threading
 from collections.abc import Sequence
 
 
@@ -185,6 +188,32 @@ def _build_parser() -> argparse.ArgumentParser:
                             "(persisted in the permission store, like any grant)")
     agent.add_argument("--json", action="store_true", help="print the result as JSON")
     agent.set_defaults(handler=_cmd_agent)
+
+    voice = sub.add_parser(
+        "voice",
+        help="instant voice-to-action: route each spoken command to one skill, no planning",
+        description="Listens (Apple on-device speech), or takes --text, splits the utterance into "
+                    "commands, picks one skill per command (a regex router, or Jev over the skill "
+                    "list) and executes it through the same safety gate as every other tool. Each "
+                    "command prints a one-line timeline: speech endpointing, routing, action, and "
+                    "the bounded post-check, as measured.",
+    )
+    voice.add_argument("--router", choices=("local", "jev"), default="local",
+                       help="local: regexes, no network (default); jev: TypeSafe System One, "
+                            "key from TYPESAFE_API_KEY or .env, falls back to local on any failure")
+    voice.add_argument("--text", metavar="TRANSCRIPT",
+                       help="run this transcript (or a file with one utterance per line) instead "
+                            "of listening; needs no microphone or Speech grant")
+    voice.add_argument("--push-to-talk", action="store_true",
+                       help="Return starts a segment, Return commits it (no silence endpointing)")
+    voice.add_argument("--silence", type=float, default=0.5,
+                       help="seconds of unchanged transcript that end an utterance (default 0.5)")
+    voice.add_argument("--locale", default="en-US", help="speech recogniser locale (default en-US)")
+    voice.add_argument("--grant", choices=("read", "click", "full"),
+                       help="grant this tier to every app in --apps before starting")
+    voice.add_argument("--apps", help="comma-separated app names or bundle ids for --grant")
+    voice.add_argument("--json", action="store_true", help="print one JSON object per command")
+    voice.set_defaults(handler=_cmd_voice)
 
     mission = sub.add_parser(
         "mission",
@@ -500,6 +529,71 @@ def _cmd_agent(args: argparse.Namespace) -> int:
               f"out={result.usage.output_tokens} wall={result.wall_time_s:.1f}s "
               f"audit={result.audit_dir}")
     return 0 if result.success else 1
+
+
+def _split_apps(spec: str | None) -> list[str]:
+    """``--apps`` values: comma-separated, quotes stripped, blanks dropped."""
+    if not spec:
+        return []
+    return [part.strip().strip("\"'") for part in spec.split(",") if part.strip().strip("\"'")]
+
+
+def _cmd_voice(args: argparse.Namespace) -> int:
+    from a11y_computer_use import reflex, safety, server, voice
+    from a11y_computer_use.schema import ComputerUseError
+
+    runtime = server.Runtime()
+    if args.grant:
+        apps = _split_apps(args.apps)
+        if not apps:
+            print("--grant needs --apps NAME[,NAME...]", file=sys.stderr)
+            return 2
+        for app in apps:
+            try:
+                target = _grant_target(runtime, app)
+            except ComputerUseError as exc:
+                print(server.error_text(exc), file=sys.stderr)
+                return 1
+            runtime.store.set_tier(target, safety.Tier(args.grant))
+            print(f"granted {target} tier {args.grant}", file=sys.stderr)
+    try:
+        router = reflex.get_router(args.router)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if isinstance(router, reflex.JevRouter) and not router.api_key:
+        print(f"{reflex.API_KEY_VAR} is not set (env or .env); routing locally", file=sys.stderr)
+    runner = reflex.ReflexRunner(runtime, router)
+
+    def on_utterance(text: str, endpoint_ms: float | None) -> None:
+        for result in runner.handle(text, stt_ms=endpoint_ms):
+            print(json.dumps(result.to_dict()) if args.json else result.timeline(), flush=True)
+
+    if args.text is not None:
+        listener = voice.TextListener(args.text)
+    else:
+        blocked = _preflight_display(runtime)
+        if blocked:
+            print(blocked, file=sys.stderr)
+            return 1
+        if args.push_to_talk:
+            listener = voice.PushToTalkListener(args.locale, silence_s=args.silence)
+        else:
+            listener = voice.SpeechListener(args.locale, silence_s=args.silence,
+                                            partial=lambda t: print(f"\r  {t[:100]}", end="", file=sys.stderr))
+        print("listening (ctrl-c to stop)", file=sys.stderr)
+    stop = threading.Event()
+    try:
+        listener.listen(on_utterance, stop)
+    except KeyboardInterrupt:
+        stop.set()
+    except RuntimeError as exc:
+        print(f"voice: {exc}", file=sys.stderr)
+        return 1
+    failed = [r for r in runner.results if not r.ok]
+    if not args.json and runner.results:
+        print(f"{len(runner.results) - len(failed)}/{len(runner.results)} commands ok", file=sys.stderr)
+    return 0 if runner.results and not failed else 1
 
 
 def _cmd_mission_validate(args: argparse.Namespace) -> int:

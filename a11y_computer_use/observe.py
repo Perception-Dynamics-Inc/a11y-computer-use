@@ -1683,17 +1683,22 @@ def _find_app(app: str) -> tuple[int, str]:
     """Resolve a bundle id or display name to (pid, bundle id)."""
     from AppKit import NSWorkspace
 
-    needle = app.lower()
-    for running in NSWorkspace.sharedWorkspace().runningApplications():
-        bundle = running.bundleIdentifier()
-        name = running.localizedName()
-        if (bundle and bundle.lower() == needle) or (name and name.lower() == needle):
-            return int(running.processIdentifier()), str(bundle) if bundle else app
-    raise ComputerUseError(
-        ErrorCode.APP_NOT_FOUND,
-        f"no running application matches {app!r}",
-        detail={"app": app},
-    )
+    from a11y_computer_use.server import _match_running_app
+
+    match = _match_running_app(NSWorkspace.sharedWorkspace().runningApplications(), app)
+    if match is None:  # maybe launched since the list was last refreshed
+        from a11y_computer_use.safety import refresh_workspace
+
+        refresh_workspace()
+        match = _match_running_app(NSWorkspace.sharedWorkspace().runningApplications(), app)
+    if match is None:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"no running application matches {app!r}",
+            detail={"app": app},
+        )
+    running, bundle = match
+    return int(running.processIdentifier()), bundle or app
 
 
 def _display_geometry() -> tuple[DisplayGeometry, ...]:
