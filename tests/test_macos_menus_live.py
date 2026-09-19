@@ -13,14 +13,19 @@ import subprocess
 import sys
 import time
 
+import os
+
 import pytest
 
 from tests.conftest import HAS_AX
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
+    bool(os.environ.get("GITHUB_ACTIONS")),
+    reason="menu validation and key chords need an interactive desktop session; CI Macs have none",
+), pytest.mark.skipif(
     sys.platform != "darwin" or not HAS_AX,
     reason="live menu tests need macOS and the Accessibility TCC grant",
-)
+)]
 
 from a11y_computer_use import menus  # noqa: E402
 from a11y_computer_use.schema import ComputerUseError, ErrorCode  # noqa: E402

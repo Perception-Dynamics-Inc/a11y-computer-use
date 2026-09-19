@@ -590,9 +590,24 @@ def _macos_app_element(app: str) -> tuple[object, AXMenuAccessor, str]:
     observe.ensure_trusted()
     ax = observe._appservices()
     pid, bundle = observe._find_app(app)
+    cached = _APP_ELEMENTS.get(bundle)
+    if cached is not None and cached[0] == pid:
+        return cached[1], AXMenuAccessor(ax), bundle
     app_el = ax.AXUIElementCreateApplication(pid)
     observe._check_responsive(ax, app_el, bundle)
+    _APP_ELEMENTS[bundle] = (pid, app_el)
     return app_el, AXMenuAccessor(ax), bundle
+
+
+#: AXUIElementRef per bundle id, keyed by the pid it was created for: the
+#: element is only valid for that process, so a relaunch (new pid) misses and
+#: recreates it. Creation plus the responsiveness probe are the fixed cost of
+#: every menu query; on the reflex hot path they are paid once per app.
+_APP_ELEMENTS: dict[str, tuple[int, object]] = {}
+
+
+def reset_app_element_cache() -> None:
+    _APP_ELEMENTS.clear()
 
 
 def macos_menu_items(app: str, path: str | None) -> list[dict[str, object]]:

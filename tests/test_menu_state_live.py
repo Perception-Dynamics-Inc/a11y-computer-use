@@ -12,14 +12,19 @@ import tempfile
 import time
 from pathlib import Path
 
+import os
+
 import pytest
 
 from tests.conftest import HAS_AX, HAS_DISPLAYS
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.skipif(
+    bool(os.environ.get("GITHUB_ACTIONS")),
+    reason="menu validation and key chords need an interactive desktop session; CI Macs have none",
+), pytest.mark.skipif(
     sys.platform != "darwin" or not HAS_AX or not HAS_DISPLAYS,
     reason="needs macOS, the Accessibility grant, and an unlocked window-server session",
-)
+)]
 
 from a11y_computer_use import menus, safety, server  # noqa: E402
 from a11y_computer_use.schema import ComputerUseError  # noqa: E402

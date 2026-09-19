@@ -1209,3 +1209,38 @@ def test_auto_ocr_escalation_runs_when_cropped_even_if_not_frontmost(tmp_path, m
     rt = _granted_runtime(tmp_path, monkeypatch)
     note = rt._auto_ocr_note("org.krita", None)
     assert "Brush" in note and "cropped" in note
+
+
+# --- name resolution prefers the dock app over same-named helpers -------------
+
+
+class _RunningApp:
+    def __init__(self, bundle, name, policy=0, pid=1):
+        self._bundle, self._name, self._policy, self._pid = bundle, name, policy, pid
+
+    def bundleIdentifier(self):
+        return self._bundle
+
+    def localizedName(self):
+        return self._name
+
+    def activationPolicy(self):
+        return self._policy
+
+    def processIdentifier(self):
+        return self._pid
+
+
+def test_match_running_app_prefers_bundle_then_regular_app_over_helper() -> None:
+    widget = _RunningApp("com.apple.Notes.WidgetExtension", "Notes", policy=2, pid=10)
+    notes = _RunningApp("com.apple.Notes", "Notes", policy=0, pid=11)
+    apps = [widget, notes]
+    assert server._match_running_app(apps, "Notes") == (notes, "com.apple.Notes")
+    assert server._match_running_app(apps, "com.apple.notes.widgetextension") == (
+        widget, "com.apple.Notes.WidgetExtension")
+    assert server._match_running_app([widget], "Notes") is None  # a faceless helper is not "Notes"
+    accessory = _RunningApp("com.example.bar", "Bar", policy=1)
+    assert server._match_running_app([accessory], "bar") == (accessory, "com.example.bar")
+    assert server._match_running_app(apps, "TextEdit") is None
+    unnamed = _RunningApp(None, "Loose", policy=0)
+    assert server._match_running_app([unnamed], "loose") == (unnamed, "")

@@ -130,6 +130,7 @@ EXPECTED_CHECKS = [
     "responsible_app",
     "accessibility_grant",
     "screen_recording_grant",
+    "speech_recognition_grant",
     "python_version",
     "pyobjc_version",
     "mcp_import",
@@ -141,6 +142,8 @@ def _patch_environment(
 ) -> None:
     monkeypatch.setattr(doctor, "_ax_trusted", lambda: ax)
     monkeypatch.setattr(doctor, "_screen_capture_preflight", lambda: screen)
+    monkeypatch.setattr(doctor, "_speech_status",
+                        lambda: {"speech": "authorized", "microphone": "authorized"})
     monkeypatch.setattr(doctor, "_run_ps", _canned(ps_table))
     monkeypatch.setattr(doctor.os, "getpid", lambda: 500)
 
@@ -235,6 +238,26 @@ def test_pyobjc_check_reports_missing_install(monkeypatch: pytest.MonkeyPatch) -
     assert "pyobjc-framework-ApplicationServices" in result["fix"]
 
 
+@darwin_only
+def test_speech_check_names_host_app_and_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor, "_speech_status",
+                        lambda: {"speech": "not_determined", "microphone": "denied"})
+    result = doctor._check_speech_recognition("Terminal")
+    assert result["ok"] is False
+    assert "not_determined" in result["detail"] and "denied" in result["detail"]
+    assert "Terminal" in result["fix"] and "Speech Recognition" in result["fix"]
+    assert "--text" in result["fix"]
+
+
+@darwin_only
+def test_speech_check_missing_wheels_points_at_pip(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor, "_speech_status",
+                        lambda: {"speech": "unavailable", "microphone": "unavailable"})
+    result = doctor._check_speech_recognition(None)
+    assert result["ok"] is False
+    assert "pyobjc-framework-Speech" in result["fix"]
+
+
 # --- render_text --------------------------------------------------------------
 
 
@@ -245,7 +268,7 @@ def test_render_text_lists_checks_fixes_and_summary(monkeypatch: pytest.MonkeyPa
     assert "[FAIL] accessibility_grant" in text
     assert "[ OK ] screen_recording_grant" in text
     assert "fix: Grant Accessibility to Terminal" in text
-    assert "5/6 checks passed" in text
+    assert "6/7 checks passed" in text
 
 
 # --- live TCC probes (structured permission path, guarded both ways) ----------
