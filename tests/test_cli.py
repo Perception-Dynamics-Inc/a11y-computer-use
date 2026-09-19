@@ -272,3 +272,24 @@ def test_grant_target_accepts_an_installed_but_not_running_app(monkeypatch) -> N
         def _resolve_app(self, ident): return (object(), "com.resolved.app")
 
     assert cli._grant_target(_RTOk(), "Whatever") == "com.resolved.app"
+
+
+def test_keep_awake_runs_caffeinate_on_macos_and_stops_it(monkeypatch) -> None:
+    calls: list = []
+
+    class _P:
+        def terminate(self): calls.append("terminate")
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda args, **kw: calls.append(args) or _P())
+    monkeypatch.delenv("A11Y_COMPUTER_USE_KEEP_AWAKE", raising=False)
+    with cli._keep_awake():
+        pass
+    if sys.platform == "darwin":
+        assert calls == [["/usr/bin/caffeinate", "-dimsu"], "terminate"]
+    else:
+        assert calls == []
+    calls.clear()
+    monkeypatch.setenv("A11Y_COMPUTER_USE_KEEP_AWAKE", "0")
+    with cli._keep_awake():
+        pass
+    assert calls == []

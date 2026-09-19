@@ -163,8 +163,17 @@ def displays() -> tuple[Display, ...]:
     contract that every coordinate is display-qualified physical pixels.
     """
     err, ids, count = Quartz.CGGetActiveDisplayList(_MAX_DISPLAYS, None, None)
-    if err != 0 or not ids:
-        raise RuntimeError(f"CGGetActiveDisplayList failed (error {err})")
+    if err != 0 or not ids or not count:
+        # No active display means the session is locked or the display is
+        # asleep: a structured error the agent loop can surface, not a crash
+        # that kills a 30-minute mission.
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no active display: the screen is locked or asleep (CGGetActiveDisplayList "
+            f"returned {count or 0} displays, error {err}); unlock the screen, or keep it "
+            "awake with `caffeinate -dimsu` during long runs",
+            detail={"active_displays": int(count or 0), "error": int(err)},
+        )
     main_id = int(Quartz.CGMainDisplayID())
     found = []
     for display_id in (int(d) for d in list(ids)[:count]):

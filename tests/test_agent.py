@@ -571,3 +571,17 @@ def test_live_browser_agent_loop_fills_and_clicks_by_ref(tmp_path) -> None:
         assert "effect:" in result.steps[1].result  # Effect Receipt from the real page
     finally:
         d._reset()
+
+
+def test_a_tool_that_raises_unexpectedly_becomes_an_internal_error_result(tmp_path) -> None:
+    """A RuntimeError from a tool must not end a long run; the planner sees internal_error."""
+    rt = make_runtime(tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("display went away")
+
+    rt.call_tool = boom  # type: ignore[assignment]
+    provider = ScriptedProvider([tool_turn("screenshot", {}), tool_turn("done", {"summary": "x", "success": False})])
+    result = agent.run_task("t", rt, provider, app=APP, max_steps=3)
+    assert result.steps[0].error_code == "internal_error" and "display went away" in result.steps[0].result
+    assert result.stopped == "done"

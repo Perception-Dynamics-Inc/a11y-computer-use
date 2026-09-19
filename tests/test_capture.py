@@ -233,3 +233,11 @@ def test_screenshot_live_dimensions_match_display() -> None:
     shot = capture.screenshot()
     image = Image.open(io.BytesIO(shot.png))
     assert image.size == (shot.display.width, shot.display.height)
+
+
+def test_displays_reports_a_locked_screen_as_a_structured_error(monkeypatch) -> None:
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+    monkeypatch.setattr(capture.Quartz, "CGGetActiveDisplayList", lambda n, a, b: (0, [], 0))
+    with pytest.raises(ComputerUseError) as info:
+        capture.displays()
+    assert info.value.code is ErrorCode.UNSUPPORTED and "locked or asleep" in str(info.value)

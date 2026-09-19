@@ -174,6 +174,8 @@ def _observe(runtime: server.Runtime, app: str) -> tuple[str, bool]:
         return server.error_text(exc), False
     except server.ActionRefused as exc:
         return server.refusal_text(exc.decision), False
+    except Exception as exc:  # noqa: BLE001 - surface, never crash the loop
+        return f"internal_error: desktop_snapshot: {type(exc).__name__}: {exc}", False
 
 
 def _execute(runtime: server.Runtime, app: str, call: ToolCall, *, verify: bool,
@@ -204,6 +206,10 @@ def _execute(runtime: server.Runtime, app: str, call: ToolCall, *, verify: bool,
         ok = False
         code = "unknown_tool" if "unknown tool" in str(exc) else "invalid_arguments"
         blocks = [{"type": "text", "text": f"{code}: {call.name}: {exc}"}]
+    except Exception as exc:  # noqa: BLE001 - one broken tool must not end a long run
+        ok = False
+        code = "internal_error"
+        blocks = [{"type": "text", "text": f"internal_error: {call.name}: {type(exc).__name__}: {exc}"}]
     duration_ms = (time.perf_counter() - started) * 1000.0
     step = Step(index=index, tool=call.name, params=params, ok=ok,
                 result=_text_of(blocks)[:_EXCERPT_CHARS], error_code=code,

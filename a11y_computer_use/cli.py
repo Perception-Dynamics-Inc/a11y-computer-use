@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import contextlib
+import subprocess
 import os
 import sys
 from collections.abc import Sequence
@@ -368,6 +370,29 @@ def _cmd_bench_h2h(args: argparse.Namespace) -> int:
 
 
 
+
+@contextlib.contextmanager
+def _keep_awake():
+    """Hold the display awake and assert user activity for the run's duration.
+
+    Synthetic input does not reset macOS's idle timer, so a long agent run
+    ends with a locked screen and every capture failing. ``caffeinate -dimsu``
+    prevents display and system sleep and counts as user activity; it is
+    killed when the run ends. No-op elsewhere or when caffeinate is missing.
+    """
+    proc = None
+    if sys.platform == "darwin" and os.environ.get("A11Y_COMPUTER_USE_KEEP_AWAKE", "1") != "0":
+        try:
+            proc = subprocess.Popen(["/usr/bin/caffeinate", "-dimsu"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            proc = None
+    try:
+        yield
+    finally:
+        if proc is not None:
+            proc.terminate()
+
 def _grant_target(runtime: "server.Runtime", app: str | None) -> str:
     """The app id ``--grant`` should key on.
 
@@ -429,8 +454,9 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             answer = input(f"{prompt} [y/N] ")
             return answer.strip().lower() in ("y", "yes")
 
-    result = agent.run_task(args.task, runtime, provider, app=app, max_steps=args.max_steps,
-                            verify=not args.no_verify, on_step=on_step, confirm=confirm)
+    with _keep_awake():
+        result = agent.run_task(args.task, runtime, provider, app=app, max_steps=args.max_steps,
+                                verify=not args.no_verify, on_step=on_step, confirm=confirm)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
     else:
@@ -486,8 +512,9 @@ def _cmd_mission_run(args: argparse.Namespace) -> int:
         def confirm(prompt: str) -> bool:
             return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
-    result = mission_mod.run(mission, runtime, provider, runs_dir=args.runs_dir,
-                             from_phase=args.from_phase, on_step=on_step, confirm=confirm)
+    with _keep_awake():
+        result = mission_mod.run(mission, runtime, provider, runs_dir=args.runs_dir,
+                                 from_phase=args.from_phase, on_step=on_step, confirm=confirm)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
     else:
