@@ -81,12 +81,14 @@ def _sync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _replace_file(source: Path, target: Path, *, timeout: float = 1.0) -> None:
+def _replace_file(source: Path, target: Path, *, timeout: float = 5.0) -> None:
     """Replace atomically, allowing brief Windows reader/sharing conflicts.
 
     Ordinary Windows file readers can temporarily deny replacement. Keep the
     old file intact while retrying; persistent access errors still propagate
-    after a bounded wait, and other filesystem errors fail immediately.
+    after a bounded wait, and other filesystem errors fail immediately. Four
+    processes rewriting one permissions file on a GitHub Windows runner
+    exceeded a 1 s wait once (2026-09-20); 5 s is still a bound, not a hang.
     """
     deadline = time.monotonic() + timeout
     while True:
