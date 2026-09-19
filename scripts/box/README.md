@@ -97,7 +97,9 @@ session D-Bus address, read from a running `budgie-wm`), turns on the Qt and
 GTK accessibility bridges, and execs the server; the handshake takes about
 4 s and lists the same 21 tools as a local server. `app launch` takes
 `name=`, and `app list` is gated on the frontmost app, so on an empty desktop
-it refuses until something is focused.
+it refuses until something is focused. Pass `--view-images` when the planner
+is `claude-cli` and the app has no accessibility tree: without it that
+planner only reads the screenshot's text description.
 
 Known limits of this image (2026-09-20): Krita 5.2.2 never registers on the
 AT-SPI bus, and a bare PyQt5 window logs `qt.accessibility.atspi: Error in
