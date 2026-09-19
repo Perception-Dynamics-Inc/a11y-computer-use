@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace as _NS
 
+import math
+
 import pytest
 
 from a11y_computer_use.drivers import _atspi, _linux_input
@@ -197,14 +199,37 @@ def test_click_button_and_count(xtest_recorder) -> None:
     assert events[1:] == [(_X_BPRESS, 3, 0, 0), (_X_BRELEASE, 3, 0, 0)] * 2
 
 
-def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder) -> None:
+def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
+    monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
     events, display = xtest_recorder
     _linux_input.drag(10, 20, 300, 400)
-    assert events == [
-        (_X_MOTION, 0, 10, 20), (_X_BPRESS, 1, 0, 0),
-        (_X_MOTION, 0, 300, 400), (_X_BRELEASE, 1, 0, 0),
-    ]
+    assert events[:2] == [(_X_MOTION, 0, 10, 20), (_X_BPRESS, 1, 0, 0)]
+    assert events[-2:] == [(_X_MOTION, 0, 300, 400), (_X_BRELEASE, 1, 0, 0)]
+    motions = [(x, y) for kind, _d, x, y in events[2:-1]]
+    assert all(kind == _X_MOTION for kind, *_ in events[2:-1])  # button held throughout
+    hops = [math.hypot(bx - ax, by - ay) for (ax, ay), (bx, by) in zip([(10, 20), *motions], motions)]
+    assert max(hops) <= _linux_input.DRAG_STEP_PX + 1  # walked, not teleported (+1: rounding)
     assert display.warps == []
+
+
+def test_drag_walks_through_every_waypoint_in_order(xtest_recorder, monkeypatch) -> None:
+    """A freehand-brush stroke: the waypoints must all be visited, in order,
+    with the button held, so a canvas draws the curve rather than a chord."""
+    monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
+    events, _display = xtest_recorder
+    path = [(60, 20), (60, 80), (10, 80)]
+    _linux_input.drag(10, 20, 10, 20, path=path)
+    assert events[1] == (_X_BPRESS, 1, 0, 0) and events[-1] == (_X_BRELEASE, 1, 0, 0)
+    motions = [(x, y) for kind, _d, x, y in events[2:-1] if kind == _X_MOTION]
+    seen = [motions.index(p) for p in [*path, (10, 20)]]  # every waypoint is a motion event
+    assert seen == sorted(seen)
+    assert len(motions) > len(path) + 1  # intermediate hops between waypoints
+
+
+def test_hops_end_exactly_on_the_target() -> None:
+    assert _linux_input._hops(0, 0, 0, 0) == [(0, 0)]
+    hops = _linux_input._hops(0, 0, 100, 0)
+    assert hops[-1] == (100, 0) and len(hops) == 13
 
 
 def test_scroll_positions_before_wheel_notches(xtest_recorder) -> None:

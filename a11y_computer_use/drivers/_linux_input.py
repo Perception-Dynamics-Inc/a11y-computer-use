@@ -17,6 +17,9 @@ the focused-element typing path.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
+
 from contextlib import contextmanager
 
 _display = None
@@ -353,15 +356,44 @@ def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     _flush()
 
 
-def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left") -> None:
+DRAG_STEP_PX = 8  #: longest pointer jump inside a held-button stroke
+DRAG_PACE_S = 0.004  #: pause between motion events so apps see a stroke, not a teleport
+
+
+def drag(x1: int, y1: int, x2: int, y2: int, *, button: str = "left",
+         path: Sequence[tuple[int, int]] = ()) -> None:
+    """Press at (x1, y1), move through ``path`` to (x2, y2), release.
+
+    The pointer is walked in DRAG_STEP_PX hops with a short pace between
+    them. One press + one motion + one release is a valid X drag, but a
+    freehand brush (Krita, GIMP) or a canvas that samples pointer velocity
+    turns a single jump into a dot or a straight line; walking the stroke
+    makes the waypoints an actual curve. Each hop is flushed so the pace is
+    real time, not a queue the server drains at once."""
+    import time
+
     from Xlib import X
 
     num = _BUTTON_NUM.get(button, 1)
     _move(x1, y1)
     _fake(X.ButtonPress, num)
-    _move(x2, y2)  # motion while the button is held = the drag
+    _flush()
+    cx, cy = int(x1), int(y1)
+    for px, py in [*path, (x2, y2)]:
+        for hx, hy in _hops(cx, cy, int(px), int(py)):
+            _move(hx, hy)  # motion while the button is held = the drag
+            _flush()
+            time.sleep(DRAG_PACE_S)
+        cx, cy = int(px), int(py)
     _fake(X.ButtonRelease, num)
     _flush()
+
+
+def _hops(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
+    """Points from (x1, y1) exclusive to (x2, y2) inclusive, at most
+    DRAG_STEP_PX apart; the endpoint itself is always the last hop."""
+    n = max(1, math.ceil(math.hypot(x2 - x1, y2 - y1) / DRAG_STEP_PX))
+    return [(round(x1 + (x2 - x1) * i / n), round(y1 + (y2 - y1) * i / n)) for i in range(1, n + 1)]
 
 
 def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:

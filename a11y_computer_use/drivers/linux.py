@@ -219,7 +219,8 @@ class LinuxDriver:
         self._focused_editable = None
         x1, y1 = _point_of(start)
         x2, y2 = _point_of(end)
-        _linux_input.drag(x1, y1, x2, y2, button=_BUTTON_NAME.get(button, "left"))
+        _linux_input.drag(x1, y1, x2, y2, button=_BUTTON_NAME.get(button, "left"),
+                          path=[_point_of(p) for p in path])
         return None
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
