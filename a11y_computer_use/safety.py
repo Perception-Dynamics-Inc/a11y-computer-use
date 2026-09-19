@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -564,6 +565,28 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
     )
 
 
+def refresh_workspace() -> None:
+    """Let NSWorkspace catch up with LaunchServices before it is read.
+
+    `NSWorkspace.runningApplications` and `frontmostApplication` are updated by
+    notifications on the main thread's run loop. A process that never spins
+    that loop (a CLI, an MCP server on asyncio) keeps reading the list it
+    fetched first: an app launched a second ago is "not running", the app
+    that just came to the front is not "frontmost", and every wait for either
+    burns its whole timeout. One non-blocking pass of the loop (deadline in
+    the past) delivers the pending updates: measured at 0.01 ms when nothing
+    is pending and under 1 ms right after a launch. No-op off the main
+    thread (the loop there carries no AppKit notifications) and off macOS.
+    """
+    if sys.platform != "darwin" or threading.current_thread() is not threading.main_thread():
+        return
+    try:
+        from Foundation import NSDate, NSRunLoop
+    except ImportError:
+        return
+    NSRunLoop.currentRunLoop().runMode_beforeDate_("kCFRunLoopDefaultMode", NSDate.distantPast())
+
+
 def frontmost_app() -> tuple[str | None, int | None]:
     """(bundle id, pid) of the frontmost application, or (None, None).
 
@@ -577,6 +600,7 @@ def frontmost_app() -> tuple[str | None, int | None]:
         from AppKit import NSWorkspace
     except ImportError:  # non-macOS, or pyobjc missing
         return None, None
+    refresh_workspace()
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
         return None, None

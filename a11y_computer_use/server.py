@@ -313,17 +313,51 @@ def _running_app(identifier: str) -> tuple[object, str]:
     """
     if sys.platform != "darwin":
         return None, _system_ops().resolve_app(identifier)
+    match = _match_running_app(NSWorkspace.sharedWorkspace().runningApplications(), identifier)
+    if match is None:  # maybe launched since the list was last refreshed
+        safety.refresh_workspace()
+        match = _match_running_app(NSWorkspace.sharedWorkspace().runningApplications(), identifier)
+    if match is None:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"no running application matches {identifier!r}",
+            detail={"app": identifier},
+        )
+    running, bundle = match
+    return running, bundle or identifier
+
+
+def _match_running_app(apps, identifier: str) -> tuple[object, str] | None:
+    """The running app ``identifier`` names: an exact bundle id first, then a
+    display name, and among name matches the ordinary (dock) app before an
+    accessory (menu bar) app. Faceless helpers never match by name: Notes
+    runs a `com.apple.Notes.WidgetExtension` process whose localized name is
+    also "Notes" even when Notes itself is closed; resolving to it activates
+    nothing and its AX server never answers, so "Notes" must read as not
+    running (and get launched) instead. A helper is still reachable by its
+    bundle id."""
     needle = identifier.lower()
-    for running in NSWorkspace.sharedWorkspace().runningApplications():
+    best: tuple[int, object, str] | None = None
+    for running in apps:
         bundle = running.bundleIdentifier()
         name = running.localizedName()
-        if (bundle and bundle.lower() == needle) or (name and name.lower() == needle):
-            return running, str(bundle) if bundle else identifier
-    raise ComputerUseError(
-        ErrorCode.APP_NOT_FOUND,
-        f"no running application matches {identifier!r}",
-        detail={"app": identifier},
-    )
+        if bundle and bundle.lower() == needle:
+            rank = 0
+        elif name and name.lower() == needle:
+            try:
+                policy = int(running.activationPolicy())
+            except Exception:  # noqa: BLE001 - fakes without a policy
+                policy = 0
+            if policy >= 2:  # NSApplicationActivationPolicyProhibited
+                continue
+            rank = 1 + policy  # 1 regular, 2 accessory
+        else:
+            continue
+        if best is None or rank < best[0]:
+            best = (rank, running, str(bundle) if bundle else "")
+            if rank <= 1:
+                break
+    return None if best is None else (best[1], best[2])
 
 
 #: How long `_activate` waits for the target to become frontmost per attempt.
@@ -1901,15 +1935,33 @@ class Runtime:
                 return None
             time.sleep(0.25)
 
-    def _wait_frontmost(self, bundle: str, timeout_s: float) -> bool:
+    #: `_wait_frontmost` polls this often; activation is verified within one
+    #: tick of it landing instead of a 100 ms grid.
+    FOCUS_POLL_S = 0.02
+
+    def _wait_frontmost(self, bundle: str, timeout_s: float, pid: int | None = None) -> bool:
+        """True once ``bundle`` is frontmost, by NSWorkspace's frontmost app or,
+        when ``pid`` is known, by the WindowServer's stacking order (the same
+        predicate `_activate` verifies with): after a Stage Manager or Space
+        switch NSWorkspace can lag by a beat, or never report an app without a
+        window (Finder with only the desktop), and a focus used to burn the
+        whole timeout there."""
         deadline = time.monotonic() + timeout_s
+        hits = 0
         while True:
             front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
-            if front and front.lower() == bundle.lower():
-                return True
+            if (front and front.lower() == bundle.lower()) or (
+                    pid and not self._resolves_apps() and _top_window_pid() == pid):
+                hits += 1
+                # Two consecutive polls, so a window that is on top for one
+                # frame of the switch animation does not count as focused.
+                if hits >= 2 or self._resolves_apps():
+                    return True
+            else:
+                hits = 0
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(0.1)
+            time.sleep(self.FOCUS_POLL_S)
 
     @_serialized
     def app(self, action: str, name: str | None = None) -> str:
@@ -1976,13 +2028,17 @@ class Runtime:
                 return f"sent quit to {bundle}; it is still running"
 
             return self._run_gated(AppOp(verb=verb, app=bundle), bundle, quit_app)
-        _running, bundle = self._resolve_app(name)  # FOCUS
+        running, bundle = self._resolve_app(name)  # FOCUS
+        try:
+            pid = int(running.processIdentifier()) if running is not None else None
+        except Exception:  # noqa: BLE001 - fakes and non-NSRunningApplication objects
+            pid = None
 
         def focus() -> bool:
             self.driver.activate_app(name)
             if self._resolves_apps():
                 return True
-            return self._wait_frontmost(bundle, self.APP_FOCUS_WAIT_S)
+            return self._wait_frontmost(bundle, self.APP_FOCUS_WAIT_S, pid)
 
         front = self._run_gated(AppOp(verb=verb, app=bundle), bundle, focus)
         if front:
