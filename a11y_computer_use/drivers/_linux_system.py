@@ -138,16 +138,21 @@ def resolve_app(identifier: str) -> str:
     needle = (identifier or "").lower()
     if not needle:
         return identifier
+    by_title: str | None = None
     try:
         d = _display()
         for win in _managed_windows(d):
             comm = (_comm_for_pid(_pid_of(win, d)) or "").lower()
-            title = _win_title(win, d).lower()
-            if needle in comm or needle in title:
-                return comm or identifier
+            if needle in comm:
+                return comm  # the app itself beats any window that merely names it
+            # A title match is a fallback, never a winner over a comm match:
+            # a Chromium tab "Donations | Krita" stacked above Krita's window
+            # must not turn `krita` into `chrome`.
+            if by_title is None and comm and needle in _win_title(win, d).lower():
+                by_title = comm
     except Exception:
         pass
-    return identifier
+    return by_title or identifier
 
 
 def pids_matching(identifier: str) -> set[int]:

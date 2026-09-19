@@ -125,3 +125,35 @@ def test_pids_matching_matches_the_owner_comm_but_never_a_window_title(monkeypat
     assert _linux_system.pids_matching("chrome") == {2}
     assert _linux_system.pids_matching("") == set()
     assert _linux_system.resolve_app("Google Search") == "chrome"  # titles resolve here, by design
+
+
+def test_resolve_app_prefers_the_owning_comm_over_a_window_that_names_it(monkeypatch) -> None:
+    """Krita's Help menu opened a Chromium tab "Donations | Krita" stacked above
+    Krita's own window; resolve_app("krita") walked the stack top-down and took
+    the first title hit, so `window list app=krita` returned Chromium's window
+    and the planner lost Krita. A comm match wins wherever it sits in the stack."""
+
+    class _TitledWin(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 800, 600, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    donate = _TitledWin(0x70, pid=2, title="Donations | Krita - Chromium")
+    krita = _TitledWin(0x80, pid=1, title="Krita")
+    root = _FakeXRoot([donate, krita])  # Chromium first in stacking order
+    by_id = {w.id: w for w in (donate, krita)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: {1: "krita", 2: "chrome"}.get(pid))
+    assert _linux_system.resolve_app("krita") == "krita"
+    assert _linux_system.resolve_app("Donations") == "chrome"  # a pure title still resolves
+    assert _linux_system.resolve_app("nothing-here") == "nothing-here"

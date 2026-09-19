@@ -2885,10 +2885,12 @@ def build_server(
         globs; newest match wins), {"file_stable": path, "seconds": n} (size
         unchanged for n seconds: a finished download or render),
         {"url_status": url, "status": 200}, {"snapshot_text": text, "app": id}
-        (re-snapshot the app until the text appears), or {"screen_text": text}
-        (OCR, where the backend supports it). Returns JSON {matched, waited_s,
-        polls} or a timeout error. Use it instead of repeated snapshots while a
-        render, upload, or deploy runs. Tier 'read'."""
+        (re-snapshot the app until the text appears), {"screen_text": text}
+        (OCR, where the backend supports it), or {"settle": seconds} (nothing to
+        observe: an app with no accessibility tree is still loading or
+        animating; prefer an observable condition when one exists). Returns
+        JSON {matched, waited_s, polls} or a timeout error. Use it instead of
+        repeated snapshots while a render, upload, or deploy runs. Tier 'read'."""
         return await run(runtime.wait_until, condition, timeout_s, poll_s)
 
     # Browser-only: a console feed is meaningful only where the backend has one,

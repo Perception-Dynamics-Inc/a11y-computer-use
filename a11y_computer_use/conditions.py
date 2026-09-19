@@ -13,6 +13,12 @@ Condition shapes (one key selects the kind; the rest are options)::
     {"url_status": "https://example.com/", "status": 200}
     {"snapshot_text": "Render complete", "app": "com.adobe.AfterEffects"}
     {"screen_text": "Message sent"}
+    {"settle": 8}
+
+``settle`` is the one condition with nothing to observe: it holds once the
+given seconds have passed. It exists for apps that show nothing checkable
+while they load or animate (a Qt app with no accessibility tree); prefer an
+observable condition wherever one exists.
 
 File paths may contain ``~`` and glob characters; the newest match wins. Paths
 outside the user's home are refused unless ``A11Y_COMPUTER_USE_ALLOW_ANY_PATH=1``,
@@ -36,7 +42,7 @@ from pathlib import Path
 from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 #: The kinds ``wait_until`` understands; exactly one of these keys selects it.
-KINDS = ("file_exists", "file_stable", "url_status", "snapshot_text", "screen_text")
+KINDS = ("file_exists", "file_stable", "url_status", "snapshot_text", "screen_text", "settle")
 
 #: Ceiling for a single wait (seconds). Renders and deploys take minutes;
 #: nothing an agent waits for should take longer than half an hour.
@@ -151,6 +157,12 @@ class Checker:
     def probe(self, condition: dict, state: dict) -> str | None:
         """One evaluation. Returns a description of the match, or None."""
         kind = kind_of(condition)
+        if kind == "settle":
+            seconds = float(condition["settle"])
+            if not (0 <= seconds <= MAX_WAIT_UNTIL_S):
+                raise ValueError(f"settle must be between 0 and {MAX_WAIT_UNTIL_S:g} seconds")
+            started = state.setdefault("settle_started", time.monotonic())
+            return f"settled for {seconds:g}s" if time.monotonic() - started >= seconds else None
         if kind == "file_exists":
             path = _newest_match(
                 _allowed_path(condition["file_exists"]), int(condition.get("min_bytes", 1))
