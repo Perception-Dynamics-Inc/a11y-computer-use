@@ -483,7 +483,7 @@ def test_cli_agent_runs_a_task_and_prints_json(tmp_path, monkeypatch, capsys) ->
     rt = make_runtime(tmp_path, tier=None)
     monkeypatch.setattr(server, "Runtime", lambda: rt)
     provider = ScriptedProvider([tool_turn("click", {"ref": "e2"}), done_turn("clicked")])
-    monkeypatch.setattr(providers, "get_provider", lambda name, model=None: provider)
+    monkeypatch.setattr(providers, "get_provider", lambda name, model=None, **kw: provider)
     code = cli.main(["agent", "--task", "Click Save", "--app", APP, "--grant", "full", "--json"])
     out, err = capsys.readouterr()
     assert code == 0
@@ -497,11 +497,11 @@ def test_cli_agent_reports_failure_with_exit_1_and_provider_errors_with_exit_2(t
     rt = make_runtime(tmp_path)
     monkeypatch.setattr(server, "Runtime", lambda: rt)
     monkeypatch.setattr(providers, "get_provider",
-                        lambda name, model=None: ScriptedProvider([done_turn("gave up", success=False)]))
+                        lambda name, model=None, **kw: ScriptedProvider([done_turn("gave up", success=False)]))
     assert cli.main(["agent", "--task", "x", "--app", APP]) == 1
     assert "not completed" in capsys.readouterr().out
 
-    def no_provider(name, model=None):
+    def no_provider(name, model=None, **kw):
         raise ProviderError("no planner available")
 
     monkeypatch.setattr(providers, "get_provider", no_provider)
