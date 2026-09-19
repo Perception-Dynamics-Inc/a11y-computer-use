@@ -250,3 +250,25 @@ def test_bench_web_mode_and_json(capsys, monkeypatch) -> None:
     assert data["mode"] == "interactive" and len(data["observations"]) == 1
     assert cli.main(["bench", "web", "https://example.com", "--rounds", "1"]) == 0
     assert "cu-arena  observations=1" in capsys.readouterr().out
+
+
+def test_grant_target_accepts_an_installed_but_not_running_app(monkeypatch) -> None:
+    """--grant must not abort when the target app is not running yet: the loop can launch it."""
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    class _RT:
+        def _frontmost(self): return "com.front.app"
+        def _resolve_app(self, ident):
+            raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "nope", detail={"app": ident})
+
+    assert cli._grant_target(_RT(), "org.krita") == "org.krita"          # bundle id as given
+    with pytest.raises(ComputerUseError) as info:
+        cli._grant_target(_RT(), "definitely-not-an-app-9f3")
+    assert info.value.code is ErrorCode.APP_NOT_FOUND
+    with pytest.raises(ComputerUseError):
+        cli._grant_target(_RT(), None)                                    # frontmost must resolve
+
+    class _RTOk(_RT):
+        def _resolve_app(self, ident): return (object(), "com.resolved.app")
+
+    assert cli._grant_target(_RTOk(), "Whatever") == "com.resolved.app"

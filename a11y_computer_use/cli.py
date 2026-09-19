@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 
@@ -236,7 +237,7 @@ def _cmd_bench_audit(args: argparse.Namespace) -> int:
 def _cmd_bench_web(args: argparse.Namespace) -> int:
     from a11y_computer_use import arena
     from a11y_computer_use.drivers.browser import BrowserDriver
-    from a11y_computer_use.schema import ComputerUseError
+    from a11y_computer_use.schema import ErrorCode, ComputerUseError
     from a11y_computer_use import server
 
     driver = BrowserDriver(endpoint=args.endpoint)
@@ -366,6 +367,44 @@ def _cmd_bench_h2h(args: argparse.Namespace) -> int:
     return 0 if agg and all(v["completed"] > 0 for v in agg.values()) else 1
 
 
+
+def _grant_target(runtime: "server.Runtime", app: str | None) -> str:
+    """The app id ``--grant`` should key on.
+
+    A running app resolves to its id through the driver. An app that is NOT
+    running yet is still a valid target (the loop can `app launch` it), so a
+    bundle id is granted as given and a display name is looked up among the
+    installed applications; only an identifier that matches nothing raises.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    target = app if app is not None else runtime._frontmost()
+    try:
+        _running, resolved = runtime._resolve_app(target)
+        return resolved
+    except ComputerUseError as exc:
+        if exc.code is not ErrorCode.APP_NOT_FOUND or app is None:
+            raise
+    if "." in target:
+        return target  # a bundle id; grants are keyed by it whether or not it runs
+    if sys.platform == "darwin":
+        from AppKit import NSBundle, NSWorkspace
+
+        url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(target)
+        if url is None:
+            for folder in ("/Applications", os.path.expanduser("~/Applications"), "/System/Applications"):
+                candidate = os.path.join(folder, f"{target}.app")
+                if os.path.isdir(candidate):
+                    bundle = NSBundle.bundleWithPath_(candidate)
+                    ident = bundle.bundleIdentifier() if bundle is not None else None
+                    if ident:
+                        return str(ident)
+    raise ComputerUseError(
+        ErrorCode.APP_NOT_FOUND,
+        f"no running or installed application matches {target!r}; pass its bundle id",
+        detail={"app": target},
+    )
+
 def _cmd_agent(args: argparse.Namespace) -> int:
     from a11y_computer_use import agent, providers, safety, server
     from a11y_computer_use.schema import ComputerUseError
@@ -379,8 +418,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     app = args.app
     if args.grant:
         try:
-            target = app if app is not None else runtime._frontmost()
-            _running, target = runtime._resolve_app(target)
+            target = _grant_target(runtime, app)
         except ComputerUseError as exc:
             print(server.error_text(exc), file=sys.stderr)
             return 1
