@@ -2611,19 +2611,27 @@ def build_server(
     @server.tool(name="screenshot")
     async def screenshot(
         display_id: int | None = None, max_long_edge: int = _DEFAULT_MAX_LONG_EDGE,
-        marks: bool = False,
+        marks: bool = False, format: str = "png", quality: int = 80,
     ) -> list:
         """Capture one display (default: main) as a PNG downscaled to at most
         max_long_edge px on its long edge. The accompanying text states the
         physical resolution and how to map image coordinates back to physical
         pixels. Prefer desktop_snapshot refs; this is the vision fallback.
+        format='jpeg' (with quality, default 80) sends the same pixels four to
+        five times smaller, for a server reached over a slow link.
 
         marks=true draws each interactive element from your latest snapshot on
         the image, labeled with its ref (Set-of-Mark) — so you can name a ref
         ('click e7') off the picture instead of guessing pixel coordinates. Take
         a desktop_snapshot first so there are refs to mark. Tier 'read' against
         the frontmost app. Needs the Screen Recording permission."""
+        if format not in ("png", "jpeg"):
+            raise ValueError(f"format must be 'png' or 'jpeg', not {format!r}")
         text, scaled = await run(runtime.screenshot, display_id, max_long_edge, marks)
+        if format == "jpeg":
+            from a11y_computer_use import capture as _capture
+
+            return [text, Image(data=_capture.to_jpeg(scaled.png, quality), format="jpeg")]
         return [text, Image(data=scaled.png, format="png")]
 
     @server.tool(name="zoom")

@@ -458,6 +458,29 @@ async def test_screenshot_round_trip_returns_text_and_image(
     assert image_block.mimeType == "image/png"
 
 
+async def test_screenshot_format_jpeg_sends_a_jpeg_and_rejects_other_formats(
+    mcp_server, store, monkeypatch
+) -> None:
+    import base64
+
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    display = Display(display_id=1, width=8, height=4, scale=2.0, is_main=True)
+    monkeypatch.setattr(
+        capture, "screenshot",
+        lambda display_id=None: capture.Screenshot(png=tiny_png(), display=display),
+    )
+    store.set_tier("com.test.front", safety.Tier.READ)
+
+    result = await call_tool(mcp_server, "screenshot", {"format": "jpeg", "quality": 70})
+    assert not result.isError
+    image_block = result.content[1]
+    assert image_block.mimeType == "image/jpeg"
+    assert base64.b64decode(image_block.data)[:3] == b"\xff\xd8\xff"
+
+    result = await call_tool(mcp_server, "screenshot", {"format": "gif"})
+    assert result.isError and "format" in result.content[0].text
+
+
 async def test_screenshot_without_grant_needs_permission(
     mcp_server, audit_dir, monkeypatch
 ) -> None:

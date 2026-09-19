@@ -290,6 +290,21 @@ def zoom_region(region: Bounds) -> bytes:
     return buffer.getvalue()
 
 
+def to_jpeg(png: bytes, quality: int = 80) -> bytes:
+    """Re-encode PNG bytes as JPEG (alpha dropped). A 1080p desktop is four to
+    five times smaller as JPEG at quality 80, which is what makes a screenshot
+    affordable over a slow remote link; the pixel grid, and so every
+    coordinate, is unchanged."""
+    import io
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=max(1, min(95, int(quality))), optimize=True)
+    return buf.getvalue()
+
+
 def downscale(png: bytes, max_long_edge: int = DEFAULT_MAX_LONG_EDGE) -> ScaledImage:
     """Downscale a PNG so its long edge is at most ``max_long_edge``.
 

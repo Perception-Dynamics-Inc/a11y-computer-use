@@ -54,6 +54,36 @@ class _Image:
     png: bytes
 
 
+WIRE_IMAGE_FORMAT = os.environ.get("A11Y_COMPUTER_USE_REMOTE_IMAGE_FORMAT", "jpeg")
+
+
+def wire_params(tool: str, params: dict[str, object], tools: list[dict]) -> dict[str, object]:
+    """Ask a remote ``screenshot`` for JPEG when the server's schema advertises
+    ``format`` and the caller did not choose: a 1080p PNG is about 800 KB on
+    the wire and took 6 to 70 s over the Box link; the JPEG is a fifth of that.
+    Older servers, other tools, and explicit choices pass through unchanged."""
+    if tool != "screenshot" or "format" in params or WIRE_IMAGE_FORMAT == "png":
+        return dict(params)
+    spec = next((t for t in tools if t.get("name") == tool), None)
+    props = ((spec or {}).get("input_schema") or {}).get("properties") or {}
+    if "format" not in props:
+        return dict(params)
+    return {**params, "format": WIRE_IMAGE_FORMAT}
+
+
+def as_png(data: bytes, mime: str) -> bytes:
+    """Image bytes from the wire as PNG, so the planner side sees one format."""
+    if mime == "image/png" or data[:8] == b"\x89PNG\r\n\x1a\n":
+        return data
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.open(io.BytesIO(data)).convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
 class RemoteRuntime:
     """A Runtime look-alike whose tools run on a remote MCP server."""
 
@@ -143,6 +173,8 @@ class RemoteRuntime:
         if self._session is None:
             raise ComputerUseError(ErrorCode.UNSUPPORTED, "remote MCP session is not connected")
 
+        params = wire_params(tool, params, self._tools)
+
         async def _call():
             return await asyncio.wait_for(self._session.call_tool(tool, dict(params)), self._call_timeout_s)
 
@@ -157,7 +189,7 @@ class RemoteRuntime:
             if kind == "text":
                 texts.append(block.text)
             elif kind == "image":
-                image = _Image(base64.b64decode(block.data))
+                image = _Image(as_png(base64.b64decode(block.data), getattr(block, "mimeType", "")))
         text = "\n".join(texts)
         if getattr(result, "isError", False):
             code, message, detail = parse_error_text(text)

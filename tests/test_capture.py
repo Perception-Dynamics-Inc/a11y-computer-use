@@ -242,3 +242,17 @@ def test_displays_reports_a_locked_screen_as_a_structured_error(monkeypatch) -> 
     with pytest.raises(ComputerUseError) as info:
         capture.displays()
     assert info.value.code is ErrorCode.UNSUPPORTED and "locked or asleep" in str(info.value)
+
+
+def test_to_jpeg_keeps_the_pixel_grid_and_shrinks_the_bytes() -> None:
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use import capture
+
+    im = Image.effect_noise((640, 360), 64).convert("RGBA")  # noise: PNG cannot compress it
+    buf = io.BytesIO(); im.save(buf, format="PNG")
+    jpg = capture.to_jpeg(buf.getvalue(), 80)
+    assert jpg[:3] == b"\xff\xd8\xff" and Image.open(io.BytesIO(jpg)).size == (640, 360)
+    assert len(jpg) < len(buf.getvalue())

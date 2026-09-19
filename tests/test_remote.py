@@ -61,3 +61,25 @@ def test_agent_tool_specs_prefers_the_remote_list() -> None:
 
     names = [t["name"] for t in agent.tool_specs(_RT())]
     assert names == ["click", "done"]
+
+
+def test_wire_params_asks_for_jpeg_only_when_the_server_advertises_format() -> None:
+    new = [{"name": "screenshot", "input_schema": {"properties": {"format": {}, "quality": {}}}}]
+    old = [{"name": "screenshot", "input_schema": {"properties": {"max_long_edge": {}}}}]
+    assert remote.wire_params("screenshot", {"max_long_edge": 1280}, new) == {"max_long_edge": 1280, "format": "jpeg"}
+    assert remote.wire_params("screenshot", {"format": "png"}, new) == {"format": "png"}  # explicit choice wins
+    assert remote.wire_params("screenshot", {}, old) == {}  # an older server never sees the argument
+    assert remote.wire_params("click", {"ref": "e1"}, new) == {"ref": "e1"}
+
+
+def test_as_png_returns_png_unchanged_and_transcodes_jpeg() -> None:
+    import io
+
+    from PIL import Image
+
+    im = Image.new("RGB", (8, 6), (40, 120, 200))
+    png, jpg = io.BytesIO(), io.BytesIO()
+    im.save(png, format="PNG"); im.save(jpg, format="JPEG")
+    assert remote.as_png(png.getvalue(), "image/png") == png.getvalue()
+    out = remote.as_png(jpg.getvalue(), "image/jpeg")
+    assert out[:8] == b"\x89PNG\r\n\x1a\n" and Image.open(io.BytesIO(out)).size == (8, 6)
