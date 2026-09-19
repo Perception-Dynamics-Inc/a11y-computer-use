@@ -73,6 +73,41 @@ anything that launches GUI apps: `box ssh` waits for every child that inherits
 its stdout, so a stray GTK window keeps the session open until it times out.
 Redirect launched apps to `/dev/null` or use `--detach`.
 
+## 4a. Drive the box from a planner on your machine
+
+The agent can run its planner here and every tool on the box: the box runs
+`a11y-computer-use mcp` inside its desktop session and the agent speaks MCP
+to it over `box ssh`'s stdin/stdout.
+
+```bash
+# once, on the box: grants are per machine and cannot be set remotely.
+# Linux grant keys are process comm names (15 chars): krita, gedit, chrome, gnome-terminal-.
+box ssh <id> 'cd ~/a11y-computer-use && .venv/bin/python -c "
+from a11y_computer_use.safety import PermissionStore, Tier
+s = PermissionStore()
+for app in [\"krita\", \"gedit\", \"chrome\", \"gnome-terminal-\"]: s.set_tier(app, Tier.FULL)"'
+
+# from your machine
+a11y-computer-use agent --provider claude-cli --app gedit --task "..." \
+  --mcp-command "box ssh <id> bash /home/user/a11y-computer-use/scripts/box/mcp-session.sh"
+```
+
+`mcp-session.sh` sources `session-env.sh` (DISPLAY, XAUTHORITY and the
+session D-Bus address, read from a running `budgie-wm`), turns on the Qt and
+GTK accessibility bridges, and execs the server; the handshake takes about
+4 s and lists the same 21 tools as a local server. `app launch` takes
+`name=`, and `app list` is gated on the frontmost app, so on an empty desktop
+it refuses until something is focused.
+
+Known limits of this image (2026-09-20): Krita 5.2.2 never registers on the
+AT-SPI bus, and a bare PyQt5 window logs `qt.accessibility.atspi: Error in
+contacting registry: Not connected to D-Bus server` even with
+`AT_SPI_BUS_ADDRESS` exported, so Qt apps have no a11y tree here and are
+driven by screenshot and coordinates (GTK apps such as gedit are fine).
+Linux has no OCR refs (`screen_text` is macOS-only). A full-desktop
+screenshot crosses the `box ssh` link at roughly 170 KB/s, which is why the
+remote runtime asks for JPEG.
+
 ## 4b. Verify coordinate input under a real pointer (on the box)
 
 ```bash
