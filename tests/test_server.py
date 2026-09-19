@@ -532,6 +532,22 @@ async def test_app_list_returns_json_rows(mcp_server, store, monkeypatch) -> Non
     assert rows == [{"bundle_id": APP, "name": "TextEdit", "pid": 42, "frontmost": True}]
 
 
+async def test_app_list_on_a_fresh_desktop_keys_on_a_trusted_running_app(mcp_server, store, monkeypatch) -> None:
+    """Nothing focused: the frontmost 'app' is the desktop shell, which nobody
+    grants. The list (identities only) is then gated against a running app the
+    human already trusted; with no grant anywhere it still refuses."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "nemo-desktop")
+    rows_ = [{"bundle_id": "nemo-desktop", "name": "nemo-desktop", "pid": 1, "frontmost": True},
+             {"bundle_id": APP, "name": "TextEdit", "pid": 42, "frontmost": False}]
+    monkeypatch.setattr(server, "_list_apps", lambda: rows_)
+    result = await call_tool(mcp_server, "app", {"action": "list"})
+    assert result.isError and "needs_permission" in result.content[0].text  # no grant anywhere
+    store.set_tier(APP, safety.Tier.READ)
+    result = await call_tool(mcp_server, "app", {"action": "list"})
+    assert not result.isError
+    assert json.loads(result.content[0].text) == rows_
+
+
 async def test_window_list_bounds_are_display_qualified_physical_pixels(
     mcp_server, store, monkeypatch
 ) -> None:

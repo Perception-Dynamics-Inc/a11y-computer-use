@@ -2049,6 +2049,29 @@ class Runtime:
     APP_LAUNCH_WAIT_S = float(os.environ.get("A11Y_COMPUTER_USE_LAUNCH_WAIT_S", "60"))
     APP_FOCUS_WAIT_S = 5.0
 
+    def _list_gate_key(self) -> str:
+        """The app `app list` is gated against. The list reveals app identities
+        only (id, name, pid, frontmost), so it is gated at tier read against the
+        frontmost app when that app holds a grant. On a fresh desktop the
+        frontmost "app" is the shell (Finder, nemo-desktop, explorer.exe), which
+        nobody grants, and the planner's first question, "what is running?",
+        was refused on every trial; the gate then keys on a running app the
+        human has already trusted. With no grant on any running app the refusal
+        stands: nothing on this machine is trusted yet."""
+        front = self._frontmost()
+        if self.store.get_tier(front) is not None:
+            return front
+        try:
+            rows = self.driver.running_apps()
+        except ComputerUseError:
+            return front
+        for row in rows:
+            ident = str(row.get("bundle_id") or row.get("id") or row.get("app") or row.get("name") or "")
+            tier, denied, _error = self.store.policy(ident) if ident else (None, True, None)
+            if tier is not None and not denied:
+                return ident
+        return front
+
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
         needle = identifier.lower()
         for key in ("app", "bundle_id", "name"):
@@ -2122,7 +2145,7 @@ class Runtime:
         # to come to the front, so the next observation sees a ready app.
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
-            rows = self._run_gated(AppOp(verb=verb), self._frontmost(), self.driver.running_apps)
+            rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self.driver.running_apps)
             return json.dumps(rows)
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
