@@ -2212,7 +2212,9 @@ _INSTRUCTIONS = (
     "Accessibility-first computer use (macOS, Windows, Linux, and Chromium over CDP). "
     "Call desktop_snapshot first and act on "
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
-    "snapshot — a stale_ref error means the UI changed, re-observe. Prefer "
+    "snapshot — a stale_ref error means the UI changed, re-observe; if its reason is "
+    "title_changed the list reordered under the ref and the candidates name the element now at "
+    "that position: find(text=...) or scroll_to_find the target again, never click the slot. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
     "and mode='diff' to re-observe after an action. When a snapshot has no "
     "actionable elements (custom-drawn apps such as Telegram or After Effects), "
@@ -2597,7 +2599,11 @@ def build_server(
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the largest scroll
-        container in view is used. Gated at tier 'click' (it scrolls)."""
+        container in view is used. Gated at tier 'click' (it scrolls).
+        After a stale_ref whose reason is title_changed (the list reordered or
+        refreshed under the ref, and the row at that position is now another
+        one), call find(text=...) or scroll_to_find again and act on the ref it
+        returns; never click the old slot."""
         return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
 
     @server.tool(name="app")

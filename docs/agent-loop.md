@@ -136,3 +136,42 @@ The planner chose the batched `act` tool on its own, which is the round-trip-sav
 ## Live runs on macOS
 
 Synthetic input does not reset the idle timer, so a long run on an unattended Mac ends with a locked screen and every capture failing. `a11y-computer-use agent` and `mission run` therefore hold `caffeinate -dimsu` for their duration (`A11Y_COMPUTER_USE_KEEP_AWAKE=0` opts out) and refuse to start while the screen is locked or no display is active, with a structured `unsupported` message instead of a traceback. Turn display sleep off or leave the keep-awake default on, and do not use the machine while a run drives it: the same-window recheck refuses clicks under whatever window you bring to the front. Observations of a granted app (`desktop_snapshot`, `screen_text(app=X)`, `window list app=X`, and the automatic OCR escalation) are gated against that app, so an ungranted terminal in front does not block them; the result says when the app is not frontmost. `app launch` waits `A11Y_COMPUTER_USE_LAUNCH_WAIT_S` seconds (default 60) for the first window.
+
+## Refs after a live reorder
+
+A ref is issued for an element with a title. When the ref is used later, the
+element is re-resolved against a fresh tree, and the title is binding: the ref
+follows the element wherever it moved, and it never resolves onto whatever
+element now occupies its old position. This closes the failure the incident
+gauntlet exposed, where a virtualized list refreshed and reordered between the
+observation and the click, and the click landed on the row that had slid into
+the slot.
+
+What the planner sees when the titled element is gone from the tree:
+
+```text
+stale_ref: e105 (AXRow 'email-router production') is no longer in the tree under
+that title; the AXRow at that position is now 'config-sync production'. The
+list may have reordered: use find(text=...) or scroll_to_find to locate it
+again rather than clicking the slot
+detail: {"reason": "title_changed", "candidates": [..., {"ref": "e105",
+"title": "config-sync production", "at_old_position": true}]}
+```
+
+Rules, in order:
+
+- A developer-assigned stable id still wins for controls that may relabel
+  (a button going from "Submit" to "Sending") when no other live element
+  carries the old label. For rows, cells, items, links, and static text the
+  label is binding even against a matching id, because virtualized lists hand
+  out slot-based ids that outlive the row's content.
+- Titles compare case- and whitespace-insensitively; a title truncated with an
+  ellipsis matches a live title that starts with the same stem of at least
+  three characters.
+- Text-like elements without a title (static text, headings) are bound by
+  their value the same way.
+- Untitled elements keep the positional ladder: same path, then nearest bounds
+  within 400 px.
+
+After a `title_changed` result, call `find(text=...)` or `scroll_to_find` and
+act on the ref it returns.

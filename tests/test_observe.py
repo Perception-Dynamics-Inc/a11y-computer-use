@@ -991,3 +991,131 @@ def test_application_root_without_geometry_still_walks_its_windows(snapshot_buil
     roles = [e.role for e in snap.elements]
     assert roles == ["AXApplication", "AXWindow", "AXButton"], roles
     assert snap.elements[0].bounds.width == 3024 and snap.elements[2].clickable
+
+
+# ---------------------------------------------------------------------------
+# Refs after a live reorder (the incident-gauntlet failure: a ref must never
+# re-resolve onto whatever element slid into its old slot)
+# ---------------------------------------------------------------------------
+
+
+def _row(title: str, y: float, sid: str | None = None) -> dict:
+    node = ax("AXRow", title=title, at=(10.0, y), size=(300.0, 20.0), actions=("AXPress",))
+    if sid:
+        node["stable_id"] = sid
+    return node
+
+
+def _list(rows: list[dict]) -> dict:
+    return ax("AXWindow", title="Console", at=(0.0, 0.0), size=(400.0, 600.0), children=[
+        ax("AXList", title="Services", at=(0.0, 40.0), size=(320.0, 500.0), children=rows),
+    ])
+
+
+def test_reorder_with_recreated_ids_is_stale_with_title_changed_and_the_slot_occupant() -> None:
+    """Rows destroyed and recreated (new ids) and reordered: the ref for the
+    'email-router production' row must NOT resolve onto 'config-sync', the row
+    now at that position; the error names the occupant."""
+    before = snap_of(_list([
+        _row("auth-gateway production", 60.0, "n1"),
+        _row("email-router production", 80.0, "n2"),
+        _row("config-sync production", 100.0, "n3"),
+    ]))
+    # The target scrolled out of the rendered window; other rows moved and got new ids.
+    after = snap_of(_list([
+        _row("payments-api staging", 60.0, "n7"),
+        _row("config-sync production", 80.0, "n8"),
+        _row("auth-gateway production", 100.0, "n9"),
+    ]))
+    anchor = by_title(before, "email-router production")
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(before, anchor.ref, live=after)
+    detail = exc.value.detail
+    assert detail["reason"] == "title_changed"
+    occupant = next(c for c in detail["candidates"] if c.get("at_old_position"))
+    assert occupant["title"] == "config-sync production"
+    assert "config-sync production" in str(exc.value)
+    assert "find(text=...)" in str(exc.value)
+
+
+def test_reorder_where_the_titled_row_still_exists_resolves_to_it_by_title() -> None:
+    before = snap_of(_list([
+        _row("auth-gateway production", 60.0, "n1"),
+        _row("email-router production", 80.0, "n2"),
+        _row("config-sync production", 100.0, "n3"),
+    ]))
+    # Same rows, new ids, reordered; the target moved 400 px down (beyond the old drift cap).
+    after = snap_of(_list([
+        _row("config-sync production", 80.0, "n8"),
+        _row("auth-gateway production", 100.0, "n9"),
+        _row("email-router production", 480.0, "n7"),
+    ]))
+    anchor = by_title(before, "email-router production")
+    match = resolve_ref(before, anchor.ref, live=after)
+    assert match.title == "email-router production"
+    assert match.bounds.y > by_title(after, "auth-gateway production").bounds.y  # it moved down, past the old drift cap
+
+
+def test_slot_based_stable_id_does_not_beat_the_title_on_item_roles() -> None:
+    """A virtualized list that reuses ids per slot: the id 'slot-2' now holds a
+    different row. The title wins; the id alone must not."""
+    before = snap_of(_list([_row("email-router production", 80.0, "slot-2")]))
+    after = snap_of(_list([
+        _row("config-sync production", 80.0, "slot-2"),
+        _row("email-router production", 140.0, "slot-5"),
+    ]))
+    match = resolve_ref(before, by_title(before, "email-router production").ref, live=after)
+    assert match.title == "email-router production"
+    gone = snap_of(_list([_row("config-sync production", 80.0, "slot-2")]))
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(before, by_title(before, "email-router production").ref, live=gone)
+    assert exc.value.detail["reason"] == "title_changed"
+
+
+def test_relabelled_button_under_a_developer_id_still_resolves() -> None:
+    """Buttons may relabel under a stable developer id ("Submit" -> "Sending…")
+    when nothing else carries the old label; that path is unchanged."""
+    before = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Submit", at=(10.0, 10.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ]))
+    after = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", title="Sending…", at=(250.0, 200.0), size=(80.0, 30.0),
+           actions=("AXPress",), stable_id="submit-btn"),
+    ]))
+    assert resolve_ref(before, by_title(before, "Submit").ref, live=after).title == "Sending…"
+
+
+def test_truncated_title_tolerance() -> None:
+    before = snap_of(_list([_row("email-router prod…", 80.0)]))
+    after = snap_of(_list([_row("config-sync production", 80.0),
+                           _row("email-router production", 120.0)]))
+    match = resolve_ref(before, by_title(before, "email-router prod…").ref, live=after)
+    assert match.title == "email-router production"
+    assert observe._labels_match("Abc…", "Abcd") and not observe._labels_match("Ab…", "Abcd")  # stem of three
+    assert observe._labels_match("  Email   Router ", "email router")
+
+
+def test_untitled_anchor_keeps_the_positional_ladder() -> None:
+    before = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", at=(10.0, 10.0), size=(80.0, 30.0), actions=("AXPress",)),
+    ]))
+    after = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXButton", at=(30.0, 20.0), size=(80.0, 30.0), actions=("AXPress",)),
+    ]))
+    anchor = next(el for el in before.elements if el.role == "AXButton")
+    moved = next(el for el in after.elements if el.role == "AXButton")
+    assert resolve_ref(before, anchor.ref, live=after).bounds == moved.bounds
+
+
+def test_value_is_binding_for_text_like_roles() -> None:
+    before = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXStaticText", value="Request 1234 succeeded", at=(10.0, 10.0), size=(200.0, 20.0)),
+    ]))
+    after = snap_of(ax("AXWindow", title="W", at=(0.0, 0.0), size=(400.0, 300.0), children=[
+        ax("AXStaticText", value="Request 1235 timed out", at=(10.0, 10.0), size=(200.0, 20.0)),
+    ]))
+    anchor = next(el for el in before.elements if el.role == "AXStaticText")
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(before, anchor.ref, live=after)
+    assert exc.value.detail["reason"] == "title_changed"

@@ -24,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 
 import itertools
+import difflib
 import math
 import os
 import time
@@ -341,9 +342,18 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     anchor = snap.element(ref)
     match, reason = _match_anchor(anchor, live)
     if match is None:
+        message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
+        candidates = stale_ref_candidates(anchor, live)
+        if reason == "title_changed":
+            occupant = next((c for c in candidates if c.get("at_old_position")), None)
+            where = (f"; the {anchor.role} at that position is now {occupant['title']!r}"
+                     if occupant else "")
+            message = (f"{ref} ({anchor.role} {anchor.title!r}) is no longer in the tree under "
+                       f"that title{where}. The list may have reordered: use find(text=...) or "
+                       "scroll_to_find to locate it again rather than clicking the slot")
         raise ComputerUseError(
             ErrorCode.STALE_REF,
-            f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe",
+            message,
             detail={
                 "ref": ref,
                 "snapshot_id": snap.snapshot_id,
@@ -355,7 +365,7 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
                     "path": list(anchor.path),
                 },
                 # near-misses so the agent can retry a likely ref, no re-snapshot
-                "candidates": stale_ref_candidates(anchor, live),
+                "candidates": candidates,
             },
         )
     return match
@@ -1259,24 +1269,117 @@ def ax_handle_for(snapshot_id: str, ref: str) -> object | None:
 # ---------------------------------------------------------------------------
 
 
+#: Roles whose ``value`` is the text a person reads (no separate title), so a
+#: value-bearing anchor of one of these must keep its value to re-resolve.
+_TEXT_LIKE_ROLES = frozenset({"AXStaticText", "AXHeading"})
+#: Roles whose identity IS their text: rows, cells, items, links. A stable id on
+#: one of these is often slot-based (``row-3`` keeps its id while the content
+#: scrolls or reorders under it), so the label stays binding even when the id
+#: matches. Buttons and fields may legitimately relabel ("Submit" -> "Sending")
+#: under a developer-assigned id, so for them a matching id still wins when no
+#: live element carries the old label.
+_ITEM_ROLES = frozenset({"AXRow", "AXCell", "AXListItem", "AXOutlineRow", "AXMenuItem",
+                         "AXStaticText", "AXHeading", "AXLink"})
+_ELLIPSES = ("\u2026", "...")
+
+
+def _norm_label(text: str) -> str:
+    text = " ".join(text.split()).lower()
+    for mark in _ELLIPSES:
+        if text.endswith(mark):
+            text = text[: -len(mark)].rstrip()
+    return text
+
+
+def _labels_match(anchor_text: str, live_text: str | None) -> bool:
+    """Case- and whitespace-insensitive equality, plus one tolerance: a title
+    truncated with an ellipsis ("email-router prod…") matches a live title that
+    starts with the same stem (at least three characters), and the reverse."""
+    if live_text is None:
+        return False
+    a, b = _norm_label(anchor_text), _norm_label(live_text)
+    if a == b:
+        return True
+    a_cut = any(anchor_text.rstrip().endswith(m) for m in _ELLIPSES)
+    b_cut = any(live_text.rstrip().endswith(m) for m in _ELLIPSES)
+    if a_cut and len(a) >= 3 and b.startswith(a):
+        return True
+    if b_cut and len(b) >= 3 and a.startswith(b):
+        return True
+    return False
+
+
+def _anchor_label(anchor: Element) -> tuple[str, str] | None:
+    """The text a ref was issued for: ("title", ...) when the element has a
+    title, ("value", ...) for text-like roles that only carry a value, else None
+    (an untitled anchor is matched by path and position alone)."""
+    if anchor.title:
+        return "title", anchor.title
+    if anchor.role in _TEXT_LIKE_ROLES and anchor.value:
+        return "value", str(anchor.value)
+    return None
+
+
+def _label_of(el: Element, kind: str) -> str | None:
+    if kind == "title":
+        return el.title
+    return None if el.value is None else str(el.value)
+
+
+def _label_similarity(a: str, b: str | None) -> float:
+    if not b:
+        return 0.0
+    na, nb = _norm_label(a), _norm_label(b)
+    if not na or not nb:
+        return 0.0
+    ta, tb = set(na.split()), set(nb.split())
+    overlap = len(ta & tb) / max(1, len(ta | tb))
+    return max(overlap, difflib.SequenceMatcher(None, na, nb).ratio())
+
+
 def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]:
     """Find ``anchor``'s counterpart in ``live``; (None, reason) on failure.
 
-    A developer-assigned `stable_id` (AXIdentifier / AutomationId / accessible-id)
-    is layout-independent, so when the anchor carries one an exact (stable_id,
-    role) match is authoritative — this is what lets refs survive relayout,
-    scroll, and dynamic lists that shift title/path/bounds. Only a genuine
-    duplicate (same id and role on two live nodes) falls through to the
-    positional ladder: candidates share the role and at least one strong anchor
-    (title or path); title+path matches win; ties break by bounds proximity; a
-    near-exact distance tie is ambiguous; partial matches must lie within
-    `_WEAK_ANCHOR_DRIFT_PX`.
+    The text a ref was issued for is binding. A titled anchor (or a text-like
+    element with a value) only ever re-resolves onto a live element with the
+    same title, wherever it moved; it never resolves onto whatever element now
+    occupies its old slot. That case, a live list reordering under a ref, was
+    the single largest failure in the incident-gauntlet benchmark: the click
+    landed on the row that had slid into the position. Untitled anchors keep
+    the positional ladder (path, then bounds proximity within
+    `_WEAK_ANCHOR_DRIFT_PX`).
+
+    A developer-assigned `stable_id` (AXIdentifier / AutomationId / accessible-id
+    / backend DOM node id) is layout-independent, so an exact (stable_id, role)
+    match is authoritative when the label still matches, or when the anchor had
+    no label; a recreated node that reuses an id under a different title falls
+    through to the label ladder. Duplicate ids disambiguate by proximity; a
+    near-exact distance tie is ambiguous.
+
+    Reasons: ``not_found`` (no same-role element at all, or nothing matching an
+    untitled anchor), ``title_changed`` (same-role elements exist but none
+    carries the anchor's text), ``ambiguous`` (a tie).
     """
+    label = _anchor_label(anchor)
+
+    def label_ok(el: Element) -> bool:
+        return label is None or _labels_match(label[1], _label_of(el, label[0]))
+
     if anchor.stable_id:
         exact = [
             el for el in live.elements
             if el.stable_id == anchor.stable_id and el.role == anchor.role
         ]
+        if label is not None:
+            labelled = [el for el in exact if label_ok(el)]
+            if labelled:
+                exact = labelled
+            elif anchor.role in _ITEM_ROLES or any(
+                label_ok(el) for el in live.elements if el.role == anchor.role
+            ):
+                # The id kept its slot but the text moved (or the row is an item
+                # whose text is its identity): the label ladder decides.
+                exact = []
         if len(exact) == 1:
             return exact[0], ""
         if len(exact) > 1:  # duplicate ids: disambiguate by bounds proximity
@@ -1285,19 +1388,26 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
             d1 = _center_distance(anchor.bounds, ranked[1].bounds)
             return (None, "ambiguous") if d1 - d0 <= _AMBIGUITY_PX else (ranked[0], "")
 
+    same_role = [el for el in live.elements if el.role == anchor.role]
     candidates: list[tuple[int, float, Element]] = []
-    for el in live.elements:
-        if el.role != anchor.role:
+    for el in same_role:
+        if label is not None:
+            if not label_ok(el):
+                continue
+            # The text matched: it may have moved anywhere (a reordered or
+            # scrolled list), so no drift cap; path agreement still ranks first.
+            score = 4 + (2 if el.path == anchor.path else 0)
+            candidates.append((score, _center_distance(anchor.bounds, el.bounds), el))
             continue
-        score = (4 if el.title == anchor.title else 0) + (2 if el.path == anchor.path else 0)
+        score = 2 if el.path == anchor.path else 0
         if score == 0:
             continue
         distance = _center_distance(anchor.bounds, el.bounds)
-        if score < 6 and distance > _WEAK_ANCHOR_DRIFT_PX:
+        if distance > _WEAK_ANCHOR_DRIFT_PX:
             continue
         candidates.append((score, distance, el))
     if not candidates:
-        return None, "not_found"
+        return None, ("title_changed" if label is not None and same_role else "not_found")
     best_score = max(score for score, _, _ in candidates)
     pool = sorted(
         ((d, el) for score, d, el in candidates if score == best_score),
@@ -1316,27 +1426,54 @@ def _center_distance(a: Bounds, b: Bounds) -> float:
 
 
 def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> list[dict]:
-    """The best near-misses for a ref that failed to re-resolve — same role plus
-    a title/path overlap, ranked by anchor strength then proximity. Attached to
-    the STALE_REF error so the agent can self-correct to a likely-right ref
-    instead of re-snapshotting the whole tree."""
-    scored: list[tuple[int, float, Element]] = []
+    """The best near-misses for a ref that failed to re-resolve, attached to the
+    STALE_REF error so the agent can self-correct without re-snapshotting.
+
+    Same-role elements ranked by anchor strength (exact text 4, path 2, partial
+    text overlap or closest text by similarity 1..3), then proximity. For a
+    labelled anchor the element now occupying the old position is always
+    included and flagged ``at_old_position``, so the planner reads "the row at
+    that slot is now X" instead of clicking it blind.
+    """
+    label = _anchor_label(anchor)
+    scored: list[tuple[float, float, Element]] = []
     for el in live.elements:
         if el.role != anchor.role:
             continue
-        score = (4 if el.title == anchor.title else 0) + (2 if el.path == anchor.path else 0)
-        if score == 0 and anchor.title and el.title and (
-            anchor.title in el.title or el.title in anchor.title
-        ):
-            score = 1  # partial title overlap is a weak but useful signal
-        if score == 0:
+        score: float = 0.0
+        if label is not None:
+            live_text = _label_of(el, label[0])
+            if _labels_match(label[1], live_text):
+                score = 4.0
+            else:
+                sim = _label_similarity(label[1], live_text)
+                if sim >= 0.3:
+                    score = 1.0 + 2.0 * sim  # 1.6 .. 3.0: closest texts first
+        elif el.title == anchor.title:
+            score = 4.0
+        if el.path == anchor.path:
+            score += 2.0
+        if score == 0.0:
             continue
         scored.append((score, _center_distance(anchor.bounds, el.bounds), el))
     scored.sort(key=lambda t: (-t[0], t[1]))
-    return [
-        {"ref": el.ref, "role": el.role, "title": el.title, "score": score}
+    out = [
+        {"ref": el.ref, "role": el.role, "title": el.title, "score": int(round(score))}
         for score, _dist, el in scored[:limit]
     ]
+    if label is not None:
+        same_role = [el for el in live.elements if el.role == anchor.role]
+        if same_role:
+            occupant = min(same_role, key=lambda el: _center_distance(anchor.bounds, el.bounds))
+            if math.isfinite(_center_distance(anchor.bounds, occupant.bounds)):
+                for row in out:
+                    if row["ref"] == occupant.ref:
+                        row["at_old_position"] = True
+                        break
+                else:
+                    out.append({"ref": occupant.ref, "role": occupant.role,
+                                "title": occupant.title, "score": 0, "at_old_position": True})
+    return out
 
 
 # ---------------------------------------------------------------------------
