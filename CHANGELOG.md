@@ -9,6 +9,10 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] - 2026-09-20
+
 Found by four planner trials on the Box Linux desktop over the remote backend (Krita, Excalidraw in Chromium, ffmpeg in a terminal, gedit): the "Mona Lisa" the first run reported was a single dot, every screenshot took 6 to 70 s, launches waited a minute for a window that was already up, quit did nothing, the document and the terminal screen were missing from snapshots, and the first `app list` on a fresh desktop was refused.
 
 ### Fixed

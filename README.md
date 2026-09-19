@@ -7,12 +7,12 @@
   <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.3.0"><img src="https://img.shields.io/badge/release-v0.3.0-2A8CFF" alt="Release v0.3.0"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.3.1"><img src="https://img.shields.io/badge/release-v0.3.1-2A8CFF" alt="Release v0.3.1"></a>
 </p>
 
 Computer use for AI agents that clicks real UI elements instead of guessed pixels. The model reads a pruned accessibility tree and says `click e14`. Works on macOS, Windows, Linux, and Chromium, through one MCP server.
 
-> 0.3.0 adds voice control (`a11y-computer-use voice`: on-device speech, about 60 ms from transcript to action with the local router), a remote backend (`agent --mcp-command` drives a server on another machine over SSH), and WebMCP tools as `w` refs in the browser. The full agency mission in `docs/missions/` has not been run end to end yet.
+> 0.3.1 fixes what four planner trials on a real Linux desktop found (drag waypoints, app resolution and launch, GTK and terminal content, JPEG screenshots for remote servers). 0.3.0 added voice control (`a11y-computer-use voice`), a remote backend (`agent --mcp-command`), and WebMCP tools as `w` refs in the browser. The full agency mission in `docs/missions/` has not been run end to end yet.
 
 ![Driving TextEdit through accessibility refs](docs/hero-demo.gif)
 
