@@ -261,6 +261,10 @@ def test_grant_target_accepts_an_installed_but_not_running_app(monkeypatch) -> N
         def _resolve_app(self, ident):
             raise ComputerUseError(ErrorCode.APP_NOT_FOUND, "nope", detail={"app": ident})
 
+    # The installed-app lookup is a macOS LaunchServices query; fake it so the
+    # test is hermetic on every OS.
+    monkeypatch.setattr(server, "_installed_bundle_id",
+                        lambda ident: "org.krita" if "krita" in ident.lower() else None)
     assert cli._grant_target(_RT(), "org.krita") == "org.krita"          # bundle id as given
     with pytest.raises(ComputerUseError) as info:
         cli._grant_target(_RT(), "definitely-not-an-app-9f3")
