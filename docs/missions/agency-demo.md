@@ -28,7 +28,7 @@ multi-app jobs, menu and file-dialog primitives, and text-based waits.
 | Read brief | Telegram | brief text captured to notes |
 | Design | Figma | file exists, frame named "Landing" present |
 | Video | Chrome (Higgsfield) | mp4 in ~/Downloads, size > 1 MB |
-| Edit | After Effects, Media Encoder | rendered mp4 exists, duration 15 to 30 s |
+| Edit | Terminal (ffmpeg) | ~/Movies/supercar-reel.mp4 exists and is stable, note starts with reel: |
 | Site | Chrome (Higgsfield website) | deployed URL returns 200, page contains the video |
 | Reply | Telegram | sent message visible in the chat, contains the URL |
 

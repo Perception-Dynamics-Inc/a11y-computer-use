@@ -60,21 +60,23 @@ checks = [
 
 [[phase]]
 name = "edit"
-task = """Open the prepared template project in After Effects, replace the placeholder
-footage with the downloaded video from your notes, set the title text to the shop's
-name from the brief, add the composition to the Media Encoder queue, and export an
-H.264 mp4 to ~/Movies/supercar-reel.mp4. Use the menu bar (File, Composition) and
-keyboard shortcuts; panels may need screenshot and coordinates. Record the exported
-path as a note starting with 'reel:'."""
-apps = ["com.adobe.AfterEffects", "com.adobe.ame.application"]
+task = """Edit the downloaded car video with ffmpeg from the Terminal. Launch Terminal,
+then type one ffmpeg command that trims the clip from your notes to its first 20
+seconds, overlays the shop's name from the brief as a title (drawtext, top
+centre, white, 2 s fade in), adds a 1 s fade out, and writes an H.264 mp4 to
+~/Movies/supercar-reel.mp4. Press Return, wait for the prompt to come back, and
+record the exported path as a note starting with 'reel:'. Use wait_until
+file_stable on the output before finishing."""
+apps = ["com.apple.Terminal"]
 tier = "full"
-max_steps = 200
+max_steps = 60
 retries = 1
-check_timeout_s = 900
+check_timeout_s = 600
 checks = [
-  { file_stable = "~/Movies/supercar-reel.mp4", seconds = 10, min_bytes = 1000000 },
+  { file_stable = "~/Movies/supercar-reel.mp4", seconds = 5 },
   { notes_contain = "reel:" },
 ]
+on_fail_notes = "The ffmpeg edit did not produce ~/Movies/supercar-reel.mp4; check the command's error output in Terminal and retry."
 
 [[phase]]
 name = "site"
