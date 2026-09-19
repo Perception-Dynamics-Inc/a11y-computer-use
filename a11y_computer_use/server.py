@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import os
 import subprocess
@@ -93,6 +94,8 @@ from a11y_computer_use.schema import (
     TypeText,
     WaitCondition,
     WaitFor,
+    WebMcpOp,
+    WebMcpVerb,
     WindowOp,
     WindowVerb,
 )
@@ -168,6 +171,9 @@ OCR_WAIT_POLL_S = 0.5
 #: transport (MCP elicitation, a CLI prompt, a test double) stays out of the
 #: safety core.
 Confirmer = Callable[[str], bool]
+
+#: A WebMCP tool ref as rendered in the snapshot block (w1..wN).
+_WEBMCP_REF = re.compile(r"^w[1-9][0-9]*$")
 
 #: Appended to a snapshot that exposes no actionable refs — the a11y→vision
 #: handoff signal (PLAN §6 / COM-12). Custom-drawn apps (Telegram, some games,
@@ -724,6 +730,11 @@ class Runtime:
         self._ocr_engine = ocr_engine if ocr_engine is not None else ocr.default_engine()
         self._screen_text: ocr.ScreenText | None = None
         self._ocr_seq = 0
+        #: The latest WebMCP tool listing (browser backend) and the tab it came
+        #: from: the ``w`` refs' epoch. Refreshed by every browser snapshot and
+        #: by webmcp(action='list'); a call resolves its ref or name here only.
+        self._webmcp_tools: list[dict] = []
+        self._webmcp_app: str | None = None
 
     def close(self) -> None:
         """Wait for the active operation, then release the driver once.
@@ -1371,6 +1382,8 @@ class Runtime:
                 text = f"{first}{header}\n{rest}" if rest else f"{first}{header}"
             if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
                 text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle, snap)}"
+            if hasattr(self.driver, "webmcp_tools"):  # browser: the page's own tools as w refs
+                text = f"{text}{self._webmcp_block(bundle)}"
             return text
 
         return self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute)
@@ -1497,6 +1510,129 @@ class Runtime:
     def network(self, app: str) -> str:
         """Completed network outcomes (status codes + failures) from the browser."""
         return self._browser_feed(app, "network_requests", ObserveVerb.NETWORK, "network")
+
+
+    # -- WebMCP: the page's own tools, as w refs --------------------------------
+
+    def _webmcp_refresh(self, app: str) -> dict:
+        """Read the tab's WebMCP registry and make it the current ``w`` epoch."""
+        listing = self.driver.webmcp_tools(app=app)  # type: ignore[attr-defined]
+        self._webmcp_tools = list(listing.get("tools") or [])
+        self._webmcp_app = app
+        return listing
+
+    def _webmcp_block(self, app: str) -> str:
+        """The ``webmcp tools:`` block appended to a browser snapshot, or ``""``.
+
+        A page that exposes no tools adds nothing; a listing failure is not a
+        snapshot failure (the block is dropped and the cache cleared)."""
+        try:
+            listing = self._webmcp_refresh(app)
+        except ComputerUseError:
+            self._webmcp_tools, self._webmcp_app = [], None
+            return ""
+        tools = listing.get("tools") or []
+        if not tools:
+            return ""
+        lines = ["", "webmcp tools:"]
+        for i, tool in enumerate(tools, start=1):
+            desc = " ".join(str(tool.get("description") or "").split())[:200]  # one line each
+            lines.append(f"  w{i} {tool['name']}" + (f" ({desc})" if desc else ""))
+        return "\n".join(lines)
+
+    def _webmcp_render(self, listing: dict) -> dict:
+        tools = []
+        for i, tool in enumerate(listing.get("tools") or [], start=1):
+            tools.append({
+                "ref": f"w{i}",
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "inputSchema": tool.get("inputSchema"),
+                "kind": tool.get("kind", "script"),
+                "tier": "full" if safety.webmcp_sensitive(tool["name"], tool.get("inputSchema")) else "click",
+            })
+        return {"api": listing.get("api", "absent"), "tools": tools}
+
+    def _webmcp_lookup(self, app: str, ref_or_name: str) -> dict:
+        """Resolve a ``w`` ref or a tool name against the current listing."""
+        if self._webmcp_app != app or not self._webmcp_tools:
+            raise ComputerUseError(
+                ErrorCode.STALE_REF,
+                f"no WebMCP tool listing for {app}; call webmcp(action='list') or desktop_snapshot first",
+                detail={"ref": ref_or_name, "reason": "no_listing"},
+            )
+        if _WEBMCP_REF.match(ref_or_name):
+            index = int(ref_or_name[1:])
+            if not 1 <= index <= len(self._webmcp_tools):
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF, f"{ref_or_name} is not in the current WebMCP listing",
+                    detail={"ref": ref_or_name, "reason": "unknown_ref",
+                            "count": len(self._webmcp_tools)},
+                )
+            return self._webmcp_tools[index - 1]
+        for tool in self._webmcp_tools:
+            if tool["name"] == ref_or_name:
+                return tool
+        raise ComputerUseError(
+            ErrorCode.STALE_REF, f"no WebMCP tool named {ref_or_name!r} in the current listing",
+            detail={"ref": ref_or_name, "reason": "unknown_name",
+                    "candidates": [t["name"] for t in self._webmcp_tools][:20]},
+        )
+
+    @_serialized
+    def webmcp(
+        self,
+        app: str,
+        action: str = "list",
+        name: str | None = None,
+        arguments: "dict | str | None" = None,
+        *,
+        confirm: "Confirmer | None" = None,
+    ) -> str:
+        """List or call the WebMCP tools a page registered (browser backend).
+
+        ``action='list'`` returns JSON ``{api, tools: [{ref, name, description,
+        inputSchema, kind, tier}]}`` and makes those ``w`` refs current (a
+        browser ``desktop_snapshot`` does the same). ``action='call'`` runs the
+        tool ``name`` (a ``w`` ref or a name from the current listing) with
+        ``arguments`` (a JSON object) through the gate: CLICK tier, or FULL when
+        `safety.webmcp_sensitive` says the tool takes free text or names a
+        payment or submission. The audit row never carries the arguments."""
+        if action not in ("list", "call"):
+            raise ValueError("action must be 'list' or 'call'")
+        if getattr(self.driver, "webmcp_tools", None) is None or getattr(self.driver, "webmcp_call", None) is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED, "webmcp is only available on the browser backend",
+                detail={"driver": self.driver.name},
+            )
+        _running, bundle = self._resolve_app(app)
+        if action == "list":
+            return self._run_gated(
+                WebMcpOp(verb=WebMcpVerb.LIST, app=bundle), bundle,
+                lambda: json.dumps(self._webmcp_render(self._webmcp_refresh(bundle))),
+            )
+        if not name:
+            raise ValueError("name is required for action='call': a w ref (w3) or a tool name")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError as exc:
+                raise ValueError(f"arguments must be a JSON object: {exc}") from None
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be a JSON object")
+        tool = self._webmcp_lookup(bundle, name)
+        tool_name = tool["name"]
+        op = WebMcpOp(
+            verb=WebMcpVerb.CALL, app=bundle, name=tool_name, arguments=json.dumps(arguments),
+            sensitive=safety.webmcp_sensitive(tool_name, tool.get("inputSchema")),
+        )
+        return self._run_gated(
+            op, bundle,
+            lambda: json.dumps(self.driver.webmcp_call(tool_name, arguments, app=bundle)),  # type: ignore[attr-defined]
+            recheck=self._recheck_frontmost_app, confirm=confirm,
+        )
 
     # -- action tools -----------------------------------------------------------
 
@@ -2181,6 +2317,7 @@ class Runtime:
             "file_dialog": self.file_dialog,
             "notes": self.notes,
             "wait_until": self.wait_until,
+            "webmcp": partial(self.webmcp, confirm=confirm),
         }
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
@@ -2224,7 +2361,11 @@ _INSTRUCTIONS = (
     "needs_permission/deny results must be resolved by the human user. For "
     "permission_denied_* errors, run `a11y_computer_use doctor`. In long tasks, "
     "record facts you will need later with notes(action='add') and wait for files, "
-    "URLs, or on-screen text with wait_until instead of polling snapshots."
+    "URLs, or on-screen text with wait_until instead of polling snapshots. On the "
+    "browser backend a snapshot may end with a 'webmcp tools:' block (refs w1..wN): "
+    "tools the page itself offers to agents. When one matches the step, prefer "
+    "webmcp(action='call', name='w2', arguments={...}) over clicking and typing "
+    "through the UI; it is fewer steps and the page validates the input."
 )
 
 
@@ -2708,6 +2849,25 @@ def build_server(
             of {method, url, status} for responses and {method, url, error} for
             failures. Reading clears the buffer. Tier 'read'."""
             return await run(runtime.network, app)
+
+    if hasattr(runtime.driver, "webmcp_tools"):
+        @server.tool(name="webmcp")
+        async def webmcp(
+            app: str, action: str = "list", name: str | None = None,
+            arguments: dict | None = None,
+        ) -> str:
+            """The WebMCP tools a web page registered for agents
+            (navigator.modelContext), on a browser tab (app = the tab/target id).
+            action='list' returns JSON {api, tools: [{ref, name, description,
+            inputSchema, kind, tier}]}; the same tools appear at the end of a
+            desktop_snapshot as 'webmcp tools:' with refs w1..wN. action='call'
+            runs one tool: name is a w ref ('w2') or a tool name from the
+            current listing, arguments a JSON object matching its inputSchema.
+            Prefer a matching tool over driving the UI. Tier 'read' to list;
+            a call is 'click', or 'full' when the tool takes free text or its
+            name suggests payment or submission."""
+            return await run(runtime.webmcp, app, action, name, arguments,
+                             confirm=_confirmer_for(server.get_context()))
 
     return server
 

@@ -20,6 +20,7 @@ are imported lazily).
 from __future__ import annotations
 
 import base64
+import json
 import math
 import os
 import time
@@ -49,6 +50,124 @@ if TYPE_CHECKING:
 _DEFAULT_ENDPOINT = "http://127.0.0.1:9222"
 _FEED_LIMIT = 1000
 _FEED_TEXT_LIMIT = 4096
+_WEBMCP_TOOL_LIMIT = 200
+_WEBMCP_RESULT_LIMIT = 16384
+_WEBMCP_CALL_TIMEOUT_S = 30.0
+
+# The registration recorder. WebMCP (navigator.modelContext) offers a page no
+# way to enumerate what it registered, so the driver records registerTool /
+# unregisterTool calls into a hidden, non-enumerable window.__a11y_webmcp
+# registry: it wraps the native methods when the browser has the API and
+# polyfills the object when it does not (so a page guarded with
+# `if ('modelContext' in navigator)` still registers). Idempotent per document.
+_WEBMCP_SHIM_JS = r"""
+(() => {
+  const g = globalThis;
+  if (g.__a11y_webmcp) return;
+  const nav = g.navigator;
+  if (!nav) return;
+  const registry = new Map();
+  let native = null;
+  try { native = nav.modelContext || null; } catch (e) { native = null; }
+  const store = { registry, native: !!native };
+  try { Object.defineProperty(g, '__a11y_webmcp', { value: store, enumerable: false, configurable: false, writable: false }); }
+  catch (e) { return; }
+  const record = (tool) => { if (tool && typeof tool.name === 'string' && tool.name) registry.set(tool.name, tool); };
+  const forget = (name) => { registry.delete(String(name)); };
+  if (native) {
+    const wrap = (method, hook) => {
+      const orig = typeof native[method] === 'function' ? native[method].bind(native) : null;
+      try {
+        Object.defineProperty(native, method, { configurable: true, writable: true, value: function (...a) { hook(...a); return orig ? orig(...a) : undefined; } });
+      } catch (e) {}
+    };
+    wrap('registerTool', (tool) => record(tool));
+    wrap('unregisterTool', (name) => forget(name));
+    wrap('provideContext', (ctx) => { registry.clear(); for (const t of (ctx && ctx.tools) || []) record(t); });
+    wrap('clearContext', () => registry.clear());
+  } else {
+    const shim = {
+      registerTool(tool) { record(tool); },
+      unregisterTool(name) { forget(name); },
+      provideContext(ctx) { registry.clear(); for (const t of (ctx && ctx.tools) || []) record(t); },
+      clearContext() { registry.clear(); },
+    };
+    try { Object.defineProperty(nav, 'modelContext', { value: shim, configurable: true, enumerable: true, writable: false }); }
+    catch (e) {}
+  }
+})();
+"""
+
+_WEBMCP_LIST_JS = r"""
+(async () => {
+  const nav = globalThis.navigator;
+  const store = globalThis.__a11y_webmcp;
+  let hasApi = false;
+  try { hasApi = !!(nav && ('modelContext' in nav) && nav.modelContext); } catch (e) {}
+  const api = store ? (store.native ? 'native' : 'shim') : (hasApi ? 'native' : 'absent');
+  const plain = (v) => { try { return JSON.parse(JSON.stringify(v === undefined ? null : v)); } catch (e) { return null; } };
+  const tools = [];
+  const seen = new Set();
+  const push = (name, description, schema, kind) => {
+    if (typeof name !== 'string' || !name || seen.has(name)) return;
+    seen.add(name);
+    tools.push({ name, description: String(description || ''), inputSchema: plain(schema), kind });
+  };
+  if (store) for (const [name, t] of store.registry) push(name, t.description, t.inputSchema, 'script');
+  if (hasApi && typeof nav.modelContext.listTools === 'function') {
+    try {
+      const listed = await nav.modelContext.listTools();
+      for (const t of listed || []) if (t) push(t.name, t.description, t.inputSchema, 'script');
+    } catch (e) {}
+  }
+  for (const f of document.querySelectorAll('form[toolname]')) {
+    const name = f.getAttribute('toolname');
+    if (!name || seen.has(name)) continue;
+    const props = {}; const required = [];
+    for (const el of f.elements) {
+      if (!el.name || el.disabled || props[el.name]) continue;
+      if (['submit', 'button', 'hidden', 'reset', 'image'].includes(el.type)) continue;
+      const p = { type: (el.type === 'number' || el.type === 'range') ? 'number' : (el.type === 'checkbox' ? 'boolean' : 'string') };
+      const d = el.getAttribute('toolparamdescription'); if (d) p.description = d;
+      const t = el.getAttribute('toolparamtitle'); if (t) p.title = t;
+      if (el.tagName === 'SELECT') p.enum = Array.from(el.options).map((o) => o.value);
+      props[el.name] = p;
+      if (el.required) required.push(el.name);
+    }
+    push(name, f.getAttribute('tooldescription'), { type: 'object', properties: props, required }, 'form');
+  }
+  return { api, tools };
+})()
+"""
+
+# %s slots: JSON-encoded tool name, JSON-encoded arguments object.
+_WEBMCP_CALL_JS = r"""
+(async () => {
+  const name = %s;
+  const args = %s;
+  const store = globalThis.__a11y_webmcp;
+  const text = (r) => { try { return JSON.stringify(r === undefined ? null : r); } catch (e) { return JSON.stringify(String(r)); } };
+  const tool = store && store.registry.get(name);
+  if (tool) {
+    if (typeof tool.execute !== 'function') return { ok: false, error: 'tool has no execute function', kind: 'script' };
+    try { const r = await tool.execute(args, {}); return { ok: true, result: text(r), kind: 'script' }; }
+    catch (e) { return { ok: false, error: String(e && e.message ? e.message : e), kind: 'script' }; }
+  }
+  const form = Array.from(document.querySelectorAll('form[toolname]')).find((f) => f.getAttribute('toolname') === name);
+  if (form) {
+    for (const [k, v] of Object.entries(args || {})) {
+      const el = form.elements.namedItem(k);
+      if (!el) continue;
+      if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v);
+      try { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+    }
+    try { form.requestSubmit(); } catch (e) { return { ok: false, error: String(e && e.message ? e.message : e), kind: 'form' }; }
+    return { ok: true, result: text({ content: [{ type: 'text', text: 'submitted form tool ' + name }] }), kind: 'form' };
+  }
+  return { ok: false, error: 'not_found' };
+})()
+"""
+
 
 # CDP dispatchKeyEvent modifier bitmask (Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8).
 _MOD_BIT = {"alt": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "command": 4, "shift": 8}
@@ -91,9 +210,18 @@ class BrowserDriver:
     #: system-ops. See Runtime._resolves_apps.
     resolves_apps = True
 
-    def __init__(self, endpoint: str | None = None, *, target_id: str | None = None) -> None:
+    def __init__(self, endpoint: str | None = None, *, target_id: str | None = None,
+                 webmcp_shim: bool | None = None) -> None:
         self._endpoint = endpoint or os.environ.get("A11Y_COMPUTER_USE_CDP_ENDPOINT", _DEFAULT_ENDPOINT)
         self._target_id = target_id
+        #: Whether `webmcp_tools` may install the registration recorder into
+        #: the page (see `_install_webmcp_shim`). Default on; the env var
+        #: A11Y_COMPUTER_USE_WEBMCP_SHIM=0 turns it off for a page that must
+        #: not be touched, leaving only declarative form tools observable.
+        if webmcp_shim is None:
+            webmcp_shim = os.environ.get("A11Y_COMPUTER_USE_WEBMCP_SHIM", "1") not in ("0", "false", "no")
+        self._webmcp_shim = bool(webmcp_shim)
+        self._webmcp_shim_installed = False
         self._session: CDPSession | None = None  # connected lazily
         self._console: deque[dict] = deque(maxlen=_FEED_LIMIT)
         self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
@@ -150,6 +278,7 @@ class BrowserDriver:
         if self._session is not None:
             self._session.close()
         self._session = None
+        self._webmcp_shim_installed = False  # the recorder lives in the session
         self._console.clear()
         self._network.clear()
         self._net_pending.clear()
@@ -588,6 +717,121 @@ class BrowserDriver:
             base = self._net_pending.pop(rid, {"method": "GET", "url": ""})
             self._network.append({**base, "error": str(p.get("errorText", "failed"))[:_FEED_TEXT_LIMIT]})
 
+    # -- WebMCP (navigator.modelContext) ------------------------------------
+    def _install_webmcp_shim(self, sess: CDPSession) -> None:
+        """Install the registration recorder once per session.
+
+        WebMCP has no page-visible enumeration, so the driver records what a
+        page registers: `Page.addScriptToEvaluateOnNewDocument` covers every
+        document loaded from now on, and one evaluate covers the current one
+        (which misses tools that page already registered before this call, a
+        limit stated in docs/webmcp.md). Only when the driver was asked to
+        (``webmcp_shim=True``, the default; env A11Y_COMPUTER_USE_WEBMCP_SHIM=0
+        turns it off), and never before the first WebMCP request.
+        """
+        if not self._webmcp_shim or self._webmcp_shim_installed:
+            return
+        try:
+            sess.call("Page.addScriptToEvaluateOnNewDocument", {"source": _WEBMCP_SHIM_JS})
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.UNSUPPORTED:
+                raise
+        sess.call("Runtime.evaluate", {"expression": _WEBMCP_SHIM_JS, "returnByValue": True})
+        self._webmcp_shim_installed = True
+
+    def webmcp_tools(self, *, app: str | None = None) -> dict:
+        """The WebMCP tools the bound tab (or tab ``app``) exposes, as
+        ``{"api": native|shim|absent, "tools": [{name, description, inputSchema, kind}]}``.
+
+        ``api`` says how the page saw ``navigator.modelContext``: ``native`` is
+        the browser's own implementation (Chrome behind its WebMCP flag),
+        ``shim`` is the driver's polyfill (the page called it as if native), and
+        ``absent`` means no API and no shim, so the list holds only declarative
+        ``<form toolname>`` tools. ``kind`` is ``script`` for
+        ``registerTool`` calls and ``form`` for declarative forms. Only the top
+        document is read: tools registered inside cross-origin frames are not
+        visible to a main-frame evaluate and are skipped.
+        """
+        sess = self._bind(app)
+        self._install_webmcp_shim(sess)
+        reply = sess.call("Runtime.evaluate", {
+            "expression": _WEBMCP_LIST_JS, "awaitPromise": True, "returnByValue": True,
+        })
+        _raise_page_exception(reply, "listing WebMCP tools")
+        raw = reply.get("result", {}).get("value")
+        if not isinstance(raw, dict):
+            return {"api": "absent", "tools": []}
+        tools: list[dict] = []
+        for t in raw.get("tools") or []:
+            if not isinstance(t, dict) or not isinstance(t.get("name"), str) or not t["name"]:
+                continue
+            schema = t.get("inputSchema")
+            tools.append({
+                "name": t["name"][:_FEED_TEXT_LIMIT],
+                "description": str(t.get("description") or "")[:_FEED_TEXT_LIMIT],
+                "inputSchema": schema if isinstance(schema, dict) else None,
+                "kind": "form" if t.get("kind") == "form" else "script",
+            })
+        api = raw.get("api")
+        return {"api": api if api in ("native", "shim", "absent") else "absent",
+                "tools": tools[:_WEBMCP_TOOL_LIMIT]}
+
+    def webmcp_call(self, name: str, arguments: dict | None = None, *, app: str | None = None) -> dict:
+        """Run the page's WebMCP tool ``name`` with ``arguments`` and return
+        ``{"name", "kind", "result", "truncated"?}``.
+
+        A script tool's ``execute`` runs in the page and its awaited return
+        value comes back JSON-serialised (the spec shape is
+        ``{content: [{type: "text", text}]}``; anything JSON-able is passed
+        through, capped at ``_WEBMCP_RESULT_LIMIT`` characters with
+        ``truncated: true``). A declarative form tool is filled from
+        ``arguments`` and submitted with ``requestSubmit()``. A tool that is
+        not registered raises ``stale_ref`` (list again); a tool whose execute
+        throws raises ``unsupported`` carrying the page's error text.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise ValueError("arguments must be a JSON object (dict) or None")
+        try:
+            args_json = json.dumps(arguments)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"arguments must be JSON-serialisable: {exc}") from None
+        sess = self._bind(app)
+        self._install_webmcp_shim(sess)
+        expression = _WEBMCP_CALL_JS % (json.dumps(name), args_json)
+        reply = sess.call("Runtime.evaluate", {
+            "expression": expression, "awaitPromise": True, "returnByValue": True,
+        }, timeout=_WEBMCP_CALL_TIMEOUT_S)
+        _raise_page_exception(reply, f"calling WebMCP tool {name}")
+        raw = reply.get("result", {}).get("value")
+        if not isinstance(raw, dict):
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, f"WebMCP tool {name} returned no result",
+                                   detail={"tool": name})
+        if not raw.get("ok"):
+            error = str(raw.get("error") or "failed")[:_FEED_TEXT_LIMIT]
+            if error == "not_found":
+                raise ComputerUseError(
+                    ErrorCode.STALE_REF, f"WebMCP tool {name} is not registered on this page",
+                    detail={"tool": name, "reason": "tool_not_registered",
+                            "hint": "list the tools again; the page may have unregistered it"},
+                )
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, f"WebMCP tool {name} failed: {error}",
+                                   detail={"tool": name, "page_error": error})
+        text = raw.get("result")
+        out: dict = {"name": name, "kind": raw.get("kind", "script")}
+        if isinstance(text, str) and len(text) > _WEBMCP_RESULT_LIMIT:
+            out["result"] = text[:_WEBMCP_RESULT_LIMIT]
+            out["truncated"] = True
+            return out
+        try:
+            out["result"] = json.loads(text) if isinstance(text, str) else text
+        except ValueError:
+            out["result"] = text
+        return out
+
     # -- system / windowing (tabs as apps/windows) --------------------------
     def frontmost_app(self) -> tuple[str | None, int | None]:
         if self._target_id is None:
@@ -734,6 +978,17 @@ _FOCUSED_PASSWORD_JS = (
     "break;}"
     "return !!(e&&e.tagName==='INPUT'&&String(e.type).toLowerCase()==='password');})()"
 )
+
+
+def _raise_page_exception(reply: dict, what: str) -> None:
+    """Turn a `Runtime.evaluate` exception into a structured error."""
+    det = reply.get("exceptionDetails") if isinstance(reply, dict) else None
+    if not det:
+        return
+    exc = det.get("exception") or {}
+    text = str(exc.get("description") or det.get("text") or "JavaScript exception")[:_FEED_TEXT_LIMIT]
+    raise ComputerUseError(ErrorCode.UNSUPPORTED, f"{what} raised in the page: {text}",
+                           detail={"page_error": text})
 
 
 def _console_entry(event: dict) -> dict | None:

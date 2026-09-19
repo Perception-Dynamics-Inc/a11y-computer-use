@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>WebMCP fixture</title>
+</head>
+<body>
+  <h1>WebMCP fixture</h1>
+  <p id="status">idle</p>
+  <ul id="cart"></ul>
+  <script>
+    // Which path registered the tools, for the live test to report:
+    //   native      the browser's own navigator.modelContext (Chrome behind its flag)
+    //   driver-shim the a11y-computer-use recorder was installed before this script ran
+    //   fixture-shim no API at all; this page's own minimal stand-in
+    (() => {
+      let path = 'native';
+      if (globalThis.__a11y_webmcp) {
+        path = 'driver-shim';
+      } else if (!('modelContext' in navigator)) {
+        path = 'fixture-shim';
+        const tools = new Map();
+        Object.defineProperty(navigator, 'modelContext', {
+          value: {
+            registerTool(t) { tools.set(t.name, t); },
+            unregisterTool(n) { tools.delete(n); },
+            __fixtureTools: tools,
+          },
+          configurable: true,
+        });
+      }
+      document.body.dataset.webmcpPath = path;
+
+      const cart = [];
+      navigator.modelContext.registerTool({
+        name: 'add_to_cart',
+        description: 'Add a product to the cart by SKU',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sku: { type: 'string', enum: ['A1', 'B2', 'C3'] },
+            quantity: { type: 'integer', minimum: 1 },
+          },
+          required: ['sku'],
+        },
+        async execute({ sku, quantity }) {
+          const qty = quantity || 1;
+          cart.push({ sku, qty });
+          const li = document.createElement('li');
+          li.textContent = `${sku} x${qty}`;
+          document.getElementById('cart').appendChild(li);
+          document.getElementById('status').textContent = `added ${sku}`;
+          return { content: [{ type: 'text', text: `added ${sku} x${qty}; cart has ${cart.length} lines` }] };
+        },
+      });
+      navigator.modelContext.registerTool({
+        name: 'cart_total',
+        description: 'Count the lines in the cart',
+        inputSchema: { type: 'object', properties: {} },
+        execute() {
+          if (cart.length === 0) throw new Error('cart is empty');
+          return { content: [{ type: 'text', text: String(cart.length) }] };
+        },
+      });
+    })();
+  </script>
+</body>
+</html>

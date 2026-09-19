@@ -76,7 +76,8 @@ def _fixture_responder(method: str, params: dict):
         # focused password field. Tests that need "focused" override this.
         return {"result": {"type": "boolean", "value": False}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
-                  "DOM.enable", "Page.enable", "Runtime.enable", "Runtime.releaseObject"):
+                  "DOM.enable", "Page.enable", "Runtime.enable", "Runtime.releaseObject",
+                  "Page.addScriptToEvaluateOnNewDocument"):  # the WebMCP recorder install
         return {}
     if method == "Page.captureScreenshot":
         import base64

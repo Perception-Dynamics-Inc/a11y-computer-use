@@ -234,7 +234,7 @@ def _pixel_responder(method: str, params: dict):
         return {"result": {"type": "string", "value": "state"}}
     if method in ("Input.insertText", "Input.dispatchKeyEvent", "Input.dispatchMouseEvent",
                   "DOM.enable", "Page.enable", "Runtime.enable", "Log.enable", "Network.enable",
-                  "Runtime.releaseObject"):
+                  "Runtime.releaseObject", "Page.addScriptToEvaluateOnNewDocument"):
         return {}
     raise AssertionError(f"unexpected CDP method {method}")
 

@@ -551,6 +551,36 @@ class ClipboardOp:
     text: str | None = None
 
 
+class WebMcpVerb(str, Enum):
+    LIST = "list"
+    CALL = "call"
+
+
+@dataclass(frozen=True, slots=True)
+class WebMcpOp:
+    """List or call the WebMCP tools a web page registered through
+    ``navigator.modelContext`` (browser backend only).
+
+    Attributes:
+        verb: LIST reads the page's tool registry; CALL runs one tool.
+        app: The tab (CDP target id) the page lives in.
+        name: Tool name for CALL; None for LIST.
+        arguments: The CALL arguments as JSON text (an object). Kept as text so
+            the action stays hashable; the audit log always redacts it, the
+            way clipboard-write text is redacted, because it is free-form
+            content handed to the page.
+        sensitive: Set by the Runtime from `safety.webmcp_sensitive` when the
+            tool's name or input schema suggests text entry, payment, or
+            submission; lifts the CALL tier from CLICK to FULL.
+    """
+
+    verb: WebMcpVerb
+    app: str
+    name: str | None = None
+    arguments: str | None = None
+    sensitive: bool = False
+
+
 #: Union of every action the safety layer gates and drivers execute. This is
 #: the type ``safety.check_action`` receives and the audit log records.
 Action: TypeAlias = (
@@ -566,6 +596,7 @@ Action: TypeAlias = (
     | ClipboardOp
     | MenuOp
     | FileDialogOp
+    | WebMcpOp
 )
 
 

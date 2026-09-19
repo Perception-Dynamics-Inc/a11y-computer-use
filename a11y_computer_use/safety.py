@@ -46,6 +46,8 @@ from a11y_computer_use.schema import (
     FileDialogOp,
     MenuOp,
     MenuVerb,
+    WebMcpOp,
+    WebMcpVerb,
 )
 
 #: Placeholder written into audit entries in place of secure-field content.
@@ -186,9 +188,81 @@ def required_tier(action: Action) -> Tier:
         return Tier.READ if action.verb in (MenuVerb.LIST, MenuVerb.STATE) else Tier.CLICK
     if isinstance(action, FileDialogOp):
         return Tier.FULL  # it types a path and a filename
+    if isinstance(action, WebMcpOp):
+        # Listing observes. Calling is an activation like a click, unless the
+        # tool takes free text or names a payment / submission, which is the
+        # typing tier (see `webmcp_sensitive`).
+        if action.verb is WebMcpVerb.LIST:
+            return Tier.READ
+        return Tier.FULL if action.sensitive else Tier.CLICK
     if isinstance(action, (WaitFor, ObserveOp)):
         return Tier.READ
     raise TypeError(f"not a schema.Action: {type(action).__name__}")
+
+
+#: Tool-name words that mark a WebMCP call as payment or submission: the call
+#: sends something out of the page, so it is gated at FULL like typing.
+_WEBMCP_SENSITIVE_WORDS: frozenset[str] = frozenset({
+    "submit", "send", "post", "publish", "pay", "payment", "purchase", "buy",
+    "checkout", "order", "book", "reserve", "transfer", "donate", "subscribe",
+    "signup", "register", "login", "signin", "message", "email", "reply",
+    "comment", "upload", "delete", "remove",
+})
+
+
+def _schema_takes_free_text(schema: object) -> bool:
+    """True when a JSON schema has a string property with no enum, or a
+    string that is itself unconstrained: an argument the model composes."""
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("type") == "string" and not schema.get("enum") and not schema.get("const"):
+        return True
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for prop in props.values():
+            if _schema_takes_free_text(prop):
+                return True
+    items = schema.get("items")
+    if isinstance(items, dict) and _schema_takes_free_text(items):
+        return True
+    for key in ("anyOf", "oneOf", "allOf"):
+        alts = schema.get(key)
+        if isinstance(alts, list) and any(_schema_takes_free_text(a) for a in alts):
+            return True
+    return False
+
+
+def webmcp_sensitive(name: str, input_schema: object) -> bool:
+    """Whether calling WebMCP tool ``name`` needs the FULL tier.
+
+    The rule: FULL when the tool's input schema has a free-text string
+    argument (no enum: the model composes text, which is text entry) or when
+    the name contains a payment or submission word (`_WEBMCP_SENSITIVE_WORDS`,
+    matched on the name split at underscores, dashes, dots, and camelCase);
+    otherwise CLICK, an activation with fixed choices. Unknown schemas
+    (None) are treated as free text, the conservative side.
+    """
+    if input_schema is None or _schema_takes_free_text(input_schema):
+        return True
+    words = _name_words(name)
+    return any(w in _WEBMCP_SENSITIVE_WORDS for w in words)
+
+
+def _name_words(name: str) -> list[str]:
+    out: list[str] = []
+    word = ""
+    for ch in name:
+        if ch.isalnum():
+            if word and ch.isupper() and not word[-1].isupper():
+                out.append(word.lower())
+                word = ""
+            word += ch
+        elif word:
+            out.append(word.lower())
+            word = ""
+    if word:
+        out.append(word.lower())
+    return out
 
 
 class PermissionStore:
@@ -551,6 +625,18 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
             f'Confirm a potentially irreversible action: choose the menu item "{title}" in '
             f"{target_app}? (matched \u201c{match}\u201d)"
         )
+    if isinstance(action, WebMcpOp) and action.verb is WebMcpVerb.CALL:
+        # A tool named delete_order or remove_item is the page's own word for
+        # an irreversible step; the same keyword rule as a button label.
+        name = action.name or ""
+        lowered = " ".join(_name_words(name))
+        match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
+        if match is None:
+            return None
+        return (
+            f'Confirm a potentially irreversible action: call the WebMCP tool "{name}" in '
+            f"{target_app}? (matched \u201c{match}\u201d)"
+        )
     if not isinstance(action, Click) or not isinstance(action.target, Element):
         return None
     title = action.target.title.strip()
@@ -803,6 +889,8 @@ class AuditLog:
         kind = payload.pop("kind")
         if secure or isinstance(action, ClipboardOp):
             payload = _redact(payload)
+        if isinstance(action, WebMcpOp) and payload.get("arguments") is not None:
+            payload["arguments"] = REDACTED  # free-form content handed to the page
         payload = _redact_target_values(payload)
         entry: dict[str, object] = {
             "ts": self._now(),
