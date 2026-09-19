@@ -46,6 +46,10 @@ dependencies = [
     "pyobjc-framework-ApplicationServices; sys_platform == 'darwin'",
     # On-device OCR for apps without an accessibility tree (ocr.py, `screen_text`).
     "pyobjc-framework-Vision; sys_platform == 'darwin'",
+    # On-device speech for the reflex layer (voice.py, `voice`): SFSpeechRecognizer
+    # fed from an AVAudioEngine microphone tap.
+    "pyobjc-framework-Speech; sys_platform == 'darwin'",
+    "pyobjc-framework-AVFoundation; sys_platform == 'darwin'",
     # cross-platform
     # Pin below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (server.py imports
     # FastMCP from there). The 1.x line (tested on 1.28.x) keeps that import.
