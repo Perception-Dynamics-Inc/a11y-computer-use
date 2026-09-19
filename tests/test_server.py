@@ -1092,6 +1092,7 @@ def test_activate_verifies_frontmost_and_escalates(monkeypatch) -> None:
     if sys.platform != "darwin":
         pytest.skip("macOS activation path")
     monkeypatch.setattr(server, "_ACTIVATE_WAIT_S", 0.05)
+    monkeypatch.setattr(server, "_top_window_pid", lambda: None)
     calls: list[str] = []
 
     class _Running:
@@ -1120,3 +1121,18 @@ def test_activate_verifies_frontmost_and_escalates(monkeypatch) -> None:
         server._activate(_Running())
     assert info.value.code is ErrorCode.FOCUS_CHANGED
     assert calls == ["activate", "open", "ax-app-4242", "set-AXFrontmost", "perform-AXRaise"]
+
+
+def test_activate_accepts_the_window_stack_when_nsworkspace_lags(monkeypatch) -> None:
+    if sys.platform != "darwin":
+        pytest.skip("macOS activation path")
+    monkeypatch.setattr(server, "_ACTIVATE_WAIT_S", 0.05)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.other.app")
+    monkeypatch.setattr(server, "_top_window_pid", lambda: 4242)
+
+    class _Running:
+        def bundleIdentifier(self): return "com.test.app"
+        def processIdentifier(self): return 4242
+        def activateWithOptions_(self, opts): return True
+
+    server._activate(_Running())  # no raise: the target owns the top window

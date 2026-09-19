@@ -327,7 +327,31 @@ def _running_app(identifier: str) -> tuple[object, str]:
 
 
 #: How long `_activate` waits for the target to become frontmost per attempt.
-_ACTIVATE_WAIT_S = 1.5
+#: Stage Manager and Space switches animate for well over a second.
+_ACTIVATE_WAIT_S = 3.0
+
+
+def _top_window_pid() -> int | None:
+    """Pid owning the frontmost ordinary (layer 0) on-screen window, or None.
+
+    NSWorkspace's frontmost application can lag a Stage Manager or Space
+    switch by a beat; the WindowServer's stacking order does not.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import Quartz
+
+        rows = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID,
+        )
+        for row in rows or ():
+            if row.get("kCGWindowLayer") == 0 and row.get("kCGWindowOwnerName") != "WindowManager":
+                return int(row.get("kCGWindowOwnerPID"))
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _activate(running: object) -> None:
@@ -342,11 +366,12 @@ def _activate(running: object) -> None:
     structured `FOCUS_CHANGED` when none of them takes.
     """
     bundle = str(running.bundleIdentifier() or "")
+    pid = int(running.processIdentifier() or 0)
 
     def frontmost() -> bool:
         deadline = time.monotonic() + _ACTIVATE_WAIT_S
         while time.monotonic() < deadline:
-            if not bundle or _frontmost_bundle() == bundle:
+            if not bundle or _frontmost_bundle() == bundle or (pid and _top_window_pid() == pid):
                 return True
             time.sleep(0.1)
         return False
