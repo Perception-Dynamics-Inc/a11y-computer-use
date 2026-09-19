@@ -28,9 +28,15 @@ def test_remote_runtime_lists_tools_and_returns_refusals_as_text(tmp_path, monke
         names = {t["name"] for t in rt.remote_tool_specs()}
         assert {"desktop_snapshot", "click", "type", "notes", "wait_until"} <= names
         assert all("input_schema" in t for t in rt.remote_tool_specs())
-        with pytest.raises(ComputerUseError) as info:  # structured errors keep their codes
-            rt.call_tool("desktop_snapshot", {"app": "com.example.nothing"})
-        assert info.value.code in (ErrorCode.APP_NOT_FOUND, ErrorCode.PERMISSION_DENIED_ACCESSIBILITY)
+        # macOS resolves the app before the gate (structured app_not_found);
+        # Linux and Windows gate the ungranted app first (a refusal, as text).
+        # Both keep their meaning across the wire.
+        try:
+            out = rt.call_tool("desktop_snapshot", {"app": "com.example.nothing"})
+        except ComputerUseError as exc:
+            assert exc.code in (ErrorCode.APP_NOT_FOUND, ErrorCode.PERMISSION_DENIED_ACCESSIBILITY)
+        else:
+            assert isinstance(out, str) and out.startswith("needs_permission"), out
         out = rt.call_tool("app", {"action": "list"})  # gated: an ungranted app is a refusal, as text
         assert isinstance(out, str) and out.startswith("needs_permission")
         assert rt._frontmost() == "unknown" or isinstance(rt._frontmost(), str)
