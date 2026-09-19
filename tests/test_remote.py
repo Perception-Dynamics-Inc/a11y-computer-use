@@ -37,8 +37,11 @@ def test_remote_runtime_lists_tools_and_returns_refusals_as_text(tmp_path, monke
             assert exc.code in (ErrorCode.APP_NOT_FOUND, ErrorCode.PERMISSION_DENIED_ACCESSIBILITY)
         else:
             assert isinstance(out, str) and out.startswith("needs_permission"), out
-        out = rt.call_tool("app", {"action": "list"})  # gated: an ungranted app is a refusal, as text
-        assert isinstance(out, str) and out.startswith("needs_permission")
+        # `app list` is gated: on a machine with no grants it is a refusal, as
+        # text; where the runner's grant store already trusts an app (the live
+        # suites grant one) it is the JSON list. Both are the wire form, unwrapped.
+        out = rt.call_tool("app", {"action": "list"})
+        assert isinstance(out, str) and (out.startswith("needs_permission") or out.startswith("[")), out
         assert rt._frontmost() == "unknown" or isinstance(rt._frontmost(), str)
         assert rt._resolve_app("x") == (None, "x")
         assert rt.driver.name.startswith("remote:")

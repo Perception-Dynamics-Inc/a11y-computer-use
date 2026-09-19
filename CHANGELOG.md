@@ -9,13 +9,21 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Both found by the Krita trial on the Box Linux desktop over the remote backend: the "Mona Lisa" it reported was a single dot, and every screenshot took 6 to 70 s.
+Found by four planner trials on the Box Linux desktop over the remote backend (Krita, Excalidraw in Chromium, ffmpeg in a terminal, gedit): the "Mona Lisa" the first run reported was a single dot, every screenshot took 6 to 70 s, launches waited a minute for a window that was already up, quit did nothing, the document and the terminal screen were missing from snapshots, and the first `app list` on a fresh desktop was refused.
 
 ### Fixed
 
 - Linux `drag` walks its waypoints: the driver had dropped the path and sent one press, one jump, one release, which a freehand brush paints as a dot. The stroke is now 8 px hops through every waypoint, each flushed and paced, endpoint exact; a 15-waypoint circle renders as a circle in Krita 5.2.2 on the Box (6ec0466, 2026-09-20).
+- Linux app resolution prefers the owning process over a window that merely names it: a Chromium tab "Donations | Krita" stacked above Krita had turned `window list app=krita` into Chromium's rows (fd8b41b, 2026-09-20).
+- `app launch` off macOS recognises the window it opened: window rows carry the process comm, cut at 15 bytes ("gnome-terminal-") or without the vendor prefix ("chrome" for google-chrome), which never equalled the launched name; the id is also re-resolved each poll. `app quit` sends the driver's own chord (ctrl+q on Linux, alt+f4 on Windows) instead of cmd+q, which is Super+q on X (129c51b, 2026-09-20).
+- GTK notebook pages with a hidden tab label (gedit with one document, gnome-terminal with one tab) keep their content: GTK reports a negative extent for the page tab, the reader had turned that into "no extents" and the engine dropped the subtree. The AT-SPI "terminal" role reads as a text area, so a VTE screen is snapshot text. Zero-size and offscreen nodes still drop, so macOS trees are unchanged (17420da, 2026-09-20).
+- `app list` on a fresh desktop: the frontmost "app" is the desktop shell, which nobody grants. The list (identities only) is gated against the frontmost app when granted, else a trusted running app, else any app the human has granted on the machine; with no grant anywhere it still refuses (724bab0, c12ee13, 2026-09-20).
 
 ### Added
+
+- `wait_until {"settle": seconds}`: the one condition with nothing to observe, for apps with no accessibility tree that are still loading or animating; the Krita planner had been waiting on `file_stable ~/.bashrc` to get the same effect (fd8b41b, 2026-09-20).
+- `agent --view-images`: a claude-cli planner looks at its screenshots (the newest one is written to a temp PNG the CLI can Read) instead of a text description; needed for apps with no accessibility tree. API providers always send images inline (4688406, 2026-09-20).
+- `scripts/box/README.md` documents driving a Box from a local planner with `--mcp-command`, the grants, the session env, and this image's Qt accessibility limit: Krita 5.2.2 and a bare PyQt5 window never register on the AT-SPI bus there, so Qt apps are driven by screenshot and coordinates (e8ca239, 76aaf91, 2026-09-20).
 
 - `screenshot(format="jpeg", quality=80)` on the MCP tool: the same pixels about five times smaller. `agent --mcp-command` asks a remote server for JPEG when its schema advertises the argument (older servers never see it; `A11Y_COMPUTER_USE_REMOTE_IMAGE_FORMAT=png` opts out) and hands the planner PNG as before. The Box grab and encode take 0.1 s; the 800 KB PNG on a 170 KB/s link was the cost. Measured on that link, two samples each: PNG 29 and 57 s, JPEG 13.6 and 9.5 s (21878e3, 2026-09-20).
 
