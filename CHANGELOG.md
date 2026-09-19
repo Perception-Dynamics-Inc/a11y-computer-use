@@ -9,7 +9,15 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+Both found by the Krita trial on the Box Linux desktop over the remote backend: the "Mona Lisa" it reported was a single dot, and every screenshot took 6 to 70 s.
+
+### Fixed
+
+- Linux `drag` walks its waypoints: the driver had dropped the path and sent one press, one jump, one release, which a freehand brush paints as a dot. The stroke is now 8 px hops through every waypoint, each flushed and paced, endpoint exact; a 15-waypoint circle renders as a circle in Krita 5.2.2 on the Box (6ec0466, 2026-09-20).
+
+### Added
+
+- `screenshot(format="jpeg", quality=80)` on the MCP tool: the same pixels about five times smaller. `agent --mcp-command` asks a remote server for JPEG when its schema advertises the argument (older servers never see it; `A11Y_COMPUTER_USE_REMOTE_IMAGE_FORMAT=png` opts out) and hands the planner PNG as before. The Box grab and encode take 0.1 s; the 800 KB PNG on a 170 KB/s link was the cost (21878e3, 2026-09-20).
 
 ## [0.3.0] - 2026-09-20
 
