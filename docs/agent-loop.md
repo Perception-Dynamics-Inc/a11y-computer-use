@@ -132,3 +132,7 @@ The planner chose the batched `act` tool on its own, which is the round-trip-sav
 - HTTP providers retry connection errors and retryable statuses three times with backoff; anything else ends the run with `stopped == "provider_error"`.
 - A model refusal (`stop_reason == "refusal"` on Anthropic) ends the run the same way, with the refusal category in the summary.
 - The loop does not compact the conversation into a summary when it grows past the bounded observations; long tasks should be split.
+
+## Live runs on macOS
+
+Synthetic input does not reset the idle timer, so a long run on an unattended Mac ends with a locked screen and every capture failing. `a11y-computer-use agent` and `mission run` therefore hold `caffeinate -dimsu` for their duration (`A11Y_COMPUTER_USE_KEEP_AWAKE=0` opts out) and refuse to start while the screen is locked or no display is active, with a structured `unsupported` message instead of a traceback. Turn display sleep off or leave the keep-awake default on, and do not use the machine while a run drives it: the same-window recheck refuses clicks under whatever window you bring to the front. Observations of a granted app (`desktop_snapshot`, `screen_text(app=X)`, `window list app=X`, and the automatic OCR escalation) are gated against that app, so an ungranted terminal in front does not block them; the result says when the app is not frontmost. `app launch` waits `A11Y_COMPUTER_USE_LAUNCH_WAIT_S` seconds (default 60) for the first window.

@@ -293,3 +293,18 @@ def test_keep_awake_runs_caffeinate_on_macos_and_stops_it(monkeypatch) -> None:
     with cli._keep_awake():
         pass
     assert calls == []
+
+
+def test_preflight_display_reports_a_locked_screen(monkeypatch) -> None:
+    if sys.platform != "darwin":
+        assert cli._preflight_display() is None
+        return
+    import Quartz
+    monkeypatch.delenv("A11Y_COMPUTER_USE_DRIVER", raising=False)
+    monkeypatch.setattr(Quartz, "CGSessionCopyCurrentDictionary", lambda: {"CGSSessionScreenIsLocked": 1})
+    assert "locked" in cli._preflight_display()
+    monkeypatch.setattr(Quartz, "CGSessionCopyCurrentDictionary", lambda: {})
+    monkeypatch.setattr(Quartz, "CGGetActiveDisplayList", lambda n, a, b: (0, [], 0))
+    assert "no active display" in cli._preflight_display()
+    monkeypatch.setenv("A11Y_COMPUTER_USE_DRIVER", "browser")
+    assert cli._preflight_display() is None

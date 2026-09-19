@@ -1117,7 +1117,7 @@ class Runtime:
             if bounds is None:
                 cropped_note = f"\n(no window rect known for {bundle}: OCR covers the whole display)"
             else:
-                cropped_note = f"\n(OCR cropped to {bundle}'s windows)"
+                cropped_note = f"\n(OCR cropped to {bundle}'s windows)" + (" (this app is not frontmost: windows of other apps may overlap the captured rect; call app focus before acting on these refs)" if self._frontmost() != bundle else "")
                 display_id = bounds.display_id
         if region is not None:
             try:
@@ -1139,8 +1139,15 @@ class Runtime:
             self._screen_text = screen
             return ocr.render_screen_text(screen) + cropped_note
 
-        front = self._frontmost()
-        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=front), front, execute)
+        if app is not None:
+            # A capture cropped to X's own windows is an observation OF X: gate
+            # it against X's read grant, not against whichever app the owner has
+            # in front (their terminal, typically). Overlapping windows of other
+            # apps can still show inside that rect; the result says so.
+            gate_key = bundle
+        else:
+            gate_key = self._frontmost()
+        return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=gate_key), gate_key, execute)
 
     def _ocr_find(self, text: str) -> str:
         """`find(ocr=True)`: fresh OCR epoch, filtered to lines containing ``text``."""
@@ -1226,10 +1233,11 @@ class Runtime:
         whole display, and says so, when no window rect is known. Never raises."""
         if not AUTO_OCR or self._ocr_engine is None:
             return ""
-        if self._frontmost() != bundle:
-            # The capture would show another app's pixels under this app's grant.
-            return "\nCall `screen_text` once this app is frontmost to get OCR refs (o1..oN)."
         region = self._app_window_region(bundle, snap)
+        if region is None and self._frontmost() != bundle:
+            # A whole-display capture would show another app's pixels under this
+            # app's grant; a capture cropped to this app's own windows is fine.
+            return "\nCall `screen_text` once this app is frontmost to get OCR refs (o1..oN)."
         try:
             screen = self._ocr_epoch(region.display_id if region else None, region)
         except ComputerUseError as exc:
@@ -1854,7 +1862,9 @@ class Runtime:
 
     #: How long `app launch` waits for the app's first window, and `app focus`
     #: for the app to become frontmost, before reporting what it saw.
-    APP_LAUNCH_WAIT_S = 45.0  #: heavy apps (Krita, Figma) need well over 20 s to show a window
+    #: Seconds `app launch` waits for the first window; heavy apps (Krita, Figma)
+    #: need well over 20 s. Override with A11Y_COMPUTER_USE_LAUNCH_WAIT_S.
+    APP_LAUNCH_WAIT_S = float(os.environ.get("A11Y_COMPUTER_USE_LAUNCH_WAIT_S", "60"))
     APP_FOCUS_WAIT_S = 5.0
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
@@ -2019,9 +2029,18 @@ class Runtime:
         return json.dumps(result)
 
     @_serialized
-    def window(self, action: str, window_id: int | None = None) -> str:
+    def window(self, action: str, window_id: int | None = None, app: str | None = None) -> str:
         verb = WindowVerb(action)
         if verb is WindowVerb.LIST:
+            if app is not None:
+                # Listing X's windows is an observation of X: gate against X's
+                # read grant and return only its rows.
+                _running, bundle = self._resolve_app(app)
+                rows = self._run_gated(WindowOp(verb=verb), bundle, self.driver.windows)
+                rows = [r for r in rows
+                        if str(r.get("bundle") or r.get("app") or "") == bundle
+                        or str(r.get("bundle") or r.get("app") or "").lower() in bundle.lower()]
+                return json.dumps(rows)
             rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
             return json.dumps(rows)
         if verb is not WindowVerb.RAISE:
@@ -2593,14 +2612,15 @@ def build_server(
         return await run(runtime.app, action, name)
 
     @server.tool(name="window")
-    async def window(action: str, window_id: int | None = None) -> str:
+    async def window(action: str, window_id: int | None = None, app: str | None = None) -> str:
         """Window verbs: action='list' returns on-screen windows as JSON
         (window_id, app, pid, title, bounds; titles are empty without the
-        Screen Recording grant). bounds are {display_id, x, y, width, height}
+        Screen Recording grant). With app=X, 'list' returns only X's windows
+        and is gated against X (tier read) instead of the frontmost app. bounds are {display_id, x, y, width, height}
         in that display's physical pixels — the same space click/scroll/drag
         take — or null for offscreen windows. 'raise' brings window_id's app
         frontmost; raise is gated at tier 'click' against the owning app."""
-        return await run(runtime.window, action, window_id)
+        return await run(runtime.window, action, window_id, app)
 
     @server.tool(name="clipboard")
     async def clipboard(action: str, text: str | None = None) -> str:

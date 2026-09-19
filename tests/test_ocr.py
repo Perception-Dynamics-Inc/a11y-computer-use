@@ -353,10 +353,22 @@ def test_escalation_is_opt_out_and_never_captures_another_app(tmp_path, monkeypa
     monkeypatch.setattr(server, "AUTO_OCR", False)
     assert "[ocr-" not in make_runtime(tmp_path / "a").desktop_snapshot(APP)
     monkeypatch.setattr(server, "AUTO_OCR", True)
+    # Another app in front: a capture CROPPED to this app's own windows is still an
+    # observation of this app and runs under its grant ...
     other_front = make_runtime(tmp_path / "b", driver=FakeDriver(frontmost="com.apple.finder"))
     other_front.store.set_tier("com.apple.finder", safety.Tier.READ)
     text = other_front.desktop_snapshot(APP)
-    assert "[ocr-" not in text and "Call `screen_text` once this app is frontmost" in text
+    assert "[ocr-" in text and "cropped" in text
+
+    # ... but a whole-display capture (no window rect known) is not.
+    class NoWindows(FakeDriver):
+        def windows(self):
+            return []
+
+    blind = make_runtime(tmp_path / "c", driver=NoWindows(frontmost="com.apple.finder"))
+    blind.store.set_tier("com.apple.finder", safety.Tier.READ)
+    note = blind._auto_ocr_note(APP, None)  # no snapshot windows, no driver windows: no rect
+    assert "[ocr-" not in note and "Call `screen_text` once this app is frontmost" in note
 
 
 def test_escalation_reports_a_missing_screen_grant_instead_of_failing(tmp_path) -> None:

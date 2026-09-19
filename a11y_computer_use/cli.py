@@ -371,6 +371,28 @@ def _cmd_bench_h2h(args: argparse.Namespace) -> int:
 
 
 
+
+def _preflight_display() -> str | None:
+    """A structured reason a live run cannot start: the screen is locked or no
+    display is active (asleep). None when the desktop is usable. macOS only."""
+    if sys.platform != "darwin" or os.environ.get("A11Y_COMPUTER_USE_DRIVER") == "browser":
+        return None
+    try:
+        import Quartz
+    except ImportError:
+        return None
+    try:
+        session = Quartz.CGSessionCopyCurrentDictionary() or {}
+        if int(session.get("CGSSessionScreenIsLocked", 0)):
+            return "unsupported: the screen is locked; unlock it before a live run"
+        err, _ids, count = Quartz.CGGetActiveDisplayList(8, None, None)
+        if err != 0 or not count:
+            return ("unsupported: no active display (asleep or headless); wake it, and turn display "
+                    "sleep off or leave the keep-awake default on for long runs")
+    except Exception:  # noqa: BLE001 - never block on a probe failure
+        return None
+    return None
+
 @contextlib.contextmanager
 def _keep_awake():
     """Hold the display awake and assert user activity for the run's duration.
@@ -454,6 +476,10 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             answer = input(f"{prompt} [y/N] ")
             return answer.strip().lower() in ("y", "yes")
 
+    blocked = _preflight_display()
+    if blocked:
+        print(blocked, file=sys.stderr)
+        return 1
     with _keep_awake():
         result = agent.run_task(args.task, runtime, provider, app=app, max_steps=args.max_steps,
                                 verify=not args.no_verify, on_step=on_step, confirm=confirm)
@@ -512,6 +538,10 @@ def _cmd_mission_run(args: argparse.Namespace) -> int:
         def confirm(prompt: str) -> bool:
             return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
+    blocked = _preflight_display()
+    if blocked:
+        print(blocked, file=sys.stderr)
+        return 1
     with _keep_awake():
         result = mission_mod.run(mission, runtime, provider, runs_dir=args.runs_dir,
                                  from_phase=args.from_phase, on_step=on_step, confirm=confirm)

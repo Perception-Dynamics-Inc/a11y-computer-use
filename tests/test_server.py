@@ -1158,3 +1158,54 @@ def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch) 
     monkeypatch.setattr(rt, "_wait_first_window", lambda name, wait: "Krita")
     assert "launched Krita" in rt.app("launch", "Krita")
     assert launched == ["Krita"]
+
+
+# --- observations of a named app gate against that app ---------------------------
+
+
+class _WinDriver:
+    resolves_apps = False
+    name = "fake"
+    def ensure_trusted(self): return None
+    def frontmost_app(self): return ("com.owner.terminal", 1)
+    def main_display_id(self): return 0
+    def windows(self):
+        return [{"window_id": 1, "app": "Krita", "bundle": "org.krita", "pid": 9,
+                 "bounds": {"display_id": 0, "x": 100, "y": 100, "width": 800, "height": 600}},
+                {"window_id": 2, "app": "Terminal", "bundle": "com.owner.terminal", "pid": 1,
+                 "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 400, "height": 300}}]
+    def screenshot(self, display_id=None):
+        img = PILImage.new("RGB", (1000, 800), "black"); buf = io.BytesIO(); img.save(buf, "PNG")
+        return capture.Screenshot(png=buf.getvalue(), display=Display(0, 1000, 800, 1.0, True))
+
+
+def _granted_runtime(tmp_path, monkeypatch):
+    from a11y_computer_use import ocr
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("org.krita", safety.Tier.READ)          # the target, granted
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_WinDriver(),
+                        ocr_engine=ocr.FakeOcr([ocr.TextBox("Brush", 120, 120, 60, 20, 1.0)]))
+    monkeypatch.setattr(rt, "_resolve_app", lambda ident: (object(), "org.krita"))
+    return rt
+
+
+def test_screen_text_of_a_named_app_is_gated_against_that_app(tmp_path, monkeypatch) -> None:
+    rt = _granted_runtime(tmp_path, monkeypatch)
+    out = rt.screen_text(app="org.krita")                  # the owner's terminal is frontmost and ungranted
+    assert "o1" in out and "Brush" in out and "not frontmost" in out
+    with pytest.raises(server.ActionRefused):
+        rt.screen_text()                                    # whole display: still gated on the frontmost app
+
+
+def test_window_list_for_a_named_app_is_gated_against_it_and_filtered(tmp_path, monkeypatch) -> None:
+    rt = _granted_runtime(tmp_path, monkeypatch)
+    rows = json.loads(rt.window("list", app="org.krita"))
+    assert [r["window_id"] for r in rows] == [1]
+    with pytest.raises(server.ActionRefused):
+        rt.window("list")
+
+
+def test_auto_ocr_escalation_runs_when_cropped_even_if_not_frontmost(tmp_path, monkeypatch) -> None:
+    rt = _granted_runtime(tmp_path, monkeypatch)
+    note = rt._auto_ocr_note("org.krita", None)
+    assert "Brush" in note and "cropped" in note
