@@ -372,11 +372,19 @@ def _cmd_bench_h2h(args: argparse.Namespace) -> int:
 
 
 
-def _preflight_display() -> str | None:
+def _preflight_display(runtime: "server.Runtime | None" = None) -> str | None:
     """A structured reason a live run cannot start: the screen is locked or no
-    display is active (asleep). None when the desktop is usable. macOS only."""
+    display is active (asleep). None when the desktop is usable.
+
+    Only the real macOS driver is checked: fakes and the test seam driver
+    (subclasses) must never depend on this machine's lock state.
+    """
     if sys.platform != "darwin" or os.environ.get("A11Y_COMPUTER_USE_DRIVER") == "browser":
         return None
+    if runtime is not None:
+        from a11y_computer_use.drivers.macos import MacOSDriver
+        if type(runtime.driver) is not MacOSDriver:
+            return None
     try:
         import Quartz
     except ImportError:
@@ -476,7 +484,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             answer = input(f"{prompt} [y/N] ")
             return answer.strip().lower() in ("y", "yes")
 
-    blocked = _preflight_display()
+    blocked = _preflight_display(runtime)
     if blocked:
         print(blocked, file=sys.stderr)
         return 1
@@ -538,7 +546,7 @@ def _cmd_mission_run(args: argparse.Namespace) -> int:
         def confirm(prompt: str) -> bool:
             return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
 
-    blocked = _preflight_display()
+    blocked = _preflight_display(runtime)
     if blocked:
         print(blocked, file=sys.stderr)
         return 1

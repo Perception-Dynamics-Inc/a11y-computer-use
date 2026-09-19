@@ -57,6 +57,9 @@ def test_open_menu_is_reported_closed_and_stops_swallowing_chords() -> None:
     except ComputerUseError as exc:
         pytest.skip(f"TextEdit did not come to the front: {exc}")
     time.sleep(0.8)
+    from a11y_computer_use import safety
+    if safety.frontmost_app()[0] != "com.apple.TextEdit":
+        pytest.skip("TextEdit is not frontmost (owner at the keyboard, or a CI Mac with no foreground session)")
     before = _window_count()  # taken while no menu is open: AppleScript stalls during menu tracking
     # Open the File menu through AX (press the bar item, do not pick an entry).
     app_el, accessor, _bundle = menus._macos_app_element("TextEdit")
