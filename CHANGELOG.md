@@ -17,7 +17,7 @@ Both found by the Krita trial on the Box Linux desktop over the remote backend: 
 
 ### Added
 
-- `screenshot(format="jpeg", quality=80)` on the MCP tool: the same pixels about five times smaller. `agent --mcp-command` asks a remote server for JPEG when its schema advertises the argument (older servers never see it; `A11Y_COMPUTER_USE_REMOTE_IMAGE_FORMAT=png` opts out) and hands the planner PNG as before. The Box grab and encode take 0.1 s; the 800 KB PNG on a 170 KB/s link was the cost (21878e3, 2026-09-20).
+- `screenshot(format="jpeg", quality=80)` on the MCP tool: the same pixels about five times smaller. `agent --mcp-command` asks a remote server for JPEG when its schema advertises the argument (older servers never see it; `A11Y_COMPUTER_USE_REMOTE_IMAGE_FORMAT=png` opts out) and hands the planner PNG as before. The Box grab and encode take 0.1 s; the 800 KB PNG on a 170 KB/s link was the cost. Measured on that link, two samples each: PNG 29 and 57 s, JPEG 13.6 and 9.5 s (21878e3, 2026-09-20).
 
 ## [0.3.0] - 2026-09-20
 
