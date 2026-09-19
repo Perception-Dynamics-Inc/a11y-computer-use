@@ -11,6 +11,27 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.3.0] - 2026-09-20
+
+Instant voice control, a remote desktop backend, and WebMCP tools. The voice pipeline was measured live on a Mac (local router about 60 ms from transcript to action); the remote backend is exercised by CI against a local server and was used live to drive a Linux desktop VM over SSH; WebMCP is covered by scripted-transport tests and one opt-in headless-Chrome test.
+
+### Added
+
+- Reflex layer: one fixed skill per spoken command instead of a planning loop. Nine built-in skills (open app, new document, set title, type text, web search, open URL, take photo, screenshot, menu item) run over the gated `Runtime` with slots pulled from the transcript by regexes, so no model writes text or coordinates. `LocalRouter` routes on patterns with no network; `JevRouter` asks TypeSafe System One for one choice over the skill list, times out at 2 s, and falls back to the local router (2199647, 2026-09-20).
+- `a11y-computer-use voice [--router local|jev] [--text ...] [--push-to-talk] [--json]`: on-device speech through Apple's Speech framework, one timeline per command (`[stt 412 ms] [route 0 ms local] [act 62 ms] open_app ... -> ok`); `--text` runs the pipeline from a transcript without a microphone; `doctor` reports the Speech Recognition and Microphone grants. New macOS dependencies `pyobjc-framework-Speech` and `pyobjc-framework-AVFoundation` (9507d1d, 2026-09-20).
+- WebMCP on the browser backend: tools a page registers through `navigator.modelContext` (native, a recorder shim, or declarative `form[toolname]`) appear as refs `w1..wN` under `webmcp tools:` in a browser snapshot; the `webmcp` tool lists them (tier read) or calls one (tier click, lifted to full for free-text, payment, or submission tools; destructive names go through the confirmation gate; arguments are redacted in the audit log). `docs/webmcp.md` states the standard's status and the limits (450aaec, 2026-09-20).
+- `a11y-computer-use agent --mcp-command "<cmd>"`: the planner runs locally while every observation and action happens on a remote a11y-computer-use MCP server spoken to over stdio, for example an SSH channel into a Linux desktop VM, under that machine's own grants and audit log. Structured errors keep their codes across the wire, refusals come back as tool text, screenshots as images. `scripts/box/mcp-session.sh` starts the server inside a running X session with the Qt and GTK accessibility bridges on (7d4af2f, 2026-09-20).
+
+### Fixed
+
+- `app focus` no longer burns its whole 5 s wait when NSWorkspace lags the WindowServer stacking order (5077 ms to about 10 ms); the workspace's running and frontmost lists are refreshed with one non-blocking run-loop pass, so an app launched a second ago is seen; "Notes" no longer resolves to the faceless widget extension of the same name; menu queries cache the app's accessibility element per pid (2199647, 2026-09-20).
+- Remote wire: an ungranted unknown app is a structured `app_not_found` on macOS and a `needs_permission` refusal text on Linux and Windows; the test accepts both (091558b, 2026-09-20).
+
+### CI
+
+- Live TextEdit menu tests skip under GitHub Actions, whose Macs have no interactive session (fcdcc49, 2026-09-20).
+- `tests/test_remote.py` is committed next to its module; an earlier commit had tracked it alone (11ece1c, 8f0668c, 2026-09-20).
+
 ## [0.2.1] - 2026-09-19
 
 Fixes from the first live desktop trials and the first gauntlet benchmark run.

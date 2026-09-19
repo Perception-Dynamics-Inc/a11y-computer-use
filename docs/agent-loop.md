@@ -24,6 +24,10 @@ A11Y_COMPUTER_USE_DRIVER=browser A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1
 # macOS: the frontmost app, or --app by bundle id or name
 a11y-computer-use agent --app TextEdit --grant full --task "Type a two-line greeting"
 
+# Remote machine: the planner stays here, the server runs there (its grants, its audit log)
+a11y-computer-use agent --mcp-command "ssh vm a11y-computer-use mcp" --app krita --task "Draw a circle"
+
+
 # Pick a planner explicitly
 a11y-computer-use agent --provider anthropic --task "..."
 a11y-computer-use agent --provider openai --model gpt-5 --task "..."

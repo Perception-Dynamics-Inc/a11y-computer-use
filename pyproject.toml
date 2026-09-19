@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "a11y-computer-use"
-version = "0.2.1"
+version = "0.3.0"
 description = "Accessibility-first computer-use framework for macOS, Windows, Linux, and the browser (CDP): pruned accessibility-tree snapshots, element refs, and a safety layer, exposed as an MCP server + CLI."
 readme = "README.md"
 requires-python = ">=3.11"
