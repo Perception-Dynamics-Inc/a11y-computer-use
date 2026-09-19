@@ -427,6 +427,8 @@ def test_get_provider_selection(monkeypatch) -> None:
         get_provider()
     monkeypatch.setattr(providers.shutil, "which", lambda name: "/usr/local/bin/claude")
     assert isinstance(get_provider(), ClaudeCLIProvider)
+    assert get_provider().view_images is False  # text-only unless asked: the Read tool costs a turn
+    assert get_provider(view_images=True).view_images is True  # `agent --view-images`
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
     assert isinstance(get_provider(model="llama3.1"), OpenAIProvider)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")

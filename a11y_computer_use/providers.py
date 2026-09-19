@@ -648,9 +648,14 @@ class ScriptedProvider:
 PROVIDERS = ("anthropic", "openai", "claude-cli", "scripted")
 
 
-def get_provider(name: str | None = None, *, model: str | None = None) -> Provider:
+def get_provider(name: str | None = None, *, model: str | None = None,
+                 view_images: bool = False) -> Provider:
     """Build a provider by name (or ``$A11Y_COMPUTER_USE_PROVIDER``, or the first
-    one the environment can support: Anthropic key, OpenAI key, ``claude`` CLI)."""
+    one the environment can support: Anthropic key, OpenAI key, ``claude`` CLI).
+
+    ``view_images`` matters only for ``claude-cli``, whose calls are text
+    unless the newest screenshot is written to disk for the CLI to Read; the
+    API providers send images inline regardless."""
     target = name or os.environ.get("A11Y_COMPUTER_USE_PROVIDER")
     if not target:
         if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
@@ -668,7 +673,7 @@ def get_provider(name: str | None = None, *, model: str | None = None) -> Provid
     if target == "openai":
         return OpenAIProvider(model)
     if target == "claude-cli":
-        return ClaudeCLIProvider(model)
+        return ClaudeCLIProvider(model, view_images=view_images)
     if target == "scripted":
         return ScriptedProvider([])
     raise ProviderError(f"unknown provider {target!r}; expected one of {PROVIDERS}")

@@ -185,6 +185,11 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="drive a remote a11y-computer-use MCP server as the tool backend, for example "
                             "'ssh -T host ~/computerUse/.venv/bin/a11y-computer-use mcp'; the planner "
                             "runs here, every observation and action runs there under its own grants")
+    agent.add_argument("--view-images", action="store_true",
+                       help="let a claude-cli planner look at its screenshots (the newest one is "
+                            "written to a temp PNG the CLI can Read); without it that planner only "
+                            "gets the screenshot's text description. Needed for apps with no "
+                            "accessibility tree. API providers always see images")
     agent.add_argument("--no-verify", action="store_true",
                        help="do not request Effect Receipts on click/act")
     agent.add_argument("--grant", choices=("read", "click", "full"),
@@ -488,7 +493,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from a11y_computer_use.schema import ComputerUseError
 
     try:
-        provider = providers.get_provider(args.provider, model=args.model)
+        provider = providers.get_provider(args.provider, model=args.model,
+                                          view_images=bool(getattr(args, "view_images", False)))
     except providers.ProviderError as exc:
         print(f"provider: {exc}", file=sys.stderr)
         return 2
