@@ -991,8 +991,18 @@ def _prune_inner(
     recursing, so `MAX_DEPTH` is applied during the walk (bounding its cost) and
     a node whose pruned depth is under the cap is never elided."""
     bounds = _to_bounds(raw.position, raw.size, geometry)
-    if bounds is None or _is_decorative(raw):
-        return None  # zero-size, fully offscreen, or decorative: drop subtree
+    if _is_decorative(raw):
+        return None
+    # A node with no rect of its own drops its subtree when it is zero-size or
+    # fully offscreen (scrolled-away rows, hidden GTK widgets parked at -2^31),
+    # but not when its extent is NEGATIVE: GTK reports (-1, -1, -1, -1) for a
+    # notebook page tab whose label is hidden while the page's content (the
+    # gedit document, a VTE terminal) has real bounds below it. Such a hollow
+    # container is kept only if descendants survive, with their union as rect.
+    # Zero-size stays a drop so macOS trees (and their token budgets) are unchanged.
+    hollow = bounds is None
+    if hollow and not _degenerate_size(raw.size):
+        return None  # zero-size or fully offscreen: drop subtree
 
     kept: list[_PNode] = []
     elided = 0
@@ -1030,6 +1040,10 @@ def _prune_inner(
 
     clickable, editable, _ = _flags(raw)
     interactive = clickable or editable
+    if hollow:
+        if not kept:
+            return None  # zero-size and nothing visible below it
+        bounds = _union_bounds([c.bounds for c in kept])
     if candidate and len(kept) == 1 and elided == 0:
         return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
     return _PNode(
@@ -1040,6 +1054,24 @@ def _prune_inner(
         has_interactive=interactive or any(c.has_interactive for c in kept),
         node=node,
     )
+
+
+def _degenerate_size(size: tuple[float, float] | None) -> bool:
+    """A rect the toolkit marked invalid with a negative extent (GTK's -1
+    sentinel for a widget that has no allocation of its own), as opposed to a
+    zero-size rect or a real rect that merely lies off every display."""
+    return size is not None and (size[0] < 0 or size[1] < 0)
+
+
+def _union_bounds(rects: list[Bounds]) -> Bounds:
+    """The smallest rect covering ``rects`` (all on the first rect's display)."""
+    first = rects[0]
+    same = [r for r in rects if r.display_id == first.display_id] or [first]
+    x1 = min(r.x for r in same)
+    y1 = min(r.y for r in same)
+    x2 = max(r.x + r.width for r in same)
+    y2 = max(r.y + r.height for r in same)
+    return Bounds(display_id=first.display_id, x=x1, y=y1, width=x2 - x1, height=y2 - y1)
 
 
 def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:

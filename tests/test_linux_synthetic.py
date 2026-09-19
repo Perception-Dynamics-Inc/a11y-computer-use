@@ -31,6 +31,7 @@ def test_role_map_covers_common_atspi_roles() -> None:
     assert r["frame"] == "AXWindow"
     assert r["menu item"] == "AXMenuItem"
     assert r["separator"] == "AXSplitter"  # decorative -> dropped by the engine
+    assert r["terminal"] == "AXTextArea"  # VTE: the screen text is its Text iface, else the tab is empty
 
 
 class _FakeAccessor:
@@ -77,6 +78,59 @@ def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     assert any(el.clickable and el.title == "Save" for el in snap.elements)
     assert any(el.editable and el.value == "hello" for el in snap.elements)
     assert snap.app == "gedit" and snap.pid == 42
+
+
+def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypatch) -> None:
+    class _Rect:
+        def __init__(self, x, y, w, h): self.x, self.y, self.width, self.height = x, y, w, h
+
+    class _Comp:
+        def __init__(self, rect): self._rect = rect
+        def get_extents(self, coord): return self._rect
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_component", lambda acc: acc)
+    assert _atspi._extents(_Comp(_Rect(-1, -1, -1, -1))) == ((-1.0, -1.0), (-1.0, -1.0))
+    assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30))) == (None, None)
+    assert _atspi._extents(_Comp(_Rect(5, 6, 70, 30))) == ((5.0, 6.0), (70.0, 30.0))
+
+
+def test_hollow_page_tab_keeps_the_document_below_it() -> None:
+    """GTK reports (-1, -1, -1, -1) for a notebook page tab whose label is hidden
+    (gedit with one document, gnome-terminal with one tab); the page content has
+    real bounds. The engine used to drop the whole subtree as zero-size, leaving
+    an empty tabgroup and no document text. The tab now survives as a container
+    sized to its visible descendants."""
+    tree = _node(
+        "AXWindow", "doc - gedit", pos=(0.0, 0.0), size=(1280.0, 800.0),
+        children=[_node(
+            "AXTabGroup", "", pos=(0.0, 60.0), size=(1280.0, 700.0),
+            children=[_node(
+                "AXTab", "", pos=(-1.0, -1.0), size=(-1.0, -1.0),
+                children=[_node("AXTextArea", "", value="a11y box trial",
+                                pos=(10.0, 70.0), size=(1200.0, 600.0))],
+            )],
+        )],
+    )
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app="gedit", pid=1,
+                          geometry=_geometry())
+    text = [el for el in snap.elements if el.role == "AXTextArea"]
+    assert text and text[0].value == "a11y box trial"
+    tab = [el for el in snap.elements if el.role == "AXTab"]
+    assert tab and tab[0].bounds is not None and tab[0].bounds.width == 1200  # union of its content
+    # A hollow node with nothing visible below it still disappears.
+    tree = _node("AXWindow", "w", pos=(0.0, 0.0), size=(400.0, 300.0),
+                 children=[_node("AXTab", "", pos=(-1.0, -1.0), size=(-1.0, -1.0),
+                                 children=[_node("AXStaticText", "", pos=(-1.0, -1.0), size=(-1.0, -1.0))])])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=_geometry())
+    assert not [el for el in snap.elements if el.role == "AXTab"]
+    # A real-sized node parked off every display keeps dropping its subtree (scrolled-away rows).
+    tree = _node("AXWindow", "w", pos=(0.0, 0.0), size=(400.0, 300.0),
+                 children=[_node("AXRow", "hidden", pos=(-5000.0, -5000.0), size=(100.0, 20.0),
+                                 children=[_node("AXButton", "Inside", actions=("AXPress",),
+                                                 pos=(10.0, 10.0), size=(50.0, 20.0))])])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=_geometry())
+    assert not [el for el in snap.elements if el.title in ("hidden", "Inside")]
 
 
 def test_password_role_is_secure_and_never_leaks_value() -> None:

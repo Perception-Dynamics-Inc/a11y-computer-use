@@ -43,6 +43,7 @@ _ROLE = {
     "password text": "AXSecureTextField",
     "text": "AXTextArea",
     "document text": "AXTextArea",
+    "terminal": "AXTextArea",  # VTE (gnome-terminal, tilix): its Text iface is the screen contents
     "document frame": "AXGroup",
     "document web": "AXGroup",
     "document email": "AXGroup",
@@ -206,7 +207,12 @@ def _extents(acc):
         return None, None
     w = float(getattr(rect, "width", 0) or 0)
     h = float(getattr(rect, "height", 0) or 0)
-    if w <= 0 or h <= 0:
+    if w < 0 or h < 0:
+        # GTK's "no allocation of my own" sentinel (-1, -1, -1, -1): a notebook
+        # page tab whose label is hidden. Passed through as a negative extent so
+        # the engine keeps the page's content below it instead of dropping it.
+        return (-1.0, -1.0), (-1.0, -1.0)
+    if w == 0 or h == 0:
         return None, None
     return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
 
