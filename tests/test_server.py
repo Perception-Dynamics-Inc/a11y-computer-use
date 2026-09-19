@@ -532,6 +532,10 @@ async def test_app_list_returns_json_rows(mcp_server, store, monkeypatch) -> Non
     assert rows == [{"bundle_id": APP, "name": "TextEdit", "pid": 42, "frontmost": True}]
 
 
+def tmp_path_for(store) -> object:
+    return store.path.parent / "audit"
+
+
 async def test_app_list_on_a_fresh_desktop_keys_on_a_trusted_running_app(mcp_server, store, monkeypatch) -> None:
     """Nothing focused: the frontmost 'app' is the desktop shell, which nobody
     grants. The list (identities only) is then gated against a running app the
@@ -542,10 +546,12 @@ async def test_app_list_on_a_fresh_desktop_keys_on_a_trusted_running_app(mcp_ser
     monkeypatch.setattr(server, "_list_apps", lambda: rows_)
     result = await call_tool(mcp_server, "app", {"action": "list"})
     assert result.isError and "needs_permission" in result.content[0].text  # no grant anywhere
-    store.set_tier(APP, safety.Tier.READ)
+    store.set_tier("com.other.granted", safety.Tier.READ)  # trusted, but not running
     result = await call_tool(mcp_server, "app", {"action": "list"})
     assert not result.isError
     assert json.loads(result.content[0].text) == rows_
+    store.set_tier(APP, safety.Tier.READ)  # a trusted RUNNING app is preferred as the key
+    assert server.Runtime(store=store, audit=safety.AuditLog(tmp_path_for(store)))._list_gate_key() == APP
 
 
 async def test_window_list_bounds_are_display_qualified_physical_pixels(

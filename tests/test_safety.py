@@ -413,3 +413,19 @@ def test_confirmation_prompt_ignores_non_click_actions() -> None:
     assert confirmation_prompt(TYPE, APP) is None
     assert confirmation_prompt(KEY, APP) is None
     assert confirmation_prompt(OBSERVE, APP) is None
+
+
+def test_granted_apps_lists_grants_the_deny_and_allow_lists_do_not_override(tmp_path) -> None:
+    """`app list` keys its gate on a trusted app when the desktop shell is
+    frontmost; the store says which apps are trusted, honouring deny/allow."""
+    from a11y_computer_use.safety import PermissionStore, Tier
+
+    store = PermissionStore(tmp_path / "p.json")
+    assert store.granted_apps() == []
+    store.set_tier("gedit", Tier.READ)
+    store.set_tier("krita", Tier.FULL)
+    assert store.granted_apps() == ["gedit", "krita"]
+    store.add_deny("krita")
+    assert store.granted_apps() == ["gedit"]  # a denied app is never a trusted key
+    store.add_allow("nothing-else")
+    assert store.granted_apps() == []  # a non-empty allow list is a whitelist

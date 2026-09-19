@@ -405,6 +405,13 @@ class PermissionStore:
         """Granted tier for ``bundle_id``; None means ungranted ("ask")."""
         return self.policy(bundle_id)[0]
 
+    def granted_apps(self) -> list[str]:
+        """App ids holding a grant that the deny/allow lists do not override,
+        in config order. Empty when nothing on this machine is trusted."""
+        with self._lock:
+            self._refresh()
+            return [app for app in self._tiers if not self.policy(app)[1]]
+
     def set_tier(self, bundle_id: str, tier: Tier) -> None:
         """Record a human-approved grant and persist it."""
         self._validate_app(bundle_id)

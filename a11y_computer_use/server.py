@@ -2055,22 +2055,25 @@ class Runtime:
         frontmost app when that app holds a grant. On a fresh desktop the
         frontmost "app" is the shell (Finder, nemo-desktop, explorer.exe), which
         nobody grants, and the planner's first question, "what is running?",
-        was refused on every trial; the gate then keys on a running app the
-        human has already trusted. With no grant on any running app the refusal
-        stands: nothing on this machine is trusted yet."""
+        was refused on every trial; the gate then keys on an app the human has
+        already trusted on this machine: a running one first, else any granted
+        one (the list is what a planner reads before launching it). With no
+        grant anywhere the refusal stands: nothing on this machine is trusted."""
         front = self._frontmost()
         if self.store.get_tier(front) is not None:
+            return front
+        trusted = self.store.granted_apps()
+        if not trusted:
             return front
         try:
             rows = self.driver.running_apps()
         except ComputerUseError:
-            return front
+            rows = []
         for row in rows:
             ident = str(row.get("bundle_id") or row.get("id") or row.get("app") or row.get("name") or "")
-            tier, denied, _error = self.store.policy(ident) if ident else (None, True, None)
-            if tier is not None and not denied:
+            if ident in trusted:
                 return ident
-        return front
+        return trusted[0]
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
         needle = identifier.lower()
