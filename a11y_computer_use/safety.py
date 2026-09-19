@@ -104,6 +104,24 @@ def _replace_file(source: Path, target: Path, *, timeout: float = 5.0) -> None:
             time.sleep(min(0.01, remaining))
 
 
+def _ensure_lock_byte(fd: int) -> None:
+    """Give an empty Windows sidecar the one byte `msvcrt.locking` locks.
+
+    Two processes can open the empty sidecar together: the first writes the
+    byte and locks it, and the second's write then fails with EACCES because
+    Windows refuses writes into another process's locked range. The byte
+    exists by then, so that failure is not an error; the acquire loop that
+    follows waits for the lock as usual. Any other error propagates.
+    """
+    if os.fstat(fd).st_size != 0:
+        return
+    try:
+        os.write(fd, b"\0")
+    except OSError as exc:
+        if exc.errno != errno.EACCES:
+            raise
+
+
 @contextmanager
 def _file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
     """Serialize local processes using a stable sidecar file, with a deadline.
@@ -118,8 +136,7 @@ def _file_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            if os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
+            _ensure_lock_byte(fd)
 
             def acquire() -> None:
                 os.lseek(fd, 0, os.SEEK_SET)

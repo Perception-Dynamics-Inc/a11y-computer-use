@@ -454,3 +454,36 @@ def test_permission_and_audit_files_are_private_by_default(tmp_path: Path) -> No
 def test_audit_rejects_unbounded_or_inconsistent_limits(tmp_path: Path, kwargs: dict) -> None:
     with pytest.raises(ValueError):
         safety.AuditLog(tmp_path, **kwargs)
+
+
+def test_lock_byte_init_tolerates_another_process_holding_the_byte(tmp_path: Path, monkeypatch) -> None:
+    """Windows: the first opener writes and locks byte 0; a second opener's write
+    into that locked byte fails with EACCES, which must not abort the lock."""
+    fd = os.open(tmp_path / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        def locked_range_write(_fd, _data):
+            raise PermissionError(errno.EACCES, "Permission denied")
+
+        monkeypatch.setattr(safety.os, "write", locked_range_write)
+        safety._ensure_lock_byte(fd)  # no raise: the byte exists, the lock loop will wait
+
+        def disk_full(_fd, _data):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(safety.os, "write", disk_full)
+        with pytest.raises(OSError, match="No space"):
+            safety._ensure_lock_byte(fd)
+    finally:
+        os.close(fd)
+
+
+def test_lock_byte_init_writes_once_then_leaves_the_file_alone(tmp_path: Path) -> None:
+    path = tmp_path / ".lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        safety._ensure_lock_byte(fd)
+        safety._ensure_lock_byte(fd)
+    finally:
+        os.close(fd)
+    assert path.read_bytes() == b"\0"
+
