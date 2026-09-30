@@ -50,6 +50,9 @@ EXPECTED_TOOLS = {
     "file_dialog",
     "notes",
     "wait_until",
+    "request_permission",
+    "grant_app",
+    "report_issue",
 }
 
 
