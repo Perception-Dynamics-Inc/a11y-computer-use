@@ -168,3 +168,39 @@ def first_hint(kind: str, opener: Callable[[list[str]], object] | None = None,
     return (f"{lead} Tell the user: switch on {who} under System Settings > Privacy & Security > "
             f"{_LABELS[kind]}. Then call request_permission(kind='{kind}'), which reopens the pane "
             f"if needed and waits up to 90 s for the switch, and retry.")
+
+
+def native_confirm(title: str, message: str, *, ok: str = "Allow", cancel: str = "Don't Allow",
+                   timeout_s: float = 120.0,
+                   runner: Callable[..., "subprocess.CompletedProcess[str]"] | None = None) -> bool | None:
+    """A macOS dialog shown by this process, for hosts that cannot show one.
+
+    Returns True for ``ok``, False for ``cancel`` or the timeout, None when no
+    dialog could be shown (off macOS, no window server, osascript missing).
+    The dialog belongs to System Events, an app this tool's tiers never grant
+    by default, so the agent cannot click it through this server.
+    """
+    if sys.platform != "darwin" or _quiet():
+        return None
+    run = runner or (lambda cmd, **kw: subprocess.run(cmd, capture_output=True, text=True, **kw))
+    esc = lambda t: t.replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
+    script = (
+        'tell application "System Events"\n'
+        "activate\n"
+        f'display dialog "{esc(message)}" with title "{esc(title)}" '
+        f'buttons {{"{esc(cancel)}", "{esc(ok)}"}} default button "{esc(cancel)}" '
+        f'cancel button "{esc(cancel)}" with icon caution giving up after {int(timeout_s)}\n'
+        "end tell"
+    )
+    try:
+        done = run(["osascript", "-e", script], timeout=timeout_s + 15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = (done.stdout or "") + (done.stderr or "")
+    if "gave up:true" in out:
+        return False
+    if f"button returned:{ok}" in out:
+        return True
+    if done.returncode != 0 and "User canceled" not in out and "-128" not in out:
+        return None  # osascript itself failed: no display, no binary
+    return False

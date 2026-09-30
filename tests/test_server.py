@@ -1345,10 +1345,24 @@ async def test_grant_app_records_the_grant_only_when_the_user_accepts(mcp_server
     assert result.isError and "tier must be" in result.content[0].text
 
 
-async def test_grant_app_without_a_confirmation_channel_hands_back_the_command(mcp_server, store) -> None:
+async def test_grant_app_without_a_host_dialog_asks_through_a_native_one(mcp_server, store, monkeypatch) -> None:
+    from a11y_computer_use import onboarding
+
+    shown = []
+    monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: shown.append(msg) or True)
     result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Other", "tier": "click"})
-    assert "a11y-computer-use grant com.example.Other click" in result.content[0].text
-    assert store.get_tier("com.example.Other") is None
+    assert result.content[0].text == "granted: com.example.Other at tier 'click' (user confirmed in the native dialog)"
+    assert store.get_tier("com.example.Other") is safety.Tier.CLICK and "com.example.Other" in shown[0]
+
+    monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: False)
+    result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Third", "tier": "click"})
+    assert "declined com.example.Third at 'click' in the native dialog" in result.content[0].text
+    assert store.get_tier("com.example.Third") is None
+
+    monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: None)
+    result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Fourth", "tier": "click"})
+    assert "a11y-computer-use grant com.example.Fourth click" in result.content[0].text
+    assert store.get_tier("com.example.Fourth") is None
 
 
 async def test_needs_permission_refusal_names_the_grant_step(mcp_server, monkeypatch) -> None:
@@ -1361,9 +1375,10 @@ async def test_needs_permission_refusal_names_the_grant_step(mcp_server, monkeyp
 
 
 async def test_report_issue_without_gh_returns_a_prefilled_link(mcp_server, audit_dir, monkeypatch) -> None:
-    from a11y_computer_use import reporting
+    from a11y_computer_use import onboarding, reporting
 
     monkeypatch.setattr(reporting.shutil, "which", lambda name: None)
+    monkeypatch.setattr(onboarding, "native_confirm", lambda *a, **kw: None)
     result = await call_tool(mcp_server, "report_issue", {
         "kind": "bug", "title": "click crashed", "body": "internal_error: click crashed: KeyError", "tool": "click"})
     text = result.content[0].text
@@ -1389,3 +1404,25 @@ async def test_a_crash_inside_a_tool_reads_as_internal_error_with_the_report_hin
     assert "internal_error: screenshot crashed: KeyError" in result.content[0].text
     assert "report_issue(kind='bug', tool='screenshot'" in result.content[0].text
 
+
+
+def test_running_app_by_bundle_asks_launchservices_directly(monkeypatch) -> None:
+    """The NSWorkspace list lags in a process whose main run loop is the asyncio
+    loop; a direct bundle-id query still sees the app (Calculator, 2026-10-01)."""
+    import sys as _sys
+    import types
+
+    class Running:
+        def __init__(self, policy): self._p = policy
+        def activationPolicy(self): return self._p
+
+    calls = []
+    fake_appkit = types.SimpleNamespace(NSRunningApplication=types.SimpleNamespace(
+        runningApplicationsWithBundleIdentifier_=lambda bid: calls.append(bid) or
+        ([Running(2), Running(0)] if bid == "com.apple.calculator" else [])))
+    monkeypatch.setitem(_sys.modules, "AppKit", fake_appkit)
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: "com.apple.calculator" if ident == "Calculator" else (ident if "." in ident else None))
+    got = server._running_app_by_bundle("Calculator")
+    assert got is not None and got[1] == "com.apple.calculator" and got[0].activationPolicy() == 0  # helper skipped
+    assert server._running_app_by_bundle("com.example.none") is None
+    assert server._running_app_by_bundle("Nothing") is None and calls == ["com.apple.calculator", "com.example.none"]

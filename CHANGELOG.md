@@ -21,6 +21,11 @@ Adoption: the two grants come to the user instead of the user hunting for them, 
 - `grant_app(app, tier)`: an ungranted app is granted through the host's own confirmation dialog (MCP elicitation) and recorded on accept; hosts without elicitation get the shell command instead, and nothing is recorded without a human's yes. `needs_permission` refusals now carry both routes. `a11y-computer-use grant <app> <tier>` (list with no arguments, `--revoke`) for the shell (2026-10-01).
 - `report_issue(kind, title, body, tool)`: agents file defects, bottlenecks, missing capabilities, and app-compatibility gaps on the project's public issues, with secrets, e-mails, and the home directory redacted and an environment table appended; the host confirms first, `gh` files it under `agent-report` plus the kind, and without `gh` or a confirmation channel the tool returns a prefilled link. The server instructions say when to report; a crash inside a tool reads as `internal_error` with the report instruction, and a call over `A11Y_COMPUTER_USE_SLOW_CALL_S` (10 s; waiting tools exempt) is marked `[slow call]`. `docs/reporting.md`, issue template `agent_report.yml`, labels (2026-10-01).
 - `a11y-computer-use --version`; `__version__` reads the installed distribution instead of a stale constant (2026-10-01).
+- A native macOS confirmation dialog, shown by the server itself, when the host cannot show one: Codex's MCP client has no elicitation, so `grant_app` had answered "the user declined" for a prompt nobody saw. `grant_app` and `report_issue` now try the host's dialog, then a dialog from this process (System Events, which the tool's tiers never grant, so the agent cannot click it), and only then hand back the shell command (2026-10-01).
+
+### Fixed
+
+- The MCP server never saw an app launched a moment ago (Calculator, Notes: "no window appeared within 60s", `app_not_found` right after `launched`): the NSWorkspace refresh only ran on the main thread, and the server runs every tool on a worker thread. The refresh now hops to the main thread's loop, and app lookup falls back to a direct LaunchServices query by bundle id (2026-10-01).
 
 ### Changed
 

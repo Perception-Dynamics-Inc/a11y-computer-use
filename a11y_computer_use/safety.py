@@ -690,8 +690,23 @@ def refresh_workspace() -> None:
     is pending and under 1 ms right after a launch. No-op off the main
     thread (the loop there carries no AppKit notifications) and off macOS.
     """
-    if sys.platform != "darwin" or threading.current_thread() is not threading.main_thread():
+    if sys.platform != "darwin":
         return
+    if threading.current_thread() is not threading.main_thread():
+        # The MCP server runs every tool on a worker thread while the asyncio
+        # loop owns the main thread: hop over for the one pass. Outside a
+        # worker context (no portal) there is nothing to hop to.
+        try:
+            import anyio
+
+            anyio.from_thread.run_sync(_spin_main_run_loop)
+        except Exception:  # noqa: BLE001 - not inside anyio.to_thread, or no loop
+            pass
+        return
+    _spin_main_run_loop()
+
+
+def _spin_main_run_loop() -> None:
     try:
         from Foundation import NSDate, NSRunLoop
     except ImportError:

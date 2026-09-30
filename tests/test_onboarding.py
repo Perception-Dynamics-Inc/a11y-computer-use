@@ -84,3 +84,37 @@ def test_first_hint_prompts_once_per_process(monkeypatch) -> None:
 def test_granted_reads_the_real_grants() -> None:
     assert isinstance(onboarding.granted("accessibility"), bool)
     assert isinstance(onboarding.granted("screen_recording"), bool)
+
+
+def _osascript(stdout="", returncode=0, stderr=""):
+    import subprocess
+
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    run.calls = calls
+    return run
+
+
+def test_native_confirm_reads_the_button(monkeypatch) -> None:
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.delenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", raising=False)
+    run = _osascript("button returned:Allow\n")
+    assert onboarding.native_confirm("t", 'Allow "X"?', runner=run) is True
+    script = run.calls[0][2]
+    assert 'display dialog "Allow \\"X\\"?"' in script and 'default button "Don\'t Allow"' in script
+    assert onboarding.native_confirm("t", "m", runner=_osascript("", 1, "execution error: User canceled. (-128)")) is False
+    assert onboarding.native_confirm("t", "m", runner=_osascript("button returned:, gave up:true")) is False
+    assert onboarding.native_confirm("t", "m", runner=_osascript("", 1, "osascript: no display")) is None
+
+
+def test_native_confirm_is_none_off_macos_or_when_quiet(monkeypatch) -> None:
+    monkeypatch.setattr(onboarding.sys, "platform", "linux")
+    assert onboarding.native_confirm("t", "m", runner=_osascript("button returned:Allow")) is None
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", "1")
+    assert onboarding.native_confirm("t", "m", runner=_osascript("button returned:Allow")) is None
+

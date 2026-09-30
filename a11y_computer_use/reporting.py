@@ -39,7 +39,8 @@ KINDS: dict[str, str] = {
 SLOW_CALL_S = float(os.environ.get("A11Y_COMPUTER_USE_SLOW_CALL_S", "10"))
 
 #: Tools whose whole purpose is to wait; their duration is the caller's choice.
-WAITING_TOOLS = frozenset({"wait_until", "wait_for", "app", "scroll_to_find", "mission"})
+WAITING_TOOLS = frozenset({"wait_until", "wait_for", "app", "scroll_to_find", "mission",
+                           "request_permission", "grant_app", "report_issue"})  # the last three wait on a human
 
 #: GitHub prefilled-URL budget (the request line, not the body limit).
 _URL_BUDGET = 7000

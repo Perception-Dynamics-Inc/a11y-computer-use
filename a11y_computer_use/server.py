@@ -342,6 +342,8 @@ def _running_app(identifier: str) -> tuple[object, str]:
     if match is None:  # maybe launched since the list was last refreshed
         safety.refresh_workspace()
         match = _match_running_app(NSWorkspace.sharedWorkspace().runningApplications(), identifier)
+    if match is None:  # the cached list can still lag: ask LaunchServices directly
+        match = _running_app_by_bundle(identifier)
     if match is None:
         raise ComputerUseError(
             ErrorCode.APP_NOT_FOUND,
@@ -350,6 +352,31 @@ def _running_app(identifier: str) -> tuple[object, str]:
         )
     running, bundle = match
     return running, bundle or identifier
+
+
+def _running_app_by_bundle(identifier: str) -> tuple[object, str] | None:
+    """`NSRunningApplication.runningApplicationsWithBundleIdentifier_` queries
+    LaunchServices itself, so it sees an app the NSWorkspace list has not
+    caught up with (Calculator launched by the server a second earlier read
+    as not running, 2026-10-01). A display name goes through the installed
+    bundle id first; faceless helpers are skipped as in `_match_running_app`."""
+    bundle = _installed_bundle_id(identifier) or identifier
+    if "." not in bundle:
+        return None
+    try:
+        from AppKit import NSRunningApplication
+
+        apps = list(NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle))
+    except Exception:  # noqa: BLE001 - AppKit unavailable
+        return None
+    for running in apps:
+        try:
+            if int(running.activationPolicy()) >= 2:
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        return running, bundle
+    return None
 
 
 def _match_running_app(apps, identifier: str) -> tuple[object, str] | None:
@@ -2543,7 +2570,7 @@ def build_server(
 
     server = FastMCP("a11y-computer-use", instructions=_INSTRUCTIONS, lifespan=lifespan)
 
-    async def run(fn, /, *args, **kwargs):
+    async def run(fn, /, *args, _tool: str | None = None, **kwargs):
         """Run a blocking Runtime call on a worker thread and convert
         structured failures into clear tool-error strings.
 
@@ -2552,7 +2579,7 @@ def build_server(
         active call retains execution ownership until its worker has finished,
         even if its requester disconnects; subsequent calls cannot race it.
         """
-        tool_name = getattr(fn, "__name__", "tool")
+        tool_name = _tool or getattr(fn, "__name__", "tool")
         started = time.monotonic()
         try:
             try:
@@ -2609,6 +2636,29 @@ def build_server(
         note in the click tool)."""
         result = await ctx.elicit(message=prompt, schema=_ConfirmResponse)
         return getattr(result, "action", None) == "accept"
+
+    def _ask_user(ctx, title: str, prompt: str) -> tuple[str, str]:
+        """Yes-or-no from the human, by whatever channel exists: (outcome, channel).
+
+        outcome: 'accepted', 'declined', or 'unavailable'. The host's MCP
+        elicitation dialog comes first; a host that lacks one (or errors) hands
+        over to a native macOS dialog shown by this process; with neither, the
+        caller falls back to a command the user can run.
+        """
+        if _can_elicit(ctx):
+            try:
+                result = anyio.from_thread.run(ctx.elicit, prompt, _ConfirmResponse)
+                action = getattr(result, "action", None)
+                if action == "accept":
+                    return "accepted", "host"
+                if action == "decline":
+                    return "declined", "host"
+            except Exception:  # noqa: BLE001 - the host advertised it but cannot show it
+                pass
+        native = onboarding.native_confirm(title, prompt)
+        if native is None:
+            return "unavailable", "none"
+        return ("accepted" if native else "declined"), "native dialog"
 
     def _can_elicit(ctx) -> bool:
         """Whether the connected host declared MCP elicitation support."""
@@ -2981,7 +3031,7 @@ def build_server(
                 raise ComputerUseError(ErrorCode.UNSUPPORTED, str(exc)) from exc
             return json.dumps(out)
 
-        return await run(execute)
+        return await run(execute, _tool="request_permission")
 
     @server.tool(name="grant_app")
     async def grant_app(app: str, tier: str = "click") -> str:
@@ -2989,12 +3039,12 @@ def build_server(
         server control an app, and record the grant on accept. tier: 'read'
         (observe only), 'click' (press elements, menus, dialogs), 'full' (type
         text and key chords too). Call it after a needs_permission result and
-        after telling the user why the task needs that app. Without a
-        confirmation channel nothing is recorded and you get the one-line
-        command the user can run instead. Grants persist in
+        after telling the user why the task needs that app. A host without a
+        confirmation dialog gets a native macOS dialog from this server instead;
+        with neither, nothing is recorded and you get the one-line command the
+        user can run. Grants persist in
         ~/.a11y-computer-use/permissions.json; the user can revoke them there."""
         ctx = server.get_context()
-        confirm = _confirmer_for(ctx) if _can_elicit(ctx) else None
 
         def execute() -> str:
             try:
@@ -3007,21 +3057,25 @@ def build_server(
             if current is not None and safety._TIER_RANK[current] >= safety._TIER_RANK[wanted]:
                 return f"already granted: {bundle} at tier '{current.value}'"
             cmd = f"a11y-computer-use grant {bundle} {wanted.value}"
-            if confirm is None:
-                return (f"not granted: this host has no confirmation channel. Ask the user to run "
-                        f"`{cmd}` (or edit ~/.a11y-computer-use/permissions.json), then retry.")
-            ok = confirm(f"Allow this agent to control {bundle} at tier '{wanted.value}'?\n"
-                         f"read = observe only; click = press elements, menus, dialogs; "
-                         f"full = type text and key chords too.\n"
-                         f"Recorded in ~/.a11y-computer-use/permissions.json; revoke there any time.")
-            if not ok:
-                return f"not granted: the user declined {bundle} at '{wanted.value}'."
+            outcome, channel = _ask_user(
+                ctx, "a11y-computer-use",
+                f"Allow this agent to control {bundle} at tier '{wanted.value}'?\n\n"
+                f"read = observe only; click = press elements, menus, dialogs; "
+                f"full = type text and key chords too.\n\n"
+                f"Recorded in ~/.a11y-computer-use/permissions.json; revoke there any time.")
+            if outcome == "unavailable":
+                return (f"not granted: no way to ask the user from here (the host has no confirmation "
+                        f"dialog and no native dialog could be shown). Ask the user to run `{cmd}`, "
+                        f"then retry.")
+            if outcome == "declined":
+                return (f"not granted: the user declined {bundle} at '{wanted.value}' in the "
+                        f"{channel}. Do not retry unless they ask; they can run `{cmd}` later.")
             runtime.store.set_tier(bundle, wanted)
             runtime.audit.record({"action": "grant_app", "app": bundle, "tier": wanted.value,
-                                  "via": "host confirmation"})
-            return f"granted: {bundle} at tier '{wanted.value}' (user confirmed in the host)"
+                                  "via": channel})
+            return f"granted: {bundle} at tier '{wanted.value}' (user confirmed in the {channel})"
 
-        return await run(execute)
+        return await run(execute, _tool="grant_app")
 
     @server.tool(name="report_issue")
     async def report_issue(kind: str, title: str, body: str, tool: str | None = None) -> str:
@@ -3039,8 +3093,10 @@ def build_server(
         the user instead. Never report needs_permission/deny, stale_ref, or your
         own argument mistakes."""
         ctx = server.get_context()
-        confirm = _confirmer_for(ctx) if _can_elicit(ctx) else None
         driver = getattr(getattr(runtime, "driver", None), "name", None)
+
+        def confirm(prompt: str) -> bool:
+            return _ask_user(ctx, "a11y-computer-use: file a public issue?", prompt)[0] == "accepted"
 
         def execute() -> str:
             try:
@@ -3052,7 +3108,7 @@ def build_server(
                                   "title": reporting.redact(title), "outcome": out[:120]})
             return out
 
-        return await run(execute)
+        return await run(execute, _tool="report_issue")
 
     @server.tool(name="wait_until")
     async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
