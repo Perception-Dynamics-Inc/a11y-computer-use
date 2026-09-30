@@ -864,6 +864,7 @@ def test_set_value_prefers_driver_then_falls_back_and_refuses_secure() -> None:
     snap = type("S", (), {"app": "com.test"})()
     rt._anchor = lambda ref: (snap, el)
     rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._recheck_target = lambda app, target: None  # the HID fallback's guard; hit-tests the real screen
     calls = {"set": [], "press": [], "type": []}
 
     class _D:
