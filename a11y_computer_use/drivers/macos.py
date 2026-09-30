@@ -71,13 +71,16 @@ class MacOSDriver:
                dry_run: bool = False) -> object:
         return act.scroll(target, dx=dx, dy=dy, unit=unit, pre_check=pre_check, dry_run=dry_run)
 
+    #: Keyboard input can be addressed to a process (no activation).
+    background_input = True
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
-                  dry_run: bool = False) -> object:
-        return act.type_text(text, pre_check=pre_check, dry_run=dry_run)
+                  dry_run: bool = False, pid: int | None = None) -> object:
+        return act.type_text(text, pre_check=pre_check, dry_run=dry_run, pid=pid)
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
-                  dry_run: bool = False) -> object:
-        return act.key_chord(chord, pre_check=pre_check, dry_run=dry_run)
+                  dry_run: bool = False, pid: int | None = None) -> object:
+        return act.key_chord(chord, pre_check=pre_check, dry_run=dry_run, pid=pid)
 
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:
@@ -108,9 +111,9 @@ class MacOSDriver:
         from a11y_computer_use import server
         return server._list_apps()
 
-    def launch_app(self, identifier: str) -> None:
+    def launch_app(self, identifier: str, *, activate: bool = True) -> None:
         from a11y_computer_use import server
-        server._launch_app(identifier)
+        server._launch_app(identifier, activate=activate)
 
     def activate_app(self, identifier: str) -> str:
         from a11y_computer_use import server

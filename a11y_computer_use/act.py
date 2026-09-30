@@ -437,13 +437,23 @@ def _key_event(keycode: int, key_down: bool, *, flags: int = 0) -> object:
     return event
 
 
-def _post(events: list[BuiltEvent], *, dry_run: bool) -> None:
+def _post(events: list[BuiltEvent], *, dry_run: bool, pid: int | None = None) -> None:
     """Post events to the HID tap with small inter-event delays; no-op in
-    dry_run. Callers gate on `_require_ax` *before* building/posting."""
+    dry_run. Callers gate on `_require_ax` *before* building/posting.
+
+    With ``pid`` the events go to that process (``CGEventPostToPid``) instead
+    of the HID tap: the app receives them without being frontmost, so nothing
+    is activated and the user's screen stays where it is. Keyboard events
+    reach the app's key or main window this way; mouse events do not (AppKit
+    drops pointer events that carry no window), so only typing and chords
+    take a pid."""
     if dry_run:
         return
     for built in events:
-        Quartz.CGEventPost(Quartz.kCGHIDEventTap, built.event)
+        if pid:
+            Quartz.CGEventPostToPid(int(pid), built.event)
+        else:
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, built.event)
         time.sleep(EVENT_DELAY_S)
 
 
@@ -613,7 +623,7 @@ def _utf16_chunks(text: str, max_units: int) -> list[str]:
     return chunks
 
 
-def _type_via_unicode(text: str, *, dry_run: bool) -> list[BuiltEvent]:
+def _type_via_unicode(text: str, *, dry_run: bool, pid: int | None = None) -> list[BuiltEvent]:
     """Short-text path: keycode-less events carrying the literal characters.
 
     Both down and up carry the unicode payload (apps otherwise see a bare
@@ -626,12 +636,12 @@ def _type_via_unicode(text: str, *, dry_run: bool) -> list[BuiltEvent]:
             event = _key_event(0, key_down)
             Quartz.CGEventKeyboardSetUnicodeString(event, units, chunk)
             events.append(BuiltEvent(kind, event))
-    _post(events, dry_run=dry_run)
+    _post(events, dry_run=dry_run, pid=pid)
     return events
 
 
 def _type_via_clipboard(
-    text: str, *, dry_run: bool, pasteboard: Pasteboard | None
+    text: str, *, dry_run: bool, pasteboard: Pasteboard | None, pid: int | None = None
 ) -> list[BuiltEvent]:
     """Long-text path: save pasteboard, set text, cmd+v, restore after delay.
 
@@ -654,7 +664,7 @@ def _type_via_clipboard(
         BuiltEvent("key_up", _key_event(keycode, False, flags=flags)),
     ]
     try:
-        _post(events, dry_run=dry_run)
+        _post(events, dry_run=dry_run, pid=pid)
     finally:
         if not dry_run:
             time.sleep(PASTE_RESTORE_DELAY_S)
@@ -669,6 +679,7 @@ def type_text(
     pre_check: PreCheck | None = None,
     dry_run: bool = False,
     pasteboard: Pasteboard | None = None,
+    pid: int | None = None,
 ) -> list[BuiltEvent]:
     """Type literal text into the focused element.
 
@@ -716,8 +727,8 @@ def type_text(
     if not dry_run:
         _require_ax()
     if len(text) > CLIPBOARD_PATH_THRESHOLD:
-        return _type_via_clipboard(text, dry_run=dry_run, pasteboard=pasteboard)
-    return _type_via_unicode(text, dry_run=dry_run)
+        return _type_via_clipboard(text, dry_run=dry_run, pasteboard=pasteboard, pid=pid)
+    return _type_via_unicode(text, dry_run=dry_run, pid=pid)
 
 
 def parse_chord(chord: str) -> tuple[int, int]:
@@ -750,6 +761,7 @@ def key_chord(
     *,
     pre_check: PreCheck | None = None,
     dry_run: bool = False,
+    pid: int | None = None,
 ) -> list[BuiltEvent]:
     """Press a key combination, e.g. ``"cmd+shift+t"`` (see `schema.KeyChord`).
 
@@ -775,7 +787,7 @@ def key_chord(
         BuiltEvent("key_down", _key_event(keycode, True, flags=flags)),
         BuiltEvent("key_up", _key_event(keycode, False, flags=flags)),
     ]
-    _post(events, dry_run=dry_run)
+    _post(events, dry_run=dry_run, pid=pid)
     return events
 
 

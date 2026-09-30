@@ -1426,3 +1426,117 @@ def test_running_app_by_bundle_asks_launchservices_directly(monkeypatch) -> None
     assert got is not None and got[1] == "com.apple.calculator" and got[0].activationPolicy() == 0  # helper skipped
     assert server._running_app_by_bundle("com.example.none") is None
     assert server._running_app_by_bundle("Nothing") is None and calls == ["com.apple.calculator", "com.example.none"]
+
+
+# --- background input: keystrokes addressed to a process, no activation ------------
+
+
+class _RunningPid:
+    def __init__(self, pid=4242): self._pid = pid
+    def bundleIdentifier(self): return APP
+    def processIdentifier(self): return self._pid
+
+
+class _BgDriver:
+    """A driver that can address keyboard input to a process."""
+    resolves_apps = False
+    name = "fake-bg"
+    background_input = True
+
+    def __init__(self):
+        self.typed: list[tuple[str, int | None]] = []
+        self.chords: list[tuple[str, int | None]] = []
+        self.launched: list[tuple[str, bool]] = []
+    def ensure_trusted(self): return None
+    def frontmost_app(self): return ("com.other.front", 1)  # the user is elsewhere
+    def main_display_id(self): return 0
+    def type_text(self, text, *, pre_check=None, dry_run=False, pid=None): self.typed.append((text, pid))
+    def key_chord(self, chord, *, pre_check=None, dry_run=False, pid=None): self.chords.append((chord, pid))
+    def launch_app(self, ident, *, activate=True): self.launched.append((ident, activate))
+
+
+@pytest.fixture
+def bg(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_running_app", lambda ident: (_RunningPid(), APP))
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.other.front")
+    store = safety.PermissionStore(tmp_path / "p.json")
+    driver = _BgDriver()
+    with server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver) as rt:
+        yield server.build_server(runtime=rt), rt, driver, store
+
+
+async def test_type_with_app_is_addressed_to_the_process_and_gated_against_it(bg) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.FULL)
+    result = await call_tool(srv, "type", {"text": "hi", "app": APP})
+    assert not result.isError, result.content[0].text
+    assert "addressed to its process; nothing was activated" in result.content[0].text
+    assert driver.typed == [("hi", 4242)]
+    result = await call_tool(srv, "key", {"chord": "cmd+s", "app": APP})
+    assert not result.isError and driver.chords == [("cmd+s", 4242)]
+
+
+async def test_type_with_app_needs_the_app_grant_not_the_frontmost_one(bg) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier("com.other.front", safety.Tier.FULL)  # the frontmost app's grant must not count
+    result = await call_tool(srv, "type", {"text": "hi", "app": APP})
+    assert result.isError and "needs_permission: " + APP in result.content[0].text
+    assert driver.typed == []
+
+
+async def test_background_mode_addresses_the_observed_app_by_default(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    monkeypatch.setattr(server, "FOCUS_MODE", "background")
+    store.set_tier(APP, safety.Tier.FULL)
+    rt._current = dataclasses.replace(build_synthetic_snapshot(), app=APP)
+    result = await call_tool(srv, "type", {"text": "x"})
+    assert not result.isError, result.content[0].text
+    assert driver.typed == [("x", 4242)]
+    result = await call_tool(srv, "app", {"action": "launch", "name": APP})
+    assert driver.launched and driver.launched[-1][1] is False  # background mode: open -g
+
+
+async def test_launch_activate_flag_reaches_the_driver(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.CLICK)
+    monkeypatch.setattr(rt, "_wait_first_window", lambda name, wait: "Untitled")
+    await call_tool(srv, "app", {"action": "launch", "name": APP, "activate": False})
+    await call_tool(srv, "app", {"action": "launch", "name": APP})
+    assert [a for _, a in driver.launched] == [False, True]
+
+
+async def test_type_with_app_is_unsupported_off_background_drivers(bg) -> None:
+    srv, rt, driver, store = bg
+    driver.background_input = False
+    store.set_tier(APP, safety.Tier.FULL)
+    result = await call_tool(srv, "type", {"text": "hi", "app": APP})
+    assert result.isError and "unsupported" in result.content[0].text
+
+
+def test_launch_without_activation_uses_open_g(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(server.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("R", (), {"returncode": 0, "stderr": ""})())
+    server._launch_app("com.apple.TextEdit", activate=False)
+    server._launch_app("com.apple.TextEdit")
+    assert calls[0] == ["/usr/bin/open", "-g", "-b", "com.apple.TextEdit"]
+    assert calls[1] == ["/usr/bin/open", "-b", "com.apple.TextEdit"]
+
+
+def test_launch_wait_sees_a_window_on_another_space(tmp_path, monkeypatch) -> None:
+    """The on-screen window list stops at the current Space; an app that opened
+    its window on another desktop must still count as launched."""
+    class _D:
+        resolves_apps = False
+        name = "fake"
+        def ensure_trusted(self): return None
+        def frontmost_app(self): return ("com.front", 1)
+        def main_display_id(self): return 0
+        def windows(self): return []  # nothing on this Space
+
+    monkeypatch.setattr(server, "_running_app", lambda ident: (_RunningPid(31), APP))
+    monkeypatch.setattr(server, "_window_titles_all_spaces", lambda pid: ["Untitled 2.rtf"] if pid == 31 else [])
+    store = safety.PermissionStore(tmp_path / "p.json")
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    assert rt._wait_first_window(APP, 0.5) == "Untitled 2.rtf"
+    monkeypatch.setattr(server, "_window_titles_all_spaces", lambda pid: [])
+    assert rt._wait_first_window(APP, 0.3) is None

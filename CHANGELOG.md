@@ -11,6 +11,20 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.0] - 2026-10-01
+
+The user keeps working while the agent works. The same answer as the cursor: address the app, not the screen.
+
+### Added
+
+- `type(text, app=X)` and `key(chord, app=X)`: keystrokes addressed to X's process (`CGEventPostToPid`) reach its key or main window without activating it, so the user's screen and Space stay put. Gated against X (tier `full`), with a recheck that the process is still the one the grant was decided for, a stronger guarantee than the frontmost check. Verified live on TextEdit while another app had focus. Pointer events cannot be addressed this way (AppKit drops them without a window), so coordinate clicks, drags, and wheel scrolls still need the app in front; the tool docs say so. macOS only; `unsupported` elsewhere (2026-10-01).
+- `app launch ... activate=false` (`open -g`): the app starts behind the current one. `A11Y_COMPUTER_USE_FOCUS_MODE=background` makes both the default: `type`/`key` without `app` address the app of the latest snapshot, and launch does not activate. `docs/coexist.md` states what never activates, what still does, and the Space limit: the accessibility API only exposes windows on the user's current Space, so an app on another desktop or behind a fullscreen app cannot be observed until they share a desktop again (2026-10-01).
+- The server instructions tell planners to prefer refs, `set_value`, menus, and addressed keystrokes over `app focus` and coordinate clicks, and to say so before a focus change (2026-10-01).
+
+### Fixed
+
+- `app launch` no longer waits a minute for a window that opened on another Space: the wait also queries windows on every Space (`kCGWindowListOptionAll`), where the on-screen list and the accessibility API stop at the current one (2026-10-01).
+
 ## [0.3.2] - 2026-10-01
 
 Adoption: the two grants come to the user instead of the user hunting for them, and agents report the tool's own defects where they get fixed.

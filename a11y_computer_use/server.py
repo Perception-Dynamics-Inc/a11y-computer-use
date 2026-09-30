@@ -105,6 +105,12 @@ if TYPE_CHECKING:
 
 _DOCTOR_HINT = "run `a11y_computer_use doctor` to see which host app needs the grant"
 
+#: "auto": type/key go to the frontmost app and launch activates (the classic
+#: behaviour). "background": type/key are addressed to the observed app's
+#: process and launch does not activate, so the user's screen and Space stay
+#: where they are while the agent works (docs/coexist.md).
+FOCUS_MODE = os.environ.get("A11Y_COMPUTER_USE_FOCUS_MODE", "auto")
+
 #: Ceiling for the ``wait_for`` timeout parameter (seconds).
 MAX_WAIT_TIMEOUT_S = 60.0
 MAX_BATCH_STEPS = 100
@@ -515,17 +521,17 @@ def _installed_bundle_id(identifier: str) -> str | None:
     url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(identifier)
     return identifier if url is not None else None
 
-def _launch_app(identifier: str) -> None:
+def _launch_app(identifier: str, *, activate: bool = True) -> None:
     """Launch by bundle id (``open -b``) or display name (``open -a``).
 
     Dotted display names ("OBS 30.1") are indistinguishable from bundle ids,
-    so ``-b`` falls back to ``-a`` before giving up.
+    so ``-b`` falls back to ``-a`` before giving up. ``activate=False`` adds
+    ``-g``: the app starts behind the current one and the user's Space stays.
     """
     flags = ("-b", "-a") if "." in identifier else ("-a",)
     for flag in flags:
-        result = subprocess.run(
-            ["/usr/bin/open", flag, identifier], capture_output=True, text=True
-        )
+        cmd = ["/usr/bin/open"] + ([] if activate else ["-g"]) + [flag, identifier]
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             return
     raise ComputerUseError(
@@ -533,6 +539,24 @@ def _launch_app(identifier: str) -> None:
         f"could not launch {identifier!r}: {result.stderr.strip() or 'open failed'}",
         detail={"app": identifier},
     )
+
+
+def _window_titles_all_spaces(pid: int) -> list[str] | None:
+    """Titles of ``pid``'s ordinary windows on every Space (CGWindowList with
+    kCGWindowListOptionAll), or None off macOS. The on-screen list and the
+    accessibility API both stop at the current Space, so an app launched
+    behind the user, or one whose window opened on another desktop, read as
+    "no window appeared" for a full minute (TextEdit, Notes, 2026-10-01)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import Quartz
+    except ImportError:
+        return None
+    rows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID) or []
+    return [str(r.get("kCGWindowName") or "") for r in rows
+            if int(r.get("kCGWindowOwnerPID") or 0) == pid and int(r.get("kCGWindowLayer") or 0) == 0
+            and float(r.get("kCGWindowAlpha") or 1.0) > 0]
 
 
 def _list_windows() -> list[dict[str, object]]:
@@ -1766,11 +1790,52 @@ class Runtime:
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
 
+    def _background_target(self, app: str | None) -> tuple[str, int] | None:
+        """(bundle, pid) to address keyboard input to, or None for the
+        frontmost path. Explicit ``app`` wins; in background mode the app of
+        the latest snapshot is the target; otherwise the classic path."""
+        if app is None:
+            if FOCUS_MODE != "background" or self._current is None or not self._current.app:
+                return None
+            app = self._current.app
+        if not getattr(self.driver, "background_input", False):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "keyboard input addressed to an app (no activation) is available on macOS only",
+                detail={"app": app, "driver": getattr(self.driver, "name", "?")},
+            )
+        running, bundle = _running_app(app)
+        pid = int(getattr(running, "processIdentifier", lambda: 0)() or 0) if running is not None else 0
+        if not pid:
+            raise ComputerUseError(ErrorCode.APP_NOT_FOUND, f"no process for {app!r}", detail={"app": app})
+        return bundle, pid
+
+    def _recheck_pid(self, bundle: str, pid: int):
+        def recheck(app: str) -> None:
+            running, found = _running_app(bundle)
+            now = int(getattr(running, "processIdentifier", lambda: 0)() or 0) if running is not None else 0
+            if found != bundle or now != pid:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    f"{bundle} is no longer the process the input was gated for; re-observe and retry",
+                    detail={"gated_app": bundle, "pid": pid, "pid_now": now},
+                )
+        return recheck
+
     @_serialized
-    def type_text(self, text: str) -> str:
+    def type_text(self, text: str, app: str | None = None) -> str:
         action = TypeText(text=text)
-        front = self._frontmost()
+        target = self._background_target(app)
         note: list[str] = []
+        if target is not None:
+            bundle, pid = target
+
+            def execute_bg() -> None:
+                self.driver.type_text(text, pid=pid)
+
+            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
+            return f"typed {len(text)} characters into {bundle} (addressed to its process; nothing was activated)"
+        front = self._frontmost()
 
         def execute() -> None:
             note.append(self._dismiss_open_menu(front))
@@ -1780,14 +1845,23 @@ class Runtime:
         return f"typed {len(text)} characters{''.join(note)}"
 
     @_serialized
-    def key(self, chord: str) -> str:
+    def key(self, chord: str, app: str | None = None) -> str:
         if sys.platform == "darwin":
             from a11y_computer_use import act  # lazy: US-layout keycode parse, macOS
 
             act.parse_chord(chord)  # validate before gating, so bad chords fail fast
         action = KeyChord(chord=chord)
-        front = self._frontmost()
+        target = self._background_target(app)
         note: list[str] = []
+        if target is not None:
+            bundle, pid = target
+
+            def execute_bg() -> None:
+                self.driver.key_chord(chord, pid=pid)
+
+            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
+            return f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)"
+        front = self._frontmost()
 
         def execute() -> None:
             note.append(self._dismiss_open_menu(front))
@@ -2129,12 +2203,13 @@ class Runtime:
         so an unresolved id (the identifier echoed back) is retried each poll."""
         deadline = time.monotonic() + timeout_s
         bundle: str | None = None
+        _running = None
         while True:
             try:
                 if (bundle is None or bundle.lower() == identifier.lower()) and not self._resolves_apps():
                     _running, bundle = _running_app(identifier)
             except ComputerUseError:
-                bundle = None
+                bundle, _running = None, None
             try:
                 rows = self.driver.windows()
             except ComputerUseError:
@@ -2142,6 +2217,11 @@ class Runtime:
             for row in rows:
                 if self._app_matches(row, identifier, bundle):
                     return str(row.get("title") or "")
+            if bundle and _running is not None:  # windows on another Space are not "on screen"
+                pid = int(getattr(_running, "processIdentifier", lambda: 0)() or 0)
+                titles = _window_titles_all_spaces(pid) if pid else None
+                if titles:
+                    return titles[0]
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.25)
@@ -2175,7 +2255,7 @@ class Runtime:
             time.sleep(self.FOCUS_POLL_S)
 
     @_serialized
-    def app(self, action: str, name: str | None = None) -> str:
+    def app(self, action: str, name: str | None = None, activate: bool | None = None) -> str:
         # Routed through the driver (running_apps/launch_app/activate_app), so the
         # browser backend lists/opens/focuses TABS and Windows/Linux use their own
         # backends. Launch waits for the first window and focus waits for the app
@@ -2199,7 +2279,11 @@ class Runtime:
                     gate_key = _installed_bundle_id(name) or name
 
             def launch() -> str | None:
-                self.driver.launch_app(name)
+                if getattr(self.driver, "background_input", False):
+                    self.driver.launch_app(name, activate=activate if activate is not None
+                                           else FOCUS_MODE != "background")
+                else:
+                    self.driver.launch_app(name)
                 if self._resolves_apps():
                     return None
                 return self._wait_first_window(name, self.APP_LAUNCH_WAIT_S)
@@ -2499,6 +2583,10 @@ _INSTRUCTIONS = (
     "tools the page itself offers to agents. When one matches the step, prefer "
     "webmcp(action='call', name='w2', arguments={...}) over clicking and typing "
     "through the UI; it is fewer steps and the page validates the input. "
+    "COEXIST: the user keeps working while you act. Ref clicks, set_value, menu, file_dialog, and "
+    "type/key with app=<the app you observed> never activate anything; app focus and coordinate "
+    "clicks pull the user's screen to the app, so avoid them unless a coordinate click is the "
+    "only way (then say so). Launch with activate=false. "
     "GRANTS: on macOS the host app needs the Accessibility (and, for screenshots, Screen "
     "Recording) grant; a permission_denied_* error already opened the system dialog and the "
     "settings pane: tell the user which app to switch on, then call request_permission(kind), "
@@ -2834,19 +2922,25 @@ def build_server(
         )
 
     @server.tool(name="type")
-    async def type_text(text: str) -> str:
+    async def type_text(text: str, app: str | None = None) -> str:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). Gated at tier 'full' against the frontmost app;
-        refuses with secure_field when a password field has focus — secrets
-        are typed by the human, never by this tool."""
-        return await run(runtime.type_text, text)
+        for long text). With app=<bundle id or name> (macOS) the keystrokes are
+        addressed to that app's process: it need not be frontmost, nothing is
+        activated, and the user's screen stays where it is; prefer this over
+        `app focus` + type. Without app: the frontmost app. Gated at tier
+        'full' against the target app; refuses with secure_field when a
+        password field has focus — secrets are typed by the human, never by
+        this tool."""
+        return await run(runtime.type_text, text, app)
 
     @server.tool(name="key")
-    async def key(chord: str) -> str:
+    async def key(chord: str, app: str | None = None) -> str:
         """Press one key chord, e.g. 'cmd+s', 'cmd+shift+t', 'escape':
         lowercase names joined by '+', modifiers first, one regular key last.
-        Gated at tier 'full' against the frontmost app."""
-        return await run(runtime.key, chord)
+        With app=<bundle id or name> (macOS) the chord is addressed to that
+        app's process without activating it (the user's screen stays put);
+        without app it goes to the frontmost app. Gated at tier 'full'."""
+        return await run(runtime.key, chord, app)
 
     @server.tool(name="scroll")
     async def scroll(
@@ -2948,15 +3042,20 @@ def build_server(
         return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
 
     @server.tool(name="app")
-    async def app(action: str, name: str | None = None) -> str:
+    async def app(action: str, name: str | None = None, activate: bool | None = None) -> str:
         """Application verbs: action='list' returns running GUI apps as JSON
         (bundle_id, name, pid, frontmost). 'launch' starts name and waits up to
-        20 s for its first window (returns the title); 'focus' brings it to the
-        front and waits until it is frontmost; 'quit' sends cmd+q and reports
-        whether a dialog (unsaved changes) is still showing. name is a bundle
-        id (preferred; grants are keyed by bundle id) or a display name.
+        60 s for its first window (returns the title); activate=false starts it
+        behind the current app so the user's screen and Space stay put (the
+        default in background focus mode); refs, set_value, menus, and
+        type/key with app=... all work without focus. 'focus' brings it to the
+        front and waits until it is frontmost: this switches the user's screen,
+        so use it only when they should see the app or when coordinate clicks
+        are unavoidable. 'quit' sends the quit chord and reports whether a
+        dialog (unsaved changes) is still showing. name is a bundle id
+        (preferred; grants are keyed by bundle id) or a display name.
         launch/focus are tier 'click', quit is tier 'full'."""
-        return await run(runtime.app, action, name)
+        return await run(runtime.app, action, name, activate)
 
     @server.tool(name="window")
     async def window(action: str, window_id: int | None = None, app: str | None = None) -> str:
