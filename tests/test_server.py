@@ -1595,3 +1595,37 @@ def test_seconds_since_user_input_ignores_our_own_hid_posts(monkeypatch) -> None
     assert safety.seconds_since_user_input() == 0.2  # a real hardware event
     monkeypatch.setattr(act, "LAST_HID_POST_MONOTONIC", safety.time.monotonic() - 0.2)
     assert safety.seconds_since_user_input() is None  # that event was ours
+
+
+# --- issue 11: a covered window is not a visible one ---------------------------------
+
+
+async def test_ax_ref_click_works_under_an_overlay_but_hid_click_does_not(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    store.set_tier(APP, safety.Tier.FULL)
+    await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    monkeypatch.setattr(server, "_app_at_point", lambda point: "com.openai.codex")  # floating window on top
+    monkeypatch.setattr(observe, "press_element", lambda element: True)  # the AXPress reaches the element
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert not result.isError, result.content[0].text
+    assert mocked_driver["click"] == []  # no synthesized mouse event was needed
+    monkeypatch.setattr(observe, "press_element", lambda element: False)  # no AX action: synthesized click
+    result = await call_tool(mcp_server, "click", {"ref": "e2"})
+    assert result.isError and "focus_changed" in result.content[0].text  # the HID path keeps its guard
+    assert mocked_driver["click"] == []
+
+
+async def test_focus_reports_a_window_covered_by_another_app(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.CLICK)
+    driver.activate_app = lambda name: None
+    driver.windows = lambda: [{"app": APP, "pid": 4242, "title": "Untitled", "bounds": {"display_id": 1, "x": 100, "y": 100, "width": 800, "height": 600}}]
+    monkeypatch.setattr(rt, "_wait_frontmost", lambda bundle, wait, pid=None: True)
+    monkeypatch.setattr(server, "_app_at_point", lambda point: "com.openai.codex" if (point.x, point.y) == (500, 400) else APP)
+    result = await call_tool(srv, "app", {"action": "focus", "name": APP})
+    text = result.content[0].text
+    assert text.startswith(f"focused {APP}, but its window is covered by com.openai.codex")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: APP)
+    result = await call_tool(srv, "app", {"action": "focus", "name": APP})
+    assert result.content[0].text == f"focused {APP}"

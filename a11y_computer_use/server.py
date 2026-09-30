@@ -1812,6 +1812,8 @@ class Runtime:
 
         def execute() -> None:
             self._refuse_secure(target)  # audited refusal, every driver
+            if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
+                self._recheck_target(app, target)
             menu_note.append(self._dismiss_open_menu(app))
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
@@ -1825,12 +1827,14 @@ class Runtime:
                 and self.driver.press_element(target)
             ):
                 return  # activated via AX — the user's cursor never moved
+            # Synthesized mouse events land on whatever window is under the
+            # point, so the hit-test runs right before them; an AXPress above
+            # addressed the element itself and needs no such guard (#11).
+            self._recheck_target(app, target)
             self._guard_user(app)
             self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
 
-        self._run_gated(
-            action, app, execute, recheck=partial(self._recheck_target, target=target), confirm=confirm
-        )
+        self._run_gated(action, app, execute, confirm=confirm)
         msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
@@ -2431,8 +2435,39 @@ class Runtime:
 
         front = self._run_gated(AppOp(verb=verb, app=bundle), bundle, focus)
         if front:
+            cover = self._window_cover(name, bundle)
+            if cover:
+                return (f"focused {bundle}, but its window is covered by {cover} at its centre (a "
+                        f"floating window?): the user cannot see it, and coordinate input there would "
+                        f"be refused. Ref actions still work; to show it, raise it with window raise or "
+                        f"ask the user to move {cover}.")
             return f"focused {bundle}"
         return f"activated {bundle}, but it is not frontmost yet (another app may hold focus)"
+
+    def _window_cover(self, name: str, bundle: str) -> str | None:
+        """Who owns the pixel at the centre of the app's first window, when that
+        is not the app itself: a floating window (Codex, a picture-in-picture
+        player) can sit over a frontmost app, so "focused" alone was mistaken
+        for "visible" (#11). None when nothing covers it or nothing is known."""
+        if self._resolves_apps():
+            return None
+        try:
+            rows = self.driver.windows()
+        except (ComputerUseError, AttributeError, NotImplementedError):
+            return None
+        for row in rows:
+            if not self._app_matches(row, name, bundle):
+                continue
+            b = row.get("bounds") or {}
+            if not b:
+                return None
+            try:
+                centre = Point(int(b["display_id"]), int(b["x"] + b["width"] / 2), int(b["y"] + b["height"] / 2))
+            except (KeyError, TypeError, ValueError):
+                return None
+            owner = _app_at_point(centre)
+            return owner if owner and owner != bundle else None
+        return None
 
     #: Pause after cmd+q before checking whether the app is still running.
     QUIT_SETTLE_S = 0.6

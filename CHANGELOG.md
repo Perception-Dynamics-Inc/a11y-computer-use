@@ -9,7 +9,10 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- A ref click no longer runs the pointer hit-test: an AXPress addresses the element, so a floating window over the target (Codex over Chrome, #11) no longer turns it into `focus_changed`; synthesized mouse events keep the guard right before injection, and a bound browser tab keeps its tab-switch guard on every path (2026-10-01).
+- `app focus` says when the app's window is covered: after activation it hit-tests the centre of the app's first window, and reports the covering app instead of a bare "focused", since a frontmost app under a floating window is not visible to the user (#11). Closes #11 (2026-10-01).
 
 ## [0.4.1] - 2026-10-01
 
