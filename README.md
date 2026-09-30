@@ -7,12 +7,12 @@
   <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.4.2"><img src="https://img.shields.io/badge/release-v0.4.2-2A8CFF" alt="Release v0.4.2"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.4.3"><img src="https://img.shields.io/badge/release-v0.4.3-2A8CFF" alt="Release v0.4.3"></a>
 </p>
 
 Computer use for AI agents that clicks real UI elements instead of guessed pixels. The model reads a pruned accessibility tree and says `click e14`. Works on macOS, Windows, Linux, and Chromium, through one MCP server.
 
-> 0.4.2 closes the first three agent-filed issues (file dialogs by address, no whole-display OCR under an app's grant), refuses to fight the user for an app (`user_active`), and asks permission through a real macOS alert. 0.4.0: the user keeps working while the agent works ([docs/coexist.md](./docs/coexist.md)).
+> 0.4.3 captures 100x faster on macOS 26 (screencapture, per-window OCR that ignores covering apps). 0.4.2 closes the first three agent-filed issues (file dialogs by address, no whole-display OCR under an app's grant), refuses to fight the user for an app (`user_active`), and asks permission through a real macOS alert. 0.4.0: the user keeps working while the agent works ([docs/coexist.md](./docs/coexist.md)).
 
 ![Driving TextEdit through accessibility refs](docs/hero-demo.gif)
 

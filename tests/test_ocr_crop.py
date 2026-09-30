@@ -126,3 +126,37 @@ def test_screen_text_app_without_a_known_window_is_a_structured_refusal(tmp_path
         rt.screen_text(app=APP)
     assert info.value.code is ErrorCode.UNSUPPORTED and info.value.detail["reason"] == "app_not_on_screen"
     assert engine.sizes == []
+
+
+def test_screen_text_app_captures_the_window_itself_when_the_driver_can(tmp_path) -> None:
+    """Issue #12: one window's own pixels, whatever covers it, instead of a display crop."""
+    import io
+
+    from PIL import Image
+
+    rows = [{"app": APP, "window_id": 77, "bounds": {"display_id": 1, "x": 50, "y": 60, "width": 400, "height": 300}}]
+    engine = RecordingOcr(())
+    driver = WindowedDriver((), rows=rows)
+    captured = []
+
+    def window_png(window_id):
+        captured.append(window_id)
+        buf = io.BytesIO(); Image.new("RGB", (800, 600), (0, 0, 0)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    driver.window_png = window_png
+    rt = make_runtime(tmp_path, driver, engine)
+    text = rt.screen_text(app=APP)
+    assert captured == [77] and engine.sizes[-1] == (800, 600)  # the window image, not the display
+    assert f"(OCR of {APP}'s window 77: its own pixels, whatever covers it)" in text
+
+
+def test_window_capture_failure_falls_back_to_the_display_crop(tmp_path) -> None:
+    rows = [{"app": APP, "window_id": 77, "bounds": {"display_id": 1, "x": 50, "y": 60, "width": 400, "height": 300}}]
+    engine = RecordingOcr(())
+    driver = WindowedDriver((), rows=rows)
+    driver.window_png = lambda window_id: (_ for _ in ()).throw(RuntimeError("gone"))
+    rt = make_runtime(tmp_path, driver, engine)
+    rt.screen_text(app=APP)
+    assert engine.sizes[-1] == (800, 600)  # the crop of the 3200x2000 display at 2x
+

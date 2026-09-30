@@ -56,6 +56,8 @@ windows, and `desktop_snapshot` saw no text. So:
   but observation returns an empty tree until the app and the user share a
   desktop again.
 
+Pixels are the exception: `screen_text(app=X)` captures X's own window through `screencapture -l`, which works for a window on another Space and ignores whatever covers it, so OCR refs of an app the user is not looking at are available; acting on them by coordinate still needs the window on this desktop.
+
 A second display changes the picture: each display has its own current
 Space, so an app on the other display's desktop is observable while the
 user works on theirs. A virtual display for the agent is the way to make

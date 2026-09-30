@@ -17,7 +17,9 @@ call invokes ``CGRequestScreenCaptureAccess``.
 from __future__ import annotations
 
 import io
+import os
 import subprocess
+import time
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -356,12 +358,61 @@ def downscale(png: bytes, max_long_edge: int = DEFAULT_MAX_LONG_EDGE) -> ScaledI
 # ---------------------------------------------------------------------------
 
 
+#: "screencapture" (default; ScreenCaptureKit under the hood, 0.1 to 0.4 s) or
+#: "quartz" (the deprecated in-process CGWindowListCreateImage, which took a
+#: flat 30 s per call on macOS 26.6 and returned nothing from
+#: CGDisplayCreateImage; kept for machines where the binary is unavailable).
+CAPTURE_BACKEND = os.environ.get("A11Y_COMPUTER_USE_CAPTURE", "screencapture")
+
+#: Wall-clock of the last display or window capture, for stage timings.
+LAST_CAPTURE_S = 0.0
+
+
 def _capture_display_png(display: Display) -> bytes:
-    """Capture one display as PNG: Quartz first, ``screencapture`` fallback."""
-    png = _capture_via_quartz(display)
-    if png is None:
-        png = _capture_via_screencapture(display)
-    return png
+    """Capture one display as PNG through the configured backend."""
+    global LAST_CAPTURE_S
+    started = time.monotonic()
+    try:
+        if CAPTURE_BACKEND == "quartz":
+            png = _capture_via_quartz(display)
+            if png is None:
+                png = _capture_via_screencapture(display)
+            return png
+        try:
+            return _capture_via_screencapture(display)
+        except RuntimeError:
+            png = _capture_via_quartz(display)
+            if png is None:
+                raise
+            return png
+    finally:
+        LAST_CAPTURE_S = time.monotonic() - started
+
+
+def window_png(window_id: int) -> bytes:
+    """Capture one window by CGWindowID, shadow omitted, whatever covers it and
+    whichever Space it is on (``screencapture -l``, ScreenCaptureKit). The
+    image is the window's rect at the display's backing scale, so it lines up
+    with the window's projected bounds the way a display crop would.
+
+    Raises:
+        RuntimeError: the window is gone or the capture failed.
+    """
+    global LAST_CAPTURE_S
+    started = time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "window.png"
+            result = subprocess.run(
+                ["/usr/sbin/screencapture", "-x", "-o", "-l", str(int(window_id)), str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0 or not path.exists():
+                reason = result.stderr.strip() or f"exit code {result.returncode}"
+                raise RuntimeError(f"screencapture -l {window_id} failed: {reason}")
+            return path.read_bytes()
+    finally:
+        LAST_CAPTURE_S = time.monotonic() - started
 
 
 def _capture_via_quartz(display: Display) -> bytes | None:

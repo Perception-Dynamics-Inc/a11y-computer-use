@@ -93,6 +93,13 @@ class MacOSDriver:
     def zoom_region(self, region: Bounds) -> bytes:
         return capture.zoom_region(region)
 
+    def window_png(self, window_id: int) -> bytes:
+        """One window's own pixels, whatever covers it (`capture.window_png`)."""
+        return capture.window_png(window_id)
+
+    def displays(self):
+        return capture.displays()
+
     def main_display_id(self) -> int:
         import Quartz  # pyobjc, macOS only; loaded at call time like the rest
 

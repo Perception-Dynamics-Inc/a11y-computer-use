@@ -454,9 +454,15 @@ def set_value(element: Element, value: str) -> bool:
     if handle is None:
         return False
     try:
-        return _appservices().AXUIElementSetAttributeValue(handle, "AXValue", value) == 0
+        ok = _appservices().AXUIElementSetAttributeValue(handle, "AXValue", value) == 0
     except Exception:
         return False
+    if ok:
+        try:  # a following key chord (Return in an address bar) should land here (#12)
+            _appservices().AXUIElementSetAttributeValue(handle, "AXFocused", True)
+        except Exception:
+            pass
+    return ok
 
 
 def _copy_action_names(handle: object) -> tuple[str, ...]:

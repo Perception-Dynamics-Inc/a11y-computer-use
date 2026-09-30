@@ -575,6 +575,41 @@ def _launch_app(identifier: str, *, activate: bool = True) -> None:
     )
 
 
+def _windows_all_spaces(bundle: str) -> list[tuple[int, Bounds]]:
+    """(window_id, projected bounds) of ``bundle``'s ordinary windows on every
+    Space, largest first; empty off macOS or when the app is not running."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        running, found = _running_app(bundle)
+        pid = int(getattr(running, "processIdentifier", lambda: 0)() or 0)
+    except ComputerUseError:
+        return []
+    if not pid:
+        return []
+    try:
+        import Quartz
+    except ImportError:
+        return []
+    rows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID) or []
+    out: list[tuple[int, Bounds]] = []
+    for r in rows:
+        if int(r.get("kCGWindowOwnerPID") or 0) != pid or int(r.get("kCGWindowLayer") or 0) != 0:
+            continue
+        if float(r.get("kCGWindowAlpha") or 1.0) <= 0:
+            continue
+        raw = r.get("kCGWindowBounds") or {}
+        if float(raw.get("Width", 0)) < 50 or float(raw.get("Height", 0)) < 50:
+            continue
+        projected = observe.project_global_rect((float(raw["X"]), float(raw["Y"])),
+                                                (float(raw["Width"]), float(raw["Height"])))
+        if projected is None:
+            continue
+        out.append((int(r["kCGWindowNumber"]), projected))
+    out.sort(key=lambda t: t[1].width * t[1].height, reverse=True)
+    return out
+
+
 def _window_titles_all_spaces(pid: int) -> list[str] | None:
     """Titles of ``pid``'s ordinary windows on every Space (CGWindowList with
     kCGWindowListOptionAll), or None off macOS. The on-screen list and the
@@ -1134,17 +1169,57 @@ class Runtime:
             )
         return engine
 
+    def _window_capture(self, window_id: int) -> bytes | None:
+        """One window's pixels regardless of what covers it (macOS); None when
+        the driver cannot capture windows or the capture fails, so the caller
+        falls back to a display crop."""
+        fn = getattr(self.driver, "window_png", None)
+        if fn is None:
+            return None
+        try:
+            return fn(window_id)
+        except Exception:  # noqa: BLE001 - window gone, binary missing
+            return None
+
+    def _display_for(self, display_id: int):
+        from a11y_computer_use.schema import Display
+
+        for d in self.driver.displays() if hasattr(self.driver, "displays") else ():
+            if d.display_id == display_id:
+                return d
+        return Display(display_id=display_id, width=0, height=0, scale=1.0, is_main=True)
+
     def _ocr_epoch(
         self,
         display_id: int | None = None,
         region: "Bounds | None" = None,
         min_confidence: float = ocr.DEFAULT_MIN_CONFIDENCE,
+        window_id: int | None = None,
     ) -> "ocr.ScreenText":
         """Capture the display through the driver and OCR it into a fresh
         `ocr.ScreenText`. Not gated by itself: callers run it inside a gated
         ``execute`` (READ, screenshot verb, frontmost app), the same grant a
         `screenshot` needs."""
         engine = self._require_ocr()
+        window_png = self._window_capture(window_id) if window_id is not None and region is not None else None
+        if window_png is not None:
+            import io
+
+            from PIL import Image
+
+            display = self._display_for(region.display_id)
+            with Image.open(io.BytesIO(window_png)) as image:
+                width, height = image.size
+            png = window_png
+            offset = (region.x, region.y)
+            target_size = (region.width, region.height)
+            boxes = engine.recognize(png)
+            self._ocr_seq += 1
+            return ocr.build_screen_text(
+                boxes, display=display, image_width=width, image_height=height,
+                text_id=f"ocr-{self._ocr_seq}", min_confidence=min_confidence,
+                offset=offset, target_size=target_size, engine=getattr(engine, "name", ""),
+            )
         shot = self.driver.screenshot(display_id)
         png, display = shot.png, shot.display
         offset = (0, 0)
@@ -1259,10 +1334,14 @@ class Runtime:
             raise ValueError("give either app or region, not both")
         self._require_ocr()
         bounds: Bounds | None = None
+        window_id: int | None = None
         cropped_note = ""
         if app is not None:
             _running, bundle = self._resolve_app(app)
             bounds = self._app_window_region(bundle, self._current)
+            wins = self._app_windows(bundle)
+            if wins:  # one window's own pixels: nothing covering it gets in (#12)
+                window_id, bounds = wins[0]
             if bounds is None:
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
@@ -1274,7 +1353,10 @@ class Runtime:
                                     "desktop_snapshot, which reads the tree regardless"},
                 )
             else:
-                cropped_note = f"\n(OCR cropped to {bundle}'s windows)" + (" (this app is not frontmost: windows of other apps may overlap the captured rect; call app focus before acting on these refs)" if self._frontmost() != bundle else "")
+                cropped_note = (f"\n(OCR of {bundle}'s window {window_id}: its own pixels, whatever covers it)"
+                                if window_id is not None else f"\n(OCR cropped to {bundle}'s windows)")
+                if self._frontmost() != bundle:
+                    cropped_note += " (this app is not frontmost: clicking these refs by coordinate needs it in front; ref actions on the tree do not)"
                 display_id = bounds.display_id
         if region is not None:
             try:
@@ -1292,7 +1374,7 @@ class Runtime:
                 raise ValueError("region width and height must be positive")
 
         def execute() -> str:
-            screen = self._ocr_epoch(display_id, bounds, float(min_confidence))
+            screen = self._ocr_epoch(display_id, bounds, float(min_confidence), window_id=window_id)
             self._screen_text = screen
             return ocr.render_screen_text(screen) + cropped_note
 
@@ -1360,6 +1442,30 @@ class Runtime:
         y1 = max(r.y + r.height for r in same)
         return Bounds(display_id=did, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
 
+    def _app_windows(self, bundle: str) -> list[tuple[int, Bounds]]:
+        """(window_id, bounds) of ``bundle``'s ordinary windows on this Space,
+        front to back, from the driver's window list. Empty when none or when
+        the driver has no window ids."""
+        try:
+            rows = self.driver.windows()
+        except (ComputerUseError, NotImplementedError, OSError, AttributeError):
+            return []
+        out: list[tuple[int, Bounds]] = []
+        for row in rows:
+            owner = str(row.get("bundle") or row.get("app") or "")
+            b = row.get("bounds")
+            wid = row.get("window_id")
+            if not b or wid is None or (owner != bundle and owner.lower() not in bundle.lower()):
+                continue
+            try:
+                out.append((int(wid), Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
+                                             int(b["width"]), int(b["height"]))))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not out and sys.platform == "darwin" and getattr(self.driver, "window_png", None) is not None:
+            out = _windows_all_spaces(bundle)  # a window on another Space still has pixels
+        return out
+
     def _app_window_region(self, bundle: str, snap: "Snapshot | None" = None) -> Bounds | None:
         """Union of ``bundle``'s window rects: from ``snap``'s window elements
         when given, else from the driver's window list. None when unknown."""
@@ -1391,6 +1497,10 @@ class Runtime:
         if not AUTO_OCR or self._ocr_engine is None:
             return ""
         region = self._app_window_region(bundle, snap)
+        wins = self._app_windows(bundle)
+        window_id = wins[0][0] if wins else None
+        if wins:
+            region = wins[0][1]
         if region is None:
             # A whole-display capture would show other apps' text under this
             # app's grant (issue #10); only a capture cropped to this app's own
@@ -1398,7 +1508,7 @@ class Runtime:
             return ("\n(no window rect known for this app: OCR skipped rather than read the whole "
                     "display; bring its window to this desktop, then call screen_text(app=...))")
         try:
-            screen = self._ocr_epoch(region.display_id if region else None, region)
+            screen = self._ocr_epoch(region.display_id if region else None, region, window_id=window_id)
         except ComputerUseError as exc:
             return f"\n(auto OCR unavailable: {exc.code.value})"
         self._screen_text = screen

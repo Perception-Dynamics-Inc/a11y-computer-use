@@ -256,3 +256,48 @@ def test_to_jpeg_keeps_the_pixel_grid_and_shrinks_the_bytes() -> None:
     jpg = capture.to_jpeg(buf.getvalue(), 80)
     assert jpg[:3] == b"\xff\xd8\xff" and Image.open(io.BytesIO(jpg)).size == (640, 360)
     assert len(jpg) < len(buf.getvalue())
+
+
+def test_display_capture_prefers_screencapture_and_keeps_quartz_as_a_fallback(monkeypatch) -> None:
+    """CGWindowListCreateImage took a flat 30 s per call on macOS 26.6; screencapture takes 0.3 s."""
+    from a11y_computer_use import capture
+    from a11y_computer_use.schema import Display
+
+    d = Display(display_id=1, width=10, height=10, scale=1.0, is_main=True)
+    calls = []
+    monkeypatch.setattr(capture, "_capture_via_screencapture", lambda display: calls.append("sc") or b"sc-png")
+    monkeypatch.setattr(capture, "_capture_via_quartz", lambda display: calls.append("q") or b"q-png")
+    monkeypatch.setattr(capture, "CAPTURE_BACKEND", "screencapture")
+    assert capture._capture_display_png(d) == b"sc-png" and calls == ["sc"]
+    calls.clear()
+    monkeypatch.setattr(capture, "_capture_via_screencapture", lambda display: (_ for _ in ()).throw(RuntimeError("no binary")))
+    assert capture._capture_display_png(d) == b"q-png" and calls == ["q"]
+    calls.clear()
+    monkeypatch.setattr(capture, "CAPTURE_BACKEND", "quartz")
+    assert capture._capture_display_png(d) == b"q-png" and calls == ["q"]
+    assert capture.LAST_CAPTURE_S >= 0.0
+
+
+def test_window_png_runs_screencapture_for_that_window(monkeypatch, tmp_path) -> None:
+    import subprocess
+
+    from a11y_computer_use import capture
+
+    seen = []
+
+    def run(cmd, **kw):
+        seen.append(cmd)
+        open(cmd[-1], "wb").write(b"png-bytes")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(capture.subprocess, "run", run)
+    assert capture.window_png(57053) == b"png-bytes"
+    assert seen[0][:6] == ["/usr/sbin/screencapture", "-x", "-o", "-l", "57053", seen[0][5]]
+
+    def fail(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, "", "could not create image from window")
+
+    monkeypatch.setattr(capture.subprocess, "run", fail)
+    with pytest.raises(RuntimeError, match="could not create image"):
+        capture.window_png(1)
+

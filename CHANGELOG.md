@@ -11,6 +11,20 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.3] - 2026-10-01
+
+Issue #12, filed by Codex: the 31-second OCR was macOS, and the fix makes captures faster than they have ever been.
+
+### Fixed
+
+- Screenshots and OCR took a flat 30 s per call on macOS 26.6: the deprecated in-process `CGWindowListCreateImage` now times out at 30 s and `CGDisplayCreateImage` returns nothing. Display capture goes through `screencapture` (ScreenCaptureKit) first, 0.3 s measured; the Quartz path stays behind `A11Y_COMPUTER_USE_CAPTURE=quartz` (#12) (2026-10-01).
+- `screen_text(app=X)` and the automatic OCR escalation capture X's own window (`screencapture -l`, shadow omitted) instead of cropping a display capture: whatever covers the window stays out, and a window on another Space is captured too. Measured: `screen_text(app=Chrome)` 31 s and another app's text before, 0.8 s and 40 lines of Chrome's page after, with Chrome on another desktop (#12) (2026-10-01).
+- `set_value` focuses the element after writing it, so a following `key(chord="return", app=...)` lands in that field (an address bar) instead of nowhere (#12) (2026-10-01).
+
+### Not yet
+
+- Per-window pixels for the `screenshot` tool itself, snapshot latency on large Chrome trees, and a Chrome tree that exposes page content on the first snapshot (the enhanced-accessibility unlock exists; whether Chrome needs it flipped earlier is open). #12 stays open for those.
+
 ## [0.4.2] - 2026-10-01
 
 Issue #11, filed by Codex: "focused" was not "visible".
