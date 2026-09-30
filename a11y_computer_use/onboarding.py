@@ -170,19 +170,62 @@ def first_hint(kind: str, opener: Callable[[list[str]], object] | None = None,
             f"if needed and waits up to 90 s for the switch, and retry.")
 
 
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".a11y-computer-use", "settings.json")
+
+
+def settings() -> dict:
+    """User choices remembered from dialogs (`report_issue_always`, ...)."""
+    try:
+        import json
+
+        with open(SETTINGS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001 - missing or unreadable: no choices remembered
+        return {}
+
+
+def remember(key: str, value: object) -> None:
+    import json
+
+    data = settings()
+    data[key] = value
+    os.makedirs(os.path.dirname(SETTINGS_PATH), mode=0o700, exist_ok=True)
+    tmp = SETTINGS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, SETTINGS_PATH)
+
+
 def native_confirm(title: str, message: str, *, ok: str = "Allow", cancel: str = "Don't Allow",
-                   timeout_s: float = 120.0,
+                   timeout_s: float = 120.0, details: str | None = None,
+                   remember_label: str | None = None,
                    runner: Callable[..., "subprocess.CompletedProcess[str]"] | None = None) -> bool | None:
     """A macOS dialog shown by this process, for hosts that cannot show one.
 
+    A native `NSAlert` from a short-lived helper (`a11y_computer_use._alert`):
+    the project icon, ``title`` as the headline, ``message`` as one short
+    paragraph, ``details`` in a scrollable box, ``ok`` and ``cancel`` buttons,
+    and, with ``remember_label``, a "don't ask again" checkbox whose answer
+    `last_remember` reports. AppleScript's `display dialog` is the fallback
+    when the helper cannot run.
+
     Returns True for ``ok``, False for ``cancel`` or the timeout, None when no
-    dialog could be shown (off macOS, no window server, osascript missing).
-    The dialog belongs to System Events, an app this tool's tiers never grant
-    by default, so the agent cannot click it through this server.
+    dialog could be shown (off macOS, no window server, no helper). The
+    dialog is a separate process this tool's tiers never grant, so the agent
+    cannot click it through this server.
     """
+    global last_remember
+    last_remember = False
     if sys.platform != "darwin" or _quiet():
         return None
     run = runner or (lambda cmd, **kw: subprocess.run(cmd, capture_output=True, text=True, **kw))
+    answer = _alert_helper(title, message, ok=ok, cancel=cancel, timeout_s=timeout_s, details=details,
+                           remember_label=remember_label, run=run)
+    if answer is not None:
+        return answer
+    if details:
+        message = f"{message}\n\n{details[:900]}" + ("\n..." if len(details) > 900 else "")
     esc = lambda t: t.replace("\\", "\\\\").replace('"', '\\"')  # noqa: E731
     script = (
         'tell application "System Events"\n'
@@ -204,3 +247,49 @@ def native_confirm(title: str, message: str, *, ok: str = "Allow", cancel: str =
     if done.returncode != 0 and "User canceled" not in out and "-128" not in out:
         return None  # osascript itself failed: no display, no binary
     return False
+
+
+#: Whether the user ticked the "don't ask again" box in the last native dialog.
+last_remember = False
+
+
+def _alert_helper(title: str, message: str, *, ok: str, cancel: str, timeout_s: float,
+                  details: str | None, remember_label: str | None, run) -> bool | None:
+    """Run the NSAlert helper; None when it could not show a dialog."""
+    global last_remember
+    import json
+    import tempfile
+
+    cmd = [sys.executable, "-m", "a11y_computer_use._alert", "--title", title, "--message", message,
+           "--allow", ok, "--deny", cancel, "--timeout", str(int(timeout_s))]
+    tmp = None
+    if details:
+        fd, tmp = tempfile.mkstemp(prefix="a11y-alert-", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(details)
+        cmd += ["--details", tmp]
+    if remember_label:
+        cmd += ["--remember", remember_label]
+    try:
+        done = run(cmd, timeout=timeout_s + 20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    if done.returncode != 0 or not (done.stdout or "").strip():
+        return None
+    try:
+        out = json.loads((done.stdout or "").strip().splitlines()[-1])
+    except ValueError:
+        return None
+    last_remember = bool(out.get("remember"))
+    button = out.get("button")
+    if button == "allow":
+        return True
+    if button in ("deny", "timeout"):
+        return False
+    return None

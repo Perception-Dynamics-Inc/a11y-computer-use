@@ -102,9 +102,10 @@ def _osascript(stdout="", returncode=0, stderr=""):
 def test_native_confirm_reads_the_button(monkeypatch) -> None:
     monkeypatch.setattr(onboarding.sys, "platform", "darwin")
     monkeypatch.delenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", raising=False)
-    run = _osascript("button returned:Allow\n")
+    run = _osascript("button returned:Allow\n")  # the NSAlert helper gets this too: not JSON, so it falls through
     assert onboarding.native_confirm("t", 'Allow "X"?', runner=run) is True
-    script = run.calls[0][2]
+    assert run.calls[0][1:3] == ["-m", "a11y_computer_use._alert"] and run.calls[-1][0] == "osascript"
+    script = run.calls[-1][2]
     assert 'display dialog "Allow \\"X\\"?"' in script and 'default button "Don\'t Allow"' in script
     assert onboarding.native_confirm("t", "m", runner=_osascript("", 1, "execution error: User canceled. (-128)")) is False
     assert onboarding.native_confirm("t", "m", runner=_osascript("button returned:, gave up:true")) is False
@@ -117,4 +118,54 @@ def test_native_confirm_is_none_off_macos_or_when_quiet(monkeypatch) -> None:
     monkeypatch.setattr(onboarding.sys, "platform", "darwin")
     monkeypatch.setenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", "1")
     assert onboarding.native_confirm("t", "m", runner=_osascript("button returned:Allow")) is None
+
+
+def _helper(stdout="", returncode=0):
+    import subprocess
+
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+    run.calls = calls
+    return run
+
+
+def test_native_confirm_uses_the_nsalert_helper_and_reads_its_json(monkeypatch) -> None:
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.delenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", raising=False)
+    run = _helper('{"button": "allow", "remember": true}\n')
+    out = onboarding.native_confirm("Allow X?", "one line", details="the body", remember_label="Always", runner=run)
+    assert out is True and onboarding.last_remember is True
+    cmd = run.calls[0]
+    assert cmd[1:3] == ["-m", "a11y_computer_use._alert"] and "--details" in cmd and "--remember" in cmd
+    assert onboarding.native_confirm("t", "m", runner=_helper('{"button": "deny", "remember": false}')) is False
+    assert onboarding.last_remember is False
+    assert onboarding.native_confirm("t", "m", runner=_helper('{"button": "timeout", "remember": false}')) is False
+
+
+def test_native_confirm_falls_back_to_osascript_when_the_helper_fails(monkeypatch) -> None:
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.delenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", raising=False)
+    import subprocess
+
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[0] == "osascript":
+            return subprocess.CompletedProcess(cmd, 0, "button returned:Allow", "")
+        return subprocess.CompletedProcess(cmd, 1, "", "no display")
+
+    assert onboarding.native_confirm("t", "m", details="d", runner=run) is True
+    assert [c[0] for c in calls][-1] == "osascript" and any("a11y_computer_use._alert" in c for c in calls[0])
+
+
+def test_settings_remember_round_trip(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(onboarding, "SETTINGS_PATH", str(tmp_path / "cfg" / "settings.json"))
+    assert onboarding.settings() == {}
+    onboarding.remember("report_issue_always", True)
+    assert onboarding.settings() == {"report_issue_always": True}
 

@@ -1349,10 +1349,11 @@ async def test_grant_app_without_a_host_dialog_asks_through_a_native_one(mcp_ser
     from a11y_computer_use import onboarding
 
     shown = []
-    monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: shown.append(msg) or True)
+    monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: shown.append(title + " " + msg) or True)
     result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Other", "tier": "click"})
     assert result.content[0].text == "granted: com.example.Other at tier 'click' (user confirmed in the native dialog)"
-    assert store.get_tier("com.example.Other") is safety.Tier.CLICK and "com.example.Other" in shown[0]
+    assert store.get_tier("com.example.Other") is safety.Tier.CLICK
+    assert "com.example.Other" in shown[0] and "tier 'click'" in shown[0]
 
     monkeypatch.setattr(onboarding, "native_confirm", lambda title, msg, **kw: False)
     result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Third", "tier": "click"})
@@ -1540,3 +1541,56 @@ def test_launch_wait_sees_a_window_on_another_space(tmp_path, monkeypatch) -> No
     assert rt._wait_first_window(APP, 0.5) == "Untitled 2.rtf"
     monkeypatch.setattr(server, "_window_titles_all_spaces", lambda pid: [])
     assert rt._wait_first_window(APP, 0.3) is None
+
+
+# --- the human has the keyboard -----------------------------------------------------
+
+
+async def test_focus_and_hid_input_are_refused_while_the_user_is_active(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.FULL)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: 0.3)
+    driver.activate_app = lambda name: (_ for _ in ()).throw(AssertionError("must not activate"))
+    result = await call_tool(srv, "app", {"action": "focus", "name": APP})
+    assert result.isError and "user_active" in result.content[0].text and "0.3 s ago" in result.content[0].text
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: APP)  # the user is inside the target app
+    result = await call_tool(srv, "type", {"text": "hi", "app": APP})
+    assert result.isError and "user_active" in result.content[0].text
+    assert driver.typed == []
+
+
+async def test_addressed_input_into_another_app_is_fine_while_the_user_is_active(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.FULL)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: 0.3)
+    result = await call_tool(srv, "type", {"text": "hi", "app": APP})  # user is in com.other.front
+    assert not result.isError, result.content[0].text
+    assert driver.typed == [("hi", 4242)]
+
+
+async def test_idle_user_does_not_block_focus(bg, monkeypatch) -> None:
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.CLICK)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: 12.0)
+    activated = []
+    driver.activate_app = lambda name: activated.append(name)
+    monkeypatch.setattr(rt, "_wait_frontmost", lambda bundle, wait, pid=None: True)
+    result = await call_tool(srv, "app", {"action": "focus", "name": APP})
+    assert not result.isError and activated == [APP]
+
+
+def test_seconds_since_user_input_ignores_our_own_hid_posts(monkeypatch) -> None:
+    import types
+
+    from a11y_computer_use import act
+
+    monkeypatch.setattr(safety, "seconds_since_user_input", safety._real_seconds_since_user_input)
+    monkeypatch.setattr(safety.sys, "platform", "darwin")
+    fake_quartz = types.SimpleNamespace(
+        kCGEventSourceStateHIDSystemState=1, kCGAnyInputEventType=~0,
+        CGEventSourceSecondsSinceLastEventType=lambda state, kind: 0.2)
+    monkeypatch.setitem(safety.sys.modules, "Quartz", fake_quartz)
+    monkeypatch.setattr(act, "LAST_HID_POST_MONOTONIC", 0.0)
+    assert safety.seconds_since_user_input() == 0.2  # a real hardware event
+    monkeypatch.setattr(act, "LAST_HID_POST_MONOTONIC", safety.time.monotonic() - 0.2)
+    assert safety.seconds_since_user_input() is None  # that event was ours

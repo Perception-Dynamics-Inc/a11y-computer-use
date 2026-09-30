@@ -68,3 +68,25 @@ user is on another Space shows the user's Space, not the agent's app. Ref
 observation does not have this problem. A per-window capture
 (`CGWindowListCreateImage` for the app's windows, even on other Spaces) is
 the next step.
+
+## The human has the keyboard
+
+Every activation and every keystroke the human could collide with is refused
+with `user_active` while their last hardware mouse or keyboard event is
+younger than `A11Y_COMPUTER_USE_USER_IDLE_S` (1.5 s): `app focus`, `app
+quit`, `window raise`, coordinate clicks, drags, scrolls, frontmost typing,
+and addressed typing into the app the user is currently in. Addressed
+typing into any other app is unaffected. The error carries the age of the
+input and a retry hint, so an agent waits instead of re-raising the app
+every second while the user tries to click something, which is what "I
+cannot control After Effects" looked like on 2026-10-01. Synthesized input
+from this process never counts as the user's.
+
+## Open and save panels
+
+They are not part of the app: AppKit hosts them in
+`openAndSavePanelService`. `file_dialog`, and `type`/`key` with `app=`,
+address keystrokes to the process that owns the panel (the app's focused
+element), and `file_dialog` reads the go-to-folder field back before it
+presses Return.
+

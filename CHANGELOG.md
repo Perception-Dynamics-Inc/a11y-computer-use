@@ -11,6 +11,22 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.1] - 2026-10-01
+
+From the first Codex session on After Effects: two agent-filed issues (#9, #10), the owner's two complaints (an ugly permission dialog; the agent fighting the user for the app), and the fixes.
+
+### Fixed
+
+- `file_dialog` typed the path through the HID tap, which goes to whatever app is in front, and reported success while the go-to-folder sheet kept an earlier path (#9). Open and save panels live in AppKit's `openAndSavePanelService`, a separate process: keystrokes are now addressed to the panel's own process, the sheet field is read back before Return (retried with a direct AXValue set), and a persisting mismatch is a structured `unsupported` with `reason=dialog_unchanged` instead of a report of success. Closes #9 (2026-10-01).
+- `type`/`key` with `app=X` now go to the process that owns X's focused element when that differs from X (the panel service), so typing into an app's open or save panel works by address (2026-10-01).
+- `set_value` no longer fails a pointer hit-test it does not need: an AXValue write lands on that element only; the typing fallback is addressed to the element's process, and only the last-resort HID typing keeps the classic guard (#9) (2026-10-01).
+- `screen_text(app=X)` and the automatic OCR escalation never read the whole display under X's grant: with no window rect known (X on another Space, minimized, or not yet open) `screen_text` is a structured `unsupported` with `reason=app_not_on_screen`, and the escalation says it skipped OCR. The whole-display fallback returned another app's text (#10). Closes #10 (2026-10-01).
+- The MCP server refuses to fight the human for the machine: `app focus`, `app quit`, `window raise`, HID input (coordinate clicks, drags, scrolls, frontmost typing), and keystrokes addressed to the app the user is currently in return `user_active` while the user's last hardware mouse or keyboard event is younger than `A11Y_COMPUTER_USE_USER_IDLE_S` (1.5 s); addressed keystrokes into an app the user is not in are unaffected. Our own synthesized input never counts as the user's. New wire-stable error code `user_active` (2026-10-01).
+
+### Changed
+
+- The native confirmation is a real macOS alert (`a11y_computer_use._alert`, an `NSAlert` in a short-lived helper process): the project icon, a headline such as "Allow ChatGPT to control After Effects?", one short paragraph, the details in a scrollable box, Allow and Don't Allow, and for issue reports a "Always allow issue reports from this tool" checkbox remembered in `~/.a11y-computer-use/settings.json`. AppleScript's `display dialog` remains the fallback. `grant_app` names the host app and the app's display name (2026-10-01).
+
 ## [0.4.0] - 2026-10-01
 
 The user keeps working while the agent works. The same answer as the cursor: address the app, not the screen.

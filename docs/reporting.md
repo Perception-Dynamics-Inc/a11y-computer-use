@@ -30,8 +30,10 @@ app. The tool:
 1. redacts tokens, key-value secrets, e-mail addresses, and the home
    directory from the title and body;
 2. appends an environment table (version, platform, OS, Python, driver, tool);
-3. asks the user through the host's confirmation dialog, since the issue is
-   public; then files with the signed-in GitHub CLI (`gh issue create`) under
+3. asks the user, since the issue is public: the host's confirmation dialog,
+   or a native macOS alert from the server with the issue text in a
+   scrollable box and an "Always allow issue reports from this tool"
+   checkbox (remembered in `~/.a11y-computer-use/settings.json`); then files with the signed-in GitHub CLI (`gh issue create`) under
    the labels `agent-report` and the kind;
 4. without `gh`, without a confirmation channel, or on a decline, returns a
    prefilled new-issue link for the user to open instead. Nothing is posted

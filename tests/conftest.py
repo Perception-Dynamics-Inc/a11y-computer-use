@@ -195,3 +195,15 @@ def _no_os_permission_dialogs(monkeypatch):
     """Permission errors fire the macOS grant dialog once per process; never during tests."""
     monkeypatch.setenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", "1")
 
+
+@pytest.fixture(autouse=True)
+def _nobody_at_the_keyboard(monkeypatch):
+    """The user-activity guard reads the real HID clock; a developer typing while
+    the suite runs must not turn every activation into `user_active`. Tests of
+    the guard set the clock themselves."""
+    from a11y_computer_use import safety
+
+    if not hasattr(safety, "_real_seconds_since_user_input"):
+        safety._real_seconds_since_user_input = safety.seconds_since_user_input
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+

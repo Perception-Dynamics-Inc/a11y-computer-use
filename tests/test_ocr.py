@@ -368,7 +368,7 @@ def test_escalation_is_opt_out_and_never_captures_another_app(tmp_path, monkeypa
     blind = make_runtime(tmp_path / "c", driver=NoWindows(frontmost="com.apple.finder"))
     blind.store.set_tier("com.apple.finder", safety.Tier.READ)
     note = blind._auto_ocr_note(APP, None)  # no snapshot windows, no driver windows: no rect
-    assert "[ocr-" not in note and "Call `screen_text` once this app is frontmost" in note
+    assert "[ocr-" not in note and "OCR skipped rather than read the whole display" in note
 
 
 def test_escalation_reports_a_missing_screen_grant_instead_of_failing(tmp_path) -> None:

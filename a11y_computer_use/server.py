@@ -360,6 +360,40 @@ def _running_app(identifier: str) -> tuple[object, str]:
     return running, bundle or identifier
 
 
+def _display_name(bundle: str) -> str:
+    """"Figma" for com.figma.Desktop when the app is installed; else the id."""
+    if sys.platform != "darwin":
+        return bundle
+    try:
+        from AppKit import NSBundle, NSWorkspace
+
+        url = NSWorkspace.sharedWorkspace().URLForApplicationWithBundleIdentifier_(bundle)
+        if url is None:
+            return bundle
+        info = NSBundle.bundleWithURL_(url).infoDictionary() or {}
+        return str(info.get("CFBundleDisplayName") or info.get("CFBundleName") or bundle)
+    except Exception:  # noqa: BLE001
+        return bundle
+
+
+def _focused_element_pid(app_pid: int) -> int | None:
+    """Pid owning the app's AXFocusedUIElement, or None (off macOS, no focus)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementGetPid,
+        )
+
+        err, focused = AXUIElementCopyAttributeValue(AXUIElementCreateApplication(app_pid), "AXFocusedUIElement", None)
+        if err != 0 or focused is None:
+            return None
+        err, pid = AXUIElementGetPid(focused, None)
+        return int(pid) if err == 0 and pid else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _running_app_by_bundle(identifier: str) -> tuple[object, str] | None:
     """`NSRunningApplication.runningApplicationsWithBundleIdentifier_` queries
     LaunchServices itself, so it sees an app the NSWorkspace list has not
@@ -1230,7 +1264,15 @@ class Runtime:
             _running, bundle = self._resolve_app(app)
             bounds = self._app_window_region(bundle, self._current)
             if bounds is None:
-                cropped_note = f"\n(no window rect known for {bundle}: OCR covers the whole display)"
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{bundle} has no window on screen to read; a whole-display OCR would return "
+                    f"other apps' text under this app's grant (issue #10)",
+                    detail={"app": bundle, "reason": "app_not_on_screen",
+                            "hint": "the app's windows are on another Space, minimized, or not yet "
+                                    "open; bring them to this desktop (app focus) or use "
+                                    "desktop_snapshot, which reads the tree regardless"},
+                )
             else:
                 cropped_note = f"\n(OCR cropped to {bundle}'s windows)" + (" (this app is not frontmost: windows of other apps may overlap the captured rect; call app focus before acting on these refs)" if self._frontmost() != bundle else "")
                 display_id = bounds.display_id
@@ -1349,10 +1391,12 @@ class Runtime:
         if not AUTO_OCR or self._ocr_engine is None:
             return ""
         region = self._app_window_region(bundle, snap)
-        if region is None and self._frontmost() != bundle:
-            # A whole-display capture would show another app's pixels under this
-            # app's grant; a capture cropped to this app's own windows is fine.
-            return "\nCall `screen_text` once this app is frontmost to get OCR refs (o1..oN)."
+        if region is None:
+            # A whole-display capture would show other apps' text under this
+            # app's grant (issue #10); only a capture cropped to this app's own
+            # windows is acceptable, and without a window rect there is none.
+            return ("\n(no window rect known for this app: OCR skipped rather than read the whole "
+                    "display; bring its window to this desktop, then call screen_text(app=...))")
         try:
             screen = self._ocr_epoch(region.display_id if region else None, region)
         except ComputerUseError as exc:
@@ -1360,7 +1404,7 @@ class Runtime:
         self._screen_text = screen
         scope_note = (
             f"\n(OCR cropped to this app's window{'s' if snap and sum(1 for el in snap.elements if el.role in _WINDOW_ROLES) > 1 else ''})"
-            if region else "\n(no window rect known for this app: OCR covers the whole display)"
+            if region else ""
         )
         return "\n\n" + ocr.render_screen_text(screen) + scope_note + (
             "\nThese OCR refs are targetable now: click(ref=\"o7\") lands on that text."
@@ -1781,6 +1825,7 @@ class Runtime:
                 and self.driver.press_element(target)
             ):
                 return  # activated via AX — the user's cursor never moved
+            self._guard_user(app)
             self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
 
         self._run_gated(
@@ -1810,6 +1855,40 @@ class Runtime:
             raise ComputerUseError(ErrorCode.APP_NOT_FOUND, f"no process for {app!r}", detail={"app": app})
         return bundle, pid
 
+    def _guard_user(self, bundle: str | None, *, addressed: bool = False) -> None:
+        """Refuse to fight the human for the machine.
+
+        Activation, HID input, and keystrokes addressed to the app the human
+        is currently in are refused while their last hardware input is younger
+        than `safety.USER_IDLE_S`. Addressed keystrokes into an app that is not
+        in front are fine: they do not touch what the human is doing.
+
+        Raises:
+            ComputerUseError: `ErrorCode.USER_ACTIVE` with the age of the
+                input and a retry hint.
+        """
+        since = safety.seconds_since_user_input()
+        if since is None or since >= safety.USER_IDLE_S:
+            return
+        if addressed and bundle and self._frontmost() != bundle:
+            return
+        raise ComputerUseError(
+            ErrorCode.USER_ACTIVE,
+            f"the user touched the mouse or keyboard {since:.1f} s ago; not taking "
+            f"{bundle or 'the machine'} away from them",
+            detail={"seconds_since_input": round(since, 2), "retry_after_s": safety.USER_IDLE_S,
+                    "hint": "wait and retry, use refs or type/key with app= on an app the user is "
+                            "not in, or ask the user to pause"},
+        )
+
+    @staticmethod
+    def _input_pid(app_pid: int) -> int:
+        """Where keystrokes for ``app_pid`` must go: the process owning the
+        app's focused element when that differs (an open or save panel lives
+        in AppKit's openAndSavePanelService), else the app itself."""
+        other = _focused_element_pid(app_pid)
+        return other if other and other != app_pid else app_pid
+
     def _recheck_pid(self, bundle: str, pid: int):
         def recheck(app: str) -> None:
             running, found = _running_app(bundle)
@@ -1831,13 +1910,15 @@ class Runtime:
             bundle, pid = target
 
             def execute_bg() -> None:
-                self.driver.type_text(text, pid=pid)
+                self._guard_user(bundle, addressed=True)
+                self.driver.type_text(text, pid=self._input_pid(pid))
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
             return f"typed {len(text)} characters into {bundle} (addressed to its process; nothing was activated)"
         front = self._frontmost()
 
         def execute() -> None:
+            self._guard_user(front)
             note.append(self._dismiss_open_menu(front))
             self.driver.type_text(text)
 
@@ -1857,13 +1938,15 @@ class Runtime:
             bundle, pid = target
 
             def execute_bg() -> None:
-                self.driver.key_chord(chord, pid=pid)
+                self._guard_user(bundle, addressed=True)
+                self.driver.key_chord(chord, pid=self._input_pid(pid))
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
             return f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)"
         front = self._frontmost()
 
         def execute() -> None:
+            self._guard_user(front)
             note.append(self._dismiss_open_menu(front))
             self.driver.key_chord(chord)
 
@@ -1898,6 +1981,7 @@ class Runtime:
             ):
                 return
             self._refuse_secure(target)  # the wheel path moves the pointer onto the target
+            self._guard_user(app)
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
@@ -1926,6 +2010,7 @@ class Runtime:
 
         def execute() -> None:
             self._refuse_secure(start, end, *waypoints)  # no point of the stroke may be a secure field
+            self._guard_user(start_app)
             self.driver.drag(start, end, path=waypoints)
 
         self._run_gated(
@@ -2082,12 +2167,17 @@ class Runtime:
         action = TypeText(text=value)
 
         def execute() -> None:
-            if self.driver.set_value(live, value):
+            if self.driver.set_value(live, value):  # an AX write lands on this element only
                 return
             self.driver.press_element(live)  # fallback: focus then synthesize typing
+            pid = observe.element_pid(live) if getattr(self.driver, "background_input", False) else None
+            if pid:
+                self.driver.type_text(value, pid=pid)  # addressed: no pointer, no frontmost requirement
+                return
+            self._recheck_target(app, live)  # HID typing: the classic guard, right before injection
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute, recheck=partial(self._recheck_target, target=live))
+        self._run_gated(action, app, execute)
         return f"set {ref} = {value!r}"
 
     @_serialized
@@ -2301,6 +2391,7 @@ class Runtime:
                 # cmd+q through the driver after bringing the app to the front;
                 # a sheet that stays up afterwards means the app is asking about
                 # unsaved changes, which is the human's call, not the agent's.
+                self._guard_user(bundle)
                 self.driver.activate_app(name)
                 self._wait_frontmost(bundle, 2.0)
                 # cmd+q on macOS; the driver names its desktop's chord (ctrl+q on
@@ -2332,6 +2423,7 @@ class Runtime:
             pid = None
 
         def focus() -> bool:
+            self._guard_user(bundle)
             self.driver.activate_app(name)
             if self._resolves_apps():
                 return True
@@ -2409,7 +2501,11 @@ class Runtime:
         # window; the browser and Windows return a structured `unsupported`.
         owner = self.driver.window_owner(window_id)
         op = WindowOp(verb=verb, window_id=window_id)
-        self._run_gated(op, owner, lambda: self.driver.raise_window(window_id))
+        def raise_it() -> None:
+            self._guard_user(owner)
+            self.driver.raise_window(window_id)
+
+        self._run_gated(op, owner, raise_it)
         return f"raised window {window_id} ({owner})"
 
     @_serialized
@@ -2725,7 +2821,8 @@ def build_server(
         result = await ctx.elicit(message=prompt, schema=_ConfirmResponse)
         return getattr(result, "action", None) == "accept"
 
-    def _ask_user(ctx, title: str, prompt: str) -> tuple[str, str]:
+    def _ask_user(ctx, title: str, prompt: str, *, details: str | None = None,
+                  remember_label: str | None = None) -> tuple[str, str]:
         """Yes-or-no from the human, by whatever channel exists: (outcome, channel).
 
         outcome: 'accepted', 'declined', or 'unavailable'. The host's MCP
@@ -2735,7 +2832,8 @@ def build_server(
         """
         if _can_elicit(ctx):
             try:
-                result = anyio.from_thread.run(ctx.elicit, prompt, _ConfirmResponse)
+                full = prompt if not details else f"{prompt}\n\n{details}"
+                result = anyio.from_thread.run(ctx.elicit, full, _ConfirmResponse)
                 action = getattr(result, "action", None)
                 if action == "accept":
                     return "accepted", "host"
@@ -2743,7 +2841,7 @@ def build_server(
                     return "declined", "host"
             except Exception:  # noqa: BLE001 - the host advertised it but cannot show it
                 pass
-        native = onboarding.native_confirm(title, prompt)
+        native = onboarding.native_confirm(title, prompt, details=details, remember_label=remember_label)
         if native is None:
             return "unavailable", "none"
         return ("accepted" if native else "declined"), "native dialog"
@@ -3156,11 +3254,12 @@ def build_server(
             if current is not None and safety._TIER_RANK[current] >= safety._TIER_RANK[wanted]:
                 return f"already granted: {bundle} at tier '{current.value}'"
             cmd = f"a11y-computer-use grant {bundle} {wanted.value}"
+            host = onboarding.host_app() or "this agent"
+            what = {"read": "observe it", "click": "observe it and press its buttons, menus, and dialogs",
+                    "full": "observe it, press its controls, and type into it"}[wanted.value]
             outcome, channel = _ask_user(
-                ctx, "a11y-computer-use",
-                f"Allow this agent to control {bundle} at tier '{wanted.value}'?\n\n"
-                f"read = observe only; click = press elements, menus, dialogs; "
-                f"full = type text and key chords too.\n\n"
+                ctx, f"Allow {host} to control {_display_name(bundle)}?",
+                f"The agent asked for tier '{wanted.value}': it may {what}. "
                 f"Recorded in ~/.a11y-computer-use/permissions.json; revoke there any time.")
             if outcome == "unavailable":
                 return (f"not granted: no way to ask the user from here (the host has no confirmation "
@@ -3195,7 +3294,17 @@ def build_server(
         driver = getattr(getattr(runtime, "driver", None), "name", None)
 
         def confirm(prompt: str) -> bool:
-            return _ask_user(ctx, "a11y-computer-use: file a public issue?", prompt)[0] == "accepted"
+            if onboarding.settings().get("report_issue_always"):
+                return True
+            head, _, rest = prompt.partition("\n")
+            outcome, _channel = _ask_user(
+                ctx, f"Let {onboarding.host_app() or 'this agent'} file a public issue?",
+                "On github.com/Perception-Dynamics-Inc/a11y-computer-use, about a defect in this "
+                "tool. Secrets and your home directory are redacted; the text is below.",
+                details=rest.strip(), remember_label="Always allow issue reports from this tool")
+            if outcome == "accepted" and onboarding.last_remember:
+                onboarding.remember("report_issue_always", True)
+            return outcome == "accepted"
 
         def execute() -> str:
             try:

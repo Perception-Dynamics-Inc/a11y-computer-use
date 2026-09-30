@@ -677,6 +677,36 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
     )
 
 
+#: An action that would take the app away from the human is refused while
+#: their last mouse or keyboard event is younger than this (seconds).
+USER_IDLE_S = float(os.environ.get("A11Y_COMPUTER_USE_USER_IDLE_S", "1.5"))
+
+
+def seconds_since_user_input() -> float | None:
+    """Seconds since the last hardware mouse or keyboard event, or None where
+    unknown (off macOS, no window server). Reads the HID system state, which
+    synthesized events do not touch; `act.LAST_HID_POST_MONOTONIC` is the
+    belt to that suspender."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import Quartz
+
+        since = float(Quartz.CGEventSourceSecondsSinceLastEventType(
+            Quartz.kCGEventSourceStateHIDSystemState, Quartz.kCGAnyInputEventType))
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        from a11y_computer_use import act
+
+        ours = time.monotonic() - act.LAST_HID_POST_MONOTONIC
+        if act.LAST_HID_POST_MONOTONIC and ours < since + 0.05:
+            return None  # the last input was ours, not the human's
+    except Exception:  # noqa: BLE001
+        pass
+    return since
+
+
 def refresh_workspace() -> None:
     """Let NSWorkspace catch up with LaunchServices before it is read.
 

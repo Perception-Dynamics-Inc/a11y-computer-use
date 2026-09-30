@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 
 import pytest
+
+from a11y_computer_use.schema import ComputerUseError, ErrorCode
 from PIL import Image
 
 from a11y_computer_use import ocr, safety, server
@@ -79,12 +81,13 @@ def test_escalation_unions_several_windows(tmp_path) -> None:
     assert "(OCR cropped to this app's windows)" in text
 
 
-def test_escalation_falls_back_to_the_whole_display_and_says_so(tmp_path) -> None:
+def test_escalation_without_a_window_rect_skips_ocr_instead_of_reading_the_display(tmp_path) -> None:
+    """Issue #10: a whole-display OCR under one app's grant returned another app's text."""
     engine = RecordingOcr(())
     rt = make_runtime(tmp_path, WindowedDriver(()), engine)  # no window elements, no window rows
     text = rt.desktop_snapshot(APP)
-    assert engine.sizes[-1] == (3200, 2000)
-    assert "(no window rect known for this app: OCR covers the whole display)" in text
+    assert engine.sizes == []  # nothing captured
+    assert "OCR skipped rather than read the whole display" in text
 
 
 def test_escalation_uses_the_driver_window_list_when_the_tree_has_no_windows(tmp_path) -> None:
@@ -115,9 +118,11 @@ def test_screen_text_app_crops_to_that_apps_windows(tmp_path) -> None:
         rt.screen_text(app=APP, region={"x": 0, "y": 0, "width": 10, "height": 10})
 
 
-def test_screen_text_app_without_a_known_window_reads_the_display(tmp_path) -> None:
+def test_screen_text_app_without_a_known_window_is_a_structured_refusal(tmp_path) -> None:
+    """Issue #10: never read the whole display under one app's grant."""
     engine = RecordingOcr(())
     rt = make_runtime(tmp_path, WindowedDriver(()), engine)
-    text = rt.screen_text(app=APP)
-    assert f"(no window rect known for {APP}: OCR covers the whole display)" in text
-    assert engine.sizes[-1] == (3200, 2000)
+    with pytest.raises(ComputerUseError) as info:
+        rt.screen_text(app=APP)
+    assert info.value.code is ErrorCode.UNSUPPORTED and info.value.detail["reason"] == "app_not_on_screen"
+    assert engine.sizes == []

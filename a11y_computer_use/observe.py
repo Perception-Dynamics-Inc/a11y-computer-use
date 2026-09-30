@@ -432,6 +432,18 @@ def scroll_into_view(element: Element) -> bool:
     return _perform_action(handle, "AXScrollToVisible")
 
 
+def element_pid(element: Element) -> int | None:
+    """The process owning ``element``'s live handle, or None (no handle, off macOS)."""
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return None
+    try:
+        err, pid = _appservices().AXUIElementGetPid(handle, None)
+    except Exception:
+        return None
+    return int(pid) if err == 0 and pid else None
+
+
 def set_value(element: Element, value: str) -> bool:
     """Set ``element``'s AXValue directly (no synthesized typing) — the macOS
     intent-verb path. False when the element is secure, no live handle is

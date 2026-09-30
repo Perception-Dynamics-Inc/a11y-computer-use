@@ -477,6 +477,50 @@ def find_panel(accessor: MenuAccessor, app_el: object) -> Panel | None:
     return None
 
 
+def _goto_field(accessor: MenuAccessor, panel_node: object) -> object | None:
+    """The text field of the go-to-folder sheet, once it is showing."""
+    for sheet in tuple(accessor.attr(panel_node, "AXSheets") or ()):
+        _buttons, fields = _scan(accessor, sheet)
+        if fields:
+            return fields[0]
+    return None
+
+
+def _go_to(panel: Panel, target: str, *, accessor: MenuAccessor, key, type_text, settle, steps: list[str]) -> None:
+    """Open the go-to-folder sheet, put ``target`` in its field, confirm it.
+
+    The typed value is read back through the accessibility API before Return
+    is pressed; a mismatch is retried with a direct AXValue set, and a
+    persisting mismatch is a structured error rather than a report of success
+    (issue #9: the sheet kept an unrelated earlier path).
+    """
+    key("cmd+shift+g")
+    settle(DIALOG_SETTLE_S)
+    type_text(target)
+    steps += ["go-to-folder", f"typed {target}"]
+    field = _goto_field(accessor, panel.node)
+    if field is not None:
+        settle(DIALOG_SETTLE_S / 2)
+        value = str(accessor.attr(field, "AXValue") or "")
+        if value != target and accessor.set_value(field, target):
+            steps.append("set path via AX")
+            value = str(accessor.attr(field, "AXValue") or "")
+        if value != target:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the go-to-folder field did not take the path",
+                detail={"reason": "dialog_unchanged", "typed": target, "field": value[:200],
+                        "hint": "bring the app to the front (app focus) and retry, or set the "
+                                "field with set_value on its ref"},
+            )
+        steps.append("path verified")
+    else:
+        steps.append("path not verified (no go-to sheet field visible)")
+    key("return")
+    settle(DIALOG_SETTLE_S)
+    steps.append("return")
+
+
 def drive_panel(
     panel: Panel,
     verb: FileDialogVerb,
@@ -504,23 +548,14 @@ def drive_panel(
         raise ValueError(f"file_dialog needs an absolute path, got {path!r}")
     steps: list[str] = []
     if verb is FileDialogVerb.OPEN:
-        key("cmd+shift+g")
-        settle(DIALOG_SETTLE_S)
-        type_text(path)
+        _go_to(panel, path, accessor=accessor, key=key, type_text=type_text, settle=settle, steps=steps)
         key("return")
-        settle(DIALOG_SETTLE_S)
-        key("return")
-        steps += ["go-to-folder", f"typed {path}", "return", "return"]
+        steps.append("return")
         return {"action": "open", "path": path, "steps": steps}
     directory, filename = os.path.split(path)
     if not filename:
         raise ValueError(f"file_dialog save needs a file name, got {path!r}")
-    key("cmd+shift+g")
-    settle(DIALOG_SETTLE_S)
-    type_text(directory or "/")
-    key("return")
-    settle(DIALOG_SETTLE_S)
-    steps += ["go-to-folder", f"typed {directory or '/'}", "return"]
+    _go_to(panel, directory or "/", accessor=accessor, key=key, type_text=type_text, settle=settle, steps=steps)
     named = False
     if panel.filename_field is not None and accessor.set_value(panel.filename_field, filename):
         named = True
@@ -564,6 +599,16 @@ class AXMenuAccessor:
             return self._ax.AXUIElementSetAttributeValue(node, "AXValue", value) == 0
         except Exception:
             return False
+
+    def pid(self, node: object) -> int | None:
+        """The process that owns ``node``. Open and save panels live in AppKit's
+        openAndSavePanelService, not in the app, so keystrokes for a panel must
+        be addressed there."""
+        try:
+            err, pid = self._ax.AXUIElementGetPid(node, None)
+        except Exception:
+            return None
+        return int(pid) if err == 0 and pid else None
 
     def close(self, node: object) -> None:
         menu = None
@@ -643,8 +688,9 @@ def macos_file_dialog(verb: FileDialogVerb, path: str, app: str) -> dict[str, ob
             detail={"app": bundle, "reason": "no_dialog",
                     "hint": "trigger the panel first (menu 'File > Open…', 'File > Save As…')"},
         )
+    pid = accessor.pid(panel.node)  # the panel service, or the app itself
     return drive_panel(
         panel, verb, path, accessor=accessor,
-        key=lambda chord: act.key_chord(chord),
-        type_text=lambda text: act.type_text(text),
+        key=lambda chord: act.key_chord(chord, pid=pid),
+        type_text=lambda text: act.type_text(text, pid=pid),
     )

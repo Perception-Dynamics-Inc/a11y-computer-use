@@ -262,6 +262,9 @@ class ErrorCode(str, Enum):
     declined, cancelled, or could not be requested (no elicitation channel)."""
 
     UNSUPPORTED = "unsupported"
+    #: The human touched the mouse or keyboard a moment ago; the action would
+    #: fight them for the app. Wait and retry, or ask them.
+    USER_ACTIVE = "user_active"
     """The operation isn't available in this environment (e.g. raw coordinate /
     key injection on native Wayland, which has no XTEST) — the detail hint names
     the supported alternative (usually a ref-based action)."""

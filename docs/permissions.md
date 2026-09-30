@@ -37,8 +37,11 @@ now carries the two ways to fix it:
 
 - `grant_app(app, tier)`: the agent asks, the host shows its confirmation
   dialog (MCP elicitation) with the app, the tier, and what it allows, and the
-  grant is recorded on accept. Hosts without elicitation get the command below
-  instead; nothing is recorded without a human's yes.
+  grant is recorded on accept. A host without elicitation (Codex, headless
+  sessions) gets a native macOS alert shown by the server itself: the project
+  icon, "Allow ChatGPT to control After Effects?", one paragraph, Allow and
+  Don't Allow. Only when no dialog at all can be shown does the tool hand
+  back the command below; nothing is recorded without a human's yes.
 - `a11y-computer-use grant <app> <read|click|full>` for the user at a shell
   (`grant` alone lists the grants; `--revoke` removes one).
 

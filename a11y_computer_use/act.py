@@ -447,6 +447,7 @@ def _post(events: list[BuiltEvent], *, dry_run: bool, pid: int | None = None) ->
     reach the app's key or main window this way; mouse events do not (AppKit
     drops pointer events that carry no window), so only typing and chords
     take a pid."""
+    global LAST_HID_POST_MONOTONIC
     if dry_run:
         return
     for built in events:
@@ -454,7 +455,13 @@ def _post(events: list[BuiltEvent], *, dry_run: bool, pid: int | None = None) ->
             Quartz.CGEventPostToPid(int(pid), built.event)
         else:
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, built.event)
+            LAST_HID_POST_MONOTONIC = time.monotonic()
         time.sleep(EVENT_DELAY_S)
+
+
+#: When this process last posted to the HID tap, so the user-activity check
+#: never mistakes our own synthesized input for the human's.
+LAST_HID_POST_MONOTONIC = 0.0
 
 
 # --- Public actions ----------------------------------------------------------
