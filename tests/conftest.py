@@ -188,3 +188,10 @@ if sys.platform == "win32":
             return Path(env) if env else real_home()
 
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: _home(cls)))
+
+
+@pytest.fixture(autouse=True)
+def _no_os_permission_dialogs(monkeypatch):
+    """Permission errors fire the macOS grant dialog once per process; never during tests."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_NO_OS_PROMPT", "1")
+

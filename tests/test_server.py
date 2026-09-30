@@ -51,6 +51,9 @@ EXPECTED_TOOLS = {
     "file_dialog",
     "notes",
     "wait_until",
+    "request_permission",
+    "grant_app",
+    "report_issue",
 }
 
 
@@ -314,7 +317,7 @@ async def test_permission_error_surfaces_code_and_doctor_hint(
     assert result.isError
     text = result.content[0].text
     assert "permission_denied_accessibility" in text
-    assert "doctor" in text
+    assert "request_permission(kind='accessibility')" in text  # the one-step grant hint
 
 
 async def test_ref_before_any_snapshot_is_stale(mcp_server, mocked_driver) -> None:
@@ -1317,3 +1320,72 @@ def test_match_running_app_prefers_bundle_then_regular_app_over_helper() -> None
     assert server._match_running_app(apps, "TextEdit") is None
     unnamed = _RunningApp(None, "Loose", policy=0)
     assert server._match_running_app([unnamed], "loose") == (unnamed, "")
+
+
+# --- one-step grants and agent reports --------------------------------------------
+
+
+async def test_grant_app_records_the_grant_only_when_the_user_accepts(mcp_server, store, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: "com.example.Paint" if ident == "Paint" else None)
+    async with client_session(mcp_server, elicitation_callback=_decline_elicitation) as client:
+        result = await client.call_tool("grant_app", {"app": "Paint", "tier": "full"})
+    assert "not granted: the user declined com.example.Paint" in result.content[0].text
+    assert store.get_tier("com.example.Paint") is None
+
+    async with client_session(mcp_server, elicitation_callback=_accept_elicitation) as client:
+        result = await client.call_tool("grant_app", {"app": "Paint", "tier": "full"})
+    assert result.content[0].text.startswith("granted: com.example.Paint at tier 'full'")
+    assert store.get_tier("com.example.Paint") is safety.Tier.FULL
+
+    async with client_session(mcp_server, elicitation_callback=_accept_elicitation) as client:
+        result = await client.call_tool("grant_app", {"app": "Paint", "tier": "click"})
+    assert result.content[0].text == "already granted: com.example.Paint at tier 'full'"
+
+    result = await call_tool(mcp_server, "grant_app", {"app": "Paint", "tier": "sudo"})
+    assert result.isError and "tier must be" in result.content[0].text
+
+
+async def test_grant_app_without_a_confirmation_channel_hands_back_the_command(mcp_server, store) -> None:
+    result = await call_tool(mcp_server, "grant_app", {"app": "com.example.Other", "tier": "click"})
+    assert "a11y-computer-use grant com.example.Other click" in result.content[0].text
+    assert store.get_tier("com.example.Other") is None
+
+
+async def test_needs_permission_refusal_names_the_grant_step(mcp_server, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    result = await call_tool(mcp_server, "screenshot", {})
+    assert result.isError
+    text = result.content[0].text
+    assert "needs_permission: com.test.front" in text and "grant_app(app='com.test.front', tier='read')" in text
+    assert "a11y-computer-use grant com.test.front read" in text
+
+
+async def test_report_issue_without_gh_returns_a_prefilled_link(mcp_server, audit_dir, monkeypatch) -> None:
+    from a11y_computer_use import reporting
+
+    monkeypatch.setattr(reporting.shutil, "which", lambda name: None)
+    result = await call_tool(mcp_server, "report_issue", {
+        "kind": "bug", "title": "click crashed", "body": "internal_error: click crashed: KeyError", "tool": "click"})
+    text = result.content[0].text
+    assert text.startswith("not posted: no signed-in GitHub CLI") and reporting.ISSUES_URL + "/new?" in text
+    assert audit_entries(audit_dir)[-1]["action"] == "report_issue"
+
+    result = await call_tool(mcp_server, "report_issue", {"kind": "rant", "title": "x", "body": "y"})
+    assert result.isError and "kind must be one of" in result.content[0].text
+
+
+async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) -> None:
+    from a11y_computer_use import onboarding
+
+    monkeypatch.setattr(onboarding.sys, "platform", "linux")
+    result = await call_tool(mcp_server, "request_permission", {"kind": "accessibility"})
+    assert json.loads(result.content[0].text)["needed"] is False
+
+
+async def test_a_crash_inside_a_tool_reads_as_internal_error_with_the_report_hint(mcp_server, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: (_ for _ in ()).throw(KeyError("boom")))
+    result = await call_tool(mcp_server, "screenshot", {})
+    assert result.isError
+    assert "internal_error: screenshot crashed: KeyError" in result.content[0].text
+    assert "report_issue(kind='bug', tool='screenshot'" in result.content[0].text
+

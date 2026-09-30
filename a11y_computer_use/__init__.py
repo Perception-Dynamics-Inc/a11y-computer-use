@@ -5,4 +5,9 @@ Pruned a11y-tree snapshots with element refs, a vision/pixel fallback, and a
 safety layer, exposed as an MCP server + CLI. See PLAN.md for architecture.
 """
 
-__version__ = "0.2.1"
+try:
+    from importlib.metadata import version as _dist_version
+
+    __version__ = _dist_version("a11y-computer-use")
+except Exception:  # noqa: BLE001 - a source tree without installed metadata
+    __version__ = "0.0.0+unknown"

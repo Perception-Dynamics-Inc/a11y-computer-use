@@ -51,7 +51,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "and Chromium (CDP)."
         ),
     )
+    from a11y_computer_use import __version__
+
+    parser.add_argument("--version", action="version", version=f"a11y-computer-use {__version__}")
     sub = parser.add_subparsers(required=True)
+
+    grant = sub.add_parser("grant", help="grant, list, or revoke this tool's per-app tiers "
+                           "(~/.a11y-computer-use/permissions.json)")
+    grant.add_argument("app", nargs="?", help="bundle id or app name")
+    grant.add_argument("tier", nargs="?", choices=("read", "click", "full"),
+                       help="read = observe; click = press elements, menus, dialogs; full = type and key chords")
+    grant.add_argument("--revoke", action="store_true", help="remove the app's grant")
+    grant.set_defaults(handler=_cmd_grant)
 
     mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
     mcp.set_defaults(handler=_cmd_mcp)
@@ -677,6 +688,34 @@ def _cmd_mission_run(args: argparse.Namespace) -> int:
                   f"after {phase.attempts} attempt(s), {phase.finished_at - phase.started_at:.0f}s")
         print(f"{'completed' if result.passed else result.stopped}: artifacts in {result.run_dir}")
     return 0 if result.passed else 1
+
+
+def _cmd_grant(args: argparse.Namespace) -> int:
+    from a11y_computer_use import safety
+
+    store = safety.PermissionStore()
+    if not args.app:
+        apps = store.granted_apps()
+        if not apps:
+            print("no apps granted; grant one with: a11y-computer-use grant <app> <read|click|full>")
+        for app in apps:
+            print(f"{app}\t{store.get_tier(app).value}")
+        return 0
+    bundle = args.app
+    if sys.platform == "darwin":
+        from a11y_computer_use.server import _installed_bundle_id
+
+        bundle = _installed_bundle_id(args.app) or args.app
+    if args.revoke:
+        store.revoke(bundle)
+        print(f"revoked {bundle}")
+        return 0
+    if not args.tier:
+        print("tier required: read, click, or full", file=sys.stderr)
+        return 2
+    store.set_tier(bundle, safety.Tier(args.tier))
+    print(f"granted {bundle} at tier '{args.tier}' ({store.path})")
+    return 0
 
 
 def _cmd_doctor(_args: argparse.Namespace) -> int:

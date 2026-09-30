@@ -11,6 +11,21 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.3.2] - 2026-10-01
+
+Adoption: the two grants come to the user instead of the user hunting for them, and agents report the tool's own defects where they get fixed.
+
+### Added
+
+- One-step macOS grants: the first `permission_denied_accessibility` or `permission_denied_screen` in a process asks macOS to show its own grant dialog (`AXIsProcessTrustedWithOptions` with the prompt option, `CGRequestScreenCaptureAccess`), opens the exact System Settings pane, and names the host app in the hint (for Codex that is ChatGPT.app, which nobody could guess). `request_permission(kind)` repeats that and waits up to 90 s for the switch. `A11Y_COMPUTER_USE_NO_OS_PROMPT=1` keeps the dialog closed. `docs/permissions.md` (2026-10-01).
+- `grant_app(app, tier)`: an ungranted app is granted through the host's own confirmation dialog (MCP elicitation) and recorded on accept; hosts without elicitation get the shell command instead, and nothing is recorded without a human's yes. `needs_permission` refusals now carry both routes. `a11y-computer-use grant <app> <tier>` (list with no arguments, `--revoke`) for the shell (2026-10-01).
+- `report_issue(kind, title, body, tool)`: agents file defects, bottlenecks, missing capabilities, and app-compatibility gaps on the project's public issues, with secrets, e-mails, and the home directory redacted and an environment table appended; the host confirms first, `gh` files it under `agent-report` plus the kind, and without `gh` or a confirmation channel the tool returns a prefilled link. The server instructions say when to report; a crash inside a tool reads as `internal_error` with the report instruction, and a call over `A11Y_COMPUTER_USE_SLOW_CALL_S` (10 s; waiting tools exempt) is marked `[slow call]`. `docs/reporting.md`, issue template `agent_report.yml`, labels (2026-10-01).
+- `a11y-computer-use --version`; `__version__` reads the installed distribution instead of a stale constant (2026-10-01).
+
+### Changed
+
+- `tool_specs` (the local agent loop's planner surface) leaves out the host tools `request_permission`, `grant_app`, and `report_issue`, which need the host's confirmation channel (2026-10-01).
+
 ## [0.3.1] - 2026-09-20
 
 Found by four planner trials on the Box Linux desktop over the remote backend (Krita, Excalidraw in Chromium, ffmpeg in a terminal, gedit): the "Mona Lisa" the first run reported was a single dot, every screenshot took 6 to 70 s, launches waited a minute for a window that was already up, quit did nothing, the document and the terminal screen were missing from snapshots, and the first `app list` on a fresh desktop was refused.

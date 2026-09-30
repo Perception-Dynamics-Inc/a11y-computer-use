@@ -59,7 +59,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import conditions, drivers, notes, observe, ocr, safety
+from a11y_computer_use import conditions, drivers, notes, observe, ocr, onboarding, reporting, safety
 from a11y_computer_use.menus import parse_path as menus_parse
 
 #: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
@@ -223,8 +223,15 @@ def error_text(exc: ComputerUseError) -> str:
 
 
 def refusal_text(decision: safety.Decision) -> str:
-    """Render a non-ALLOW safety decision as one tool-error line."""
-    return f"{decision.verdict.value}: {decision.reason}"
+    """Render a non-ALLOW safety decision as one tool-error line, with the
+    one-step way to get the grant when the app is merely ungranted."""
+    text = f"{decision.verdict.value}: {decision.reason}"
+    if decision.verdict is safety.Verdict.NEEDS_PERMISSION and decision.app:
+        need = decision.required.value if decision.required else "click"
+        text += (f" | hint: ask the user, then grant_app(app='{decision.app}', tier='{need}') "
+                 f"asks them to confirm in this host and records the grant; or they run "
+                 f"`a11y-computer-use grant {decision.app} {need}`.")
+    return text
 
 
 #: Roles that commonly own their own scroll position, most specific first. The
@@ -2464,7 +2471,21 @@ _INSTRUCTIONS = (
     "browser backend a snapshot may end with a 'webmcp tools:' block (refs w1..wN): "
     "tools the page itself offers to agents. When one matches the step, prefer "
     "webmcp(action='call', name='w2', arguments={...}) over clicking and typing "
-    "through the UI; it is fewer steps and the page validates the input."
+    "through the UI; it is fewer steps and the page validates the input. "
+    "GRANTS: on macOS the host app needs the Accessibility (and, for screenshots, Screen "
+    "Recording) grant; a permission_denied_* error already opened the system dialog and the "
+    "settings pane: tell the user which app to switch on, then call request_permission(kind), "
+    "which waits for the switch. An app that returns needs_permission is ungranted in this "
+    "tool's own per-app tiers: ask the user, then grant_app(app, tier) confirms with them in "
+    "this host and records it. "
+    "REPORTING: this tool is maintained from its public issues. When a call returns "
+    "internal_error, does something clearly wrong, lacks a capability the task needs, or "
+    "is marked [slow call], report it with report_issue(kind=bug|bottleneck|"
+    "missing_capability|app_compatibility, title, body, tool) once the task is done (or "
+    "right away if it blocks you); it files on github.com/Perception-Dynamics-Inc/"
+    "a11y-computer-use after the user confirms, or returns a prefilled link for the user. "
+    "Do not report needs_permission or deny (grants are the user's choice), stale_ref "
+    "(re-observe), or your own argument mistakes."
 )
 
 
@@ -2531,6 +2552,8 @@ def build_server(
         active call retains execution ownership until its worker has finished,
         even if its requester disconnects; subsequent calls cannot race it.
         """
+        tool_name = getattr(fn, "__name__", "tool")
+        started = time.monotonic()
         try:
             try:
                 admission.acquire_nowait()
@@ -2552,15 +2575,27 @@ def build_server(
                     ) from None
                 try:
                     with anyio.CancelScope(shield=True):
-                        return await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+                        result = await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
                 finally:
                     execution.release()
             finally:
                 admission.release()
         except ComputerUseError as exc:
+            if exc.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY:
+                exc.detail["hint"] = onboarding.first_hint("accessibility")
+            elif exc.code is ErrorCode.PERMISSION_DENIED_SCREEN:
+                exc.detail["hint"] = onboarding.first_hint("screen_recording")
             raise ToolError(error_text(exc)) from exc
         except ActionRefused as exc:
             raise ToolError(refusal_text(exc.decision)) from exc
+        except (ToolError, anyio.get_cancelled_exc_class()):
+            raise
+        except Exception as exc:  # noqa: BLE001 - a crash inside the tool is our defect
+            raise ToolError(reporting.internal_error_text(tool_name, exc)) from exc
+        note = reporting.slow_call_note(tool_name, time.monotonic() - started)
+        if note and isinstance(result, str):
+            return f"{result}\n{note}"
+        return result
 
     class _ConfirmResponse(BaseModel):
         """Empty elicitation schema — the human's answer is carried entirely by
@@ -2574,6 +2609,14 @@ def build_server(
         note in the click tool)."""
         result = await ctx.elicit(message=prompt, schema=_ConfirmResponse)
         return getattr(result, "action", None) == "accept"
+
+    def _can_elicit(ctx) -> bool:
+        """Whether the connected host declared MCP elicitation support."""
+        try:
+            caps = ctx.session.client_params.capabilities
+        except Exception:  # noqa: BLE001 - no session, no params
+            return False
+        return getattr(caps, "elicitation", None) is not None
 
     def _confirmer_for(ctx) -> Confirmer | None:
         """A sync confirmer bridging a worker thread to the host's elicitation.
@@ -2920,6 +2963,97 @@ def build_server(
         agent loop shows them to you on every turn. Tier 'read'."""
         return await run(runtime.notes, action, text)
 
+    @server.tool(name="request_permission")
+    async def request_permission(kind: str = "accessibility", wait_s: float = 90.0) -> str:
+        """Get the macOS grant this server's host app needs, without the user
+        hunting for it: fires the system dialog ("<Host> would like to control
+        this computer"), opens the exact System Settings pane, names the host
+        app, and waits up to wait_s for the switch to flip. kind:
+        'accessibility' (every observation and action) or 'screen_recording'
+        (screenshot, zoom, screen_text; needs the host app relaunched after).
+        Call it when a tool returns permission_denied_accessibility or
+        permission_denied_screen, tell the user the one switch to flip, and
+        retry once it returns granted. No-op off macOS."""
+        def execute() -> str:
+            try:
+                out = onboarding.request(kind, wait_s=min(max(wait_s, 0.0), 600.0))
+            except ValueError as exc:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, str(exc)) from exc
+            return json.dumps(out)
+
+        return await run(execute)
+
+    @server.tool(name="grant_app")
+    async def grant_app(app: str, tier: str = "click") -> str:
+        """Ask the user, through this host's confirmation dialog, to let this
+        server control an app, and record the grant on accept. tier: 'read'
+        (observe only), 'click' (press elements, menus, dialogs), 'full' (type
+        text and key chords too). Call it after a needs_permission result and
+        after telling the user why the task needs that app. Without a
+        confirmation channel nothing is recorded and you get the one-line
+        command the user can run instead. Grants persist in
+        ~/.a11y-computer-use/permissions.json; the user can revoke them there."""
+        ctx = server.get_context()
+        confirm = _confirmer_for(ctx) if _can_elicit(ctx) else None
+
+        def execute() -> str:
+            try:
+                wanted = safety.Tier(tier)
+            except ValueError as exc:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED,
+                                       "tier must be 'read', 'click', or 'full'") from exc
+            bundle = _installed_bundle_id(app) or app
+            current = runtime.store.get_tier(bundle)
+            if current is not None and safety._TIER_RANK[current] >= safety._TIER_RANK[wanted]:
+                return f"already granted: {bundle} at tier '{current.value}'"
+            cmd = f"a11y-computer-use grant {bundle} {wanted.value}"
+            if confirm is None:
+                return (f"not granted: this host has no confirmation channel. Ask the user to run "
+                        f"`{cmd}` (or edit ~/.a11y-computer-use/permissions.json), then retry.")
+            ok = confirm(f"Allow this agent to control {bundle} at tier '{wanted.value}'?\n"
+                         f"read = observe only; click = press elements, menus, dialogs; "
+                         f"full = type text and key chords too.\n"
+                         f"Recorded in ~/.a11y-computer-use/permissions.json; revoke there any time.")
+            if not ok:
+                return f"not granted: the user declined {bundle} at '{wanted.value}'."
+            runtime.store.set_tier(bundle, wanted)
+            runtime.audit.record({"action": "grant_app", "app": bundle, "tier": wanted.value,
+                                  "via": "host confirmation"})
+            return f"granted: {bundle} at tier '{wanted.value}' (user confirmed in the host)"
+
+        return await run(execute)
+
+    @server.tool(name="report_issue")
+    async def report_issue(kind: str, title: str, body: str, tool: str | None = None) -> str:
+        """Report a defect or bottleneck in a11y-computer-use itself to its
+        maintainers (public issues on github.com/Perception-Dynamics-Inc/
+        a11y-computer-use). kind: 'bug' (internal_error, wrong result, crash),
+        'bottleneck' (a call marked [slow call], a wait you could not avoid),
+        'missing_capability' (a tool or argument the task needed and this server
+        lacks), 'app_compatibility' (an app whose tree is empty or wrong). body:
+        what you called, what came back (paste the error line), what you
+        expected, and the app. Secrets, e-mails and the home directory are
+        redacted; do not include screenshots or personal content. The host asks
+        the user to confirm before anything is posted; without a signed-in
+        GitHub CLI or a confirmation channel you get a prefilled link to hand to
+        the user instead. Never report needs_permission/deny, stale_ref, or your
+        own argument mistakes."""
+        ctx = server.get_context()
+        confirm = _confirmer_for(ctx) if _can_elicit(ctx) else None
+        driver = getattr(getattr(runtime, "driver", None), "name", None)
+
+        def execute() -> str:
+            try:
+                out = reporting.report(kind, title, body, tool=tool, confirm=confirm,
+                                       env=reporting.environment(driver))
+            except ValueError as exc:
+                raise ComputerUseError(ErrorCode.UNSUPPORTED, str(exc)) from exc
+            runtime.audit.record({"action": "report_issue", "kind": kind,
+                                  "title": reporting.redact(title), "outcome": out[:120]})
+            return out
+
+        return await run(execute)
+
     @server.tool(name="wait_until")
     async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
         """Wait for something outside the accessibility tree, polling every
@@ -2996,8 +3130,14 @@ def _strip_titles(schema, *, in_properties: bool = False):
     return schema
 
 
+#: Tools that talk to the human through the MCP host (confirmation dialogs) or
+#: to the OS on the host's behalf; the local agent loop has neither channel.
+HOST_TOOLS = frozenset({"request_permission", "grant_app", "report_issue"})
+
+
 def tool_specs(runtime: Runtime) -> list[dict]:
-    """The MCP tool surface as plain ``{name, description, input_schema}`` dicts.
+    """The MCP tool surface as plain ``{name, description, input_schema}`` dicts,
+    minus `HOST_TOOLS`, which the local agent loop cannot serve.
 
     Derived from the very registrations `build_server` makes for ``runtime``
     (so browser-only tools appear exactly when the driver serves them, and the
@@ -3014,4 +3154,5 @@ def tool_specs(runtime: Runtime) -> list[dict]:
             "input_schema": _strip_titles(dict(tool.parameters)),
         }
         for tool in tools
+        if tool.name not in HOST_TOOLS
     ]

@@ -7,12 +7,12 @@
   <a href="https://pypi.org/project/a11y-computer-use/"><img src="https://img.shields.io/pypi/v/a11y-computer-use?label=PyPI" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
-  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.3.1"><img src="https://img.shields.io/badge/release-v0.3.1-2A8CFF" alt="Release v0.3.1"></a>
+  <a href="https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.3.2"><img src="https://img.shields.io/badge/release-v0.3.2-2A8CFF" alt="Release v0.3.2"></a>
 </p>
 
 Computer use for AI agents that clicks real UI elements instead of guessed pixels. The model reads a pruned accessibility tree and says `click e14`. Works on macOS, Windows, Linux, and Chromium, through one MCP server.
 
-> 0.3.1 fixes what four planner trials on a real Linux desktop found (drag waypoints, app resolution and launch, GTK and terminal content, JPEG screenshots for remote servers). 0.3.0 added voice control (`a11y-computer-use voice`), a remote backend (`agent --mcp-command`), and WebMCP tools as `w` refs in the browser. The full agency mission in `docs/missions/` has not been run end to end yet.
+> 0.3.2 makes the grants one step: a permission error opens the macOS dialog and the exact settings pane and names the host app, `request_permission` waits for the switch, `grant_app` records an app grant through the host's confirmation dialog, and `report_issue` files the tool's own defects and slow calls on this repo's issues. The full agency mission in `docs/missions/` has not been run end to end yet.
 
 ![Driving TextEdit through accessibility refs](docs/hero-demo.gif)
 
@@ -46,7 +46,7 @@ For a browser tab instead of the desktop, start Chrome with `--remote-debugging-
 
 Then it acts: `click(ref="e3")`, `type("hello")`, `set_value(ref="e2", value="...")`. Ref clicks go through the accessibility API and leave your pointer alone. A stale ref comes back as `stale_ref` with the nearest live candidates. Re-observing as a diff costs about 10 tokens. Apps with no accessibility tree (Telegram, canvases) get OCR refs `o1..oN` from on-device text recognition, and `click(ref="o7")` works the same way ([docs/ocr-refs.md](./docs/ocr-refs.md)).
 
-21 tools: `desktop_snapshot`, `find`, `screen_text`, `screenshot`, `zoom`, `click`, `type`, `key`, `scroll`, `drag` (with waypoint paths for strokes), `wait_for`, `wait_until`, `act`, `set_value`, `scroll_to_find`, `notes`, `menu`, `file_dialog`, `app`, `window`, `clipboard`, plus `console`, `network`, and `webmcp` (tools a page registers through `navigator.modelContext`, listed as `w1..wN`, [docs/webmcp.md](./docs/webmcp.md)) on the browser. Menus and file dialogs stay reachable even in custom-drawn apps ([docs/macos-primitives.md](./docs/macos-primitives.md)). Details: [docs/agent-loop.md](./docs/agent-loop.md) and the tool docstrings.
+24 tools: `desktop_snapshot`, `find`, `screen_text`, `screenshot`, `zoom`, `click`, `type`, `key`, `scroll`, `drag` (with waypoint paths for strokes), `wait_for`, `wait_until`, `act`, `set_value`, `scroll_to_find`, `notes`, `menu`, `file_dialog`, `app`, `window`, `clipboard`, `request_permission`, `grant_app`, `report_issue` (agents file the tool's own defects and slow calls as issues here, [docs/reporting.md](./docs/reporting.md)), plus `console`, `network`, and `webmcp` (tools a page registers through `navigator.modelContext`, listed as `w1..wN`, [docs/webmcp.md](./docs/webmcp.md)) on the browser. Menus and file dialogs stay reachable even in custom-drawn apps ([docs/macos-primitives.md](./docs/macos-primitives.md)). Details: [docs/agent-loop.md](./docs/agent-loop.md) and the tool docstrings.
 
 ## Why not the alternatives
 
@@ -79,7 +79,8 @@ Same planner, 13 browser tasks, one round: refs finished 13/13 with 0 misclicks 
 
 <p align="center"><img src="docs/assets/safety-gate.png" alt="Permission tier, confirmation gate, same-window recheck, execute, audit log" width="92%"></p>
 
-- Per-app grants (`read`, `click`, `full`) in `~/.a11y-computer-use/permissions.json`. No tool can grant itself access.
+- Per-app grants (`read`, `click`, `full`) in `~/.a11y-computer-use/permissions.json`. No tool can grant itself access: `grant_app` records only what the user accepted in the host's own dialog, or the user runs `a11y-computer-use grant <app> <tier>`.
+- The macOS grants come to the user: a permission error opens the system dialog and the exact settings pane and names the host app ([docs/permissions.md](./docs/permissions.md)).
 - Clicks on destructive labels ask the host to confirm. No confirmation channel means the click is blocked.
 - Password fields are never read, typed into, or clicked. Every action is checked against the frontmost window right before it fires.
 - Everything is logged to `~/.a11y-computer-use/audit/` as JSONL, with secrets redacted.
@@ -112,6 +113,6 @@ Format and checks: [docs/missions.md](./docs/missions.md). The example mission i
 
 ## Docs
 
-[Agent loop](./docs/agent-loop.md) · [Missions](./docs/missions.md) · [Voice](./docs/voice.md) · [WebMCP](./docs/webmcp.md) · [OCR refs](./docs/ocr-refs.md) · [macOS menus and dialogs](./docs/macos-primitives.md) · [Adapters](./docs/provider-adapters.md) · [Observation cost](./docs/observation-cost.md) · [Benchmark](./docs/benchmark.md) · [Browser backend](./docs/browser-backend.md) · [Linux](./docs/linux-port.md) · [Windows](./docs/windows-port.md) · [Real-desktop test bed](./docs/box-testbed.md) · [CI](./docs/ci.md) · [Decision records](./docs/decisions/) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
+[Agent loop](./docs/agent-loop.md) · [Missions](./docs/missions.md) · [Permissions](./docs/permissions.md) · [Reporting](./docs/reporting.md) · [Voice](./docs/voice.md) · [WebMCP](./docs/webmcp.md) · [OCR refs](./docs/ocr-refs.md) · [macOS menus and dialogs](./docs/macos-primitives.md) · [Adapters](./docs/provider-adapters.md) · [Observation cost](./docs/observation-cost.md) · [Benchmark](./docs/benchmark.md) · [Browser backend](./docs/browser-backend.md) · [Linux](./docs/linux-port.md) · [Windows](./docs/windows-port.md) · [Real-desktop test bed](./docs/box-testbed.md) · [CI](./docs/ci.md) · [Decision records](./docs/decisions/) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
 
 Apache-2.0. Copyright 2026 Perception Dynamics, Inc.

@@ -1,0 +1,35 @@
+name: Agent report
+description: Filed by (or on behalf of) an agent that hit a defect, a slow call, a missing capability, or an app that does not read. The report_issue tool fills the same fields.
+title: "[agent] "
+labels: ["agent-report"]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - bug (internal_error, wrong result, crash)
+        - bottleneck (a slow call, an unavoidable wait)
+        - missing_capability (a tool or argument the task needed)
+        - app_compatibility (an app whose tree is empty or wrong)
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Tool
+      description: The tool that was called (desktop_snapshot, click, menu, ...).
+  - type: textarea
+    id: what
+    attributes:
+      label: What was called, what came back, what was expected
+      description: Paste the error or result line verbatim. Redact secrets, e-mail addresses, and paths under your home directory; no screenshots with personal content.
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: a11y-computer-use version, platform, OS, Python, driver, host app (the output of `a11y-computer-use doctor` is ideal).
+    validations:
+      required: true
