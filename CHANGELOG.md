@@ -9,6 +9,12 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.2] - 2026-10-01
+
+Issue #11, filed by Codex: "focused" was not "visible".
+
 ### Fixed
 
 - A ref click no longer runs the pointer hit-test: an AXPress addresses the element, so a floating window over the target (Codex over Chrome, #11) no longer turns it into `focus_changed`; synthesized mouse events keep the guard right before injection, and a bound browser tab keeps its tab-switch guard on every path (2026-10-01).
