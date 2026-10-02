@@ -9,7 +9,13 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- MCP `initialize` reports this package's version in `serverInfo.version`. FastMCP on the pinned `mcp` 1.x line takes no version argument, so the low-level server was filling that field from `importlib.metadata.version("mcp")` (1.30.0 against package 0.4.4). Issue #14.
+
+### Changed
+
+- Linux install docs name the PyPI extra (`pip install 'a11y-computer-use[linux]'`) and the Debian/Ubuntu packages a source build of PyGObject/pycairo needs when no wheel is available. The runtime AT-SPI packages stay `gir1.2-atspi-2.0` and `at-spi2-core`. Docs and the bug-report template no longer say the package is absent from PyPI. Issue #14. No new wheel and no publish-pipeline change.
 
 ## [0.4.4] - 2026-10-02
 
@@ -364,7 +370,7 @@ At HEAD the Windows driver still raises `NotImplementedError` for `resolve_ref`,
 - README rewritten from an evidence-cited fact check of the code (four drivers, the 16+2 tool surface, a platform matrix with the exact gates, measured numbers with provenance, embedding shapes, safety model, architecture), plus CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, CITATION.cff, issue forms, a PR template, dependabot, CODEOWNERS, `.editorconfig`, a docs index, brand assets under `docs/assets/`, pyproject metadata, and corrections to stale statements in the existing docs and CI comments (b59cc09, 2026-09-02).
 - `docs/box-testbed.md`: the real-desktop Linux run, the four bugs Xvfb hid, the whole-suite desktop run, `doctor` 8 of 8, and the keyboard round-trip; `scripts/box/README.md` syncs with `COPYFILE_DISABLE=1` so macOS tar ships no AppleDouble sidecars (fada77e, 2f9fa73, 8e431e3, 2026-09-02).
 
-Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag; nothing is published on PyPI.
+Dates are author dates as printed by `git log --date=short` (for one rebased commit, 445dd60, the committer date is 2026-08-25), not release dates. v0.1.0 is the first tag and was not published on PyPI; releases from 0.1.1 are.
 
 [Unreleased]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/compare/v0.2.1...main
 [0.2.1]: https://github.com/Perception-Dynamics-Inc/a11y-computer-use/releases/tag/v0.2.1

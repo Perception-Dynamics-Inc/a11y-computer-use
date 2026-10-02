@@ -6,10 +6,11 @@ a11y-computer-use injects pointer and keyboard input and reads the accessibility
 
 | Version | Where it lives | Status |
 |---|---|---|
-| 0.0.x | branch `main` | Supported. Unreleased; install from a clone. Fixes land here as ordinary commits. |
-| 0.0.1 snapshot on `main` | branch `main` | Not supported. `main` last moved on 2026-07-13 and is behind `main`. |
+| 0.4.4 | [PyPI](https://pypi.org/project/a11y-computer-use/) and tag `v0.4.4` | Current release. `pip install a11y-computer-use` installs this project (extras: `[linux]`, `[windows]`, `[browser]`), as the README describes. |
+| 0.1.1–0.4.3 | PyPI and the matching `v*` tag | Published. Fixes land on `main` and ship in a later tag. There is no backport branch. |
+| `main` | this repository | Where fixes land, including changes that are not in a tag yet. A clone install is `pip install -e ".[dev]"`. |
 
-There are no git tags, no GitHub releases, and no package on PyPI (the name `a11y-computer-use` is not registered). `pip install a11y-computer-use` does not install this project. The only supported way to run it is from a clone of the repository, as the README describes. When a versioned release exists, this table will say which releases receive fixes.
+PyPI lists 0.1.1 through 0.4.4 (checked 2026-10-02). The 0.1.0 GitHub release was not published there; that is recorded in CHANGELOG.md.
 
 ## Reporting a vulnerability
 

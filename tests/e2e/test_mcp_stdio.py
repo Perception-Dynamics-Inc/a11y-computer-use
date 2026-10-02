@@ -23,6 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult, InitializeResult, ListToolsResult
 
+from a11y_computer_use import __version__
 from tests.conftest import HAS_AX, HAS_DISPLAYS
 
 HANDSHAKE_TIMEOUT_S = 30.0
@@ -87,6 +88,10 @@ def _drive(
 def test_initialize_identifies_server(tmp_path: Path) -> None:
     init, _tools, _ = _drive(tmp_path)
     assert init.serverInfo.name == "a11y-computer-use"
+    # This package's version, not importlib.metadata.version("mcp"). FastMCP
+    # 1.x has no version argument and otherwise fills serverInfo from the
+    # library (issue #14).
+    assert init.serverInfo.version == __version__
     # The server ships usage instructions (ref lifecycle, doctor pointer).
     assert init.instructions and "desktop_snapshot" in init.instructions
 

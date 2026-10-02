@@ -11,7 +11,7 @@ One standing rule applies to code, docs, commit messages, and PR descriptions al
 Shared requirements:
 
 - Python 3.11 or newer (`requires-python` in `pyproject.toml`). CI uses 3.12 on the macOS, Windows, and browser jobs; the Linux job uses the runner's distro `python3` for reasons explained below.
-- The package is not published on PyPI. Install from a clone with `pip install -e`.
+- The package is published on PyPI as `a11y-computer-use`. Development installs from a clone with `pip install -e`.
 - `mcp` is pinned below 2.0 because `a11y_computer_use/server.py` imports `mcp.server.fastmcp`, which 2.0 removed; the 1.x line is what the suite runs on (comment in `pyproject.toml`).
 
 Create a virtual environment with either tool. The README uses the standard library venv plus pip, with uv as the alternative; CI uses pip on every job.
@@ -68,11 +68,14 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -e ".[dev]" python-xlib
 ```
 
-The second is the `docs/linux-port.md` recipe written as an editable install. The `[linux]` extra pulls PyGObject and python-xlib from pip; apt provides the AT-SPI2 typelib and the bus.
+The second is the `docs/linux-port.md` recipe. PyPI already serves the extra (`pip install 'a11y-computer-use[linux]'`); from a clone it is editable. Apt's runtime packages are the AT-SPI2 typelib and the bus. PyGObject 3.58.0 is sdist-only and pycairo has no Linux wheel, so a source build also needs the headers in that doc (issue #14, Debian 13 / Python 3.13: `python3.13-dev` matches that interpreter).
 
 ```bash
 pip install -e ".[dev,linux]"
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
+# source build, when no wheel is available (see docs/linux-port.md Packaging):
+sudo apt install pkg-config libcairo2-dev python3-dev python3.13-dev \
+    gobject-introspection libgirepository-2.0-dev
 ```
 
 For the clipboard install one of `xclip`, `xsel`, or `wl-clipboard`; headless machines add `xvfb` (`docs/linux-port.md`). On native Wayland (`WAYLAND_DISPLAY` set and no `DISPLAY`) coordinate clicks, drags, wheel scrolls, and key chords raise a structured `unsupported` error whose hint points at ref-based actions; press and explicit `set_value` go through AT-SPI; implicit typing requires a verified frontmost app owner (`_on_wayland` and `_wayland_input_error` in `a11y_computer_use/drivers/linux.py`). The Linux CI job runs under Xvfb, so the Wayland branches have no CI coverage.
@@ -279,7 +282,7 @@ No commit in the log carries a `Co-Authored-By` or "Generated with" trailer. Do 
 - Update the documents that state the claim you changed: the README tool table, `docs/decisions/plan-2026-07.md` sections 8 and 9, the backend doc under `docs/`, and the tool docstrings in `server.py`, since those are what the model reads.
 - Describe status with the word that is true. "Implemented", "hermetic-tested", "CI-verified on windows-latest", "live-verified on a granted Mac", and "unsupported on native Wayland" are different states. The code follows the same discipline: a stub raises `NotImplementedError` naming its native API, and a platform gap raises `ComputerUseError(ErrorCode.UNSUPPORTED, ...)` with a hint.
 - No formatter or linter is configured in the repository (no ruff, black, flake8, or mypy config; `pyproject.toml` has only the build, project, and pytest sections). Match the surrounding file: `from __future__ import annotations`, type hints on signatures, and a docstring on every public function.
-- Do not bump `version` in `pyproject.toml` or `a11y_computer_use/__init__.py` in a feature PR; there are no tags or releases yet, and both files say `0.0.1`.
+- Do not bump `version` in `pyproject.toml` in a feature PR. `__version__` is read from the installed distribution, not a second constant. Tagged releases are what PyPI serves.
 
 ## Where design discussions live
 
@@ -295,6 +298,5 @@ These statements in the repository (docstrings, comments, and help text) are out
 - The `EXPECTED_TOOLS` comment in `tests/e2e/test_mcp_stdio.py` (line 30) says "the ~12-tool front door". `build_server` registers 16 tools unconditionally plus `console` and `network` on the browser driver; `README.md`, the `ci.yml` smoke-step comments, `docs/linux-port.md`, and the module docstring of `a11y_computer_use/server.py` (lines 3-6, rewritten in b4ece8a to list the tools by name rather than state a count) already reflect the current surface. Section 8 of `docs/decisions/plan-2026-07.md` (line 215) still says "~12 tools", which the status note at the top of `docs/decisions/plan-2026-07.md` already records, so that one is a dated record rather than untracked drift.
 - The `get_driver` docstring (`a11y_computer_use/drivers/__init__.py:35`) says `a11y-computer-use serve`; the subcommand is `a11y-computer-use mcp` (`a11y-computer-use --help` lists `mcp`, `doctor`, `snapshot`, `run-once`, `bench`, and `agent`).
 - The module docstring of `a11y_computer_use/drivers/windows.py` (lines 3-4) says "STATUS: skeleton, UNVERIFIED. Every method ... raises `NotImplementedError`". `snapshot`, `press_element`, `scroll_into_view`, `set_value`, `type_text`, and `key_chord` are implemented, and `snapshot`, `press_element` (the `SetFocus` path), `type_text`, and `key_chord` are CI-verified on `windows-latest` (`tests/test_windows_live.py`); the remaining 15 methods raise via `_todo(...)`, as `docs/windows-port.md` describes. The module docstring of `tests/test_drivers.py` (line 6) calls Windows "an honest, mapped stub" and the comment at `tests/test_drivers.py:76-77` lists only `snapshot`, `press_element`, and `type_text` as implemented; both are behind the driver.
-- The install hints in `a11y_computer_use/drivers/linux.py:104` (`pip install a11y-computer-use[linux]`) and `a11y_computer_use/drivers/_cdp.py:71` (`pip install a11y-computer-use[browser]`) name a PyPI package that does not exist (`SECURITY.md`); from a clone the command is `pip install -e '.[linux]'` / `pip install -e '.[browser]'`, as `docs/linux-port.md` and `docs/browser-backend.md` already show.
 - The docstring of `a11y_computer_use/drivers/base.py` (lines 10-12) lists macOS and Windows only; `get_driver` supports `macos`, `windows`, `linux`, and `browser`.
 - The MCP server `instructions` string (`_INSTRUCTIONS`, `a11y_computer_use/server.py:1193-1203`) says permission tiers are "keyed by bundle id" (line 1200) on every backend; on Windows the app id is the process image name (`notepad.exe`, `a11y_computer_use/drivers/_win_system.py:42`), on Linux the process comm name (`a11y_computer_use/drivers/_linux_system.py:44`), and on the browser the CDP page target id (`a11y_computer_use/drivers/browser.py:199`). The "Accessibility-first macOS control" wording it previously carried was dropped in b4ece8a; the first sentence now reads "Accessibility-first computer use (macOS, Windows, Linux, and Chromium over CDP)", and `a11y-computer-use --help` (`a11y_computer_use/cli.py:44-47`) names the same four backends.
