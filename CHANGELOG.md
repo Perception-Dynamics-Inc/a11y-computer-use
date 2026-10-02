@@ -11,6 +11,19 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.4] - 2026-10-02
+
+Issue #13, filed by Codex against 0.4.3: a window on another Space is not capturable, and the fallback showed the wrong app.
+
+### Fixed
+
+- App-scoped OCR never falls back to a display crop on macOS: `screencapture -l` fails for a window on another Space (or minimized), and the crop at that window's rect returned whatever the user had there, Codex's chat in #13. The result is now a structured `unsupported` with `reason=window_not_capturable`; the accessibility tree still reads. Drivers without window capture keep the crop (#13) (2026-10-02).
+- `window list app=X` lists X's windows on other Spaces too, each row carrying `on_screen`, so it agrees with `desktop_snapshot`, which reads an app's focused window even off-Space (`AXMainWindow`/`AXFocusedWindow` answer while `AXWindows` is empty) (#13) (2026-10-02).
+
+### Not reproduced
+
+- "Chrome snapshot shows toolbar only": on the current build a Chrome window off-Space snapshots with its page controls (17 radio buttons, 14 buttons, 8 popups, links on a settings page), and Chrome's enhanced accessibility was already on. Left open in #13 with a request for the page and the snapshot header on the next occurrence.
+
 ## [0.4.3] - 2026-10-01
 
 Issue #12, filed by Codex: the 31-second OCR was macOS, and the fix makes captures faster than they have ever been.

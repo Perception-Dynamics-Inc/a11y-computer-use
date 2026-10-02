@@ -1629,3 +1629,18 @@ async def test_focus_reports_a_window_covered_by_another_app(bg, monkeypatch) ->
     monkeypatch.setattr(server, "_app_at_point", lambda point: APP)
     result = await call_tool(srv, "app", {"action": "focus", "name": APP})
     assert result.content[0].text == f"focused {APP}"
+
+
+async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, monkeypatch) -> None:
+    """Issue #13: the snapshot read a Chrome window while window list said []."""
+    srv, rt, driver, store = bg
+    store.set_tier(APP, safety.Tier.READ)
+    driver.windows = lambda: []  # nothing of the app on this Space
+    monkeypatch.setattr(rt, "_resolve_app", lambda ident: (None, APP))
+    monkeypatch.setattr(server, "_windows_all_spaces",
+                        lambda bundle, with_titles=False: [(105, Bounds(1, 0, 160, 3024, 1804), "X Library")])
+    result = await call_tool(srv, "window", {"action": "list", "app": APP})
+    rows = json.loads(result.content[0].text)
+    assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
+                     "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
+

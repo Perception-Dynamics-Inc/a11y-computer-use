@@ -575,9 +575,9 @@ def _launch_app(identifier: str, *, activate: bool = True) -> None:
     )
 
 
-def _windows_all_spaces(bundle: str) -> list[tuple[int, Bounds]]:
-    """(window_id, projected bounds) of ``bundle``'s ordinary windows on every
-    Space, largest first; empty off macOS or when the app is not running."""
+def _windows_all_spaces(bundle: str, *, with_titles: bool = False) -> list:
+    """(window_id, projected bounds[, title]) of ``bundle``'s ordinary windows on
+    every Space, largest first; empty off macOS or when the app is not running."""
     if sys.platform != "darwin":
         return []
     try:
@@ -605,7 +605,8 @@ def _windows_all_spaces(bundle: str) -> list[tuple[int, Bounds]]:
                                                 (float(raw["Width"]), float(raw["Height"])))
         if projected is None:
             continue
-        out.append((int(r["kCGWindowNumber"]), projected))
+        item = (int(r["kCGWindowNumber"]), projected)
+        out.append(item + (str(r.get("kCGWindowName") or ""),) if with_titles else item)
     out.sort(key=lambda t: t[1].width * t[1].height, reverse=True)
     return out
 
@@ -1202,6 +1203,20 @@ class Runtime:
         `screenshot` needs."""
         engine = self._require_ocr()
         window_png = self._window_capture(window_id) if window_id is not None and region is not None else None
+        can_capture_windows = getattr(self.driver, "window_png", None) is not None
+        if window_id is not None and region is not None and window_png is None and can_capture_windows:
+            # No crop fallback on a driver that captures windows: a display crop at
+            # the window's rect shows whatever is there on the user's current
+            # Space, which was Codex's chat (#13). Drivers without window capture
+            # (Linux, Windows) keep the crop, their best available.
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"window {window_id} cannot be captured: it is on another Space, minimized, or gone, "
+                f"and a display crop at its rect would show other apps",
+                detail={"window_id": window_id, "reason": "window_not_capturable",
+                        "hint": "the accessibility tree still reads (desktop_snapshot); for pixels, "
+                                "bring the window to this desktop first"},
+            )
         if window_png is not None:
             import io
 
@@ -2627,9 +2642,14 @@ class Runtime:
                 # read grant and return only its rows.
                 _running, bundle = self._resolve_app(app)
                 rows = self._run_gated(WindowOp(verb=verb), bundle, self.driver.windows)
-                rows = [r for r in rows
+                rows = [{**r, "on_screen": True} for r in rows
                         if str(r.get("bundle") or r.get("app") or "") == bundle
                         or str(r.get("bundle") or r.get("app") or "").lower() in bundle.lower()]
+                if not rows:  # the app's windows on other Spaces: the snapshot can still read them (#13)
+                    rows = [{"window_id": wid, "app": bundle, "title": title, "on_screen": False,
+                             "bounds": {"display_id": b.display_id, "x": b.x, "y": b.y,
+                                        "width": b.width, "height": b.height}}
+                            for wid, b, title in _windows_all_spaces(bundle, with_titles=True)]
                 return json.dumps(rows)
             rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
             return json.dumps(rows)
