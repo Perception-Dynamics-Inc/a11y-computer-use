@@ -9,13 +9,17 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-### Fixed
+Nothing yet.
 
-- MCP `initialize` reports this package's version in `serverInfo.version`. FastMCP on the pinned `mcp` 1.x line takes no version argument, so the low-level server was filling that field from `importlib.metadata.version("mcp")` (1.30.0 against package 0.4.4). Issue #14.
+## [0.4.5] - 2026-10-02
 
 ### Changed
 
-- Linux install docs name the PyPI extra (`pip install 'a11y-computer-use[linux]'`) and the Debian/Ubuntu packages a source build of PyGObject/pycairo needs when no wheel is available. The runtime AT-SPI packages stay `gir1.2-atspi-2.0` and `at-spi2-core`. Docs and the bug-report template no longer say the package is absent from PyPI. Issue #14. No new wheel and no publish-pipeline change.
+- Linux install docs now say the package is on PyPI and list the source-build packages (#15) (2026-10-02).
+
+### Fixed
+
+- The MCP server reports this package's version instead of the mcp library version (#15) (2026-10-02).
 
 ## [0.4.4] - 2026-10-02
 
