@@ -82,11 +82,36 @@ session, since portal input consent is not headless-scriptable.
 
 ## Packaging
 
+PyPI publishes the package (0.1.1 through 0.4.4, the current release). Install the Linux extra from PyPI:
+
+```bash
+pip install 'a11y-computer-use[linux]'
 ```
-pip install -e '.[linux]'        # from a clone; a11y-computer-use is not on PyPI yet
+
+From a clone, the same extra is an editable install:
+
+```bash
+pip install -e '.[linux]'
+```
+
+The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe + XTEST event generation) and **python-xlib** (pure Python: EWMH windowing, no build deps), both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so a Linux install of the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
+
+Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibility bus:
+
+```bash
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
 ```
 
-The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe + XTEST event generation) and **python-xlib** (pure Python: EWMH windowing, no build deps), both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The apt packages provide the AT-SPI2 typelib and the accessibility bus itself. For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headless boxes add `xvfb`.
+A source build, when those wheels are absent, also needs headers and pkg-config. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
+
+```bash
+sudo apt install pkg-config libcairo2-dev python3-dev python3.13-dev \
+    gobject-introspection libgirepository-2.0-dev \
+    gir1.2-atspi-2.0 at-spi2-core
+```
+
+PyGObject's Debian/Ubuntu instructions also install `gcc`. The Debian 13 report did not install a compiler separately.
+
+For clipboard support install one of `xclip`, `xsel`, or `wl-clipboard`; headless boxes add `xvfb`.
 
 In CI the shared core tests (`tests/test_drivers.py`, `tests/test_observe.py`, `tests/test_linux_synthetic.py`) and the MCP `build_server()` smoke run on `ubuntu-latest`, and `tests/test_linux_live.py` exercises the driver name, an AT-SPI snapshot of the GTK app, an a11y button press with an observable effect, a11y typing via `EditableText`, and the `org.a11y.Status` flip against a live bus. Coordinate click/drag/scroll, key chords, capture, EWMH windowing, and clipboard are implemented but have no live test yet. The `Driver` contract is a shared signature protocol (`a11y_computer_use/drivers/base.py`), and `tests/test_drivers.py` checks only that `LinuxDriver` satisfies it structurally, so a green Linux job shows that the platform-free engine passes on `ubuntu-latest` and that the five live-tested paths (driver name, AT-SPI snapshot, accessibility press, accessibility typing, `org.a11y.Status` flip) work against a GTK3 window; it is not a behavioural comparison with the macOS driver, which no test performs.

@@ -264,7 +264,8 @@ jobs:
             echo "::error::sdist contains media that should be excluded"; exit 1
           fi
       # The wheel installs and the console script runs from an isolated
-      # environment, the way `uvx a11y-computer-use mcp` will once it is on PyPI.
+      # environment, the same shape as `uvx a11y-computer-use` from PyPI.
+      # This step installs the wheel just built, not the copy already on the index.
       - name: uvx from the built wheel
         run: uvx --from "$(ls dist/*.whl)" a11y-computer-use --help
       - name: import the wheel in a fresh venv

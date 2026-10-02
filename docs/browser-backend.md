@@ -81,7 +81,8 @@ runs them against headless Chrome.
 google-chrome --headless=new --remote-debugging-port=9222 about:blank &
 
 # 2. point a11y-computer-use at it
-pip install -e '.[browser]'               # from a clone (not on PyPI yet); adds websocket-client (only extra dep)
+pip install 'a11y-computer-use[browser]'  # PyPI; adds websocket-client (only extra dep)
+# from a clone: pip install -e '.[browser]'
 A11Y_COMPUTER_USE_DRIVER=browser \
 A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222 \
 a11y-computer-use mcp

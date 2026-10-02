@@ -80,7 +80,7 @@ The `app` argument and the permission-grant key are platform identifiers, so the
 ### Browser (Chromium over CDP)
 
 ```bash
-pip install -e ".[browser]"      # adds websocket-client; install from the clone, the package is not on PyPI
+pip install 'a11y-computer-use[browser]'   # adds websocket-client. From a clone: pip install -e ".[browser]"
 google-chrome --headless=new --remote-debugging-port=9222 about:blank &
 export A11Y_COMPUTER_USE_DRIVER=browser
 export A11Y_COMPUTER_USE_CDP_ENDPOINT=http://127.0.0.1:9222   # this is also the default
@@ -111,13 +111,13 @@ python examples\inprocess_python.py   # with APP set to "notepad" (open Notepad 
 ### Linux
 
 ```bash
-sudo apt install at-spi2-core gir1.2-atspi-2.0   # accessibility bus + Atspi typelib
-pip install -e ".[linux]"                         # PyGObject + python-xlib
-export A11Y_COMPUTER_USE_DRIVER=linux                   # optional; linux is the default on Linux
+pip install 'a11y-computer-use[linux]'            # PyPI. From a clone: pip install -e ".[linux]"
+sudo apt install gir1.2-atspi-2.0 at-spi2-core    # runtime: accessibility bus + Atspi typelib
+export A11Y_COMPUTER_USE_DRIVER=linux             # optional; linux is the default on Linux
 python examples/inprocess_python.py               # with APP set to e.g. "gedit"
 ```
 
-CI takes the distro route instead of building PyGObject: `apt-get install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi xvfb dbus dbus-x11 openbox xdotool x11-utils xclip`, then a venv created with `--system-site-packages` and `pip install -e ".[dev,browser]" python-xlib` (the "install AT-SPI2 / GTK / X11 system deps" and "venv with system gi" steps in `.github/workflows/ci.yml`).
+PyGObject 3.58.0 is sdist-only on PyPI and pycairo publishes no Linux wheel, so that install compiles both when the interpreter has no wheel. The Debian/Ubuntu build packages for that compile, and the runtime AT-SPI packages, are in the Packaging section of `docs/linux-port.md`. CI takes the distro route instead of building PyGObject: `apt-get install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi xvfb dbus dbus-x11 openbox xdotool x11-utils xclip`, then a venv created with `--system-site-packages` and `pip install -e ".[dev,browser]" python-xlib` (the "install AT-SPI2 / GTK / X11 system deps" and "venv with system gi" steps in `.github/workflows/ci.yml`).
 
 - No per-app grant. The requirement is a reachable AT-SPI2 bus: `ensure_trusted()` flips `org.a11y.Status` on the session bus and probes the desktop; missing bindings or an unreachable bus return `permission_denied_accessibility` with the apt and `gsettings` hints (`a11y_computer_use/drivers/linux.py:88-115`).
 - Clipboard needs one of `xclip`, `xsel`, or `wl-clipboard`. Headless hosts run under `xvfb-run` plus `dbus-run-session`, the way the "linux backend (live AT-SPI2)" step in `.github/workflows/ci.yml` does.

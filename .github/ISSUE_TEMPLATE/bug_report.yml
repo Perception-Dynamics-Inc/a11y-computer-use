@@ -107,8 +107,8 @@ body:
     id: version
     attributes:
       label: a11y-computer-use version and commit
-      description: a11y-computer-use is not published on PyPI, so name the commit you installed from (`git rev-parse --short HEAD`) and the extras you installed.
-      placeholder: 0.0.1 at <short sha>, pip install -e '.[dev,browser]'
+      description: Name the installed version (`a11y-computer-use --version`, or the PyPI version) and the extras you installed. If you installed from a clone, also give `git rev-parse --short HEAD`.
+      placeholder: 0.4.4, pip install 'a11y-computer-use[linux]'
     validations:
       required: true
 

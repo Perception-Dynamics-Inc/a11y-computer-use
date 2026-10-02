@@ -12,16 +12,16 @@ from __future__ import annotations
 import dataclasses
 import io
 import json
-from pathlib import Path
-
 import sys
+from importlib.metadata import version as dist_version
+from pathlib import Path
 
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session as client_session
 from mcp.types import ElicitResult
 from PIL import Image as PILImage
 
-from a11y_computer_use import act, capture, observe, safety, server
+from a11y_computer_use import __version__, act, capture, observe, safety, server
 from a11y_computer_use.schema import Bounds, ComputerUseError, Display, Element, ErrorCode, Point, Scope, Snapshot
 from tests.conftest import build_synthetic_snapshot
 
@@ -150,6 +150,16 @@ def audit_entries(audit_dir: Path) -> list[dict]:
 
 
 # --- registry ----------------------------------------------------------------
+
+
+async def test_initialize_reports_package_version_not_the_mcp_library(mcp_server) -> None:
+    """serverInfo is filled from these options. FastMCP 1.x leaves version
+    unset, and the low-level server then substitutes the mcp distribution
+    version (issue #14)."""
+    options = mcp_server._mcp_server.create_initialization_options()
+    assert options.server_name == "a11y-computer-use"
+    assert options.server_version == __version__
+    assert options.server_version != dist_version("mcp")
 
 
 async def test_tool_registry_matches_plan_surface(mcp_server) -> None:

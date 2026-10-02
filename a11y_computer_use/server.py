@@ -59,7 +59,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import conditions, drivers, notes, observe, ocr, onboarding, reporting, safety
+from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, reporting, safety
 from a11y_computer_use.menus import parse_path as menus_parse
 
 #: Copied from capture.DEFAULT_MAX_LONG_EDGE so the tool defaults don't import
@@ -2918,6 +2918,11 @@ def build_server(
                     await anyio.to_thread.run_sync(runtime.close)
 
     server = FastMCP("a11y-computer-use", instructions=_INSTRUCTIONS, lifespan=lifespan)
+    # mcp 1.x FastMCP takes no version (this project pins mcp<2). Left unset,
+    # the low-level server's create_initialization_options reports
+    # importlib.metadata.version("mcp") as serverInfo.version, so initialize
+    # identified the library rather than this package. Issue #14.
+    server._mcp_server.version = __version__
 
     async def run(fn, /, *args, _tool: str | None = None, **kwargs):
         """Run a blocking Runtime call on a worker thread and convert
