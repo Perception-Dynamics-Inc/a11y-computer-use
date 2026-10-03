@@ -257,15 +257,18 @@ class LinuxDriver:
         On a Chromium list the wheel is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
         head below the top sliver leaves the pre-wheel row and stays on the
-        new row for two reads. ``snapshot`` then lists those rows, which is
-        what ``scroll_to_find`` searches. A grab whose mean absolute
-        difference stays at or below the still-page threshold raises
+        new row for two reads. The pixel check resamples the list's own
+        screen box. The frame grabbed in the same turn as the wheel can
+        still be the pre-paint image, which is what 0.4.13 reported as
+        ``mean_abs`` 0.0 while the list on screen had moved. A resample
+        that stays at or below the still-page threshold raises
         `unsupported` with ``reason=page_unchanged`` and does not replace
         the rows. A grab that changed while the head never leaves the old
         row raises `unsupported` with ``reason=rows_stale`` and does not
         replace the rows either. A pixel difference alone is not a
-        successful scroll. A coordinate target and a non-Chromium element
-        are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        successful scroll. ``snapshot`` then lists the confirmed rows,
+        which is what ``scroll_to_find`` searches. A coordinate target and
+        a non-Chromium element are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -307,8 +310,7 @@ class LinuxDriver:
         saved = self._run(lambda: _atspi.ensure_shown_rows(container))
         before_head = self._run(lambda: _atspi.row_head(saved))
         _linux_input.scroll(x, y, dx=dx, dy=dy)
-        after_grab = _grab_region(box)
-        mean = _region_mean_change(before_grab, after_grab)
+        mean, samples = _list_pixels_moved(before_grab, box)
         shown = self._run(lambda: _atspi.row_names(saved))
         if mean is None:
             raise ComputerUseError(
@@ -333,6 +335,8 @@ class LinuxDriver:
                     "dx": int(dx),
                     "dy": int(dy),
                     "mean_abs": mean,
+                    "samples": samples,
+                    "box": list(box),
                     "rows": list(shown[:8]),
                 },
             )
@@ -713,6 +717,33 @@ def _grab_wayland() -> bytes | None:
     except Exception:
         return None
     return r.stdout if r.returncode == 0 and r.stdout else None
+
+
+def _list_pixels_moved(before, box: tuple[int, int, int, int]) -> tuple[float | None, int]:
+    """Mean absolute difference of the list box against the pre-wheel grab.
+
+    The first grab after the wheel can still be the pre-paint frame. On the
+    0.4.13 retest that one sample was 0.0 while a later photograph of the
+    list had moved. Later samples of the same box are compared to the
+    pre-wheel grab until one clears the still-page threshold or the tries
+    end. The returned mean is that first clear sample, or the last sample
+    when none clears it. None means a grab could not be compared. The count
+    is how many grabs were taken after the wheel.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    last: float | None = 0.0
+    for attempt in range(_atspi._PAINT_POLLS):
+        after = _grab_region(box)
+        mean = _region_mean_change(before, after)
+        if mean is None:
+            return None, attempt + 1
+        last = mean
+        if mean > _atspi._PAGE_MOVE_MEAN:
+            return mean, attempt + 1
+        if attempt + 1 < _atspi._PAINT_POLLS:
+            _atspi.time.sleep(_atspi._PAINT_PAUSE_S)
+    return last, _atspi._PAINT_POLLS
 
 
 def _grab_region(box: tuple[int, int, int, int]):

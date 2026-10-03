@@ -887,8 +887,17 @@ _HIT_PAUSE_S = 0.05
 _HEAD_POLLS = 8
 _HEAD_PAUSE_S = 0.4
 # Pixels inside the list. A still grab is 0. The 0.4.12 retest measured 6.677
-# where the list moved and 0 where it did not. This sits between those.
+# where the list moved and 0 where it did not. The 0.4.13 retest's own
+# mean_abs was 0.0 on a scroll whose list later measured 6.13 and 5.90.
+# This threshold still sits between a still grab and those moves. A single
+# difference above it is not a successful scroll.
 _PAGE_MOVE_MEAN = 1.0
+# The grab taken in the same turn as the wheel can still be the pre-paint
+# frame. 0.4.13 compared that one pair and returned page_unchanged, so the
+# snapshot never advanced. Resample until the pixels change. A box that
+# stays at or under the threshold for the whole window is unchanged.
+_PAINT_POLLS = 12
+_PAINT_PAUSE_S = 0.15
 # The top of the list box can be a clipped row. On that retest the snapshot
 # started at ITEM-009 while the screen head was ITEM-010, and scroll_to_find
 # showed a clipped row above the visible run. Sampling below this sliver is

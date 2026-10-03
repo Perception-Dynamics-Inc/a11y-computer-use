@@ -1066,6 +1066,11 @@ class _ListHit:
         self.invent: int | None = None
         self.on_wheel = None
         self.calls = 0
+        # Grabs after the wheel that still return ``frozen`` instead of
+        # ``screen``. 0.4.13 treated the first of those as a still page.
+        self._paint_left = 0
+        self._frozen: int | None = None
+        self.grab_colors: list[int] = []
         self.x, self.y, self.width, self.height = 40, 100, 400, 160
         self._at: dict[tuple[int, int], int] = {}
 
@@ -1142,9 +1147,16 @@ def _wire_chrome_list(monkeypatch, window, hit, stuck: bool):
     def grab(_box):
         from PIL import Image
 
-        # Solid stand-in for the list pixels. Same ``screen`` means the page
-        # did not move. Not a capture of a live Chrome window.
-        return Image.new("RGB", (4, 4), (int(hit.screen) & 255, 0, 0))
+        # Solid stand-in for the list pixels. Same color means the page did
+        # not move. A positive ``_paint_left`` keeps the pre-wheel color for
+        # that many grabs, which is the frame 0.4.13 compared too early.
+        # Not a capture of a live Chrome window.
+        color = int(hit.screen) & 255
+        if hit._paint_left > 0 and hit._frozen is not None:
+            color = int(hit._frozen) & 255
+            hit._paint_left -= 1
+        hit.grab_colors.append(color)
+        return Image.new("RGB", (4, 4), (color, 0, 0))
 
     monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
     real_scroll = _linux_input.scroll
@@ -1265,6 +1277,68 @@ def test_three_line_scroll_snapshot_starts_at_the_on_screen_head(
     again = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert again[0] == "ITEM-010"
     assert "ITEM-192" not in again
+
+
+def test_late_paint_is_not_reported_as_an_unmoved_page(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The grabs right after the wheel still show the pre-wheel color. A later
+    grab of the same box shows the move from ITEM-001 to ITEM-010. That scroll
+    is not page_unchanged, and the snapshot read after it starts at ITEM-010.
+    A following wheel whose grabs stay on that color is page_unchanged and
+    does not install ITEM-192.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit._frozen = hit.screen
+        hit._paint_left = 3
+        hit.screen = 10
+        hit.clip = True
+        hit.invent = None
+        hit.hold_until = 0
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert driver.scroll(row, dy=3, unit=ScrollUnit.LINES) is None
+    # The pre-wheel grab plus the early post-wheel grabs are the old color.
+    assert hit.grab_colors[0] == 1
+    assert hit.grab_colors[1:4] == [1, 1, 1]
+    assert 10 in hit.grab_colors
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-010"
+    assert "ITEM-017" in later
+    assert "ITEM-001" not in later
+    assert "ITEM-009" not in later
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+
+    def still(_dx_ignored=None):
+        hit.invent = 192
+        hit._paint_left = 0
+        hit._at.clear()
+
+    hit.on_wheel = still
+    anchor = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.role == "AXRow" and el.title == "ITEM-010"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["samples"] > 1
+    kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert kept[0] == "ITEM-010"
+    assert "ITEM-192" not in kept
+    assert "ITEM-001" not in kept
 
 
 def test_unmoved_page_stays_unsupported_and_keeps_the_on_screen_rows(
