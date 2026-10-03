@@ -3357,7 +3357,8 @@ def build_server(
         open menu swallows key chords; click/type/key close one automatically
         and say so). Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
-        close; gated against app. macOS only today."""
+        close; gated against app. Implemented on macOS (AX menu bar) and Linux
+        (AT-SPI menu bar). Windows and the browser return unsupported."""
         return await run(runtime.menu, app, path, action, confirm=_confirmer_for(server.get_context()))
 
     @server.tool(name="file_dialog")
@@ -3368,7 +3369,12 @@ def build_server(
         Save panel. Trigger the panel first (menu 'File > Open…' or 'File >
         Save As…'), then call this. Returns JSON with the steps taken; a
         structured `unsupported` error names the problem when no panel is
-        showing or it is the other kind. Tier 'full' (it types). macOS only."""
+        showing or it is the other kind. Tier 'full' (it types). Implemented on
+        macOS. On Linux the result is unsupported: GTK and portal file choosers
+        are not driven; open the chooser, then set_value or type into the
+        location or name field shown in the snapshot (Ctrl+L focuses the
+        location bar in a GTK 3 chooser). Windows and the browser also return
+        unsupported."""
         return await run(runtime.file_dialog, action, path, app)
 
     @server.tool(name="notes")

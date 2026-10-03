@@ -481,23 +481,73 @@ class LinuxDriver:
         if not _linux_system.raise_window(window_id):
             raise _no_such_window(window_id)
 
-    # TODO: AT-SPI exposes menu bars (role "menu bar" / "menu item" with the
-    # "click" action), so menu_items/menu_press can be implemented on Linux the
-    # way the macOS driver does over AX. Not built yet.
+    def _menu_root(self, app: str) -> object:
+        """The AT-SPI application accessible for ``app``, or a structured error.
+
+        Missing bindings are the same permission error as `ensure_trusted`.
+        An unknown name is `app_not_found` and does not wait on a bus.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            root = self._run(lambda: _atspi.find_root(app, Scope.APP))
+        except ImportError as exc:
+            raise ComputerUseError(
+                ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
+                "AT-SPI2 Python bindings are missing",
+                detail={"hint": "pip install a11y_computer_use[linux]; apt install "
+                        "gir1.2-atspi-2.0 at-spi2-core", "error": str(exc)},
+            ) from exc
+        if root is None:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"no running application matches {app!r}",
+                detail={"app": app},
+            )
+        return root
+
     def menu_items(self, app: str, path: str | None) -> list[dict]:
-        raise _no_menus("menu_items")
+        from a11y_computer_use.drivers import _linux_menus
+
+        root = self._menu_root(app)
+        return self._run(lambda: _linux_menus.menu_items(root, path))
 
     def menu_press(self, app: str, path: str) -> str:
-        raise _no_menus("menu_press")
+        from a11y_computer_use.drivers import _linux_menus
+
+        root = self._menu_root(app)
+        return self._run(lambda: _linux_menus.menu_press(root, path))
 
     def menu_state(self, app: str) -> dict:
-        return {"open": False, "path": []}  # no accessible menu bar on this backend
+        """Open menu path, or closed when the app or the bus is unavailable.
+
+        The Runtime asks before keystrokes. A missing app must not raise there.
+        """
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            root = self._menu_root(app)
+        except ComputerUseError:
+            return {"open": False, "path": []}
+        try:
+            return self._run(lambda: _linux_menus.menu_state(root))
+        except ComputerUseError:
+            return {"open": False, "path": []}
 
     def menu_close(self, app: str) -> list[str]:
-        return []
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            root = self._menu_root(app)
+        except ComputerUseError:
+            return []
+        try:
+            return self._run(lambda: _linux_menus.menu_close(root))
+        except ComputerUseError:
+            return []
 
     def file_dialog(self, verb: object, path: str, app: str) -> dict:
-        raise _no_menus("file_dialog")
+        raise _unsupported_file_dialog()
 
     def read_clipboard(self) -> str | None:
         from a11y_computer_use.drivers import _linux_system
@@ -510,11 +560,21 @@ class LinuxDriver:
         _linux_system.write_clipboard(text)
 
 
-def _no_menus(op: str) -> ComputerUseError:
+def _unsupported_file_dialog() -> ComputerUseError:
+    """GTK and portal file choosers are not driven. The message is the limit."""
     return ComputerUseError(
         ErrorCode.UNSUPPORTED,
-        f"{op} is not implemented on the Linux backend yet",
-        detail={"hint": "AT-SPI menu bars can back this; press the item by ref meanwhile"},
+        "file_dialog is not supported on Linux: GTK and portal file choosers are not driven by this tool",
+        detail={
+            "platform": "linux",
+            "reason": "no_file_dialog",
+            "hint": (
+                "Open the chooser (for example menu 'File > Open'), then use the snapshot. "
+                "In a GTK 3 file chooser, Ctrl+L focuses the location bar. "
+                "set_value or type fills the location or name field. "
+                "An xdg-desktop-portal chooser is a separate dialog; drive the fields it exposes."
+            ),
+        },
     )
 
 
