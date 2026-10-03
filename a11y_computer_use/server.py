@@ -360,6 +360,23 @@ def _running_app(identifier: str) -> tuple[object, str]:
     return running, bundle or identifier
 
 
+def _permission_app_id(identifier: str) -> str:
+    """The id a grant is stored under.
+
+    macOS: the installed bundle id when a display name matches one, else the
+    identifier. Windows: the identifier. Linux: the process comm of a running
+    window, so ``google-chrome`` and "Google Chrome" key as ``chrome``, the
+    same id ``snapshot`` gates on. An unmatched name is stored as given so a
+    grant can precede launch.
+    """
+    installed = _installed_bundle_id(identifier)
+    if installed:
+        return installed
+    if sys.platform == "darwin" or sys.platform.startswith("win"):
+        return identifier
+    return _system_ops().resolve_app(identifier)
+
+
 def _display_name(bundle: str) -> str:
     """"Figma" for com.figma.Desktop when the app is installed; else the id."""
     if sys.platform != "darwin":
@@ -3459,7 +3476,7 @@ def build_server(
             except ValueError as exc:
                 raise ComputerUseError(ErrorCode.UNSUPPORTED,
                                        "tier must be 'read', 'click', or 'full'") from exc
-            bundle = _installed_bundle_id(app) or app
+            bundle = _permission_app_id(app)
             current = runtime.store.get_tier(bundle)
             if current is not None and safety._TIER_RANK[current] >= safety._TIER_RANK[wanted]:
                 return f"already granted: {bundle} at tier '{current.value}'"

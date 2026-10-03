@@ -514,8 +514,9 @@ class _Acc:
     """A stand-in accessible: role, children, and an AT-SPI Value."""
 
     def __init__(self, role, *, states=(), value=0.0, minimum=0.0, maximum=1000.0,
-                 visual_max=None, width=0.0, height=0.0, jump=None):
+                 visual_max=None, width=0.0, height=0.0, jump=None, name=""):
         self.role = role
+        self.name = name
         self.states = set(states)
         self.value = float(value)
         self.minimum = float(minimum)
@@ -528,6 +529,9 @@ class _Acc:
 
     def get_role_name(self):
         return self.role
+
+    def get_name(self):
+        return self.name
 
     def get_parent(self):
         return self.parent
@@ -585,6 +589,21 @@ class _FakeAtspi:
 
     class CoordType:
         SCREEN = 1
+
+    class Text:
+        @staticmethod
+        def get_character_count(acc):
+            if getattr(acc, "text_error", False):
+                raise RuntimeError("no text")
+            return len(acc.text)
+
+        @staticmethod
+        def get_text(acc, start, end):
+            if getattr(acc, "text_error", False):
+                raise RuntimeError("no text")
+            if end < 0 or end > len(acc.text):
+                end = len(acc.text)
+            return acc.text[start:end]
 
     Value = _ValueApi
 
@@ -746,6 +765,122 @@ def test_pixel_scroll_on_wayland_uses_the_bar_and_lines_stay_unsupported(
     LinuxDriver().scroll(_body(), dy=3, unit=ScrollUnit.PIXELS)
     assert vertical.value == 103
     assert events == []
+
+
+class _ReplacingField:
+    """GTK EditableText: set_text_contents replaces the whole buffer."""
+
+    def __init__(self, text=""):
+        self.text = text
+        self.deletes = 0
+
+    def get_editable_text_iface(self):
+        return self
+
+    def set_text_contents(self, text):
+        self.text = text
+        return True
+
+    def delete_text(self, start, end):
+        self.deletes += 1
+        self.text = self.text[:start] + self.text[end:]
+        return True
+
+    def insert_text(self, pos, text, length):
+        self.text = self.text[:pos] + text[:length] + self.text[pos:]
+        return True
+
+
+class _AppendingField(_ReplacingField):
+    """Chromium web field: set_text_contents inserts and still returns true."""
+
+    def set_text_contents(self, text):
+        self.text += text
+        return True
+
+
+def test_set_text_replaces_a_web_field_that_appends(fake_atspi) -> None:
+    field = _AppendingField()
+    assert _atspi.set_text(field, "ALPHA") is True
+    assert field.text == "ALPHA"
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert field.deletes == 1
+
+
+def test_set_text_does_not_clear_when_contents_already_replace(fake_atspi) -> None:
+    field = _ReplacingField("old")
+    assert _atspi.set_text(field, "ALPHA") is True
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert field.deletes == 0
+
+
+def test_set_text_trusts_a_replace_it_cannot_read_back(fake_atspi) -> None:
+    field = _ReplacingField()
+    field.text_error = True
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert field.deletes == 0
+
+
+def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:
+    web = _AppendingField("earlier")
+    pad = _ReplacingField("earlier")
+    seen = {"handle": web}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: seen["handle"])
+    element = _body()
+    driver = LinuxDriver()
+    assert driver.set_value(element, "ALPHA") is True
+    assert web.text == "ALPHA"
+    assert driver.set_value(element, "BETA") is True
+    assert web.text == "BETA"
+    seen["handle"] = pad
+    assert driver.set_value(element, "BETA") is True
+    assert pad.text == "BETA"
+    assert pad.deletes == 0
+
+
+def test_line_scroll_of_an_unchanged_list_is_not_success(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    events, _display = xtest_recorder
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
+    _adopt(_Acc("list"), *rows)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
+    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "tree_unchanged"
+    assert "notches were not sent" not in error.value.message
+    assert events[0] == (_X_MOTION, 0, 60, 29)
+    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+
+
+def test_line_scroll_succeeds_when_the_list_names_change(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    events, _display = xtest_recorder
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
+    _adopt(_Acc("list"), *rows)
+    real = _linux_input.scroll
+
+    def scrolling(x, y, *, dx=0, dy=0):
+        real(x, y, dx=dx, dy=dy)
+        for index, row in enumerate(rows):
+            row.name = f"ITEM-{index + 6:03d}"
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
+    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
+    assert LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES) is None
+    assert rows[0].name == "ITEM-006"
+    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+
+
+def test_line_scroll_of_a_text_area_does_not_require_a_list(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    events, _display = xtest_recorder
+    text = _Acc("text", name="Body")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+    assert LinuxDriver().scroll(_body(), dy=1, unit=ScrollUnit.LINES) is None
+    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
 
 
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:
