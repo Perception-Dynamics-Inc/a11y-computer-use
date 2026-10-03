@@ -11,6 +11,14 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.9] - 2026-10-03
+
+### Fixed
+
+- Linux `set_value` replaces a web text field. Chromium's `set_text_contents` appends and still returns true, so ALPHA then BETA left the concatenation; the field is cleared and the new string inserted when the read-back disagrees. GTK `set_text_contents` already replaces, and that path does not delete (#31) (2026-10-03).
+- Linux `google-chrome` resolves to the running `chrome` process, and granting the display name "Google Chrome" stores that same id. A snapshot of the launcher name no longer comes back empty with a `screen_text` hint (#32) (2026-10-03).
+- Linux `scroll` with `unit=lines` on a named list does not report success when the row names are unchanged after the wheel. Pixel scroll still writes the scroll bar's value by the requested pixels (#33) (2026-10-03).
+
 ## [0.4.8] - 2026-10-03
 
 ### Fixed

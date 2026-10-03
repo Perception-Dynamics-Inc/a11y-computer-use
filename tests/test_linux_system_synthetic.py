@@ -160,6 +160,46 @@ def test_resolve_app_prefers_the_owning_comm_over_a_window_that_names_it(monkeyp
     assert _linux_system.resolve_app("nothing-here") == "nothing-here"
 
 
+def test_google_chrome_resolves_to_the_running_chrome_process(monkeypatch) -> None:
+    """Chrome's launcher is google-chrome and its comm is chrome. The window
+    title is "Page - Google Chrome". All three must name the same app, and a
+    title that merely mentions another app must not steal that app's PIDs."""
+
+    class _TitledWin(_FakeXWin):
+        def __init__(self, wid: int, pid: int, title: str):
+            super().__init__(wid, 0, 0, 800, 600, pid)
+            self.title = title
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_NAME":
+                return _NS(value=self.title.encode())
+            return super().get_full_property(atom, kind)
+
+    chrome = _TitledWin(0x90, pid=7, title="Example - Google Chrome")
+    terminal = _TitledWin(0x91, pid=8, title="gnome-terminal-server")
+    root = _FakeXRoot([chrome, terminal])
+    by_id = {w.id: w for w in (chrome, terminal)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(
+        _linux_system, "_comm_for_pid",
+        lambda pid: {7: "chrome", 8: "gnome-terminal-"}.get(pid),
+    )
+    assert _linux_system.resolve_app("chrome") == "chrome"
+    assert _linux_system.resolve_app("google-chrome") == "chrome"
+    assert _linux_system.resolve_app("Google Chrome") == "chrome"
+    assert _linux_system.resolve_app("gnome-terminal-server") == "gnome-terminal-"
+    assert _linux_system.resolve_app("nothing-here") == "nothing-here"
+    assert _linux_system.pids_matching("google-chrome") == {7}
+    assert _linux_system.pids_matching("chrome") == {7}
+    assert _linux_system.pids_matching("Google Chrome") == set()
+    assert _linux_system.pids_matching("gnome-terminal-server") == {8}
+
+
 def _isolate_desktop_dirs(tmp_path, monkeypatch) -> None:
     home = tmp_path / "xdg-home"
     system = tmp_path / "xdg-dirs"

@@ -187,7 +187,9 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
-        # AT-SPI EditableText.set_text_contents (marshaled onto the a11y thread)
+        # EditableText replace, read back. A web field's set_text_contents
+        # appends and still returns true; set_text clears and inserts until
+        # the field equals value. Marshaled onto the a11y thread.
         success = self._run(lambda: _atspi.set_text(handle, value))
         if success:
             self._focused_editable = handle
@@ -232,13 +234,17 @@ class LinuxDriver:
 
         ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
-        ``unit=pixels`` writes the AT-SPI scroll-bar value by that delta and
-        reads it back. GTK scrolled windows expose the value in pixels. A
-        missing bar, or a write that jumps or does not stick, raises
-        `unsupported` — notches are not sent, and the runtime only then says
-        "pixels". A shorter write is kept when one more pixel will not move
-        (the bar is at its end). Pixel scroll does not need XTEST, so it is
-        available on Wayland when a scroll bar is exposed.
+        When the target is an element whose tree shows a list of named rows,
+        the names are read before and after the wheel. An unchanged list raises
+        `unsupported` with ``reason=tree_unchanged``: the notches were sent,
+        and the runtime must not report a successful scroll. A text area with
+        no such list is not checked. ``unit=pixels`` writes the AT-SPI
+        scroll-bar value by that delta and reads it back. GTK scrolled windows
+        expose the value in pixels. A missing bar, or a write that jumps or
+        does not stick, raises `unsupported` — notches are not sent, and the
+        runtime only then says "pixels". A shorter write is kept when one more
+        pixel will not move (the bar is at its end). Pixel scroll does not
+        need XTEST, so it is available on Wayland when a scroll bar is exposed.
         """
         if dry_run:
             return None
@@ -253,8 +259,27 @@ class LinuxDriver:
 
         self._focused_editable = None
         x, y = _point_of(target)
+        before = self._line_scroll_signature(target) if int(dx) or int(dy) else None
         _linux_input.scroll(x, y, dx=dx, dy=dy)
+        if before is not None and self._line_scroll_signature(target) == before:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the accessibility tree did not change after the wheel scroll",
+                detail={"reason": "tree_unchanged", "unit": "lines", "dx": int(dx), "dy": int(dy)},
+            )
         return None
+
+    def _line_scroll_signature(self, target: Target):
+        """Named rows around an element target, or None when there is no list."""
+        if not isinstance(target, Element):
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        if handle is None:
+            return None
+        return self._run(lambda: _atspi.list_signature(handle))
 
     def _scroll_pixels(self, target: Target, *, dx: int, dy: int) -> None:
         from a11y_computer_use import observe

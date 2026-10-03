@@ -701,11 +701,9 @@ def _cmd_grant(args: argparse.Namespace) -> int:
         for app in apps:
             print(f"{app}\t{store.get_tier(app).value}")
         return 0
-    bundle = args.app
-    if sys.platform == "darwin":
-        from a11y_computer_use.server import _installed_bundle_id
+    from a11y_computer_use.server import _permission_app_id
 
-        bundle = _installed_bundle_id(args.app) or args.app
+    bundle = _permission_app_id(args.app)
     if args.revoke:
         store.revoke(bundle)
         print(f"revoked {bundle}")
