@@ -32,6 +32,7 @@ from a11y_computer_use.schema import (
     AppOp,
     AppVerb,
     Click,
+    Hover,
     ClipboardOp,
     ClipboardVerb,
     Drag,
@@ -184,8 +185,8 @@ def required_tier(action: Action) -> Tier:
       `WaitFor` (tree polling), LIST-verb window/app ops, clipboard reads.
       Note the clipboard is cross-app: a READ grant on the frontmost app
       exposes whatever the user last copied anywhere.
-    * CLICK — pointer input and window/app manipulation: `Click`, `Drag`,
-      `Scroll`, non-LIST `WindowOp`/`AppOp` verbs.
+    * CLICK — pointer input and window/app manipulation: `Click`, `Hover`,
+      `Drag`, `Scroll`, non-LIST `WindowOp`/`AppOp` verbs.
     * FULL — text/key injection: `TypeText`, `KeyChord`, and clipboard
       *writes* (the clipboard-paste fast path is a typing path; gating it
       below FULL would let a click-tier app receive injected text).
@@ -194,7 +195,7 @@ def required_tier(action: Action) -> Tier:
         return Tier.FULL
     if isinstance(action, ClipboardOp):
         return Tier.FULL if action.verb is ClipboardVerb.WRITE else Tier.READ
-    if isinstance(action, (Click, Drag, Scroll)):
+    if isinstance(action, (Click, Hover, Drag, Scroll)):
         return Tier.CLICK
     if isinstance(action, WindowOp):
         return Tier.READ if action.verb is WindowVerb.LIST else Tier.CLICK

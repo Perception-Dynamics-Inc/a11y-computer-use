@@ -592,14 +592,27 @@ class ComputerAdapter:
         return self._guard(action, run)
 
     def move(self, x: int, y: int, *, action: str = "mouse_move") -> Result:
-        """Record the pointer position. No driver exposes a hover primitive, so
-        no event is sent; a following click or mouse-up uses this position."""
-        self._cursor = (int(x), int(y))
-        return Result(
-            action,
-            f"cursor position set to ({x}, {y}) for the next action; this backend sends no "
-            "hover event",
-        )
+        """Move the pointer. On Linux this delivers a hover (motion, no button)
+        so a tooltip or a hover-opened menu can open. Other backends record the
+        position for a later click or mouse-up and send no event."""
+
+        def run() -> Result:
+            if self.driver_name != "linux":
+                self._cursor = (int(x), int(y))
+                return Result(
+                    action,
+                    f"cursor position set to ({x}, {y}) for the next action; this backend sends no "
+                    "hover event",
+                )
+            err = self._ensure_screen()
+            if err is not None:
+                return err
+            px, py, did = self.to_physical(x, y)
+            msg = self.runtime.hover(x=px, y=py, display_id=did)
+            self._cursor = (int(x), int(y))
+            return Result(action, f"{msg} [image point ({x}, {y}) -> physical ({px}, {py})]")
+
+        return self._guard(action, run)
 
     def cursor_position(self, *, action: str = "cursor_position") -> Result:
         if self._cursor is None:

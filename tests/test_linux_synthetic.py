@@ -249,6 +249,33 @@ def xtest_recorder(monkeypatch):
     return events, display
 
 
+def test_hover_moves_the_pointer_and_sends_no_button(xtest_recorder) -> None:
+    events, display = xtest_recorder
+    _linux_input.hover(320, 180)
+    assert events == [(_X_MOTION, 0, 320, 180)]
+    assert display.warps == []
+    assert display.syncs == 1
+
+
+def test_driver_hover_is_motion_only(xtest_recorder) -> None:
+    events, display = xtest_recorder
+    assert LinuxDriver().hover(Point(0, 240, 90)) is None
+    assert events == [(_X_MOTION, 0, 240, 90)]
+    assert display.syncs == 1
+    assert display.warps == []
+
+
+def test_driver_hover_on_wayland_sends_nothing(xtest_recorder, monkeypatch) -> None:
+    events, display = xtest_recorder
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().hover(Point(0, 12, 12))
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert events == []
+    assert display.syncs == 0
+
+
 def test_click_positions_pointer_absolutely_then_presses(xtest_recorder) -> None:
     events, display = xtest_recorder
     _linux_input.click(500, 400)
