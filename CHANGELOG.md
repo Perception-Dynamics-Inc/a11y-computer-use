@@ -15,7 +15,11 @@ Nothing yet.
 
 ### Fixed
 
+- `find` and `scroll_to_find` match the field's full text, not the 200-character snapshot clip (#17) (2026-10-02).
 - Linux `scroll` with `unit=pixels` sets the accessible scroll bar's AT-SPI value by the requested delta and keeps the write when the value reads back as that delta. GTK scrolled windows expose the bar's value in pixels, so a request of 3 pixels is no longer one wheel notch per count (the 0.4.5 behaviour #18 reported on Mousepad, where both units moved the scrollbar by about 175). A shorter move is kept only when one more pixel does not move (the bar's end; GTK often reports `upper` while the visible end is `upper - page_size`). `unit=lines` is still one X11 wheel notch per unit. A pixel scroll with no scroll bar, or a write that jumps or does not stick, is `unsupported` and does not send notches, so a success string says "pixels" only after that read-back (#18) (2026-10-02).
+- Launching a program that is not on `PATH` and has no desktop file fails immediately instead of reporting success after 60 seconds (#19) (2026-10-02).
+- An unknown key chord over MCP is a validation error, not an internal crash (#20) (2026-10-02).
+- Linux `menu` list, press, state, and close walk the AT-SPI menu bar. `file_dialog` stays unsupported, and the tool result says GTK and portal file choosers are not driven by this tool (#21) (2026-10-02).
 
 ## [0.4.5] - 2026-10-02
 
