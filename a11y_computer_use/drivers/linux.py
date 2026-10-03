@@ -535,16 +535,23 @@ class LinuxDriver:
             return {"open": False, "path": []}
 
     def menu_close(self, app: str) -> list[str]:
+        """Close the open menu. A missing app returns no path.
+
+        A menu that is still open after Escape raises. That error is not
+        turned into an empty path: an empty path means nothing was open, and
+        the Runtime would report success.
+        """
         from a11y_computer_use.drivers import _linux_menus
 
         try:
             root = self._menu_root(app)
         except ComputerUseError:
             return []
-        try:
-            return self._run(lambda: _linux_menus.menu_close(root))
-        except ComputerUseError:
-            return []
+
+        def read() -> dict:
+            return self._run(lambda: _linux_menus.menu_state(root))
+
+        return _linux_menus.menu_close(root, state=read)
 
     def file_dialog(self, verb: object, path: str, app: str) -> dict:
         raise _unsupported_file_dialog()
