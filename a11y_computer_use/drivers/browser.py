@@ -1017,6 +1017,11 @@ def _mods_mask(modifiers: tuple[str, ...]) -> int:
     return mask
 
 
+def validate_chord(chord: str) -> None:
+    """Raise ValueError if ``chord`` cannot be dispatched. Sends nothing."""
+    _key_events(chord)
+
+
 def _key_events(chord: str) -> list[dict]:
     """A validated chord -> the dispatchKeyEvent payloads (down..., up...).
 

@@ -485,6 +485,40 @@ def test_render_matches_shows_refs_and_bounds_or_no_match() -> None:
     assert "no elements match" in empty
 
 
+def test_find_matches_text_past_the_value_clip() -> None:
+    """A field longer than _MAX_VALUE_CHARS still matches on its full text.
+
+    The snapshot value the model reads stays clipped. Search does not.
+    """
+    token = "line-15-token"
+    prefix = "line 01 " + ("." * 272)
+    assert len(prefix) == 280 and token not in prefix
+    spanning = ("s" * 195) + "SPANTOKEN"
+    assert 195 < observe._MAX_VALUE_CHARS < 195 + len("SPANTOKEN")
+    secret = ("p" * 280) + "SECRETTOKEN"
+    window = ax(
+        "AXWindow", title="Mousepad", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax("AXTextArea", title="", value=prefix + token, at=(10.0, 40.0), size=(760.0, 500.0)),
+            ax("AXTextField", title="span", value=spanning, at=(10.0, 10.0), size=(200.0, 24.0)),
+            ax("AXSecureTextField", title="Password", value=secret, at=(10.0, 560.0), size=(200.0, 24.0)),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    span = by_title(snap, "span")
+    assert area.value is not None and len(area.value) == observe._MAX_VALUE_CHARS
+    assert area.value.endswith("…") and token not in area.value and "line 01" in area.value
+    assert span.value is not None and "SPANTOKEN" not in span.value
+    assert [el.ref for el in observe.find_elements(snap, text=token)] == [area.ref]
+    assert [el.ref for el in observe.find_elements(snap, text="line 01")] == [area.ref]
+    assert [el.ref for el in observe.find_elements(snap, text="SPANTOKEN")] == [span.ref]
+    assert observe.find_elements(snap, text="SECRETTOKEN") == ()
+    assert all(el.value is None for el in snap.elements if el.secure)
+    rendered = observe.render_matches(snap, observe.find_elements(snap, text=token))
+    assert "1 match" in rendered and token not in rendered
+
+
 # ---------------------------------------------------------------------------
 # Rich element states (checked / selected / expanded / placeholder)
 # ---------------------------------------------------------------------------

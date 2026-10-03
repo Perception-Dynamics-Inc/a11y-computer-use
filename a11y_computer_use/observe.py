@@ -75,7 +75,7 @@ _DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
 #: report thousands of rows and each read costs several AX round-trips.
 _MAX_WALK_CHILDREN = 200
 
-_MAX_VALUE_CHARS = 200  #: Element.value cap (anchors never use value)
+_MAX_VALUE_CHARS = 200  #: Element.value cap the model reads (anchors never use value)
 _RENDER_VALUE_CHARS = 48  #: value cap in the text rendering
 _MAX_EPOCHS = 8  #: snapshot epochs kept in the render registry
 _AMBIGUITY_PX = 2.0  #: distance tie window that makes re-resolution ambiguous
@@ -280,10 +280,11 @@ def build_snapshot(
     elements: list[Element] = []
     elisions: dict[str, int] = {}
     handles: dict[str, object] = {}
+    full_values: dict[str, str] = {}
     if root is not None:
         pruned = _prune_root(root, accessor, tuple(geometry))
-        _flatten(pruned, None, (), snapshot_id, elements, elisions, handles)
-    _register_epoch(snapshot_id, elisions, handles)
+        _flatten(pruned, None, (), snapshot_id, elements, elisions, handles, full_values)
+    _register_epoch(snapshot_id, elisions, handles, full_values)
     return Snapshot(
         snapshot_id=snapshot_id,
         scope=scope,
@@ -761,12 +762,14 @@ def find_elements(
     clickable: bool | None = None,
 ) -> tuple[Element, ...]:
     """Filter ``snap``'s elements by text/role/capability — the query behind the
-    `find` tool. Pure and platform-free (operates on the canonical snapshot, so
-    it works identically on every backend).
+    `find` tool. Platform-free (operates on the canonical snapshot, so it works
+    identically on every backend).
 
     Args:
         text: case-insensitive substring matched against an element's title or
-            value (either may contain it).
+            its full value (either may contain it). ``Element.value`` is capped
+            at `_MAX_VALUE_CHARS` for the text the model reads; a snapshot built
+            here is still searched past that cap.
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
             and ``"AXTextField"`` matches exactly.
@@ -777,10 +780,15 @@ def find_elements(
     """
     needle = text.lower() if text else None
     role_needle = role.lower().removeprefix("ax") if role else None
+    full_values = _FULL_VALUES.get(snap.snapshot_id, {})
     out: list[Element] = []
     for el in snap.elements:
-        if needle is not None and needle not in f"{el.title} {el.value or ''}".lower():
-            continue
+        if needle is not None:
+            # The stored value is clipped for the model; the index keeps the
+            # field's real text so a token past the cap still matches.
+            value = full_values.get(el.ref, el.value or "")
+            if needle not in f"{el.title} {value}".lower():
+                continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
             continue
         if editable is not None and el.editable is not editable:
@@ -1146,6 +1154,7 @@ def _flatten(
     out: list[Element],
     elisions: dict[str, int],
     handles: dict[str, object],
+    full_values: dict[str, str],
 ) -> None:
     """Assign pre-order refs and emit `Element`s (parents before children)."""
     ref = f"e{len(out) + 1}"
@@ -1155,7 +1164,10 @@ def _flatten(
         handles[ref] = node.node
     value: str | None = None
     if node.raw.value is not None and not secure:  # secure fields never leak values
-        value = _clip(str(node.raw.value), _MAX_VALUE_CHARS)
+        raw_value = str(node.raw.value)
+        value = _clip(raw_value, _MAX_VALUE_CHARS)
+        if raw_value != value:
+            full_values[ref] = raw_value
     out.append(
         Element(
             ref=ref,
@@ -1181,7 +1193,7 @@ def _flatten(
     if node.elided:
         elisions[ref] = node.elided
     for child in node.children:
-        _flatten(child, ref, path, snapshot_id, out, elisions, handles)
+        _flatten(child, ref, path, snapshot_id, out, elisions, handles, full_values)
 
 
 def _to_bounds(
@@ -1291,17 +1303,27 @@ _EPOCHS: OrderedDict[str, dict[str, int]] = OrderedDict()
 #: cursor. Same bounded FIFO as `_EPOCHS`; the handles keep the walk's AX
 #: objects alive only for the recent epochs an in-flight act can still target.
 _HANDLES: OrderedDict[str, dict[str, object]] = OrderedDict()
+#: snapshot_id -> {ref -> unclipped value}. ``Element.value`` stays capped so
+#: the model and the audit anchor never see a whole document; `find_elements`
+#: reads this so a substring past the cap still matches. Same bounded FIFO.
+_FULL_VALUES: OrderedDict[str, dict[str, str]] = OrderedDict()
 
 
 def _register_epoch(
-    snapshot_id: str, elisions: dict[str, int], handles: dict[str, object]
+    snapshot_id: str,
+    elisions: dict[str, int],
+    handles: dict[str, object],
+    full_values: dict[str, str] | None = None,
 ) -> None:
     _EPOCHS[snapshot_id] = elisions
     _HANDLES[snapshot_id] = handles
+    _FULL_VALUES[snapshot_id] = full_values or {}
     while len(_EPOCHS) > _MAX_EPOCHS:
         _EPOCHS.popitem(last=False)
     while len(_HANDLES) > _MAX_EPOCHS:
         _HANDLES.popitem(last=False)
+    while len(_FULL_VALUES) > _MAX_EPOCHS:
+        _FULL_VALUES.popitem(last=False)
 
 
 def ax_handle_for(snapshot_id: str, ref: str) -> object | None:

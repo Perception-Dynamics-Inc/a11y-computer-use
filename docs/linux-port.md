@@ -36,7 +36,7 @@ Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` retu
 | `frontmost_app` | EWMH `_NET_ACTIVE_WINDOW` → `_NET_WM_PID` → **`/proc/<pid>/comm`** | `NSWorkspace` frontmost / `GetForegroundWindow` |
 | `app_at_point` | `_NET_CLIENT_LIST_STACKING` walked topmost-first, geometry hit-test → comm name (the act-time gating recheck) | `CGWindowList` / `WindowFromPoint` |
 | `running_apps` | distinct comm names of EWMH-managed windows, with pid + frontmost flag | `NSWorkspace` / `EnumWindows` |
-| `launch_app` | `subprocess.Popen([identifier])`, falling back to `gtk-launch` / `xdg-open` | `open` / `ShellExecute` |
+| `launch_app` | executable on `PATH` via `shutil.which` + `Popen`; else a desktop file via `gtk-launch` (its `Exec` line when `gtk-launch` is absent). A name that is neither raises `APP_NOT_FOUND` immediately | `open` / `ShellExecute` |
 | `activate_app` | EWMH `_NET_ACTIVE_WINDOW` `ClientMessage` to the root window (python-xlib); resolves a comm/title substring to the owning comm | `activateWithOptions` / `SetForegroundWindow` |
 | `windows` | `_NET_CLIENT_LIST_STACKING` (else `_NET_CLIENT_LIST`) + `translate_coords` for root-relative bounds | `CGWindowList` / `EnumWindows` |
 | `read_clipboard` / `write_clipboard` | shell out to `xclip` / `xsel` / `wl-clipboard` (first available) | `NSPasteboard` / `OpenClipboard` |
