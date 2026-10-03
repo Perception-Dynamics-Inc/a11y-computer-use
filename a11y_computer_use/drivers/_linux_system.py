@@ -12,6 +12,8 @@ xclip/xsel/wl-clipboard.
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 
@@ -274,16 +276,135 @@ def raise_window(window_id: int) -> bool:
     return True
 
 
-def launch_app(identifier: str) -> None:
-    """Best-effort launch: run the command, else hand it to xdg-open."""
+def _application_dirs() -> list[str]:
+    """XDG application directories, ``XDG_DATA_HOME`` then ``XDG_DATA_DIRS``.
+
+    An unset ``XDG_DATA_DIRS`` uses the spec default. An empty value adds no
+    system directories.
+    """
+    home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    raw = os.environ.get("XDG_DATA_DIRS")
+    if raw is None:
+        data_dirs = ["/usr/local/share", "/usr/share"]
+    else:
+        data_dirs = [part for part in raw.split(os.pathsep) if part]
+    return [os.path.join(home, "applications"), *[os.path.join(d, "applications") for d in data_dirs]]
+
+
+def _desktop_entry(identifier: str) -> tuple[str, str] | None:
+    """``(desktop id, path)`` for ``identifier``, or None.
+
+    The id is the filename ``gtk-launch`` takes, including ``.desktop``.
+    Hyphens also name a subdirectory (``foo-bar.desktop`` or
+    ``applications/foo/bar.desktop``). A name with a path separator is not
+    a desktop id.
+    """
+    name = identifier.strip()
+    if (
+        not name
+        or name != identifier
+        or os.sep in name
+        or (os.altsep and os.altsep in name)
+        or name.startswith("-")
+    ):
+        return None
+    entry = name if name.endswith(".desktop") else f"{name}.desktop"
+    if os.path.basename(entry) != entry:
+        return None
+    stem = entry[: -len(".desktop")]
+    parts = stem.split("-")
+    relatives = [entry]
+    for i in range(1, len(parts)):
+        relatives.append(os.path.join(*parts[:i], "-".join(parts[i:]) + ".desktop"))
+    for root in _application_dirs():
+        for rel in relatives:
+            path = os.path.join(root, rel)
+            if os.path.isfile(path):
+                return entry, path
+    return None
+
+
+_DESKTOP_FIELD_CODE = re.compile(r"^%[fFuUdDnNickvm]$")
+
+
+def _desktop_exec(path: str) -> list[str] | None:
+    """argv from a desktop file's ``Exec`` line, field codes removed.
+
+    None when the file has no Exec, the line does not parse, or the program
+    is not on PATH. This is the fallback when ``gtk-launch`` is not installed.
+    """
     try:
-        subprocess.Popen([identifier], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return None
+    in_entry = False
+    exec_line = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_entry = stripped == "[Desktop Entry]"
+            continue
+        if in_entry and stripped.startswith("Exec="):
+            exec_line = stripped[len("Exec="):].strip()
+            break
+    if not exec_line:
+        return None
+    try:
+        parts = shlex.split(exec_line, posix=True)
+    except ValueError:
+        return None
+    argv = [part for part in parts if not _DESKTOP_FIELD_CODE.match(part)]
+    if not argv:
+        return None
+    program = shutil.which(argv[0])
+    if not program:
+        return None
+    return [program, *argv[1:]]
+
+
+def _spawn(argv: list[str], identifier: str) -> None:
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    try:
+        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"could not launch {identifier!r}: {exc}",
+            detail={"app": identifier},
+        ) from exc
+
+
+def launch_app(identifier: str) -> None:
+    """Launch ``identifier`` or raise `ErrorCode.APP_NOT_FOUND` immediately.
+
+    An executable on PATH is started directly. Otherwise a matching desktop
+    file is started with ``gtk-launch``, or with its ``Exec`` line when
+    ``gtk-launch`` is not installed. A name that is neither is not handed to
+    ``xdg-open`` and does not wait for a window.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    executable = shutil.which(identifier) if identifier else None
+    if executable:
+        _spawn([executable], identifier)
         return
-    except Exception:
-        pass
-    opener = shutil.which("gtk-launch") or shutil.which("xdg-open")
-    if opener:
-        subprocess.Popen([opener, identifier], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    found = _desktop_entry(identifier) if identifier else None
+    if found is not None:
+        desktop_id, path = found
+        opener = shutil.which("gtk-launch")
+        if opener:
+            _spawn([opener, desktop_id], identifier)
+            return
+        argv = _desktop_exec(path)
+        if argv:
+            _spawn(argv, identifier)
+            return
+    raise ComputerUseError(
+        ErrorCode.APP_NOT_FOUND,
+        f"could not launch {identifier!r}: not on PATH",
+        detail={"app": identifier},
+    )
 
 
 def activate_app(identifier: str) -> str:

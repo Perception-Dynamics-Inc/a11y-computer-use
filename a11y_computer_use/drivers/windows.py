@@ -207,10 +207,11 @@ class WindowsDriver:
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
-        if dry_run:
-            return None
         from a11y_computer_use.drivers import _win_input
 
+        _win_input.validate_chord(chord)  # fail fast, including dry_run
+        if dry_run:
+            return None
         _win_input.press_chord(chord)
         return None
 

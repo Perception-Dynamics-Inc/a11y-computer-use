@@ -17,6 +17,7 @@ from types import SimpleNamespace as _NS
 import pytest
 
 from a11y_computer_use.drivers import _linux_system
+from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 
 class _FakeXWin:
@@ -157,3 +158,155 @@ def test_resolve_app_prefers_the_owning_comm_over_a_window_that_names_it(monkeyp
     assert _linux_system.resolve_app("krita") == "krita"
     assert _linux_system.resolve_app("Donations") == "chrome"  # a pure title still resolves
     assert _linux_system.resolve_app("nothing-here") == "nothing-here"
+
+
+def _isolate_desktop_dirs(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "xdg-home"
+    system = tmp_path / "xdg-dirs"
+    home.mkdir()
+    system.mkdir()
+    monkeypatch.setenv("XDG_DATA_HOME", str(home))
+    monkeypatch.setenv("XDG_DATA_DIRS", str(system))
+
+
+def _record_spawns(monkeypatch) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def popen(argv, **kwargs):
+        calls.append(list(argv))
+        return _NS()
+
+    monkeypatch.setattr(_linux_system.subprocess, "Popen", popen)
+    return calls
+
+
+def test_missing_program_is_not_launched(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    calls = _record_spawns(monkeypatch)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.launch_app("no-such-binary-a11y")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "not on PATH" in exc.value.message
+    assert calls == []
+
+
+def test_path_executable_is_spawned_directly(monkeypatch) -> None:
+    def which(name):
+        return "/usr/bin/mousepad" if name == "mousepad" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("mousepad")
+    assert calls == [["/usr/bin/mousepad"]]
+
+
+def test_desktop_id_uses_gtk_launch(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir()
+    (apps / "org.example.App.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nExec=real-app %F\n", encoding="utf-8",
+    )
+
+    def which(name):
+        return "/usr/bin/gtk-launch" if name == "gtk-launch" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("org.example.App")
+    assert calls == [["/usr/bin/gtk-launch", "org.example.App.desktop"]]
+
+
+def test_nested_desktop_id_uses_gtk_launch(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    nested = tmp_path / "xdg-home" / "applications" / "foo"
+    nested.mkdir(parents=True)
+    (nested / "bar.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nExec=real-app\n", encoding="utf-8",
+    )
+
+    def which(name):
+        return "/usr/bin/gtk-launch" if name == "gtk-launch" else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("foo-bar")
+    assert calls == [["/usr/bin/gtk-launch", "foo-bar.desktop"]]
+
+
+def test_desktop_exec_runs_when_gtk_launch_is_absent(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir()
+    (apps / "org.example.App.desktop").write_text(
+        '[Desktop Entry]\nType=Application\nExec="/usr/bin/real-app" --flag %F\n',
+        encoding="utf-8",
+    )
+
+    def which(name):
+        if name == "/usr/bin/real-app":
+            return "/usr/bin/real-app"
+        return None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    _linux_system.launch_app("org.example.App")
+    assert calls == [["/usr/bin/real-app", "--flag"]]
+
+
+def test_desktop_file_without_a_launcher_or_exec_fails_immediately(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir()
+    (apps / "org.example.App.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nExec=missing-real-app %F\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda name: None)
+    calls = _record_spawns(monkeypatch)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.launch_app("org.example.App")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert calls == []
+
+
+def test_app_launch_of_a_missing_program_does_not_wait_for_a_window(tmp_path, monkeypatch) -> None:
+    import time
+
+    from a11y_computer_use import safety, server
+
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    calls = _record_spawns(monkeypatch)
+    waited: list[str] = []
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident):
+            _linux_system.launch_app(ident)
+
+        def windows(self):
+            waited.append("windows")
+            return []
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("no-such-binary-a11y", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    rt.APP_LAUNCH_WAIT_S = 30
+    monkeypatch.setattr(
+        rt, "_resolve_app",
+        lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        rt.app("launch", "no-such-binary-a11y")
+    assert time.monotonic() - started < 2
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "not on PATH" in exc.value.message
+    assert calls == [] and waited == []

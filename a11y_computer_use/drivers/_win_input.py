@@ -88,8 +88,8 @@ def _vk_event(vk: int, up: bool) -> "_INPUT":
     return _INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=ki))
 
 
-def press_chord(chord: str) -> None:
-    """Press a chord like 'ctrl+a' / 'ctrl+shift+t' via VK codes (SendInput)."""
+def _parse_chord(chord: str) -> tuple[list[int], int]:
+    """(modifier VKs, key VK). Raises ValueError before any event is sent."""
     parts = [p.strip().lower() for p in chord.split("+") if p.strip()]
     if not parts:
         raise ValueError(f"empty chord {chord!r}")
@@ -103,7 +103,17 @@ def press_chord(chord: str) -> None:
         raise ValueError(f"chord {chord!r} has no non-modifier key")
     if key not in _VK_KEYS:
         raise ValueError(f"unknown key {key!r} in {chord!r}")
-    kvk = _VK_KEYS[key]
+    return mvks, _VK_KEYS[key]
+
+
+def validate_chord(chord: str) -> None:
+    """Raise ValueError if ``chord`` is malformed (no events sent)."""
+    _parse_chord(chord)
+
+
+def press_chord(chord: str) -> None:
+    """Press a chord like 'ctrl+a' / 'ctrl+shift+t' via VK codes (SendInput)."""
+    mvks, kvk = _parse_chord(chord)
     events = (
         [_vk_event(vk, False) for vk in mvks]
         + [_vk_event(kvk, False), _vk_event(kvk, True)]

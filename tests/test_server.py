@@ -950,6 +950,44 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
 
 
+def test_scroll_to_find_matches_text_past_the_value_clip(monkeypatch) -> None:
+    """Text already in the field, past the 200-character value cap, is a hit
+    on the first observation. It is not scrolled out of view."""
+    from tests.fixtures.trees import GEOMETRY, DictAccessor, ax
+
+    token = "line-15-token"
+    prefix = "line 01 " + ("." * 272)
+    tree = ax(
+        "AXWindow", title="Mousepad", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[ax("AXTextArea", value=prefix + token, at=(10.0, 10.0), size=(700.0, 500.0))],
+    )
+    snap = observe.build_snapshot(
+        tree, DictAccessor(), scope=Scope.WINDOW, app="mousepad", pid=1, geometry=GEOMETRY,
+    )
+    scrolls: list = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def scroll(self, target, **kw):
+            scrolls.append(kw)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "mousepad"))
+
+    out = rt.scroll_to_find("mousepad", text=token)
+    assert "found after 0 scroll(s)" in out and "1 match" in out
+    assert scrolls == []
+
+
 # --- interactive view + budget through the tool surface -----------------------------
 
 
@@ -1407,6 +1445,52 @@ async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) 
     monkeypatch.setattr(onboarding.sys, "platform", "linux")
     result = await call_tool(mcp_server, "request_permission", {"kind": "accessibility"})
     assert json.loads(result.content[0].text)["needed"] is False
+
+
+async def test_unknown_key_chord_is_invalid_arguments_not_an_internal_error(mcp_server, audit_dir) -> None:
+    """key('ctrl+notakey') names the unknown key. It is not an internal crash."""
+    result = await call_tool(mcp_server, "key", {"chord": "ctrl+notakey"})
+    assert result.isError
+    text = result.content[0].text
+    # The MCP client prefixes "Error executing tool <name>: ".
+    assert "invalid_arguments: key:" in text
+    assert "unknown key 'notakey'" in text
+    assert "internal_error" not in text
+    assert "report_issue" not in text
+    assert audit_entries(audit_dir) == []  # rejected before the permission gate
+
+
+def test_linux_runtime_rejects_an_unknown_chord_before_input(tmp_path) -> None:
+    pressed: list[str] = []
+
+    class _D:
+        name = "linux"
+        resolves_apps = False
+
+        def key_chord(self, chord, **kw):
+            pressed.append(chord)
+
+        def frontmost_app(self):
+            return ("editor", 1)
+
+        def main_display_id(self):
+            return 0
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    with pytest.raises(ValueError, match="unknown key 'notakey'"):
+        rt.key("ctrl+notakey")
+    assert pressed == []
+    assert list((tmp_path / "audit").glob("*.jsonl")) == []
+
+
+def test_windows_validate_chord_names_an_unknown_key_without_sendinput() -> None:
+    from a11y_computer_use.drivers import _win_input
+
+    with pytest.raises(ValueError, match="unknown key 'notakey'"):
+        _win_input.validate_chord("ctrl+notakey")
+    _win_input.validate_chord("ctrl+a")
 
 
 async def test_a_crash_inside_a_tool_reads_as_internal_error_with_the_report_hint(mcp_server, monkeypatch) -> None:

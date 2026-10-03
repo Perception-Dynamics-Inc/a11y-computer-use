@@ -2054,12 +2054,35 @@ class Runtime:
         self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
         return f"typed {len(text)} characters{''.join(note)}"
 
+    def _validate_chord(self, chord: str) -> None:
+        """Reject a chord this driver cannot press, before the permission gate.
+
+        Each backend has its own key names. Validation raises ``ValueError``
+        and sends no input, so a bad chord is an invalid argument rather than
+        a crash during injection. A driver this process does not recognize
+        validates inside its own ``key_chord``.
+        """
+        name = getattr(self.driver, "name", None)
+        if name == "linux":
+            from a11y_computer_use.drivers._linux_input import validate_chord
+
+            validate_chord(chord)
+        elif name == "windows":
+            from a11y_computer_use.drivers._win_input import validate_chord
+
+            validate_chord(chord)
+        elif name == "browser":
+            from a11y_computer_use.drivers.browser import validate_chord
+
+            validate_chord(chord)
+        elif name == "macos" or sys.platform == "darwin":
+            from a11y_computer_use.act import parse_chord
+
+            parse_chord(chord)
+
     @_serialized
     def key(self, chord: str, app: str | None = None) -> str:
-        if sys.platform == "darwin":
-            from a11y_computer_use import act  # lazy: US-layout keycode parse, macOS
-
-            act.parse_chord(chord)  # validate before gating, so bad chords fail fast
+        self._validate_chord(chord)  # before the gate, so a bad chord is not audited
         action = KeyChord(chord=chord)
         target = self._background_target(app)
         note: list[str] = []
@@ -2971,6 +2994,10 @@ def build_server(
             raise ToolError(refusal_text(exc.decision)) from exc
         except (ToolError, anyio.get_cancelled_exc_class()):
             raise
+        except ValueError as exc:
+            # Argument checks (unknown key, bad modifier, bad count) raise
+            # ValueError before any input. That is a bad call, not a defect.
+            raise ToolError(f"invalid_arguments: {tool_name}: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - a crash inside the tool is our defect
             raise ToolError(reporting.internal_error_text(tool_name, exc)) from exc
         note = reporting.slow_call_note(tool_name, time.monotonic() - started)
@@ -3085,7 +3112,8 @@ def build_server(
     ) -> str:
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
-        text = case-insensitive substring of an element's title or value; role =
+        text = case-insensitive substring of an element's title or its full value
+        (text past the 200 characters kept on the element still matches); role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,
@@ -3205,6 +3233,7 @@ def build_server(
     async def key(chord: str, app: str | None = None) -> str:
         """Press one key chord, e.g. 'cmd+s', 'cmd+shift+t', 'escape':
         lowercase names joined by '+', modifiers first, one regular key last.
+        An unknown key is invalid_arguments and is rejected before any input.
         With app=<bundle id or name> (macOS) the chord is addressed to that
         app's process without activating it (the user's screen stays put);
         without app it goes to the frontmost app. Gated at tier 'full'."""
@@ -3298,7 +3327,8 @@ def build_server(
         """Scroll a scrollable view until an element matching text and/or role
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
-        Give text (substring of title/value) and/or role. Scrolls `direction`
+        Give text (substring of title or the field's full value, including
+        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the largest scroll
@@ -3313,7 +3343,9 @@ def build_server(
     async def app(action: str, name: str | None = None, activate: bool | None = None) -> str:
         """Application verbs: action='list' returns running GUI apps as JSON
         (bundle_id, name, pid, frontmost). 'launch' starts name and waits up to
-        60 s for its first window (returns the title); activate=false starts it
+        60 s for its first window (returns the title). On Linux, a name that is
+        not an executable on PATH and not a desktop file fails immediately with
+        app_not_found and does not wait. activate=false starts it
         behind the current app so the user's screen and Space stay put (the
         default in background focus mode); refs, set_value, menus, and
         type/key with app=... all work without focus. 'focus' brings it to the
