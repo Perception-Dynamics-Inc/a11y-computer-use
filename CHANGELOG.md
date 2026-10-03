@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.8] - 2026-10-03
+
+### Fixed
+
+- Linux menu shortcuts prefer a bare named accelerator (`F11`, `F1`, `Delete` list as `f11`, `f1`, `delete`) over the leading mnemonic letter. A tagged chord such as `<Primary>n` is still `ctrl+n`, not the Alt mnemonic (#29) (2026-10-03).
+
 ## [0.4.7] - 2026-10-03
 
 ### Fixed

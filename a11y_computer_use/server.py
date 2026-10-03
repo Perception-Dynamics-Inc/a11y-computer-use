@@ -3388,8 +3388,8 @@ def build_server(
         whether a menu is open and its path; action='close' dismisses it (an
         open menu swallows key chords; click/type/key close one automatically
         and say so). On Linux, close sends Escape and errors if the menu is
-        still open, and a listed shortcut is the accelerator rather than the
-        Alt mnemonic. Destructive labels (Delete, Move to Trash, Discard) ask the
+        still open, and a listed shortcut is the accelerator (a tagged chord
+        or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported."""
