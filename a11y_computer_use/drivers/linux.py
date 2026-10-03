@@ -44,13 +44,6 @@ def _point_of(target: Target) -> tuple[int, int]:
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
-# Re-reads of a line-scroll list after the wheel. The first read is immediate,
-# after the AT-SPI child cache is cleared. A tree that still shows the
-# pre-wheel names on that read and publishes on a later one is accepted. A
-# list whose names stay the same through every read is tree_unchanged.
-_LINE_SCROLL_POLLS = 5
-_LINE_SCROLL_PAUSE_S = 0.04
-
 
 def _on_wayland() -> bool:
     """True on a native Wayland session (WAYLAND_DISPLAY set, no X): XTEST
@@ -140,8 +133,12 @@ class LinuxDriver:
         def _do() -> Snapshot:
             root = _atspi.find_root(app, scope)  # None -> empty snapshot
             pid = _atspi.pid_of(root) if root is not None else None
+            accessor = _atspi.ATSPIAccessor()
+            # Chromium lists: the snapshot scroll_to_find searches lists the
+            # rows a layout hit-test places in the box, not the cached children.
+            accessor.refresh_visible(root)
             return observe.build_snapshot(
-                root, _atspi.ATSPIAccessor(), scope=scope, app=app, pid=pid,
+                root, accessor, scope=scope, app=app, pid=pid,
                 geometry=_atspi.primary_geometry(),
             )
 
@@ -255,20 +252,21 @@ class LinuxDriver:
 
         ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
-        When the target is an element whose tree shows a list of named rows,
-        those names (including nested labels) are read before the wheel and
-        again after the AT-SPI child cache is cleared. A list that is still
-        the same after a few reads raises `unsupported` with
-        ``reason=tree_unchanged``: the notches were sent, and the runtime must
-        not report a successful scroll. A move that shows up on a later read
-        is accepted, so ``scroll_to_find`` can keep going. A text area with
-        no such list is not checked. ``unit=pixels`` writes the AT-SPI
-        scroll-bar value by that delta and reads it back. GTK scrolled windows
-        expose the value in pixels. A missing bar, or a write that jumps or
-        does not stick, raises `unsupported` — notches are not sent, and the
-        runtime only then says "pixels". A shorter write is kept when one more
-        pixel will not move (the bar is at its end). Pixel scroll does not
-        need XTEST, so it is available on Wayland when a scroll bar is exposed.
+        On a Chromium list, the wheel is a success only when a layout hit-test
+        of that list's box returns a different row sequence. ``snapshot`` reads
+        those same rows, which is what ``scroll_to_find`` searches. The cached
+        children are not the check: Chrome can leave them on the pre-wheel
+        names while the layout hit-test has moved. A sequence that does not
+        change raises `unsupported` with ``reason=page_unchanged``; the notches
+        were sent, and a still page is not reported as a scroll. A coordinate
+        target and a non-Chromium element are not checked. ``unit=pixels``
+        writes the AT-SPI scroll-bar value by that delta and reads it back. It
+        does not hit-test the list and does not send notches. GTK scrolled
+        windows expose the value in pixels. A missing bar, or a write that
+        jumps or does not stick, raises `unsupported`. A shorter write is kept
+        when one more pixel will not move (the bar is at its end). Pixel scroll
+        does not need XTEST, so it is available on Wayland when a scroll bar is
+        exposed.
         """
         if dry_run:
             return None
@@ -279,45 +277,33 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("scroll")
-        from a11y_computer_use.drivers import _linux_input
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_input
 
         self._focused_editable = None
         x, y = _point_of(target)
-        before = self._line_scroll_signature(target) if int(dx) or int(dy) else None
+        handle = None
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        before = None
+        if handle is not None and (int(dx) or int(dy)):
+            before = self._run(lambda: _atspi.visible_row_names(handle))
         _linux_input.scroll(x, y, dx=dx, dy=dy)
-        if before is not None and not self._line_scroll_changed(target, before):
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "the accessibility tree did not change after the wheel scroll",
-                detail={"reason": "tree_unchanged", "unit": "lines", "dx": int(dx), "dy": int(dy)},
-            )
+        if before is not None:
+            after = self._run(lambda: _atspi.wait_for_row_change(handle, before))
+            if after is None or after == before:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "the rows on screen did not change after the wheel scroll",
+                    detail={
+                        "reason": "page_unchanged",
+                        "unit": "lines",
+                        "dx": int(dx),
+                        "dy": int(dy),
+                        "rows": list(before[:8]),
+                    },
+                )
         return None
-
-    def _line_scroll_changed(self, target: Target, before) -> bool:
-        """True when a post-wheel read of the list differs from ``before``.
-
-        ``scroll_to_find`` stops on ``tree_unchanged``. A wheel that moved the
-        page must not take that path just because the first child-cache read
-        still shows the old rows.
-        """
-        for attempt in range(_LINE_SCROLL_POLLS):
-            if self._line_scroll_signature(target) != before:
-                return True
-            if attempt + 1 < _LINE_SCROLL_POLLS:
-                time.sleep(_LINE_SCROLL_PAUSE_S)
-        return False
-
-    def _line_scroll_signature(self, target: Target):
-        """Named rows around an element target, or None when there is no list."""
-        if not isinstance(target, Element):
-            return None
-        from a11y_computer_use import observe
-        from a11y_computer_use.drivers import _atspi
-
-        handle = observe.ax_handle_for(target.snapshot_id, target.ref)
-        if handle is None:
-            return None
-        return self._run(lambda: _atspi.list_signature(handle))
 
     def _scroll_pixels(self, target: Target, *, dx: int, dy: int) -> None:
         from a11y_computer_use import observe

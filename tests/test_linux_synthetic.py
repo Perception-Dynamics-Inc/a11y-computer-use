@@ -1029,217 +1029,192 @@ def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi,
     assert pad.deletes == 0
 
 
-def test_line_scroll_of_an_unchanged_list_is_not_success(fake_atspi, xtest_recorder, monkeypatch) -> None:
+class _ChromeApp:
+    def get_toolkit_name(self):
+        return "Chromium"
+
+    def get_name(self):
+        return "Google Chrome"
+
+
+class _ListHit:
+    """Chromium's hit test: the first call at a point is the cached child.
+
+    A later call is the layout row for ``head``. The cached children never
+    move. Not a screen grab and not a live Chrome list.
+    """
+
+    def __init__(self, rows: list[_Acc], stale: list[_Acc]):
+        self.rows = rows
+        self.stale = stale
+        self.head = 1
+        self.calls = 0
+        self.x, self.y, self.width, self.height = 40, 100, 400, 160
+        self._at: dict[tuple[int, int], int] = {}
+
+    def get_extents(self, _coord):
+        return self
+
+    def get_accessible_at_point(self, _x, y, _coord):
+        self.calls += 1
+        key = (int(_x), int(y))
+        n = self._at.get(key, 0) + 1
+        self._at[key] = n
+        slot = min(7, max(0, (int(y) - self.y) // 20))
+        if n == 1:
+            return self.stale[min(slot, len(self.stale) - 1)]
+        index = min(len(self.rows) - 1, max(0, self.head - 1 + slot))
+        return self.rows[index]
+
+    def advance(self) -> None:
+        self.head += 8
+        self._at.clear()
+
+
+def _chrome_list(stuck: bool = False):
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 201)]
+    stale = rows[:8]
+    hit = _ListHit(rows, stale)
+    listing = _Acc("list", name="items")
+    listing.component = hit
+    listing.get_application = lambda: _ChromeApp()
+    _adopt(listing, *stale)
+    window = _Acc("frame", name="bench", width=1280, height=800)
+    window.get_application = lambda: _ChromeApp()
+    _adopt(window, listing)
+    return window, listing, hit, stuck
+
+
+def _wire_chrome_list(monkeypatch, window, hit, stuck: bool):
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    real_scroll = _linux_input.scroll
+
+    def scrolling(x, y, dx=0, dy=0):
+        real_scroll(x, y, dx=dx, dy=dy)
+        if not stuck and (int(dx) or int(dy)):
+            hit.advance()
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+
+
+def _row_titles(snap) -> list[str]:
+    return [el.title for el in snap.elements if el.role == "AXRow"]
+
+
+def test_snapshot_lists_layout_rows_not_the_cached_children(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium hit test, not a live Chrome list.
+
+    The cached children stay ITEM-001. The second hit test at each point is
+    ITEM-009 and the rows after it. The snapshot scroll_to_find searches
+    lists those layout rows.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    hit.head = 9
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-009"
+    assert "ITEM-016" in titles
+    assert "ITEM-001" not in titles
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+    assert hit.calls >= 2
+    assert any(el.title == "ITEM-012" for el in observe.find_elements(snap, text="ITEM-012"))
+
+
+def test_scroll_to_find_reaches_item_180_from_layout_rows(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Runtime.scroll_to_find against this driver. Synthetic hit test, not a live list.
+
+    The cached children stay on ITEM-001 for the whole search. Each wheel moves
+    the layout window. The snapshot after that wheel is what the find searches,
+    and it contains ITEM-180 before max_scrolls runs out.
+    """
+    from a11y_computer_use import server
+
     events, _display = xtest_recorder
-    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
-    _adopt(_Acc("list"), *rows)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
-    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
+    window, listing, hit, _stuck = _chrome_list()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+    assert listing.children[-1].name == "ITEM-008"
+    assert events[0][0] == _X_MOTION
+    assert (_X_BPRESS, 5, 0, 0) in [(kind, detail, x, y) for kind, detail, x, y in events]
+
+
+def test_line_scroll_of_an_unmoved_layout_is_not_success(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A wheel whose layout rows stay put is unsupported. The notches were sent."""
+    events, _display = xtest_recorder
+    window, listing, hit, _stuck = _chrome_list(stuck=True)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = next(el for el in snap.elements if el.role == "AXList")
     with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES)
+        driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES)
     assert error.value.code is ErrorCode.UNSUPPORTED
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert "notches were not sent" not in error.value.message
-    assert events[0] == (_X_MOTION, 0, 60, 29)
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["rows"][0] == "ITEM-001"
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-001"
+    assert "ITEM-180" not in later
+    assert events[0][0] == _X_MOTION
+    assert (_X_BPRESS, 5, 0, 0) in [(kind, detail, x, y) for kind, detail, x, y in events]
 
 
-def test_line_scroll_succeeds_when_the_list_names_change(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    events, _display = xtest_recorder
-    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
-    _adopt(_Acc("list"), *rows)
-    real = _linux_input.scroll
+def test_gtk_snapshot_keeps_cached_children(fake_atspi, monkeypatch) -> None:
+    """A non-Chromium list is not rewritten from a hit test."""
+    cached = []
+    for index, name in enumerate(("ITEM-001", "ITEM-002")):
+        row = _Acc("list item", name=name, width=400, height=18)
+        row.component.x = 40
+        row.component.y = 100 + index * 20
+        cached.append(row)
+    listing = _Acc("list", name="files", width=400, height=160)
+    listing.component.x = 40
+    listing.component.y = 100
+    hit = _ListHit([_Acc("list item", name="ITEM-010")], cached)
+    # The list's own extents stay the cached box. The hit-test object is
+    # only there so a probe would be visible in ``hit.calls``.
+    listing.component = hit
+    _adopt(listing, *cached)
+    window = _Acc("frame", name="files", width=800, height=600)
+    _adopt(window, listing)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    before = listing.component.calls
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "gedit")
+    assert _row_titles(snap)[:2] == ["ITEM-001", "ITEM-002"]
+    assert listing.component.calls == before
 
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        for index, row in enumerate(rows):
-            row.name = f"ITEM-{index + 6:03d}"
 
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
-    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
-    assert LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES) is None
-    assert rows[0].name == "ITEM-006"
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
-
-
-def test_line_scroll_of_a_text_area_does_not_require_a_list(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    events, _display = xtest_recorder
-    text = _Acc("text", name="Body")
+def test_pixel_scroll_does_not_probe_layout_rows(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    text, vertical, horizontal = _scrolled_text()
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
-    assert LinuxDriver().scroll(_body(), dy=1, unit=ScrollUnit.LINES) is None
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
 
+    def probe(_acc):
+        raise AssertionError("pixel scroll must not read layout rows")
 
-class _CachedRows(_Acc):
-    """Child names stay put until ``clear_cache`` publishes ``pending``.
-
-    Fake-transport stand-in for an AT-SPI child cache filled by the pre-wheel
-    read. ``lag`` is how many ``clear_cache`` calls after ``queue`` still
-    return the old names. ``lag`` 1 publishes on the next clear.
-    """
-
-    def __init__(self, names: list[str]):
-        super().__init__("list")
-        self.pending: list[str] | None = None
-        self.lag = 0
-        self.clears = 0
-        self._show(names)
-
-    def _show(self, names: list[str]) -> None:
-        _adopt(self, *[_Acc("list item", name=name) for name in names])
-
-    def queue(self, names: list[str], *, lag: int = 1) -> None:
-        self.pending = list(names)
-        self.lag = lag
-
-    def clear_cache(self) -> None:
-        self.clears += 1
-        if self.pending is None:
-            return
-        self.lag -= 1
-        if self.lag <= 0:
-            self._show(self.pending)
-            self.pending = None
-
-    def names(self) -> list[str]:
-        return [child.name for child in self.children]
-
-
-def _row_element() -> Element:
-    return Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
-
-
-def test_line_scroll_accepts_a_move_hidden_by_the_child_cache(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """Fake transport only. The wheel updates a pending list; names change after clear_cache."""
-    events, _display = xtest_recorder
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(1, 9)])
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)])
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert listing.names()[0] == "ITEM-012"
-    assert listing.clears >= 2  # the pre-wheel read and the post-wheel read
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
-
-
-def test_line_scroll_waits_for_a_list_that_publishes_on_the_next_read(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """Fake transport only. The first refreshed read is still the old rows."""
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-    sleeps: list[float] = []
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)], lag=2)
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleeps.append)
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert listing.names()[0] == "ITEM-012"
-    assert sleeps  # the first post-wheel read had not published yet
-
-
-def test_line_scroll_of_a_cached_list_that_does_not_move_is_unsupported(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
-    anchor = listing.children[0]
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
-    with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert listing.names()[0] == "ITEM-003"
-    assert listing.clears >= 2
-
-
-def test_line_scroll_sees_nested_row_labels(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    """A list whose direct children are unnamed groups. Fake transport only."""
-    listing = _Acc("list")
-    labels: list[_Acc] = []
-    groups = []
-    for index in range(1, 9):
-        label = _Acc("label", name=f"ITEM-{index:03d}")
-        group = _Acc("panel")
-        _adopt(group, label)
-        labels.append(label)
-        groups.append(group)
-    _adopt(listing, *groups)
-    real = _linux_input.scroll
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        for offset, label in enumerate(labels):
-            label.name = f"ITEM-{offset + 12:03d}"
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert labels[0].name == "ITEM-012"
-
-
-def test_unchanged_nested_row_labels_are_tree_unchanged(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    listing = _Acc("list")
-    labels = []
-    groups = []
-    for index in range(1, 9):
-        label = _Acc("label", name=f"ITEM-{index:03d}")
-        group = _Acc("panel")
-        _adopt(group, label)
-        labels.append(label)
-        groups.append(group)
-    _adopt(listing, *groups)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
-    with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert labels[0].name == "ITEM-001"
-
-
-def test_line_scrolls_reach_a_later_row_when_each_wheel_moves_the_cached_list(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """Fake transport stand-in for scroll_to_find: each accepted wheel advances the window.
-
-    Not the Runtime tool, and not a live Chrome list. The driver must not raise
-    tree_unchanged on a wheel whose rows change once the child cache is cleared,
-    or the find loop stops on the first notch.
-    """
-    window = [f"ITEM-{i:03d}" for i in range(1, 11)]
-    listing = _CachedRows(window)
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-    start = {"n": 1}
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        start["n"] += 10
-        listing.queue([f"ITEM-{i:03d}" for i in range(start["n"], start["n"] + 10)])
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    visible: list[str] = []
-    for _ in range(25):
-        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-        visible = listing.names()
-        if "ITEM-180" in visible:
-            break
-    assert "ITEM-180" in visible
+    monkeypatch.setattr(_atspi, "visible_row_names", probe)
+    LinuxDriver().scroll(_body(), dx=5, dy=3, unit=ScrollUnit.PIXELS)
+    assert vertical.value == 103 and horizontal.value == 45
 
 
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:

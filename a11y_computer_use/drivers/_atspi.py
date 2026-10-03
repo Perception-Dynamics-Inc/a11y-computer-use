@@ -352,14 +352,46 @@ def _stable_id(acc, attrs: dict | None = None) -> str | None:
 
 
 class ATSPIAccessor:
-    """`observe.TreeAccessor` over `Atspi.Accessible` handles."""
+    """`observe.TreeAccessor` over `Atspi.Accessible` handles.
+
+    For a Chromium list, ``refresh_visible`` replaces the cached children with
+    the rows a layout hit-test places inside the list's box. ``scroll_to_find``
+    searches the snapshot this accessor builds, so those rows are what a later
+    find sees. A non-Chromium tree is read from ``get_child_at_index`` as before.
+    """
+
+    def __init__(self) -> None:
+        self._visible_children: dict[int, list] = {}
+        self._visible_bounds: dict[int, tuple] = {}
+
+    def refresh_visible(self, root: object) -> None:
+        """Point Chromium lists at the rows currently inside their boxes.
+
+        No-op unless the tree's toolkit is Chromium. The cached child list is
+        left untouched on the accessible; only this walk uses the hit-test rows.
+        """
+        self._visible_children.clear()
+        self._visible_bounds.clear()
+        if root is None or not _chromium_app(root):
+            return
+        for container in _list_containers(root):
+            probed = _probe_visible_rows(container)
+            if len(probed) < 2:
+                continue
+            self._visible_children[id(container)] = [acc for acc, _pos, _size in probed]
+            for acc, pos, size in probed:
+                self._visible_bounds[id(acc)] = (pos, size)
 
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
         role = _refine_web_role(role, attrs)
-        position, size = _extents(node)
+        override = self._visible_bounds.get(id(node))
+        if override is not None:
+            position, size = override
+        else:
+            position, size = _extents(node)
         enabled, focused, checked, selected, expanded = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
@@ -382,6 +414,9 @@ class ATSPIAccessor:
         )
 
     def children(self, node: object) -> Sequence[object]:
+        visible = self._visible_children.get(id(node))
+        if visible is not None:
+            return list(visible)
         count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
         count = min(int(count), _MAX_CHILDREN_FETCH)
         kids = []
@@ -834,6 +869,155 @@ def _is_scroll_bar(acc) -> bool:
 
 def _node_name(acc) -> str:
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
+
+
+# Chromium's first GetAccessibleAtPoint answer is an approximate hit test of
+# the accessibility bounds, which stay stale across a wheel. That call starts
+# a layout hit test in the renderer. A later call at the same point returns
+# the layout row once it is cached. These waits cover that gap. A row that
+# never changes is the answer, not a timeout success.
+_HIT_TRIES = 3
+_HIT_PAUSE_S = 0.05
+_ROW_POLLS = 4
+_ROW_PAUSE_S = 0.04
+_LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
+_MAX_LIST_CONTAINERS = 4
+_MAX_ROW_SAMPLES = 16
+
+
+def _chromium_app(acc) -> bool:
+    """True when ``acc`` belongs to Chromium. GTK and other toolkits are not."""
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    toolkit = (_call_first(app, ("get_toolkit_name", "getToolkitName"), default="") or "").lower()
+    if "chrom" in toolkit:
+        return True
+    name = (_call_first(app, ("get_name", "getName"), default="") or "").lower()
+    return "chrom" in name
+
+
+def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:
+    """List, table, and tree nodes under ``root``, nearest first, bounded."""
+    found: list = []
+    queue = [root]
+    seen: set[int] = set()
+    while queue and len(found) < limit and len(seen) < 80:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if _role_name(node) in _LIST_ROLES and _extents(node)[0] is not None:
+            found.append(node)
+        count = min(_child_count(node), 30)
+        for index in range(count):
+            queue.append(_child_at(node, index))
+    return found
+
+
+def _settle_hit(comp, x: int, y: int, coord):
+    """The accessible at ``(x, y)`` after Chromium's layout hit test can land.
+
+    The first call returns the bounds guess and starts the renderer hit test.
+    A later call that returns a different accessible is that layout result.
+    When every call returns the same accessible, that accessible is the answer.
+    """
+    first = None
+    latest = None
+    for attempt in range(_HIT_TRIES):
+        hit = _call_first(
+            comp, ("get_accessible_at_point", "getAccessibleAtPoint"), x, y, coord
+        )
+        if hit is not None:
+            latest = hit
+            if first is None:
+                first = hit
+            elif hit is not first:
+                return hit
+        if attempt + 1 < _HIT_TRIES:
+            time.sleep(_HIT_PAUSE_S)
+    return latest
+
+
+def _probe_visible_rows(container) -> list[tuple]:
+    """Rows whose layout hit-test falls inside ``container``'s screen box.
+
+    Each entry is ``(accessible, (x, y), (width, height))``. The rectangle is
+    the span of samples that hit that accessible, inside the container, so a
+    snapshot keeps the row even when the accessible's own extents are stale.
+    Samples that hit the container itself are skipped.
+    """
+    pos, size = _extents(container)
+    if pos is None or size[1] < 4 or size[0] < 1:
+        return []
+    comp = _component(container)
+    if comp is None:
+        return []
+    coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
+    x = int(pos[0] + size[0] / 2)
+    top = int(pos[1])
+    bottom = int(pos[1] + size[1])
+    step = max(12, int(size[1] // 12) or 12)
+    grouped: list[list] = []
+    y = top + 1
+    samples = 0
+    while y < bottom and samples < _MAX_ROW_SAMPLES:
+        samples += 1
+        hit = _settle_hit(comp, x, y, coord)
+        if hit is not None and hit is not container:
+            if grouped and grouped[-1][0] is hit:
+                grouped[-1][2] = y + step
+            else:
+                grouped.append([hit, y, y + step])
+        y += step
+    rows = []
+    for acc, y0, y1 in grouped:
+        height = max(1, min(y1, bottom) - y0)
+        rows.append((acc, (float(pos[0]), float(y0)), (float(size[0]), float(height))))
+    return rows
+
+
+def _row_names(probed) -> tuple[str, ...]:
+    names: list[str] = []
+    for acc, _pos, _size in probed:
+        name = _node_name(acc)
+        if name and (not names or names[-1] != name):
+            names.append(name)
+    return tuple(names)
+
+
+def visible_row_names(acc) -> tuple[str, ...] | None:
+    """Names of the layout rows inside the nearest Chromium list, top to bottom.
+
+    None when ``acc`` is not a Chromium list and has no Chromium list ancestor
+    or descendant, or when fewer than two named rows are hit. The cached
+    children are not this result.
+    """
+    if acc is None or not _chromium_app(acc):
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _ in range(_LIST_ANCESTORS):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        containers = [node] if _role_name(node) in _LIST_ROLES else _list_containers(node, limit=1)
+        for container in containers[:1]:
+            names = _row_names(_probe_visible_rows(container))
+            if len(names) >= 2:
+                return names
+        node = _parent_of(node)
+    return None
+
+
+def wait_for_row_change(acc, previous: tuple[str, ...]) -> tuple[str, ...] | None:
+    """Poll the layout rows until they differ from ``previous``, or the tries end."""
+    seen: tuple[str, ...] | None = previous
+    for attempt in range(_ROW_POLLS):
+        seen = visible_row_names(acc)
+        if seen != previous:
+            return seen
+        if attempt + 1 < _ROW_POLLS:
+            time.sleep(_ROW_PAUSE_S)
+    return seen
 
 
 # Descendant names collected for one line-scroll signature. Chrome's row

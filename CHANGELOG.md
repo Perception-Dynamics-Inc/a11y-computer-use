@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.12] - 2026-10-03
+
+### Fixed
+
+- Linux `scroll_to_find` searches the snapshot, so a Chromium list in that snapshot is the rows a layout hit-test places in the list's box. On the 0.4.11 retest the cached children stayed on ITEM-001, including 1.5 seconds later, while the screen had moved, and a later snapshot head was only ITEM-009 when the screen showed ITEM-018 through ITEM-025. Chromium's first `GetAccessibleAtPoint` answer is that stale bounds guess and starts a renderer hit test; a later call at the same point returns the layout row. The snapshot lists those rows, including one as far down as ITEM-180 once the layout window contains it. A wheel whose layout rows do not change is `unsupported` with `reason=page_unchanged`. `unit=pixels` is unchanged: it still writes an AT-SPI scroll-bar value and does not send a wheel. Synthetic hit tests, not a live Chrome run (#33) (2026-10-03).
+
 ## [0.4.11] - 2026-10-03
 
 ### Fixed
