@@ -21,6 +21,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Sequence
 
 from a11y_computer_use.observe import DisplayGeometry, RawNode
@@ -624,65 +625,174 @@ def insert_text(acc, text: str) -> bool:
     return bool(_call_first(eti, ("insert_text",), int(offset), text, len(text), default=False))
 
 
-def _editable_text(acc) -> str | None:
-    """The EditableText contents, or None when the Text interface cannot be read.
+# After a clear or a write, a web field's text can show up on a later read.
+# The first read is immediate; these extra reads cover that gap. A value that
+# never equals the request is still a failure.
+_TEXT_CONFIRM_POLLS = 4
+_TEXT_CONFIRM_PAUSE_S = 0.02
 
-    An empty field is ``""``. ``None`` means the read failed, which is different
-    from a field that is genuinely empty."""
-    Atspi = _atspi()
-    count = _safe(lambda: Atspi.Text.get_character_count(acc))
-    if count is None:
-        return None
-    try:
-        count = int(count)
-    except (TypeError, ValueError):
-        return None
-    if count <= 0:
-        return ""
-    got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
-    if got is None:
-        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+
+def _full_text(acc) -> str | None:
+    """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
+
+    ``None`` means that read failed. ``""`` is an empty field when the toolkit
+    returns one. A bounded ``get_text(0, character_count)`` is not used. On a
+    Chromium web field that count can be the length of the string just passed
+    to ``set_text_contents``, and the bounded read echoes that string while
+    ``get_text(0, -1)`` still has the previous contents. The client text cache
+    is dropped first so the read is not the pre-write value.
+    """
+    _call_first(acc, ("clear_cache", "clearCache"))
+    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
     if got is None:
         return None
     return str(got)
 
 
+def _x11_keys_available() -> bool:
+    """True when XTEST can reach the session. Matches ``linux._on_wayland``."""
+    return not (os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"))
+
+
+def _select_range(acc, end: int) -> None:
+    """Select ``[0, end)`` on the Text interface. A missing method is ignored."""
+    if end <= 0:
+        return
+    Atspi = _atspi()
+    if not _safe(lambda: Atspi.Text.set_selection(acc, 0, 0, end)):
+        _safe(lambda: Atspi.Text.add_selection(acc, 0, end))
+
+
+def _text_is_gone(acc) -> bool:
+    """True when the snapshot read is empty or could not be read.
+
+    Chromium returns NULL from ``get_text(0, -1)`` on an empty field, because
+    the start offset is past the end. An unreadable field is treated as clear
+    here so the replacement can be written; ``set_text`` still returns True
+    only when a later snapshot read equals the new string.
+    """
+    return not _full_text(acc)
+
+
+def _wait_until_gone(acc) -> bool:
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        if _text_is_gone(acc):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    return False
+
+
+def _x11_select_all_and_delete(acc) -> None:
+    """Focus the field and replace its selection with nothing. X11 only."""
+    grab_focus(acc)
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord("ctrl+a")
+    _linux_input.press_chord("backspace")
+
+
+def _type_string(text: str) -> None:
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.type_string(text)
+
+
+def _replace_with_keys(acc, text: str) -> bool:
+    """Clear the field and type ``text``. Used when EditableText is missing.
+
+    Chromium's ATK objects do not implement AtkEditableText, so
+    ``get_editable_text`` is absent and the runtime would otherwise type the
+    new string onto the old one and still report success. Returns True only
+    when the snapshot read equals ``text``. An unreadable field is not typed
+    into. Native Wayland has no XTEST, so this returns False there.
+    """
+    current = _full_text(acc)
+    if current == text:
+        return True
+    if current is None or not _x11_keys_available():
+        return False
+    if current:
+        _x11_select_all_and_delete(acc)
+        if not _wait_until_gone(acc):
+            return False
+    else:
+        grab_focus(acc)
+    _type_string(text)
+    return _confirm_text(acc, text)
+
+
+def _clear_text(acc, eti, current: str) -> bool:
+    """Remove ``current`` so the next write substitutes.
+
+    The deleted range is ``len(current)`` from the snapshot read, not
+    ``character_count``. ``delete_text`` is not trusted on its return value:
+    the AT-SPI editable-text adaptor reports true after the call whether or
+    not the text changed. When the snapshot read still has text, and this is
+    an X11 session, the field is focused and ctrl+a, BackSpace is sent.
+    """
+    if current == "":
+        return True
+    _select_range(acc, len(current))
+    _call_first(eti, ("delete_text",), 0, len(current), default=False)
+    if _wait_until_gone(acc):
+        return True
+    if not _x11_keys_available():
+        return False
+    _x11_select_all_and_delete(acc)
+    return _wait_until_gone(acc)
+
+
+def _confirm_text(acc, text: str) -> bool:
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        if _full_text(acc) == text:
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    return False
+
+
 def set_text(acc, text: str) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
-    GTK's ``set_text_contents`` replaces. Chromium's web text fields implement
-    that call as an insert and still return true, so the previous text stays
-    and the new string is appended. Read the contents back. When they already
-    equal ``text``, the write replaced and nothing is deleted. When they do
-    not, delete the range and insert ``text``, and return True only if the
-    field then equals ``text``. A toolkit that reports success but exposes no
-    readable text is trusted, so a replace is not refused just because
-    ``Text.get_text`` failed.
+    GTK's ``set_text_contents`` replaces, and the snapshot read then equals
+    ``text``, so nothing is deleted. Chromium's web fields implement that
+    call as an insert and the editable-text adaptor still returns true. The
+    success check is ``Text.get_text(0, -1)``, the same read a snapshot uses,
+    not ``get_text(0, character_count)``. When they disagree, the snapshot
+    text is selected and deleted; if it is still there, X11 sends ctrl+a and
+    BackSpace. The new string is written only after that, and this returns
+    True only when the snapshot read equals ``text``. A toolkit whose text
+    cannot be read at all is trusted when ``set_text_contents`` returned
+    true, so a replace is not refused just because ``Text.get_text`` failed.
+    A field with no EditableText is cleared and typed on X11; that also
+    returns True only when the snapshot read equals ``text``.
     """
     eti = _editable_iface(acc)
     if eti is None:
-        return False
+        return _replace_with_keys(acc, text)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
-    current = _editable_text(acc)
+    current = _full_text(acc)
     if current == text:
         return True
     if current is None:
         return wrote
-    end = _safe(lambda: _atspi().Text.get_character_count(acc))
-    try:
-        end_pos = int(end) if end is not None else len(current)
-    except (TypeError, ValueError):
-        end_pos = len(current)
-    if end_pos < 0:
-        end_pos = len(current)
-    if not _call_first(eti, ("delete_text",), 0, end_pos, default=False):
+    if not _clear_text(acc, eti, current):
         return False
-    if not _call_first(eti, ("insert_text",), 0, text, len(text), default=False):
-        return False
-    after = _editable_text(acc)
-    if after is None:
+    if not _call_first(eti, ("set_text_contents",), text, default=False):
+        if not _call_first(eti, ("insert_text",), 0, text, len(text), default=False):
+            if _text_is_gone(acc) and _x11_keys_available():
+                _type_string(text)
+            else:
+                return False
+    if _confirm_text(acc, text):
         return True
-    return after == text
+    # The AT-SPI write did not stick. Typing is only safe once the snapshot
+    # read says the field is empty; otherwise it would append.
+    if _text_is_gone(acc) and _x11_keys_available():
+        _type_string(text)
+        return _confirm_text(acc, text)
+    return False
 
 
 def scroll_to(acc) -> bool:
@@ -726,40 +836,86 @@ def _node_name(acc) -> str:
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
 
 
-def _named_children(acc) -> tuple[str, ...]:
+# Descendant names collected for one line-scroll signature. Chrome's row
+# label is often a nested static text, not the direct child's name. The walk
+# stops at the first list of four or more names so a window full of toolbar
+# buttons is not what gets compared.
+_LIST_NAME_LIMIT = 48
+_LIST_DEPTH = 4
+_LIST_ANCESTORS = 5
+
+
+def _invalidate_tree_cache(acc) -> None:
+    """Drop the AT-SPI child cache on ``acc`` and its ancestors.
+
+    libatspi answers ``get_child_at_index`` from that cache once it has been
+    filled. A line scroll reads the list before the wheel, so the read after
+    the wheel can still be the pre-wheel rows. A later snapshot, or a fresh
+    process, fetches the children again and shows the move.
+    """
+    node = acc
+    seen: set[int] = set()
+    for _ in range(_MAX_SCROLL_ANCESTORS):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        _call_first(node, ("clear_cache", "clearCache"))
+        node = _parent_of(node)
+
+
+def _descendant_names(acc) -> tuple[str, ...]:
+    """Names under ``acc``, not including ``acc`` itself."""
     names: list[str] = []
-    count = min(_child_count(acc), _MAX_SCROLL_NODES)
+    queue: list[tuple[object, int]] = []
+    count = min(_child_count(acc), _LIST_NAME_LIMIT)
     for index in range(count):
         child = _child_at(acc, index)
-        if child is None:
-            continue
-        name = _node_name(child)
+        if child is not None:
+            queue.append((child, _LIST_DEPTH))
+    seen = 0
+    while queue and len(names) < _LIST_NAME_LIMIT and seen < _LIST_NAME_LIMIT:
+        node, remaining = queue.pop(0)
+        seen += 1
+        name = _node_name(node)
         if name:
             names.append(name)
+        if remaining <= 1:
+            continue
+        child_count = min(_child_count(node), _LIST_NAME_LIMIT - seen)
+        for index in range(child_count):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append((child, remaining - 1))
     return tuple(names)
 
 
 def list_signature(acc) -> tuple[str, ...] | None:
-    """Names of a visible list under ``acc``, or of its siblings.
+    """Names of the nearest visible list under ``acc``.
 
     None when fewer than two named nodes are visible. A text area with no
-    sibling rows has nothing to compare, so a line scroll is not judged a
-    failure just because that one name stays put. A virtualized list (Chrome's
-    ITEM-001… rows) does, and an unchanged tuple means the tree did not follow
-    the wheel.
+    such list is not judged a failure just because its own name stays put.
+    The child cache is cleared first. Descendant names are included, so a
+    row label that lives on a nested static text counts. A longer list
+    further up replaces a short one: two scroll-bar labels must not hide
+    the rows. Four or more names stops the walk.
     """
     if acc is None:
         return None
-    own = _named_children(acc)
-    if len(own) >= 2:
-        return own
-    parent = _parent_of(acc)
-    if parent is None:
-        return None
-    siblings = _named_children(parent)
-    if len(siblings) >= 2:
-        return siblings
-    return None
+    _invalidate_tree_cache(acc)
+    best: tuple[str, ...] | None = None
+    node = acc
+    seen: set[int] = set()
+    for _ in range(_LIST_ANCESTORS):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        names = _descendant_names(node)
+        if len(names) >= 2 and (best is None or len(names) > len(best)):
+            best = names
+            if len(best) >= 4:
+                break
+        node = _parent_of(node)
+    return best
 
 
 def _collect_scrollbars(start) -> list:

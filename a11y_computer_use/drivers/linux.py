@@ -44,6 +44,13 @@ def _point_of(target: Target) -> tuple[int, int]:
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
+# Re-reads of a line-scroll list after the wheel. The first read is immediate,
+# after the AT-SPI child cache is cleared. A tree that still shows the
+# pre-wheel names on that read and publishes on a later one is accepted. A
+# list whose names stay the same through every read is tree_unchanged.
+_LINE_SCROLL_POLLS = 5
+_LINE_SCROLL_PAUSE_S = 0.04
+
 
 def _on_wayland() -> bool:
     """True on a native Wayland session (WAYLAND_DISPLAY set, no X): XTEST
@@ -187,9 +194,10 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
-        # EditableText replace, read back. A web field's set_text_contents
-        # appends and still returns true; set_text clears and inserts until
-        # the field equals value. Marshaled onto the a11y thread.
+        # EditableText replace, or X11 clear-and-type when that interface is
+        # missing. Success is the snapshot text read (Text.get_text 0, -1),
+        # not a bounded read that can echo the request. Marshaled onto the
+        # a11y thread.
         success = self._run(lambda: _atspi.set_text(handle, value))
         if success:
             self._focused_editable = handle
@@ -248,9 +256,12 @@ class LinuxDriver:
         ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
         When the target is an element whose tree shows a list of named rows,
-        the names are read before and after the wheel. An unchanged list raises
-        `unsupported` with ``reason=tree_unchanged``: the notches were sent,
-        and the runtime must not report a successful scroll. A text area with
+        those names (including nested labels) are read before the wheel and
+        again after the AT-SPI child cache is cleared. A list that is still
+        the same after a few reads raises `unsupported` with
+        ``reason=tree_unchanged``: the notches were sent, and the runtime must
+        not report a successful scroll. A move that shows up on a later read
+        is accepted, so ``scroll_to_find`` can keep going. A text area with
         no such list is not checked. ``unit=pixels`` writes the AT-SPI
         scroll-bar value by that delta and reads it back. GTK scrolled windows
         expose the value in pixels. A missing bar, or a write that jumps or
@@ -274,13 +285,27 @@ class LinuxDriver:
         x, y = _point_of(target)
         before = self._line_scroll_signature(target) if int(dx) or int(dy) else None
         _linux_input.scroll(x, y, dx=dx, dy=dy)
-        if before is not None and self._line_scroll_signature(target) == before:
+        if before is not None and not self._line_scroll_changed(target, before):
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 "the accessibility tree did not change after the wheel scroll",
                 detail={"reason": "tree_unchanged", "unit": "lines", "dx": int(dx), "dy": int(dy)},
             )
         return None
+
+    def _line_scroll_changed(self, target: Target, before) -> bool:
+        """True when a post-wheel read of the list differs from ``before``.
+
+        ``scroll_to_find`` stops on ``tree_unchanged``. A wheel that moved the
+        page must not take that path just because the first child-cache read
+        still shows the old rows.
+        """
+        for attempt in range(_LINE_SCROLL_POLLS):
+            if self._line_scroll_signature(target) != before:
+                return True
+            if attempt + 1 < _LINE_SCROLL_POLLS:
+                time.sleep(_LINE_SCROLL_PAUSE_S)
+        return False
 
     def _line_scroll_signature(self, target: Target):
         """Named rows around an element target, or None when there is no list."""

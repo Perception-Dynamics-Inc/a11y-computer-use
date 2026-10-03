@@ -11,6 +11,13 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.11] - 2026-10-03
+
+### Fixed
+
+- Linux `set_value` replaces a Chrome web field. 0.4.9 returned success when `Text.get_text(0, character_count)` equalled the new string, and a field with no EditableText fell through to typing, which appends. A snapshot reads `Text.get_text(0, -1)`. On the 0.4.9 retest the tool said `BETA` and the accessible value was the previous text with the new string appended. The check is now that snapshot read. When it disagrees, the snapshot text is selected and deleted; the editable-text adaptor's true return is not treated as a clear. If the snapshot text is still there, or the field exposes no EditableText, X11 focuses the field, sends ctrl+a and BackSpace, and types the new string. Success requires the snapshot read to equal the new string. GTK `set_text_contents` still replaces and does not delete. The web-field path is covered by synthetic tests on a fake transport, not a live Chrome run (#31) (2026-10-03).
+- Linux line scroll accepts a wheel that moves a list. 0.4.9 compared child names immediately and returned `unsupported` with `reason=tree_unchanged` when that read still showed the old rows; the next snapshot started further down the list, and `scroll_to_find` stopped on the first wheel. The signature includes nested labels, the AT-SPI child cache is cleared before the comparison, and a few later reads are accepted when the first refreshed read is still the old list. A list whose names stay the same is still `unsupported`. Synthetic tests on a fake transport, not a live Chrome list (#33) (2026-10-03).
+
 ## [0.4.10] - 2026-10-03
 
 ### Fixed
