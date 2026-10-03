@@ -112,6 +112,28 @@ def test_shortcut_binding_renders_gtk_tags() -> None:
     # Mousepad New: mnemonic path, then the Primary accelerator. Not alt+f:n.
     assert _linux_menus.shortcut_from_binding("n;<Alt>f:n;<Primary>n") == "ctrl+n"
     assert _linux_menus.shortcut_from_binding("s;<Control>s;s") == "ctrl+s"
+    # Bare named accelerators beat the leading mnemonic letter. Not f, c, or d.
+    assert _linux_menus.shortcut_from_binding("f;<Alt>v:f;F11") == "f11"
+    assert _linux_menus.shortcut_from_binding("c;<Alt>h:c;F1") == "f1"
+    assert _linux_menus.shortcut_from_binding("d;<Alt>e:d;Delete") == "delete"
+
+
+def test_list_uses_a_bare_named_accelerator_not_the_mnemonic_letter() -> None:
+    file_menu = _menu("File", _item("New", key="n;<Alt>f:n;<Primary>n"))
+    edit = _menu("Edit", _item("Delete Selection", key="d;<Alt>e:d;Delete"))
+    view = _menu("View", _item("Fullscreen", key="f;<Alt>v:f;F11"))
+    help_menu = _menu("Help", _item("Contents", key="c;<Alt>h:c;F1"))
+    bar = Acc("menu bar", "", [file_menu, edit, view, help_menu])
+    app = Acc("application", "mousepad", [Acc("frame", "Mousepad", [bar], states={"active"})])
+
+    def listed(menu: str, title: str) -> str | None:
+        rows = _linux_menus.menu_items(app, menu)
+        return next(row["shortcut"] for row in rows if row["title"] == title)
+
+    assert listed("File", "New") == "ctrl+n"
+    assert listed("View", "Fullscreen") == "f11"
+    assert listed("Help", "Contents") == "f1"
+    assert listed("Edit", "Delete Selection") == "delete"
 
 
 def test_list_reads_a_gtk_menu_without_pressing_it() -> None:

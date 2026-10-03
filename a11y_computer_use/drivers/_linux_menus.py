@@ -11,7 +11,8 @@ menu that is empty until it is shown is opened and then closed. Pressing opens
 each level and activates the leaf with the item's ``click`` action. An open
 menu is one whose item is ``SELECTED`` or whose popup is ``SHOWING``. Close
 sends Escape and succeeds only after that menu is gone. A shortcut is the
-accelerator in the AT-SPI binding, not the Alt mnemonic.
+accelerator in the AT-SPI binding: a tagged chord, or a bare key name such
+as F11, not the Alt mnemonic letter.
 
 This module does not import ``gi``. Tests drive it with fake accessibles.
 ``file_dialog`` is not implemented here.
@@ -164,13 +165,16 @@ def _has_submenu(node: object) -> bool:
 def shortcut_from_binding(raw: str | None) -> str | None:
     """Render an AT-SPI key binding (``<Control>o``, ``<Primary><Shift>S``) as ``ctrl+o``.
 
-    GTK joins several fields with ``;``. Mousepad's New item is
-    ``n;<Alt>f:n;<Primary>n``: the letter, the Alt mnemonic path (``f`` then
-    ``n``, which is why a colon is in that field), and the accelerator
-    ``<Primary>n``. The shortcut is that accelerator (``ctrl+n``), not the
-    mnemonic. A colon marks a key sequence, so it loses to a single chord.
-    A binding with no tag (the keysym half of ``s;keycode;mods``) is returned
-    as that key. Digit-only segments are ignored.
+    GTK joins several fields with ``;``. The shape is mnemonic letter, then
+    the Alt mnemonic path, then the accelerator. Mousepad's New item is
+    ``n;<Alt>f:n;<Primary>n``: a tagged chord wins, so the shortcut is
+    ``ctrl+n``, not ``alt+f:n``. A colon marks that mnemonic sequence.
+
+    A bare accelerator has no tag. Fullscreen is ``f;<Alt>v:f;F11``, Contents
+    is ``c;<Alt>h:c;F1``, and Delete Selection is ``d;<Alt>e:d;Delete``. The
+    shortcut is that key name (``f11``, ``f1``, ``delete``). A single letter
+    is the mnemonic, so it loses to a longer bare name. With no longer name,
+    the letter remains (``n;37;4`` is ``n``). Digit-only segments are ignored.
     """
     if not raw or not str(raw).strip():
         return None
@@ -179,7 +183,9 @@ def shortcut_from_binding(raw: str | None) -> str | None:
     chords = [part for part in tagged if ":" not in part]
     chosen = chords[-1] if chords else None
     if chosen is None:
-        chosen = next((part for part in parts if not part.isdigit()), None)
+        plain = [part for part in parts if "<" not in part and ":" not in part and not part.isdigit()]
+        named = [part for part in plain if len(part) > 1]
+        chosen = (named[-1] if named else plain[-1]) if plain else None
     if not chosen:
         return None
     found: list[str] = []
