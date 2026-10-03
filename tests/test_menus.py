@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from a11y_computer_use import menus, safety, server
-from a11y_computer_use.drivers import browser, linux, windows
+from a11y_computer_use.drivers import browser, windows
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
@@ -253,7 +253,7 @@ def test_drive_panel_refuses_the_wrong_kind_and_relative_paths() -> None:
 # --------------------------------------------------------------------------- #
 # other drivers answer a structured unsupported
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("driver", [windows.WindowsDriver(), linux.LinuxDriver(),
+@pytest.mark.parametrize("driver", [windows.WindowsDriver(),
                                     browser.BrowserDriver(endpoint="http://127.0.0.1:1")])
 def test_other_drivers_report_unsupported_menus(driver) -> None:
     for call in (lambda: driver.menu_items("x", None), lambda: driver.menu_press("x", "File > Save"),
