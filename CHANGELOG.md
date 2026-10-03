@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.12] - 2026-10-03
+
+### Fixed
+
+- Linux line scroll judges an element wheel by the pixels in that element's box, not by the AT-SPI tree. On the 0.4.11 Chrome retest a 3-line scroll returned `unsupported` with `reason=tree_unchanged` while the list pixels moved from ITEM-001 to ITEM-010 (mean absolute difference about 8.6 inside the list and 0 outside it). The snapshot still started at ITEM-001, including 1.5 seconds later, so clearing the child cache and reading it again did not see the scroll. `scroll_to_find` stopped on the first wheel for the same reason. The wheel is now a success when that box's mean absolute difference is above 1, and `unsupported` with `reason=page_unchanged` when the box does not change. This does not make Chrome's snapshot list the rows now on screen. `unit=pixels` is unchanged: it still writes an AT-SPI scroll-bar value and does not send a wheel. Synthetic grabs, not a live Chrome run (#33) (2026-10-03).
+
 ## [0.4.11] - 2026-10-03
 
 ### Fixed

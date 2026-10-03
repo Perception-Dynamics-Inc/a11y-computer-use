@@ -1029,217 +1029,147 @@ def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi,
     assert pad.deletes == 0
 
 
-def test_line_scroll_of_an_unchanged_list_is_not_success(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    events, _display = xtest_recorder
-    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
-    _adopt(_Acc("list"), *rows)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
-    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
-    with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES)
-    assert error.value.code is ErrorCode.UNSUPPORTED
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert "notches were not sent" not in error.value.message
-    assert events[0] == (_X_MOTION, 0, 60, 29)
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+def _solid(color: tuple[int, int, int]):
+    from PIL import Image
+
+    return Image.new("RGB", (4, 4), color)
 
 
-def test_line_scroll_succeeds_when_the_list_names_change(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    events, _display = xtest_recorder
-    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
-    _adopt(_Acc("list"), *rows)
-    real = _linux_input.scroll
+def _grab_script(monkeypatch, frames: list) -> list[tuple[int, int, int, int]]:
+    """Replace the region grab. Frames are synthetic images, not a screen."""
+    boxes: list[tuple[int, int, int, int]] = []
+    pending = list(frames)
 
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        for index, row in enumerate(rows):
-            row.name = f"ITEM-{index + 6:03d}"
+    def grab(box):
+        boxes.append(box)
+        if not pending:
+            return frames[-1]
+        return pending.pop(0)
 
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
-    element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
-    assert LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES) is None
-    assert rows[0].name == "ITEM-006"
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
-
-
-def test_line_scroll_of_a_text_area_does_not_require_a_list(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    events, _display = xtest_recorder
-    text = _Acc("text", name="Body")
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
-    assert LinuxDriver().scroll(_body(), dy=1, unit=ScrollUnit.LINES) is None
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
-
-
-class _CachedRows(_Acc):
-    """Child names stay put until ``clear_cache`` publishes ``pending``.
-
-    Fake-transport stand-in for an AT-SPI child cache filled by the pre-wheel
-    read. ``lag`` is how many ``clear_cache`` calls after ``queue`` still
-    return the old names. ``lag`` 1 publishes on the next clear.
-    """
-
-    def __init__(self, names: list[str]):
-        super().__init__("list")
-        self.pending: list[str] | None = None
-        self.lag = 0
-        self.clears = 0
-        self._show(names)
-
-    def _show(self, names: list[str]) -> None:
-        _adopt(self, *[_Acc("list item", name=name) for name in names])
-
-    def queue(self, names: list[str], *, lag: int = 1) -> None:
-        self.pending = list(names)
-        self.lag = lag
-
-    def clear_cache(self) -> None:
-        self.clears += 1
-        if self.pending is None:
-            return
-        self.lag -= 1
-        if self.lag <= 0:
-            self._show(self.pending)
-            self.pending = None
-
-    def names(self) -> list[str]:
-        return [child.name for child in self.children]
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+    return boxes
 
 
 def _row_element() -> Element:
     return Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
 
 
-def test_line_scroll_accepts_a_move_hidden_by_the_child_cache(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """Fake transport only. The wheel updates a pending list; names change after clear_cache."""
+def test_line_scroll_of_a_still_region_is_not_success(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    """Synthetic grabs. A wheel whose box does not change is unsupported."""
     events, _display = xtest_recorder
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(1, 9)])
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)])
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert listing.names()[0] == "ITEM-012"
-    assert listing.clears >= 2  # the pre-wheel read and the post-wheel read
-    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
-
-
-def test_line_scroll_waits_for_a_list_that_publishes_on_the_next_read(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    """Fake transport only. The first refreshed read is still the old rows."""
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-    sleeps: list[float] = []
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)], lag=2)
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleeps.append)
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert listing.names()[0] == "ITEM-012"
-    assert sleeps  # the first post-wheel read had not published yet
-
-
-def test_line_scroll_of_a_cached_list_that_does_not_move_is_unsupported(
-    fake_atspi, xtest_recorder, monkeypatch
-) -> None:
-    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
-    anchor = listing.children[0]
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    still = _solid((10, 20, 30))
+    boxes = _grab_script(monkeypatch, [still, still.copy()])
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
+    _adopt(_Acc("list"), *rows)
     with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert listing.names()[0] == "ITEM-003"
-    assert listing.clears >= 2
+        LinuxDriver().scroll(_row_element(), dy=3, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0.0
+    assert "notches were not sent" not in error.value.message
+    assert rows[0].name == "ITEM-001"
+    assert boxes == [(10, 20, 100, 18), (10, 20, 100, 18)]
+    assert events[0] == (_X_MOTION, 0, 60, 29)
+    assert events[2:4] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
 
 
-def test_line_scroll_sees_nested_row_labels(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    """A list whose direct children are unnamed groups. Fake transport only."""
-    listing = _Acc("list")
-    labels: list[_Acc] = []
-    groups = []
-    for index in range(1, 9):
-        label = _Acc("label", name=f"ITEM-{index:03d}")
-        group = _Acc("panel")
-        _adopt(group, label)
-        labels.append(label)
-        groups.append(group)
-    _adopt(listing, *groups)
-    real = _linux_input.scroll
-
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        for offset, label in enumerate(labels):
-            label.name = f"ITEM-{offset + 12:03d}"
-
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
-    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
-    assert labels[0].name == "ITEM-012"
-
-
-def test_unchanged_nested_row_labels_are_tree_unchanged(fake_atspi, xtest_recorder, monkeypatch) -> None:
-    listing = _Acc("list")
-    labels = []
-    groups = []
-    for index in range(1, 9):
-        label = _Acc("label", name=f"ITEM-{index:03d}")
-        group = _Acc("panel")
-        _adopt(group, label)
-        labels.append(label)
-        groups.append(group)
-    _adopt(listing, *groups)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
-    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
-    with pytest.raises(ComputerUseError) as error:
-        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-    assert error.value.detail["reason"] == "tree_unchanged"
-    assert labels[0].name == "ITEM-001"
-
-
-def test_line_scrolls_reach_a_later_row_when_each_wheel_moves_the_cached_list(
+def test_line_scroll_accepts_a_region_change_while_the_tree_stays_put(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """Fake transport stand-in for scroll_to_find: each accepted wheel advances the window.
+    """Synthetic grabs, not a live Chrome list.
 
-    Not the Runtime tool, and not a live Chrome list. The driver must not raise
-    tree_unchanged on a wheel whose rows change once the child cache is cleared,
-    or the find loop stops on the first notch.
+    The child names stay ITEM-001. The second grab is a different picture.
+    A child-cache read would still report the tree unchanged.
     """
-    window = [f"ITEM-{i:03d}" for i in range(1, 11)]
-    listing = _CachedRows(window)
-    anchor = listing.children[0]
-    real = _linux_input.scroll
-    start = {"n": 1}
+    events, _display = xtest_recorder
+    boxes = _grab_script(monkeypatch, [_solid((0, 0, 0)), _solid((255, 255, 255))])
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
+    _adopt(_Acc("list"), *rows)
+    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
+    assert [row.name for row in rows[:3]] == ["ITEM-001", "ITEM-002", "ITEM-003"]
+    assert boxes[0] == (10, 20, 100, 18)
+    assert events[2:4] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
 
-    def scrolling(x, y, *, dx=0, dy=0):
-        real(x, y, dx=dx, dy=dy)
-        start["n"] += 10
-        listing.queue([f"ITEM-{i:03d}" for i in range(start["n"], start["n"] + 10)])
 
-    monkeypatch.setattr(_linux_input, "scroll", scrolling)
-    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
-    visible: list[str] = []
+def test_line_scroll_of_a_text_area_uses_the_region_not_a_list(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    events, _display = xtest_recorder
+    _grab_script(monkeypatch, [_solid((1, 1, 1)), _solid((2, 3, 4))])
+    text = _Acc("text", name="Body")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+    assert LinuxDriver().scroll(_body(), dy=1, unit=ScrollUnit.LINES) is None
+    assert text.name == "Body"
+    assert events[2:4] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+
+
+def test_line_scrolls_keep_going_while_each_region_changes(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic stand-in for not stopping scroll_to_find on the first wheel.
+
+    Not the Runtime tool, and not a live Chrome list. Each wheel grabs the
+    box twice. Twenty-five wheels therefore need fifty grabs, and each pair
+    has to differ by more than the mean-absolute threshold: a one-channel
+    step of 1 averages to about 0.33 and is page_unchanged. The accessible
+    names stay on ITEM-001; these images do not prove the snapshot reaches
+    ITEM-180. The next pair is the same picture and is unsupported.
+    """
+    from a11y_computer_use.drivers import linux as linux_driver
+
+    frames = []
+    for _ in range(25):
+        frames.append(_solid((0, 0, 0)))
+        frames.append(_solid((255, 255, 255)))
+    still = _solid((9, 9, 9))
+    frames.append(still)
+    frames.append(still.copy())
+    boxes = _grab_script(monkeypatch, frames)
+    rows = [_Acc("list item", name="ITEM-001")]
     for _ in range(25):
         LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
-        visible = listing.names()
-        if "ITEM-180" in visible:
-            break
-    assert "ITEM-180" in visible
+    assert rows[0].name == "ITEM-001"
+    assert len(boxes) == 50
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0.0
+    assert error.value.detail["mean_abs"] <= linux_driver._LINE_SCROLL_MOVE_MEAN
+    assert len(boxes) == 52
+
+
+def test_line_scroll_region_read_failure_is_not_a_moved_page(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A screen read that raises is unsupported. It is not a successful scroll.
+
+    The first grab happens before the wheel, so a failure there sends no notches.
+    """
+    events, _display = xtest_recorder
+
+    def grab(*_args, **_kwargs):
+        raise OSError("no display")
+
+    monkeypatch.setattr("PIL.ImageGrab.grab", grab)
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(_row_element(), dy=1, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unseen"
+    assert events == [(_X_MOTION, 0, 60, 29)]
+
+
+def test_pixel_scroll_does_not_grab_the_line_scroll_region(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    text, vertical, horizontal = _scrolled_text()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+
+    def grab(_box):
+        raise AssertionError("pixel scroll must not read the line-scroll region")
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+    LinuxDriver().scroll(_body(), dx=5, dy=3, unit=ScrollUnit.PIXELS)
+    assert vertical.value == 103 and horizontal.value == 45
 
 
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:
