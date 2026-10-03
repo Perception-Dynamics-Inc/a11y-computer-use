@@ -11,6 +11,13 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.7] - 2026-10-03
+
+### Fixed
+
+- Linux `menu` close sends Escape and returns success only after the popup is gone. Pressing the menu-bar entry again left the GTK menu open while the tool reported it closed (#26) (2026-10-03).
+- Linux menu shortcuts use the accelerator in an AT-SPI binding (`n;<Alt>f:n;<Primary>n` is `ctrl+n`), not the Alt mnemonic (#27) (2026-10-03).
+
 ## [0.4.6] - 2026-10-02
 
 ### Fixed

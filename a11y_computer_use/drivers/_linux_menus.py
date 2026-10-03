@@ -9,7 +9,9 @@ prefixes still go through `menus.match_title`.
 Listing reads the tree and does not press when the rows are already there. A
 menu that is empty until it is shown is opened and then closed. Pressing opens
 each level and activates the leaf with the item's ``click`` action. An open
-menu is one whose item is ``SELECTED`` or whose popup is ``SHOWING``.
+menu is one whose item is ``SELECTED`` or whose popup is ``SHOWING``. Close
+sends Escape and succeeds only after that menu is gone. A shortcut is the
+accelerator in the AT-SPI binding, not the Alt mnemonic.
 
 This module does not import ``gi``. Tests drive it with fake accessibles.
 ``file_dialog`` is not implemented here.
@@ -162,14 +164,20 @@ def _has_submenu(node: object) -> bool:
 def shortcut_from_binding(raw: str | None) -> str | None:
     """Render an AT-SPI key binding (``<Control>o``, ``<Primary><Shift>S``) as ``ctrl+o``.
 
-    The first segment that contains a ``<modifier>`` tag wins. A binding with
-    no tag (the keysym half of ``s;keycode;mods``) is returned as that key.
-    Digit-only segments are ignored.
+    GTK joins several fields with ``;``. Mousepad's New item is
+    ``n;<Alt>f:n;<Primary>n``: the letter, the Alt mnemonic path (``f`` then
+    ``n``, which is why a colon is in that field), and the accelerator
+    ``<Primary>n``. The shortcut is that accelerator (``ctrl+n``), not the
+    mnemonic. A colon marks a key sequence, so it loses to a single chord.
+    A binding with no tag (the keysym half of ``s;keycode;mods``) is returned
+    as that key. Digit-only segments are ignored.
     """
     if not raw or not str(raw).strip():
         return None
     parts = [part.strip() for part in str(raw).split(";") if part.strip()]
-    chosen = next((part for part in parts if "<" in part), None)
+    tagged = [part for part in parts if "<" in part]
+    chords = [part for part in tagged if ":" not in part]
+    chosen = chords[-1] if chords else None
     if chosen is None:
         chosen = next((part for part in parts if not part.isdigit()), None)
     if not chosen:
@@ -482,14 +490,65 @@ def menu_state(app: object) -> dict[str, object]:
     return {"open": False, "path": []}
 
 
-def menu_close(app: object) -> list[str]:
-    state = menu_state(app)
-    path = list(state.get("path") or [])
-    if not path:
-        return []
+def _dismiss_menu() -> None:
+    """End GTK menu tracking with Escape.
+
+    Pressing the open bar entry again does not leave menu-tracking mode on
+    GTK (Mousepad on X11). Escape does.
+    """
+    import os
+
+    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
+        from a11y_computer_use.drivers.linux import _wayland_input_error
+
+        raise _wayland_input_error("menu close")
+    from a11y_computer_use.drivers import _linux_input
+
     try:
-        top = _walk(app, str(path[0]))[0]
+        _linux_input.press_chord("escape")
     except ComputerUseError:
-        return path
-    _press(top)
-    return [str(part) for part in path]
+        raise
+    except Exception as exc:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "could not send Escape to close the menu",
+            detail={
+                "reason": "escape_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "hint": "Escape ends GTK menu tracking. Pressing the menu-bar entry again does not.",
+            },
+        ) from exc
+
+
+def menu_close(app: object, *, dismiss=None, state=None, settle=None, attempts: int = 3) -> list[str]:
+    """Close the open menu. Return the path that was open.
+
+    ``dismiss`` ends tracking (Escape on a real session). Success is returned
+    only after `menu_state` says the popup is gone. A menu that is still open
+    raises, so the caller cannot report a closed menu.
+    """
+    read = state or (lambda: menu_state(app))
+    dismiss = dismiss or _dismiss_menu
+    settle = settle or _settle
+    before = read()
+    path = [str(part) for part in (before.get("path") or [])]
+    if not before.get("open") or not path:
+        return []
+    dismiss()
+    after = before
+    for _ in range(attempts):
+        settle(menus.MENU_OPEN_SETTLE_S)
+        after = read()
+        if not after.get("open"):
+            return path
+    still = [str(part) for part in (after.get("path") or path)]
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the menu is still open after Escape; close was not successful",
+        detail={
+            "path": still,
+            "reason": "menu_still_open",
+            "hint": "Pressing the menu-bar entry again does not end GTK menu tracking. "
+                    "Escape was sent and the popup is still showing.",
+        },
+    )

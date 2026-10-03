@@ -74,7 +74,7 @@ def mousepad():
     )
     file_menu = _menu(
         "File",
-        _item("New", key="<Control>n"),
+        _item("New", key="n;<Alt>f:n;<Primary>n"),
         _item("Open…", key="<Primary><Shift>O"),
         Acc("separator", "separator"),
         _item("Save", states={"enabled"}, key="<Control>s"),
@@ -109,6 +109,9 @@ def test_shortcut_binding_renders_gtk_tags() -> None:
     assert _linux_menus.shortcut_from_binding("n;37;4") == "n"
     assert _linux_menus.shortcut_from_binding("") is None
     assert _linux_menus.shortcut_from_binding("0;0;0") is None
+    # Mousepad New: mnemonic path, then the Primary accelerator. Not alt+f:n.
+    assert _linux_menus.shortcut_from_binding("n;<Alt>f:n;<Primary>n") == "ctrl+n"
+    assert _linux_menus.shortcut_from_binding("s;<Control>s;s") == "ctrl+s"
 
 
 def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
@@ -220,9 +223,42 @@ def test_open_menu_state_and_close() -> None:
     app, file_menu = mousepad()
     assert _linux_menus.menu_state(app) == {"open": False, "path": []}
     file_menu.states.add("selected")
+    popup = Acc("popup menu", "", [], states={"showing"})
+    file_menu.children.append(popup)
     assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
-    assert _linux_menus.menu_close(app) == ["File"]
-    assert file_menu.pressed == ["click"]
+    sent: list[str] = []
+
+    def escape() -> None:
+        sent.append("escape")
+        file_menu.states.discard("selected")
+        popup.states.discard("showing")
+
+    assert _linux_menus.menu_close(app, dismiss=escape, settle=lambda _s: None) == ["File"]
+    assert sent == ["escape"]
+    assert file_menu.pressed == []
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+
+
+def test_close_fails_when_the_menu_stays_open() -> None:
+    app, file_menu = mousepad()
+    file_menu.states.add("selected")
+
+    def repress() -> None:
+        # The old close path: click the bar entry and leave it selected.
+        file_menu.pressed.append("click")
+
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_close(app, dismiss=repress, settle=lambda _s: None)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "menu_still_open"
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
+
+
+def test_close_when_nothing_is_open_does_not_dismiss() -> None:
+    app, _file_menu = mousepad()
+    sent: list[str] = []
+    assert _linux_menus.menu_close(app, dismiss=lambda: sent.append("escape"), settle=lambda _s: None) == []
+    assert sent == []
 
 
 def test_driver_lists_and_presses_the_fake_application(monkeypatch) -> None:
@@ -242,6 +278,52 @@ def test_driver_lists_and_presses_the_fake_application(monkeypatch) -> None:
     with pytest.raises(ComputerUseError) as exc:
         driver.menu_items("no-such-app", None)
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
+
+
+def test_driver_close_sends_escape_and_fails_if_the_menu_stays_open(monkeypatch) -> None:
+    app, file_menu = mousepad()
+    file_menu.states.add("selected")
+    sent: list[str] = []
+
+    def find_root(name, scope):
+        assert scope is Scope.APP
+        return app if name == "mousepad" else None
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+
+    monkeypatch.setattr("a11y_computer_use.drivers._atspi.find_root", find_root)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.press_chord", press_chord)
+    monkeypatch.setattr(_linux_menus, "_settle", lambda _seconds: None)
+    driver = LinuxDriver()
+    with pytest.raises(ComputerUseError) as exc:
+        driver.menu_close("mousepad")
+    assert sent == ["escape"]
+    assert exc.value.detail["reason"] == "menu_still_open"
+    assert driver.menu_state("mousepad") == {"open": True, "path": ["File"]}
+    assert file_menu.pressed == []
+
+    def press_and_clear(chord: str) -> None:
+        sent.append(chord)
+        file_menu.states.discard("selected")
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.press_chord", press_and_clear)
+    assert driver.menu_close("mousepad") == ["File"]
+    assert sent[-1] == "escape"
+    assert driver.menu_state("mousepad") == {"open": False, "path": []}
+
+
+def test_close_on_wayland_does_not_report_success(monkeypatch) -> None:
+    app, file_menu = mousepad()
+    file_menu.states.add("selected")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(_linux_menus, "_settle", lambda _seconds: None)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_close(app)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert _linux_menus.menu_state(app) == {"open": True, "path": ["File"]}
+    assert file_menu.pressed == []
 
 
 def test_menu_state_without_a_bus_does_not_raise(monkeypatch) -> None:

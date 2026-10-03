@@ -87,9 +87,11 @@ structured `unsupported` error. The browser has no native menus (drive page
 controls by ref).
 
 Linux `menu` list, press, state, and close walk the AT-SPI menu bar with the
-same path language (`File > Save`). The walk is hermetic-tested on a
-GTK-shaped fake tree (`tests/test_linux_menus.py`) and is not live-verified
-on a desktop session. Linux `file_dialog` is unsupported: the tool result
+same path language (`File > Save`). Shortcuts are the accelerator (`ctrl+n`),
+not the Alt mnemonic. Close sends Escape and errors if the menu is still
+open. The walk is hermetic-tested on a GTK-shaped fake tree
+(`tests/test_linux_menus.py`) and is not live-verified on a desktop session.
+Linux `file_dialog` is unsupported: the tool result
 says GTK and portal file choosers are not driven, and the hint says to open
 the chooser and use the location or name field from a snapshot (Ctrl+L
 focuses the location bar in a GTK 3 chooser).
