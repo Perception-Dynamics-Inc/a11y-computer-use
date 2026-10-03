@@ -28,7 +28,7 @@ from tests.conftest import build_synthetic_snapshot
 APP = "com.test.app"
 
 EXPECTED_TOOLS = {
-    "desktop_snapshot", "find", "screenshot", "zoom", "screen_text", "click", "type", "key",
+    "desktop_snapshot", "find", "screenshot", "zoom", "screen_text", "click", "hover", "type", "key",
     "scroll", "drag",
     "wait_for", "act", "set_value", "scroll_to_find", "app", "window", "clipboard",
     "menu", "file_dialog",

@@ -622,15 +622,33 @@ class _FakeAtspi:
         def get_character_count(acc):
             if getattr(acc, "text_error", False):
                 raise RuntimeError("no text")
+            echo = getattr(acc, "echo", None)
+            if echo is not None:
+                return len(echo)
             return len(acc.text)
 
         @staticmethod
         def get_text(acc, start, end):
             if getattr(acc, "text_error", False):
                 raise RuntimeError("no text")
-            if end < 0 or end > len(acc.text):
-                end = len(acc.text)
-            return acc.text[start:end]
+            # Snapshots use end=-1 and must see the DOM, not a bounded echo.
+            if end is not None and int(end) < 0:
+                return acc.text
+            echo = getattr(acc, "echo", None)
+            if echo is not None and int(end) == len(echo):
+                return echo
+            end_i = len(acc.text) if end is None or int(end) > len(acc.text) else int(end)
+            return acc.text[int(start):end_i]
+
+        @staticmethod
+        def set_selection(acc, _selection_num, start_offset, end_offset):
+            acc.selection = (int(start_offset), int(end_offset))
+            return True
+
+        @staticmethod
+        def add_selection(acc, start_offset, end_offset):
+            acc.selection = (int(start_offset), int(end_offset))
+            return True
 
     Value = _ValueApi
 
@@ -819,10 +837,53 @@ class _ReplacingField:
 
 
 class _AppendingField(_ReplacingField):
-    """Chromium web field: set_text_contents inserts and still returns true."""
+    """Chromium web field on a fake transport.
+
+    ``set_text_contents`` appends to the DOM and still returns true.
+    ``Text.get_text(0, character_count)`` echoes that request (the read 0.4.9
+    treated as success). ``Text.get_text(0, -1)`` is the DOM, which is what a
+    snapshot reads. ``delete_text`` returns true and does nothing unless the
+    whole DOM range was selected first — the adaptor's true is not a clear.
+    """
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.echo: str | None = None
+        self.delete_ranges: list[tuple[int, int]] = []
 
     def set_text_contents(self, text):
         self.text += text
+        self.echo = text
+        return True
+
+    def delete_text(self, start, end):
+        self.deletes += 1
+        self.delete_ranges.append((int(start), int(end)))
+        selected = getattr(self, "selection", None)
+        if selected == (0, len(self.text)) and int(start) == 0 and int(end) >= len(self.text):
+            self.text = ""
+            self.echo = None
+            self.selection = None
+        return True
+
+
+class _KeyClearedWebField(_AppendingField):
+    """``delete_text`` never changes the DOM. ctrl+a and BackSpace do.
+
+    The test applies those chords to the DOM. That effect is the fake, not a
+    live Chrome key delivery.
+    """
+
+    def delete_text(self, start, end):
+        self.deletes += 1
+        self.delete_ranges.append((int(start), int(end)))
+        return True
+
+    def get_component_iface(self):
+        return self
+
+    def grab_focus(self):
+        self.focused = True
         return True
 
 
@@ -851,6 +912,106 @@ def test_set_text_trusts_a_replace_it_cannot_read_back(fake_atspi) -> None:
     assert field.deletes == 0
 
 
+def test_set_text_does_not_trust_a_bounded_read_that_echoes_the_request(fake_atspi, monkeypatch) -> None:
+    """Fake transport only. The bounded read equals the request; the snapshot read does not."""
+    field = _AppendingField("bench-value-0")
+    field.set_text_contents("ALPHA")
+    count = fake_atspi.Text.get_character_count(field)
+    assert fake_atspi.Text.get_text(field, 0, count) == "ALPHA"
+    assert fake_atspi.Text.get_text(field, 0, -1).startswith("bench-value-0")
+    field.text = "bench-value-0"
+    field.echo = None
+    field.deletes = 0
+
+    def keys_are_not_required(_chord: str) -> None:
+        raise AssertionError("selecting the snapshot range already clears this fake field")
+
+    monkeypatch.setattr(_linux_input, "press_chord", keys_are_not_required)
+    assert _atspi.set_text(field, "ALPHA") is True
+    assert field.text == "ALPHA"
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert field.delete_ranges[0] == (0, len("bench-value-0ALPHA"))
+
+
+def test_set_text_uses_x11_keys_when_delete_leaves_the_snapshot_text(fake_atspi, monkeypatch) -> None:
+    """Fake transport only: the chords clear the DOM because the test applies them."""
+    field = _KeyClearedWebField("bench-value-0")
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = ""
+            field.echo = None
+            field.selected_all = False
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert field.focused is True
+    assert sent == ["ctrl+a", "backspace"]
+
+
+def test_set_text_without_editable_text_clears_then_types(fake_atspi, monkeypatch) -> None:
+    """Fake transport only. No EditableText: the test applies the chords and the typing."""
+    field = _KeyClearedWebField("bench-value-0")
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+    typed: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = ""
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        field.text += text
+        field.echo = None
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "BETA") is True
+    assert field.text == "BETA"
+    assert sent == ["ctrl+a", "backspace"]
+    assert typed == ["BETA"]
+
+
+def test_set_text_without_editable_text_on_wayland_does_not_type(fake_atspi, monkeypatch) -> None:
+    field = _KeyClearedWebField("bench-value-0")
+    field.get_editable_text_iface = None
+    typed: list[str] = []
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_linux_input, "type_string", typed.append)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: typed.append(chord))
+    assert _atspi.set_text(field, "BETA") is False
+    assert field.text == "bench-value-0"
+    assert typed == []
+
+
+def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
+    field = _KeyClearedWebField("bench-value-0")
+    sent: list[str] = []
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    assert _atspi.set_text(field, "BETA") is False
+    assert field.text != "BETA"
+    assert sent == []
+
+
 def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:
     web = _AppendingField("earlier")
     pad = _ReplacingField("earlier")
@@ -873,6 +1034,7 @@ def test_line_scroll_of_an_unchanged_list_is_not_success(fake_atspi, xtest_recor
     rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
     _adopt(_Acc("list"), *rows)
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: rows[0])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
     element = Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
     with pytest.raises(ComputerUseError) as error:
         LinuxDriver().scroll(element, dy=1, unit=ScrollUnit.LINES)
@@ -908,6 +1070,176 @@ def test_line_scroll_of_a_text_area_does_not_require_a_list(fake_atspi, xtest_re
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
     assert LinuxDriver().scroll(_body(), dy=1, unit=ScrollUnit.LINES) is None
     assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+
+
+class _CachedRows(_Acc):
+    """Child names stay put until ``clear_cache`` publishes ``pending``.
+
+    Fake-transport stand-in for an AT-SPI child cache filled by the pre-wheel
+    read. ``lag`` is how many ``clear_cache`` calls after ``queue`` still
+    return the old names. ``lag`` 1 publishes on the next clear.
+    """
+
+    def __init__(self, names: list[str]):
+        super().__init__("list")
+        self.pending: list[str] | None = None
+        self.lag = 0
+        self.clears = 0
+        self._show(names)
+
+    def _show(self, names: list[str]) -> None:
+        _adopt(self, *[_Acc("list item", name=name) for name in names])
+
+    def queue(self, names: list[str], *, lag: int = 1) -> None:
+        self.pending = list(names)
+        self.lag = lag
+
+    def clear_cache(self) -> None:
+        self.clears += 1
+        if self.pending is None:
+            return
+        self.lag -= 1
+        if self.lag <= 0:
+            self._show(self.pending)
+            self.pending = None
+
+    def names(self) -> list[str]:
+        return [child.name for child in self.children]
+
+
+def _row_element() -> Element:
+    return Element("e1", "AXRow", "ITEM-001", None, Bounds(0, 10, 20, 100, 18), "snap-1")
+
+
+def test_line_scroll_accepts_a_move_hidden_by_the_child_cache(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Fake transport only. The wheel updates a pending list; names change after clear_cache."""
+    events, _display = xtest_recorder
+    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(1, 9)])
+    anchor = listing.children[0]
+    real = _linux_input.scroll
+
+    def scrolling(x, y, *, dx=0, dy=0):
+        real(x, y, dx=dx, dy=dy)
+        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)])
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
+    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
+    assert listing.names()[0] == "ITEM-012"
+    assert listing.clears >= 2  # the pre-wheel read and the post-wheel read
+    assert events[1:3] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)]
+
+
+def test_line_scroll_waits_for_a_list_that_publishes_on_the_next_read(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Fake transport only. The first refreshed read is still the old rows."""
+    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
+    anchor = listing.children[0]
+    real = _linux_input.scroll
+    sleeps: list[float] = []
+
+    def scrolling(x, y, *, dx=0, dy=0):
+        real(x, y, dx=dx, dy=dy)
+        listing.queue([f"ITEM-{i:03d}" for i in range(12, 20)], lag=2)
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleeps.append)
+    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
+    assert listing.names()[0] == "ITEM-012"
+    assert sleeps  # the first post-wheel read had not published yet
+
+
+def test_line_scroll_of_a_cached_list_that_does_not_move_is_unsupported(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    listing = _CachedRows([f"ITEM-{i:03d}" for i in range(3, 11)])
+    anchor = listing.children[0]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "tree_unchanged"
+    assert listing.names()[0] == "ITEM-003"
+    assert listing.clears >= 2
+
+
+def test_line_scroll_sees_nested_row_labels(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    """A list whose direct children are unnamed groups. Fake transport only."""
+    listing = _Acc("list")
+    labels: list[_Acc] = []
+    groups = []
+    for index in range(1, 9):
+        label = _Acc("label", name=f"ITEM-{index:03d}")
+        group = _Acc("panel")
+        _adopt(group, label)
+        labels.append(label)
+        groups.append(group)
+    _adopt(listing, *groups)
+    real = _linux_input.scroll
+
+    def scrolling(x, y, *, dx=0, dy=0):
+        real(x, y, dx=dx, dy=dy)
+        for offset, label in enumerate(labels):
+            label.name = f"ITEM-{offset + 12:03d}"
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
+    assert LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES) is None
+    assert labels[0].name == "ITEM-012"
+
+
+def test_unchanged_nested_row_labels_are_tree_unchanged(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    listing = _Acc("list")
+    labels = []
+    groups = []
+    for index in range(1, 9):
+        label = _Acc("label", name=f"ITEM-{index:03d}")
+        group = _Acc("panel")
+        _adopt(group, label)
+        labels.append(label)
+        groups.append(group)
+    _adopt(listing, *groups)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: labels[0])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "tree_unchanged"
+    assert labels[0].name == "ITEM-001"
+
+
+def test_line_scrolls_reach_a_later_row_when_each_wheel_moves_the_cached_list(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Fake transport stand-in for scroll_to_find: each accepted wheel advances the window.
+
+    Not the Runtime tool, and not a live Chrome list. The driver must not raise
+    tree_unchanged on a wheel whose rows change once the child cache is cleared,
+    or the find loop stops on the first notch.
+    """
+    window = [f"ITEM-{i:03d}" for i in range(1, 11)]
+    listing = _CachedRows(window)
+    anchor = listing.children[0]
+    real = _linux_input.scroll
+    start = {"n": 1}
+
+    def scrolling(x, y, *, dx=0, dy=0):
+        real(x, y, dx=dx, dy=dy)
+        start["n"] += 10
+        listing.queue([f"ITEM-{i:03d}" for i in range(start["n"], start["n"] + 10)])
+
+    monkeypatch.setattr(_linux_input, "scroll", scrolling)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: anchor)
+    visible: list[str] = []
+    for _ in range(25):
+        LinuxDriver().scroll(_row_element(), dy=5, unit=ScrollUnit.LINES)
+        visible = listing.names()
+        if "ITEM-180" in visible:
+            break
+    assert "ITEM-180" in visible
 
 
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:

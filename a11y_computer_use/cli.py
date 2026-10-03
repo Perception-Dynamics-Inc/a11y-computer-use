@@ -103,11 +103,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="execute one action through the safety layer",
         description=(
             "Execute one JSON action, e.g. '{\"tool\": \"click\", \"x\": 100, "
-            "\"y\": 200}'. The object needs a \"tool\" key (click, type, key, "
-            "scroll, drag, app, window, clipboard); the remaining keys are "
+            "\"y\": 200}'. The object needs a \"tool\" key (click, hover, type, "
+            "key, scroll, drag, app, window, clipboard); the remaining keys are "
             "that tool's parameters. Element refs (and wait_for) need a live "
             "snapshot epoch, which a one-shot process does not have — "
-            "click/scroll/drag take x/y coordinate targets only."
+            "click/hover/scroll/drag take x/y coordinate targets only."
         ),
     )
     run_once.add_argument("action", help="JSON object with a 'tool' key plus parameters")

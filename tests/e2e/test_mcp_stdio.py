@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "zoom",
     "screen_text",
     "click",
+    "hover",
     "type",
     "key",
     "scroll",

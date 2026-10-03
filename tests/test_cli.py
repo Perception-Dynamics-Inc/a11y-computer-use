@@ -139,6 +139,34 @@ def test_run_once_rejects_unknown_tool(capsys, home) -> None:
     assert "unknown tool" in capsys.readouterr().err
 
 
+def test_run_once_accepts_hover_and_does_not_click(capsys, home, fake_front, monkeypatch) -> None:
+    """Fake driver only. run-once used to reject the name before any pointer move."""
+    from a11y_computer_use.drivers import linux as linux_driver
+
+    moved: list = []
+    clicked: list = []
+
+    class _HoverOnly(linux_driver.LinuxDriver):
+        name = "linux"
+
+        def hover(self, target, **kwargs):
+            moved.append((target.x, target.y))
+
+        def click(self, target, **kwargs):
+            clicked.append(target)
+
+    monkeypatch.setattr(drivers, "get_driver", lambda *a, **k: _HoverOnly())
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    safety.PermissionStore(home / ".a11y-computer-use" / "permissions.json").set_tier(
+        FRONT, safety.Tier.CLICK
+    )
+    assert cli.main(["run-once", '{"tool": "hover", "x": 12, "y": 34}']) == 0
+    assert capsys.readouterr().out.strip() == "hovered (12, 34) on display 0"
+    assert moved == [(12, 34)]
+    assert clicked == []
+
+
 def test_run_once_does_not_offer_wait_for(capsys, home) -> None:
     # A one-shot process has no snapshot epoch, so refs can never resolve;
     # advertising wait_for here would be a tool that always fails.

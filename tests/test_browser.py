@@ -571,6 +571,7 @@ def test_mcp_server_exposes_console_and_network_only_on_browser(monkeypatch) -> 
                         lambda *a, **k: type("Bare", (), {"name": "macos"})())
     os_tools = asyncio.run(names(server.build_server()))
     assert "console" not in os_tools and "network" not in os_tools
+    assert "hover" in browser_tools and "hover" in os_tools
 
 
 def test_browser_app_window_clipboard_tools_via_runtime(tmp_path, monkeypatch) -> None:
