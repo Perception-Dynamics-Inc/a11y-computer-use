@@ -44,11 +44,6 @@ def _point_of(target: Target) -> tuple[int, int]:
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
-# Mean absolute channel difference, 0–255, inside the element box. A still
-# grab is 0. The 0.4.11 Chrome retest measured about 8.6 inside the list
-# that moved and 0 outside it. This threshold sits between those.
-_LINE_SCROLL_MOVE_MEAN = 1.0
-
 
 def _on_wayland() -> bool:
     """True on a native Wayland session (WAYLAND_DISPLAY set, no X): XTEST
@@ -76,59 +71,6 @@ def _secure_focus_error(api: str) -> ComputerUseError:
         "the focused element is a password field; secrets are typed by the human",
         detail={"api": api},
     )
-
-
-def _element_box(target: Target) -> tuple[int, int, int, int] | None:
-    """Screen box of an element target, or None for a point or an empty rect."""
-    if not isinstance(target, Element):
-        return None
-    bounds = target.bounds
-    if bounds.width <= 0 or bounds.height <= 0:
-        return None
-    return (int(bounds.x), int(bounds.y), int(bounds.width), int(bounds.height))
-
-
-def _grab_region(box: tuple[int, int, int, int]):
-    """PIL image of ``box`` ``(x, y, width, height)``. Tests replace this.
-
-    This is a screen grab of the element rectangle, not an OCR pass and not
-    an AT-SPI child read. A grab that fails is `unsupported` with
-    ``reason=page_unseen`` rather than a report that the page scrolled.
-    """
-    import os
-
-    x, y, width, height = box
-    try:
-        from PIL import ImageGrab
-
-        return ImageGrab.grab(
-            bbox=(x, y, x + width, y + height),
-            xdisplay=os.environ.get("DISPLAY"),
-        )
-    except ComputerUseError:
-        raise
-    except Exception as exc:
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            "line scroll could not read the target region, so it cannot tell whether the page moved",
-            detail={"reason": "page_unseen", "error": str(exc)},
-        ) from exc
-
-
-def _region_mean_change(before, after) -> float | None:
-    """Mean absolute RGB difference of two grabs, or None when they cannot be compared."""
-    if before is None or after is None:
-        return None
-    from PIL import ImageChops, ImageStat
-
-    left = before.convert("RGB")
-    right = after.convert("RGB")
-    if left.size != right.size:
-        return None
-    means = ImageStat.Stat(ImageChops.difference(left, right)).mean
-    if not means:
-        return None
-    return sum(means) / len(means)
 
 
 class LinuxDriver:
@@ -191,8 +133,12 @@ class LinuxDriver:
         def _do() -> Snapshot:
             root = _atspi.find_root(app, scope)  # None -> empty snapshot
             pid = _atspi.pid_of(root) if root is not None else None
+            accessor = _atspi.ATSPIAccessor()
+            # Chromium lists: the snapshot scroll_to_find searches lists the
+            # rows a layout hit-test places in the box, not the cached children.
+            accessor.refresh_visible(root)
             return observe.build_snapshot(
-                root, _atspi.ATSPIAccessor(), scope=scope, app=app, pid=pid,
+                root, accessor, scope=scope, app=app, pid=pid,
                 geometry=_atspi.primary_geometry(),
             )
 
@@ -306,22 +252,21 @@ class LinuxDriver:
 
         ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
-        On an element, the wheel is judged by the pixels in that element's
-        box, grabbed after the pointer is already there and again after the
-        notches. Chrome can move the list on screen while the AT-SPI snapshot
-        keeps the same rows, so a child-name or child-cache read is not the
-        check. A box whose mean absolute difference is above
-        ``_LINE_SCROLL_MOVE_MEAN`` is a success and ``scroll_to_find`` can
-        keep going. A box that does not change raises `unsupported` with
-        ``reason=page_unchanged``: the notches were sent, and a still page is
-        not reported as a scroll. A coordinate target has no box and is not
-        checked. ``unit=pixels`` writes the AT-SPI scroll-bar value by that
-        delta and reads it back. It does not grab the region and does not
-        send notches. GTK scrolled windows expose the value in pixels. A
-        missing bar, or a write that jumps or does not stick, raises
-        `unsupported`. A shorter write is kept when one more pixel will not
-        move (the bar is at its end). Pixel scroll does not need XTEST, so it
-        is available on Wayland when a scroll bar is exposed.
+        On a Chromium list, the wheel is a success only when a layout hit-test
+        of that list's box returns a different row sequence. ``snapshot`` reads
+        those same rows, which is what ``scroll_to_find`` searches. The cached
+        children are not the check: Chrome can leave them on the pre-wheel
+        names while the layout hit-test has moved. A sequence that does not
+        change raises `unsupported` with ``reason=page_unchanged``; the notches
+        were sent, and a still page is not reported as a scroll. A coordinate
+        target and a non-Chromium element are not checked. ``unit=pixels``
+        writes the AT-SPI scroll-bar value by that delta and reads it back. It
+        does not hit-test the list and does not send notches. GTK scrolled
+        windows expose the value in pixels. A missing bar, or a write that
+        jumps or does not stick, raises `unsupported`. A shorter write is kept
+        when one more pixel will not move (the bar is at its end). Pixel scroll
+        does not need XTEST, so it is available on Wayland when a scroll bar is
+        exposed.
         """
         if dry_run:
             return None
@@ -332,29 +277,30 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("scroll")
-        from a11y_computer_use.drivers import _linux_input
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_input
 
         self._focused_editable = None
         x, y = _point_of(target)
-        box = _element_box(target) if int(dx) or int(dy) else None
-        if box is not None:
-            # The pointer move itself would change the box. Park it first,
-            # then grab, then wheel, then grab again.
-            _linux_input.hover(x, y)
-            before = _grab_region(box)
+        handle = None
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        before = None
+        if handle is not None and (int(dx) or int(dy)):
+            before = self._run(lambda: _atspi.visible_row_names(handle))
         _linux_input.scroll(x, y, dx=dx, dy=dy)
-        if box is not None:
-            mean = _region_mean_change(before, _grab_region(box))
-            if mean is None or mean <= _LINE_SCROLL_MOVE_MEAN:
+        if before is not None:
+            after = self._run(lambda: _atspi.wait_for_row_change(handle, before))
+            if after is None or after == before:
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
-                    "the page did not move after the wheel scroll",
+                    "the rows on screen did not change after the wheel scroll",
                     detail={
                         "reason": "page_unchanged",
                         "unit": "lines",
                         "dx": int(dx),
                         "dy": int(dy),
-                        "mean_abs": None if mean is None else round(mean, 3),
+                        "rows": list(before[:8]),
                     },
                 )
         return None
