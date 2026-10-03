@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.14] - 2026-10-03
+
+### Fixed
+
+- Linux line scroll on a Chromium list no longer treats the grab taken in the same turn as the wheel as the whole pixel check. On the 0.4.13 retest that one sample was `mean_abs` 0.0, so `scroll_to_find` ITEM-180 and a 3-line scroll both returned `unsupported` with `reason=page_unchanged`, while the list on screen had moved (a later list-region measure was 6.13, then 5.90). The snapshot stayed on ITEM-001, including 5.6 seconds after the call returned, because a rejected scroll does not replace the confirmed rows. The driver now resamples the same list box until the mean absolute difference clears the still-page threshold or the samples run out. A sample run that stays still is still `unsupported` with `reason=page_unchanged` and does not install a new head. A difference is not success by itself: the snapshot head below the top sliver still has to leave the pre-wheel row. `unit=pixels` is unchanged. Synthetic hit tests and solid grabs, not a live Chrome run (#33) (2026-10-03).
+
 ## [0.4.13] - 2026-10-03
 
 ### Fixed
