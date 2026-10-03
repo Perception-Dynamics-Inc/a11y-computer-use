@@ -27,7 +27,7 @@ Coordinates need no projection either: `AtspiComponent.get_extents(SCREEN)` retu
 | `scroll_into_view` | `AtspiComponent.scroll_to(ScrollType.ANYWHERE)` | `AXScrollToVisible` / `ScrollItemPattern.ScrollIntoView` |
 | `click` | XTEST via python-xlib: absolute XTEST `MotionNotify` + `ButtonPress/Release`; modifier-clicks bracket with keysym press/release (`held()`) | `CGEvent` mouse / `SendInput(MOUSEINPUT)` |
 | `drag` | XTEST: absolute motion → `ButtonPress` → absolute motion → `ButtonRelease` | `CGEvent` drag / `SendInput` |
-| `scroll` | XTEST wheel = X buttons **4/5** (vertical) and **6/7** (horizontal); one button tap per notch | `CGEventScrollWheel` / `MOUSEEVENTF_WHEEL` |
+| `scroll` | `unit=lines`: XTEST wheel buttons **4/5** (vertical) and **6/7** (horizontal), one notch per unit. `unit=pixels`: AT-SPI `Value.set_current_value` on the nearest scroll bar by that delta (GTK scrolled windows expose the value in pixels); the write is read back, and a missing bar or a mismatch is `unsupported` with no notches sent. Covered by synthetic tests, not a live scrollbar run | macOS `CGEventScrollWheel` line vs pixel units / Windows `MOUSEEVENTF_WHEEL` (wheel not implemented) |
 | `type_text` | AT-SPI `EditableText.insert_text` on the remembered editable after verifying its owner matches the frontmost app. No widget focus is required, but missing/mismatched app ownership returns `focus_changed`; use explicit `set_value` without a detectable frontmost app. Coordinate/key/app/window changes clear the remembered target. Otherwise XTEST uses a prepared Unicode keymap and paced keystrokes. | `CGEventKeyboardSetUnicodeString` / `KEYEVENTF_UNICODE` |
 | `key_chord` | XTEST via python-xlib: chord → X keysyms (`keysymdef.h` table) → keycodes → modifier `KeyPress`es, key press/release, modifier `KeyRelease`s; `validate_chord` fails fast on dry-run. (Real widget focus is needed for chords to land, so a full desktop session, not headless, is where they apply.) | `_US_KEYCODES` / VK codes via `SendInput` |
 | `wait_for` | platform-free poll of the Runtime-supplied checker (re-resolution goes through `resolve_ref`); structured `TIMEOUT` | identical loop on all three OSes |
@@ -68,7 +68,8 @@ with a single manual check behind it, matching the ◐ rows in README.md.
 | implicit type (focused) | refuses with `focus_changed` if frontmost ownership cannot be verified | The earlier manual typing result predates the ownership guard. |
 | screenshot / zoom | ◐ manual check 2026-08-29 (`grim` screenshot); zoom not covered, no test | `grim` (wlroots ext-image-copy-capture); PIL X11 grab off |
 | org.a11y.Status force-enable | ◐ implemented; not covered by the manual check, no test | D-Bus session bus |
-| click(x,y) / drag / wheel scroll / key_chord | ⛔ `unsupported` | XTEST is X11-only → structured `ErrorCode.UNSUPPORTED` with a hint to use ref-based actions; libei/RemoteDesktop-portal input is the session-gated follow-up |
+| click(x,y) / drag / `scroll` `unit=lines` / key_chord | ⛔ `unsupported` | XTEST is X11-only → structured `ErrorCode.UNSUPPORTED` with a hint to use ref-based actions; libei/RemoteDesktop-portal input is the session-gated follow-up |
+| `scroll` `unit=pixels` | implemented when a scroll bar is exposed; `unsupported` when none is. Not part of the 2026-08-29 sway check; synthetic tests only | AT-SPI `Value` on the scroll bar. No XTEST and no pointer move |
 
 ◐ = implemented; checked by hand once, not asserted by any test or CI job.
 

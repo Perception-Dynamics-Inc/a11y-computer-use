@@ -228,7 +228,24 @@ class LinuxDriver:
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
                dry_run: bool = False) -> object:
+        """Scroll ``target``.
+
+        ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
+        6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
+        ``unit=pixels`` writes the AT-SPI scroll-bar value by that delta and
+        reads it back. GTK scrolled windows expose the value in pixels. A
+        missing bar, or a write that jumps or does not stick, raises
+        `unsupported` — notches are not sent, and the runtime only then says
+        "pixels". A shorter write is kept when one more pixel will not move
+        (the bar is at its end). Pixel scroll does not need XTEST, so it is
+        available on Wayland when a scroll bar is exposed.
+        """
         if dry_run:
+            return None
+        resolved = ScrollUnit(unit)
+        if resolved is ScrollUnit.PIXELS:
+            self._focused_editable = None
+            self._scroll_pixels(target, dx=int(dx), dy=int(dy))
             return None
         if _on_wayland():
             raise _wayland_input_error("scroll")
@@ -238,6 +255,40 @@ class LinuxDriver:
         x, y = _point_of(target)
         _linux_input.scroll(x, y, dx=dx, dy=dy)
         return None
+
+    def _scroll_pixels(self, target: Target, *, dx: int, dy: int) -> None:
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if dx == 0 and dy == 0:
+            return
+        handle = None
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        x, y = _point_of(target)
+
+        def do() -> bool:
+            if handle is not None and _atspi.scroll_by_pixels(handle, dx=dx, dy=dy):
+                return True
+            return _atspi.scroll_at_point(x, y, dx=dx, dy=dy)
+
+        if self._run(do):
+            return
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "pixel scroll needs an accessible scroll bar; wheel notches were not sent",
+            detail={
+                "unit": "pixels",
+                "dx": dx,
+                "dy": dy,
+                "api": "AT-SPI Value.set_current_value on a scroll bar",
+                "hint": "The delta is applied to the scroll bar's accessible value, "
+                        "which GTK scrolled windows expose in pixels, and the write "
+                        "must read back as that delta. Pass a ref inside a scrolled "
+                        "view that exposes a scroll bar, or use unit=lines for one "
+                        "X11 wheel notch per unit.",
+            },
+        )
 
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:

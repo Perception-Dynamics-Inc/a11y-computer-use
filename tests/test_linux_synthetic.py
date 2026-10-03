@@ -15,9 +15,20 @@ import math
 
 import pytest
 
+from a11y_computer_use import observe
 from a11y_computer_use.drivers import _atspi, _linux_input
+from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.observe import DisplayGeometry, RawNode, build_snapshot
-from a11y_computer_use.schema import Display, Scope
+from a11y_computer_use.schema import (
+    Bounds,
+    ComputerUseError,
+    Display,
+    Element,
+    ErrorCode,
+    Point,
+    Scope,
+    ScrollUnit,
+)
 
 
 def test_role_map_covers_common_atspi_roles() -> None:
@@ -462,3 +473,287 @@ def test_binding_failure_restores_keymap_without_partial_text(xtest_recorder, mo
     assert events == []
     assert display.remapped[0][1] == ord("@")
     assert not any(display.keymap[display.remapped[0][0]])
+
+
+# --- scroll units: lines are wheel notches, pixels are scroll-bar values ------
+
+
+class _States:
+    def __init__(self, names):
+        self.names = set(names)
+
+    def contains(self, member):
+        return member in self.names
+
+
+class _Rect:
+    def __init__(self, width, height):
+        self.x = 0.0
+        self.y = 0.0
+        self.width = width
+        self.height = height
+
+
+class _Geom:
+    def __init__(self, width, height):
+        self._rect = _Rect(width, height)
+
+    def get_extents(self, _coord):
+        return self._rect
+
+
+class _Hit:
+    def __init__(self, child):
+        self.child = child
+
+    def get_accessible_at_point(self, _x, _y, _coord):
+        return self.child
+
+
+class _Acc:
+    """A stand-in accessible: role, children, and an AT-SPI Value."""
+
+    def __init__(self, role, *, states=(), value=0.0, minimum=0.0, maximum=1000.0,
+                 visual_max=None, width=0.0, height=0.0, jump=None):
+        self.role = role
+        self.states = set(states)
+        self.value = float(value)
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+        self.visual_max = float(self.maximum if visual_max is None else visual_max)
+        self.children: list[_Acc] = []
+        self.parent: _Acc | None = None
+        self.component = _Geom(width, height) if (width or height) else None
+        self.jump = jump
+
+    def get_role_name(self):
+        return self.role
+
+    def get_parent(self):
+        return self.parent
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_component_iface(self):
+        return self.component
+
+
+def _adopt(parent: _Acc, *children: _Acc) -> _Acc:
+    parent.children = list(children)
+    for child in children:
+        child.parent = parent
+    return parent
+
+
+class _ValueApi:
+    @staticmethod
+    def get_current_value(acc):
+        return acc.value
+
+    @staticmethod
+    def get_minimum_value(acc):
+        return acc.minimum
+
+    @staticmethod
+    def get_maximum_value(acc):
+        return acc.maximum
+
+    @staticmethod
+    def set_current_value(acc, new):
+        if acc.jump is not None:
+            acc.value = acc.value + acc.jump
+            acc.jump = None
+            return True
+        upper = min(acc.maximum, acc.visual_max)
+        acc.value = min(max(float(new), acc.minimum), upper)
+        return True
+
+
+class _FakeAtspi:
+    desktop = None
+
+    class StateType:
+        VERTICAL = "VERTICAL"
+        HORIZONTAL = "HORIZONTAL"
+
+    class CoordType:
+        SCREEN = 1
+
+    Value = _ValueApi
+
+    @staticmethod
+    def get_desktop(_index):
+        return _FakeAtspi.desktop
+
+
+@pytest.fixture
+def fake_atspi(monkeypatch):
+    _FakeAtspi.desktop = None
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _FakeAtspi)
+    yield _FakeAtspi
+    _FakeAtspi.desktop = None
+
+
+def _scrolled_text():
+    """text inside viewport inside a scroll pane that owns both bars."""
+    text = _Acc("text")
+    viewport = _Acc("viewport")
+    vertical = _Acc(
+        "scroll bar", states=("VERTICAL",), value=100, minimum=0, maximum=2000,
+        width=14, height=400,
+    )
+    horizontal = _Acc(
+        "scroll bar", states=("HORIZONTAL",), value=40, minimum=0, maximum=2000,
+        width=400, height=14,
+    )
+    _adopt(viewport, text)
+    _adopt(_Acc("scroll pane"), viewport, vertical, horizontal)
+    return text, vertical, horizontal
+
+
+def _body(ref="e4"):
+    return Element(ref, "AXTextArea", "Body", "hello", Bounds(0, 10, 20, 200, 120), "snap-1")
+
+
+def test_pixel_scroll_sets_each_bar_by_the_requested_delta(fake_atspi) -> None:
+    text, vertical, horizontal = _scrolled_text()
+    assert _atspi.scroll_by_pixels(text, dx=5, dy=3) is True
+    assert vertical.value == 103  # positive dy: content up, bar value increases
+    assert horizontal.value == 45
+
+
+def test_pixel_scroll_rejects_a_notch_sized_jump_and_restores(fake_atspi) -> None:
+    text, vertical, _horizontal = _scrolled_text()
+    vertical.jump = 175  # the 0.4.5 wheel-notch step, not +3
+    assert _atspi.scroll_by_pixels(text, dy=3) is False
+    assert vertical.value == 100
+
+
+def test_pixel_scroll_keeps_a_clamp_at_the_toolkit_limit(fake_atspi) -> None:
+    text, vertical, _horizontal = _scrolled_text()
+    vertical.value = 100
+    vertical.visual_max = 110  # GTK reports maximum=upper, then clamps to upper-page
+    assert _atspi.scroll_by_pixels(text, dy=50) is True
+    assert vertical.value == 110
+
+
+def test_pixel_scroll_skips_a_zero_range_bar(fake_atspi) -> None:
+    text = _Acc("text")
+    dead = _Acc(
+        "scroll bar", states=("VERTICAL",), value=0, minimum=0, maximum=0,
+        width=10, height=80,
+    )
+    real = _Acc(
+        "scroll bar", states=("VERTICAL",), value=20, minimum=0, maximum=500,
+        width=14, height=300,
+    )
+    _adopt(_Acc("scroll pane"), text, dead, real)
+    assert _atspi.scroll_by_pixels(text, dy=4) is True
+    assert dead.value == 0 and real.value == 24
+
+
+def test_pixel_scroll_uses_extents_when_the_bar_has_no_orientation_state(fake_atspi) -> None:
+    text = _Acc("text")
+    bar = _Acc("scroll bar", value=5, minimum=0, maximum=100, width=12, height=200)
+    _adopt(_Acc("scroll pane"), text, bar)
+    assert _atspi.scroll_by_pixels(text, dy=-2) is True
+    assert bar.value == 3
+
+
+def test_pixel_scroll_does_not_treat_a_slider_as_a_scroll_bar(fake_atspi) -> None:
+    text = _Acc("text")
+    slider = _Acc("slider", states=("VERTICAL",), value=1, minimum=0, maximum=10, width=20, height=100)
+    _adopt(_Acc("pane"), text, slider)
+    assert _atspi.scroll_by_pixels(text, dy=1) is False
+    assert slider.value == 1
+
+
+def test_pixel_scroll_rolls_back_the_axis_that_already_landed(fake_atspi) -> None:
+    text, vertical, horizontal = _scrolled_text()
+    horizontal.jump = 80
+    assert _atspi.scroll_by_pixels(text, dx=5, dy=3) is False
+    assert vertical.value == 100 and horizontal.value == 40
+
+
+def test_scroll_at_point_hit_tests_then_sets_the_bar(fake_atspi) -> None:
+    text, vertical, _horizontal = _scrolled_text()
+    desktop = _Acc("desktop frame")
+    desktop.component = _Hit(text)
+    fake_atspi.desktop = desktop
+    assert _atspi.scroll_at_point(15, 25, dy=3) is True
+    assert vertical.value == 103
+
+
+def test_driver_coordinate_pixel_scroll_hit_tests_without_a_ref(fake_atspi, xtest_recorder) -> None:
+    events, _display = xtest_recorder
+    text, vertical, _horizontal = _scrolled_text()
+    desktop = _Acc("desktop frame")
+    desktop.component = _Hit(text)
+    fake_atspi.desktop = desktop
+    LinuxDriver().scroll(Point(0, 15, 25), dy=3, unit=ScrollUnit.PIXELS)
+    assert events == []
+    assert vertical.value == 103
+
+
+def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder) -> None:
+    events, _display = xtest_recorder
+    LinuxDriver().scroll(Point(0, 30, 40), dx=-1, dy=2, unit=ScrollUnit.LINES)
+    assert events[0] == (_X_MOTION, 0, 30, 40)
+    assert events[1:5] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)] * 2
+    assert events[5:] == [(_X_BPRESS, 6, 0, 0), (_X_BRELEASE, 6, 0, 0)]
+
+
+def test_driver_pixel_scroll_does_not_send_wheel_notches(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    events, _display = xtest_recorder
+    text, vertical, horizontal = _scrolled_text()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: text)
+    LinuxDriver().scroll(_body(), dx=5, dy=3, unit="pixels")
+    assert events == []
+    assert vertical.value == 103 and horizontal.value == 45
+
+
+def test_driver_pixel_scroll_without_a_bar_is_unsupported(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    events, _display = xtest_recorder
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Acc("text"))
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(_body(), dy=3, unit=ScrollUnit.PIXELS)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert "wheel notches were not sent" in error.value.message
+    assert error.value.detail["unit"] == "pixels"
+    assert events == []
+
+
+def test_pixel_scroll_on_wayland_uses_the_bar_and_lines_stay_unsupported(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    events, _display = xtest_recorder
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    with pytest.raises(ComputerUseError) as error:
+        LinuxDriver().scroll(Point(0, 8, 9), dy=1, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert events == []
+
+    text, vertical, _horizontal = _scrolled_text()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: text)
+    LinuxDriver().scroll(_body(), dy=3, unit=ScrollUnit.PIXELS)
+    assert vertical.value == 103
+    assert events == []
+
+
+def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:
+    events, _display = xtest_recorder
+    text, vertical, _horizontal = _scrolled_text()
+    driver = LinuxDriver()
+    driver._focused_editable = text
+    assert driver.scroll(_body(), dy=3, unit=ScrollUnit.PIXELS, dry_run=True) is None
+    assert driver._focused_editable is text
+    assert vertical.value == 100
+    assert events == []

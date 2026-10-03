@@ -640,3 +640,287 @@ def scroll_to(acc) -> bool:
         return False
     stype = getattr(getattr(Atspi, "ScrollType", None), "ANYWHERE", 0)
     return bool(_call_first(comp, ("scroll_to",), stype, default=False))
+
+
+# Pixel scroll walks a few ancestors and their immediate children looking for
+# scroll bars. A text buffer can report thousands of children; cap the walk so
+# one pixel scroll cannot turn into a full-tree D-Bus crawl.
+_MAX_SCROLL_ANCESTORS = 16
+_MAX_SCROLL_NODES = 48
+_SCROLL_BAR_ROLE = "scroll bar"
+
+
+def _child_count(acc) -> int:
+    try:
+        return int(_call_first(acc, ("get_child_count", "get_childCount"), default=0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _child_at(acc, index: int):
+    return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
+
+
+def _parent_of(acc):
+    return _call_first(acc, ("get_parent", "getParent"))
+
+
+def _is_scroll_bar(acc) -> bool:
+    return _role_name(acc) == _SCROLL_BAR_ROLE
+
+
+def _collect_scrollbars(start) -> list:
+    """Scroll bars on ``start`` and its ancestors, nearest first.
+
+    GTK puts the bars on the scroll pane, beside the viewport that holds the
+    text, so the pane is an ancestor of the content and the bars are its
+    children. A busy window is only peeked at (first children), which is
+    enough to see a scroll pane sitting next to a toolbar."""
+    found: list = []
+    seen: set[int] = set()
+    visits = 0
+
+    def consider(acc) -> None:
+        nonlocal visits
+        if acc is None or visits >= _MAX_SCROLL_NODES:
+            return
+        marker = id(acc)
+        if marker in seen:
+            return
+        seen.add(marker)
+        visits += 1
+        if _is_scroll_bar(acc):
+            found.append(acc)
+
+    node = start
+    for _ in range(_MAX_SCROLL_ANCESTORS):
+        if node is None or visits >= _MAX_SCROLL_NODES:
+            break
+        consider(node)
+        count = _child_count(node)
+        limit = count if count <= 16 else 12
+        for i in range(limit):
+            if visits >= _MAX_SCROLL_NODES:
+                break
+            child = _child_at(node, i)
+            consider(child)
+            if child is None or _is_scroll_bar(child):
+                continue
+            nested = _child_count(child)
+            if 0 < nested <= 8:
+                for j in range(nested):
+                    if visits >= _MAX_SCROLL_NODES:
+                        break
+                    consider(_child_at(child, j))
+        node = _parent_of(node)
+    return found
+
+
+def _state_contains(acc, name: str) -> bool:
+    Atspi = _atspi()
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return False
+    member = getattr(getattr(Atspi, "StateType", None), name, None)
+    if member is None:
+        return False
+    return bool(_safe(lambda: sset.contains(member), False))
+
+
+def _bar_axis(acc) -> str | None:
+    """'vertical' or 'horizontal' from AT-SPI state, else the bar's extents."""
+    vertical = _state_contains(acc, "VERTICAL")
+    horizontal = _state_contains(acc, "HORIZONTAL")
+    if vertical and not horizontal:
+        return "vertical"
+    if horizontal and not vertical:
+        return "horizontal"
+    _position, size = _extents(acc)
+    if not size:
+        return None
+    width, height = size
+    if height > width:
+        return "vertical"
+    if width > height:
+        return "horizontal"
+    return None
+
+
+def _value_call(names: tuple[str, ...], acc, *args):
+    """Call the first `Atspi.Value` class method in ``names`` (binding-tolerant)."""
+    value_iface = getattr(_atspi(), "Value", None)
+    if value_iface is None:
+        return None
+    for name in names:
+        method = getattr(value_iface, name, None)
+        if method is not None:
+            return _safe(lambda m=method: m(acc, *args))
+    return None
+
+
+def _read_value(acc) -> float | None:
+    raw = _value_call(("get_current_value", "getCurrentValue"), acc)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _value_bound(acc, names: tuple[str, ...], fallback: float) -> float:
+    raw = _value_call(names, acc)
+    if raw is None:
+        return fallback
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _write_value(acc, value: float) -> None:
+    _value_call(("set_current_value", "setCurrentValue"), acc, float(value))
+
+
+def _nudge_scrollbar(acc, delta: int, *, current: float) -> bool:
+    """Set ``acc``'s value by ``delta`` and require the read-back to match.
+
+    A zero-range bar (nothing to scroll) is not a success: the caller tries
+    the next bar. A bar already at the limit we know about reports success
+    without moving. A toolkit that clamps short of the reported maximum
+    (GTK's maximum is often ``upper``, while the visible end is
+    ``upper - page_size``) is a success only if one more pixel will not move.
+    A write that jumps farther than the request (a wheel notch, a page) is
+    undone and rejected.
+    """
+    minimum = _value_bound(acc, ("get_minimum_value", "getMinimumValue"), current)
+    maximum = _value_bound(acc, ("get_maximum_value", "getMaximumValue"), current)
+    if minimum > maximum:
+        minimum, maximum = maximum, minimum
+    target = min(max(current + float(delta), minimum), maximum)
+    expected = target - current
+    if abs(expected) < 0.5 and abs(float(delta)) >= 1 and (maximum - minimum) < 1.0:
+        return False
+    _write_value(acc, target)
+    updated = _read_value(acc)
+    if updated is None:
+        _write_value(acc, current)
+        return False
+    actual = updated - current
+    tolerance = max(1.0, abs(expected) * 0.05)
+    if abs(actual - expected) <= tolerance:
+        return True
+    undershoot = abs(actual) + 0.5 < abs(expected) and (
+        (delta > 0 and actual > 0.5) or (delta < 0 and actual < -0.5)
+    )
+    if undershoot and _stuck_at_limit(acc, updated, delta):
+        return True
+    if abs(actual) >= 0.5:
+        _write_value(acc, current)
+    return False
+
+
+def _stuck_at_limit(acc, updated: float, delta: int) -> bool:
+    """True when one more pixel from ``updated`` does not move the bar.
+
+    If the probe moves, ``updated`` is written back and this returns False;
+    the caller then restores the pre-nudge value. A short write stays only
+    when that extra pixel does not move."""
+    step = 1.0 if delta > 0 else -1.0
+    _write_value(acc, updated + step)
+    probed = _read_value(acc)
+    if probed is None:
+        _write_value(acc, updated)
+        return False
+    if abs(probed - updated) >= 0.5:
+        _write_value(acc, updated)
+        return False
+    return True
+
+
+def _apply_axis(bars, axis: str, delta: int) -> tuple[object, float] | None:
+    """Nudge the nearest ``axis`` bar. Returns (bar, previous value) on success."""
+    for bar in bars:
+        if _bar_axis(bar) != axis:
+            continue
+        before = _read_value(bar)
+        if before is None:
+            continue
+        if _nudge_scrollbar(bar, delta, current=before):
+            return bar, before
+    return None
+
+
+def scroll_by_pixels(acc, *, dx: int = 0, dy: int = 0) -> bool:
+    """Move ``acc``'s scroll bars by ``dx``/``dy`` via AT-SPI Value.
+
+    Positive ``dy`` increases the vertical bar (content moves up). Positive
+    ``dx`` increases the horizontal bar (content moves left). GTK scrolled
+    windows expose that value in pixels, so a write of +3 that reads back as
+    +3 is a 3-pixel scroll. Returns False when a requested axis has no bar,
+    or when the value that reads back is not the requested delta. Does not
+    send wheel events. On a partial failure the bars already written are put
+    back.
+    """
+    dx, dy = int(dx), int(dy)
+    if dx == 0 and dy == 0:
+        return True
+    if acc is None:
+        return False
+    bars = _collect_scrollbars(acc)
+    applied: list[tuple[object, float]] = []
+    for axis, delta in (("vertical", dy), ("horizontal", dx)):
+        if not delta:
+            continue
+        done = _apply_axis(bars, axis, delta)
+        if done is None:
+            for prev, old in reversed(applied):
+                _write_value(prev, old)
+            return False
+        applied.append(done)
+    return True
+
+
+def _accessible_at_point(x: int, y: int):
+    """Deepest accessible under screen point ``(x, y)``, or None."""
+    Atspi = _atspi()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    found = _deepest_at_point(desktop, int(x), int(y), 0, set())
+    if found is None or found is desktop:
+        return None
+    return found
+
+
+def _deepest_at_point(acc, x: int, y: int, depth: int, seen: set[int]):
+    if acc is None or depth > 24:
+        return None
+    marker = id(acc)
+    if marker in seen:
+        return None if depth == 0 else acc
+    seen.add(marker)
+    comp = _component(acc)
+    if comp is None:
+        return None if depth == 0 else acc
+    coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
+    child = _call_first(
+        comp, ("get_accessible_at_point", "getAccessibleAtPoint"), x, y, coord
+    )
+    if child is None or id(child) in seen:
+        return None if depth == 0 else acc
+    nested = _deepest_at_point(child, x, y, depth + 1, seen)
+    return nested if nested is not None else child
+
+
+def scroll_at_point(x: int, y: int, *, dx: int = 0, dy: int = 0) -> bool:
+    """Pixel-scroll whatever accessible is under screen point ``(x, y)``.
+
+    Hit-tests with ``Component.get_accessible_at_point`` and then applies
+    `scroll_by_pixels`. Returns False when the point hits nothing that
+    exposes a scroll bar — the caller must not fall back to wheel notches.
+    """
+    acc = _accessible_at_point(int(x), int(y))
+    if acc is None:
+        return False
+    return scroll_by_pixels(acc, dx=dx, dy=dy)

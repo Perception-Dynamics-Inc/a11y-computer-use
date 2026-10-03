@@ -397,8 +397,11 @@ def _hops(x1: int, y1: int, x2: int, y2: int) -> list[tuple[int, int]]:
 
 
 def scroll(x: int, y: int, *, dx: int = 0, dy: int = 0) -> None:
-    """Wheel scroll at (x, y): X buttons 4/5 = vertical, 6/7 = horizontal.
-    One button tap per notch; positive dy scrolls content up (wheel down)."""
+    """Wheel-notch scroll at (x, y): X buttons 4/5 vertical, 6/7 horizontal.
+
+    One button tap per integer unit. This is the ``unit=lines`` path.
+    ``LinuxDriver`` must not call it for ``unit=pixels``: a notch is not a
+    pixel. Positive dy scrolls content up (wheel down)."""
     from Xlib import X
 
     _move(x, y)
