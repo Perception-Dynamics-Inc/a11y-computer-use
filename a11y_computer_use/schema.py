@@ -346,6 +346,17 @@ class Click:
 
 
 @dataclass(frozen=True, slots=True)
+class Hover:
+    """Move the pointer onto a target and deliver a hover, with no button.
+
+    This is the motion a tooltip or a hover-opened menu listens for. It is
+    not a click and not a drag: the button stays up.
+    """
+
+    target: Target
+
+
+@dataclass(frozen=True, slots=True)
 class Drag:
     """Press at ``start``, move through ``path`` (optional waypoints), release at ``end``.
 
@@ -588,6 +599,7 @@ class WebMcpOp:
 #: the type ``safety.check_action`` receives and the audit log records.
 Action: TypeAlias = (
     Click
+    | Hover
     | Drag
     | Scroll
     | TypeText

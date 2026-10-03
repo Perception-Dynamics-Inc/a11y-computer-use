@@ -71,6 +71,7 @@ from a11y_computer_use.schema import (
     AppVerb,
     Bounds,
     Click,
+    Hover,
     ClipboardOp,
     ClipboardVerb,
     ComputerUseError,
@@ -1980,6 +1981,37 @@ class Runtime:
         msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
         return f"{msg}\n\neffect: {effect}" if effect else msg
+
+    @_serialized
+    def hover(
+        self,
+        x: int | None = None,
+        y: int | None = None,
+        display_id: int | None = None,
+        ref: str | None = None,
+    ) -> str:
+        """Move the pointer to a point and deliver a hover, with no button.
+
+        Linux only. A tooltip or a menu that opens on hover can be driven
+        from here. Click, right-click, double-click, and drag are separate
+        paths and are not used.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "hover is available on Linux only",
+                detail={"driver": getattr(self.driver, "name", "?")},
+            )
+        target, app = self._target(ref, x, y, display_id, kind="hover")
+        action = Hover(target=target)
+
+        def execute() -> None:
+            self._recheck_target(app, target)
+            self._guard_user(app)
+            self.driver.hover(target)
+
+        self._run_gated(action, app, execute)
+        return f"hovered {self._label(ref, target)}"
 
     def _background_target(self, app: str | None) -> tuple[str, int] | None:
         """(bundle, pid) to address keyboard input to, or None for the

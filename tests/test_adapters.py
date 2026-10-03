@@ -371,6 +371,39 @@ def test_click_variants_map_button_and_count(anthropic, fake, action, button, co
     assert target == Point(1, 12, 25)
 
 
+def test_linux_mouse_move_hovers_without_a_click(runtime, fake) -> None:
+    """On Linux, mouse_move and move deliver a hover at the physical point.
+    No button is pressed. Other drivers still only record the position."""
+    fake.name = "linux"
+    fake.calls["hover"] = []
+
+    def hover(target, *, dry_run=False):
+        fake.calls["hover"].append(target)
+
+    fake.hover = hover
+    anthropic = AnthropicComputerAdapter(runtime, app=APP)
+    moved = anthropic.handle({"action": "mouse_move", "coordinate": [100, 50]})
+    assert moved.ok, moved.text
+    assert "hovered" in moved.text
+    assert "sends no hover event" not in moved.text
+    assert fake.calls["hover"] == [Point(1, 125, 62)]
+    assert fake.calls["click"] == []
+    assert anthropic.handle({"action": "cursor_position"}).text == "X=100, Y=50"
+
+    openai = OpenAIComputerAdapter(runtime, app=APP, environment="ubuntu")
+    again = openai.handle({"type": "move", "x": 80, "y": 40})
+    assert again.ok, again.text
+    assert fake.calls["hover"][-1] == Point(1, 100, 50)
+    assert fake.calls["click"] == [] and fake.calls["drag"] == []
+
+    fake.name = "fake"
+    recorded = AnthropicComputerAdapter(runtime, app=APP).handle(
+        {"action": "mouse_move", "coordinate": [10, 10]}
+    )
+    assert recorded.ok and "sends no hover event" in recorded.text
+    assert fake.calls["hover"] == [Point(1, 125, 62), Point(1, 100, 50)]
+
+
 def test_click_without_coordinate_uses_the_last_pointer_position(anthropic, fake) -> None:
     anthropic.snap_to_refs = False
     assert anthropic.handle({"action": "mouse_move", "coordinate": [100, 50]}).ok

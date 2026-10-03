@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.10] - 2026-10-03
+
+### Fixed
+
+- Linux hover moves the pointer and delivers the motion with no button. `mouse_move` and `move` had only remembered the coordinate, so the pointer stayed put and a tooltip or a hover-opened menu could not be driven. Click, right-click, double-click, and drag are unchanged (#35) (2026-10-03).
+
 ## [0.4.9] - 2026-10-03
 
 ### Fixed

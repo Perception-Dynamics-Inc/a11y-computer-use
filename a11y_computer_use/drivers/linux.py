@@ -211,6 +211,19 @@ class LinuxDriver:
             _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
         return None
 
+    def hover(self, target: Target, *, dry_run: bool = False) -> object:
+        """Move the pointer onto ``target`` and deliver a hover. No button."""
+        if dry_run:
+            return None
+        if _on_wayland():
+            raise _wayland_input_error("hover")
+        from a11y_computer_use.drivers import _linux_input
+
+        self._focused_editable = None
+        x, y = _point_of(target)
+        _linux_input.hover(x, y)
+        return None
+
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
              path: Sequence[Target] = (), pre_check: Callable | None = None,
              dry_run: bool = False) -> object:

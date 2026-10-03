@@ -174,7 +174,7 @@ whether to send it or stop.
 | `double_click` | `x`, `y`, `keys?` | `Runtime.click` with `count` 2 |
 | `drag` | `path: [{x, y}, ...]` | `Runtime.drag` from the first to the last point |
 | `keypress` | `keys: [...]` | One chord per non-modifier key, each holding the listed modifiers (`["CTRL", "A"]` is `ctrl+a`) |
-| `move` | `x`, `y` | Records the pointer position only |
+| `move` | `x`, `y` | On Linux, `Runtime.hover`: the pointer moves and a motion event is delivered, with no button. Elsewhere, records the pointer position only |
 | `screenshot` | | `Runtime.screenshot` |
 | `scroll` | `x`, `y`, `scroll_x`, `scroll_y` | `Runtime.scroll` in pixels; positive `scroll_y` scrolls down, positive `scroll_x` scrolls right, matching the Runtime's sign convention |
 | `type` | `text` | `Runtime.type_text` |
@@ -192,10 +192,13 @@ first) and is echoed back as `acknowledged_safety_checks`.
 
 ## Approximations and limits
 
-- `mouse_move` and `move` record the pointer position and send no event: no
-  driver exposes a hover primitive. A following click or mouse-up uses the
-  recorded position, so `left_mouse_down` / `mouse_move` / `left_mouse_up`
-  sequences still become one drag.
+- `mouse_move` and `move` on Linux deliver a hover (absolute motion, no button)
+  through `Runtime.hover`. The synthetic test checks the XTEST motion and that
+  no button event is queued; a live tooltip was not driven. On macOS, Windows,
+  and the browser backend they still record the pointer position and send no
+  event. A following click or mouse-up uses the recorded position, so
+  `left_mouse_down` / `mouse_move` / `left_mouse_up` sequences still become one
+  drag.
 - `hold_key` presses the chord once. The drivers expose no key-hold, and the
   result text says so.
 - `drag` executes start to end; intermediate `path` points are dropped and

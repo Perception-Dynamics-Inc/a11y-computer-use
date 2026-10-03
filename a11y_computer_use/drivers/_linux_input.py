@@ -343,6 +343,18 @@ def _move(x: int, y: int) -> None:
     xtest.fake_input(_disp(), X.MotionNotify, 0, x=int(x), y=int(y))
 
 
+def hover(x: int, y: int) -> None:
+    """Move the pointer to screen (x, y) and deliver that motion, with no button.
+
+    One absolute XTEST ``MotionNotify``, then a flush. Tooltips and menus that
+    open on hover listen for that event. Click and drag do not call this:
+    they queue their own motion and flush it with the button events, so a
+    hover cannot change those sequences.
+    """
+    _move(x, y)
+    _flush()
+
+
 def click(x: int, y: int, *, button: str = "left", count: int = 1) -> None:
     """Synthesize a mouse click at screen (x, y). Only used when the a11y press
     path is unavailable (coordinate/vision fallback)."""
