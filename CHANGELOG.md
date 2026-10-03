@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.13] - 2026-10-03
+
+### Fixed
+
+- Linux line scroll on a Chromium list reports success only when the list pixels move and the snapshot head below an 8px top sliver leaves the pre-wheel row. On the 0.4.12 retest a 3-line scroll moved the screen from ITEM-001 to ITEM-010, but the snapshot head stayed ITEM-001 for 1.5 seconds and was ITEM-009 about 2.7 seconds later. A further wheel whose pixels did not move (mean absolute difference 0, the screen still ended at ITEM-180) returned success, and the next snapshot started at ITEM-192, which was not on screen. `scroll_to_find` ITEM-180 had already passed on that retest (found after 16 scrolls). A still grab is now `unsupported` with `reason=page_unchanged` and does not replace the rows. A grab that changed while the head never leaves the old row is `unsupported` with `reason=rows_stale` and does not replace the rows either. The next snapshot keeps the rows last confirmed for that list box, so a later hit test cannot publish a row that is off screen. `unit=pixels` still writes an AT-SPI scroll-bar value and does not send a wheel. Synthetic hit tests and solid grabs, not a live Chrome run (#33) (2026-10-03).
+
 ## [0.4.12] - 2026-10-03
 
 ### Fixed

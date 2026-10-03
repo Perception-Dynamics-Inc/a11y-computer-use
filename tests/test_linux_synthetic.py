@@ -660,9 +660,11 @@ class _FakeAtspi:
 @pytest.fixture
 def fake_atspi(monkeypatch):
     _FakeAtspi.desktop = None
+    _atspi.reset_shown_rows()
     monkeypatch.setattr(_atspi, "_atspi", lambda: _FakeAtspi)
     yield _FakeAtspi
     _FakeAtspi.desktop = None
+    _atspi.reset_shown_rows()
 
 
 def _scrolled_text():
@@ -766,8 +768,13 @@ def test_driver_coordinate_pixel_scroll_hit_tests_without_a_ref(fake_atspi, xtes
     assert vertical.value == 103
 
 
-def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder) -> None:
+def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:
     events, _display = xtest_recorder
+
+    def grab(_box):
+        raise AssertionError("a coordinate line scroll has no list to capture")
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
     LinuxDriver().scroll(Point(0, 30, 40), dx=-1, dy=2, unit=ScrollUnit.LINES)
     assert events[0] == (_X_MOTION, 0, 30, 40)
     assert events[1:5] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)] * 2
@@ -1038,62 +1045,117 @@ class _ChromeApp:
 
 
 class _ListHit:
-    """Chromium's hit test: the first call at a point is the cached child.
+    """Synthetic Chromium hit test. Not a screen grab and not a live Chrome list.
 
-    A later call is the layout row for ``head``. The cached children never
-    move. Not a screen grab and not a live Chrome list.
+    The first call at a point is a stale bounds guess (ITEM-001's window).
+    A later call is the layout row. ``screen`` is the on-screen head, 1-based.
+    While ``clock`` is below ``hold_until``, that later call stays on
+    ``held_head``. A point in the top 8px can answer ``screen - 1`` when
+    ``clip`` is set. ``invent``, when set, answers that head instead of
+    ``screen``. The cached children never move.
     """
 
     def __init__(self, rows: list[_Acc], stale: list[_Acc]):
         self.rows = rows
         self.stale = stale
-        self.head = 1
+        self.screen = 1
+        self.clock = 0
+        self.hold_until = 0
+        self.held_head = 1
+        self.clip = False
+        self.invent: int | None = None
+        self.on_wheel = None
         self.calls = 0
         self.x, self.y, self.width, self.height = 40, 100, 400, 160
         self._at: dict[tuple[int, int], int] = {}
 
+    @property
+    def head(self) -> int:
+        return self.screen
+
+    @head.setter
+    def head(self, value: int) -> None:
+        self.screen = int(value)
+
     def get_extents(self, _coord):
         return self
+
+    def _layout_row(self, y: int, slot: int):
+        if self.invent is not None:
+            head = self.invent
+        elif self.clock < self.hold_until:
+            head = self.held_head
+        elif self.clip and int(y) < int(self.y) + 8:
+            head = max(1, self.screen - 1)
+        else:
+            head = self.screen
+        index = min(len(self.rows) - 1, max(0, int(head) - 1 + slot))
+        return self.rows[index]
 
     def get_accessible_at_point(self, _x, y, _coord):
         self.calls += 1
         key = (int(_x), int(y))
         n = self._at.get(key, 0) + 1
         self._at[key] = n
-        slot = min(7, max(0, (int(y) - self.y) // 20))
+        slot = min(7, max(0, (int(y) - int(self.y)) // 20))
         if n == 1:
             return self.stale[min(slot, len(self.stale) - 1)]
-        index = min(len(self.rows) - 1, max(0, self.head - 1 + slot))
-        return self.rows[index]
+        return self._layout_row(int(y), slot)
 
     def advance(self) -> None:
-        self.head += 8
+        self.screen += 8
         self._at.clear()
+        self.invent = None
+        self.clip = False
+        self.hold_until = 0
 
 
 def _chrome_list(stuck: bool = False):
     rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 201)]
-    stale = rows[:8]
+    # Distinct objects from the cached children, so the second hit test is a
+    # different accessible even when it still names ITEM-001.
+    stale = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)]
     hit = _ListHit(rows, stale)
     listing = _Acc("list", name="items")
     listing.component = hit
-    listing.get_application = lambda: _ChromeApp()
-    _adopt(listing, *stale)
+    app = _ChromeApp()
+    listing.get_application = lambda: app
+    _adopt(listing, *rows[:8])
+    for row in rows[8:]:
+        row.parent = listing
     window = _Acc("frame", name="bench", width=1280, height=800)
-    window.get_application = lambda: _ChromeApp()
+    window.get_application = lambda: app
     _adopt(window, listing)
     return window, listing, hit, stuck
 
 
 def _wire_chrome_list(monkeypatch, window, hit, stuck: bool):
+    _atspi.reset_shown_rows()
     monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
     monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
-    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+
+    def sleep(_seconds):
+        hit.clock += 1
+
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+
+    def grab(_box):
+        from PIL import Image
+
+        # Solid stand-in for the list pixels. Same ``screen`` means the page
+        # did not move. Not a capture of a live Chrome window.
+        return Image.new("RGB", (4, 4), (int(hit.screen) & 255, 0, 0))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
     real_scroll = _linux_input.scroll
 
     def scrolling(x, y, dx=0, dy=0):
         real_scroll(x, y, dx=dx, dy=dy)
-        if not stuck and (int(dx) or int(dy)):
+        if stuck or not (int(dx) or int(dy)):
+            return
+        if hit.on_wheel is not None:
+            hit.on_wheel()
+        else:
             hit.advance()
 
     monkeypatch.setattr(_linux_input, "scroll", scrolling)
@@ -1156,10 +1218,135 @@ def test_scroll_to_find_reaches_item_180_from_layout_rows(
     assert (_X_BPRESS, 5, 0, 0) in [(kind, detail, x, y) for kind, detail, x, y in events]
 
 
+def test_three_line_scroll_snapshot_starts_at_the_on_screen_head(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    A 3-line wheel moves the pixels from ITEM-001 to ITEM-010. The hit test
+    keeps answering ITEM-001 across two polls, and a point in the top 8px
+    answers ITEM-009 once that hold ends. The snapshot read after the scroll
+    returns starts at ITEM-010. A later hit test that names ITEM-192 does not
+    replace that head.
+    """
+    events, _display = xtest_recorder
+    window, listing, hit, _stuck = _chrome_list()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit.screen = 10
+        hit.hold_until = hit.clock + 2
+        hit.held_head = 1
+        hit.clip = True
+        hit.invent = None
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert driver.scroll(row, dy=3, unit=ScrollUnit.LINES) is None
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-010"
+    assert "ITEM-017" in later
+    assert "ITEM-001" not in later
+    assert "ITEM-009" not in later
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    assert len(presses) == 3
+    hit.hold_until = 0
+    hit._at.clear()
+    hit.get_accessible_at_point(hit.x + 10, hit.y + 1, 0)
+    clipped = hit.get_accessible_at_point(hit.x + 10, hit.y + 1, 0)
+    assert clipped.name == "ITEM-009"
+    hit.invent = 192
+    hit._at.clear()
+    again = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert again[0] == "ITEM-010"
+    assert "ITEM-192" not in again
+
+
+def test_unmoved_page_stays_unsupported_and_keeps_the_on_screen_rows(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The page is ITEM-173 through ITEM-180. A wheel that does not change the
+    pixels returns unsupported, even when the hit test would name ITEM-192.
+    The next snapshot still starts at ITEM-173 and still contains ITEM-180.
+    """
+    events, _display = xtest_recorder
+    window, listing, hit, _stuck = _chrome_list()
+    hit.screen = 173
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit.invent = 192
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-173"
+    assert "ITEM-180" in titles
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-180")
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(row, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["rows"][0] == "ITEM-173"
+    assert "ITEM-192" not in error.value.detail["rows"]
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-173"
+    assert "ITEM-180" in later
+    assert "ITEM-192" not in later
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    assert len(presses) == 5
+
+
+def test_moved_page_with_a_stale_head_is_not_success(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The pixels change, but every hit test stays on ITEM-001. That is not a
+    successful scroll, and the saved rows stay ITEM-001.
+    """
+    window, _listing, hit, _stuck = _chrome_list()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit.screen = 10
+        hit.hold_until = 10**9
+        hit.held_head = 1
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(row, dy=3, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "rows_stale"
+    assert error.value.detail["mean_abs"] > 1
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-001"
+    assert "ITEM-010" not in later
+
+
 def test_line_scroll_of_an_unmoved_layout_is_not_success(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """A wheel whose layout rows stay put is unsupported. The notches were sent."""
+    """A wheel whose pixels and on-screen rows stay put is unsupported.
+
+    Synthetic Chromium list, not a live Chrome window. The notches were sent.
+    The next snapshot still starts at ITEM-001.
+    """
     events, _display = xtest_recorder
     window, listing, hit, _stuck = _chrome_list(stuck=True)
     _wire_chrome_list(monkeypatch, window, hit, stuck=True)
@@ -1207,14 +1394,17 @@ def test_gtk_snapshot_keeps_cached_children(fake_atspi, monkeypatch) -> None:
 
 def test_pixel_scroll_does_not_probe_layout_rows(fake_atspi, xtest_recorder, monkeypatch) -> None:
     text, vertical, horizontal = _scrolled_text()
+    events, _display = xtest_recorder
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
 
-    def probe(_acc):
-        raise AssertionError("pixel scroll must not read layout rows")
+    def probe(*_args, **_kwargs):
+        raise AssertionError("pixel scroll must not read layout rows or grab the list")
 
-    monkeypatch.setattr(_atspi, "visible_row_names", probe)
+    monkeypatch.setattr(_atspi, "list_container", probe)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", probe)
     LinuxDriver().scroll(_body(), dx=5, dy=3, unit=ScrollUnit.PIXELS)
     assert vertical.value == 103 and horizontal.value == 45
+    assert events == []
 
 
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:

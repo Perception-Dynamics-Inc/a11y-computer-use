@@ -134,8 +134,10 @@ class LinuxDriver:
             root = _atspi.find_root(app, scope)  # None -> empty snapshot
             pid = _atspi.pid_of(root) if root is not None else None
             accessor = _atspi.ATSPIAccessor()
-            # Chromium lists: the snapshot scroll_to_find searches lists the
-            # rows a layout hit-test places in the box, not the cached children.
+            # Chromium lists: the snapshot lists the rows last confirmed for
+            # that list box. A line scroll replaces them only after the pixels
+            # move and the head below the top sliver is stable. This read does
+            # not probe again.
             accessor.refresh_visible(root)
             return observe.build_snapshot(
                 root, accessor, scope=scope, app=app, pid=pid,
@@ -252,20 +254,24 @@ class LinuxDriver:
 
         ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
-        On a Chromium list, the wheel is a success only when a layout hit-test
-        of that list's box returns a different row sequence. ``snapshot`` reads
-        those same rows, which is what ``scroll_to_find`` searches. The cached
-        children are not the check: Chrome can leave them on the pre-wheel
-        names while the layout hit-test has moved. A sequence that does not
-        change raises `unsupported` with ``reason=page_unchanged``; the notches
-        were sent, and a still page is not reported as a scroll. A coordinate
-        target and a non-Chromium element are not checked. ``unit=pixels``
-        writes the AT-SPI scroll-bar value by that delta and reads it back. It
-        does not hit-test the list and does not send notches. GTK scrolled
-        windows expose the value in pixels. A missing bar, or a write that
-        jumps or does not stick, raises `unsupported`. A shorter write is kept
-        when one more pixel will not move (the bar is at its end). Pixel scroll
-        does not need XTEST, so it is available on Wayland when a scroll bar is
+        On a Chromium list the wheel is a success only when two things are
+        both true: the pixels inside the list box change, and the snapshot
+        head below the top sliver leaves the pre-wheel row and stays on the
+        new row for two reads. ``snapshot`` then lists those rows, which is
+        what ``scroll_to_find`` searches. A grab whose mean absolute
+        difference stays at or below the still-page threshold raises
+        `unsupported` with ``reason=page_unchanged`` and does not replace
+        the rows. A grab that changed while the head never leaves the old
+        row raises `unsupported` with ``reason=rows_stale`` and does not
+        replace the rows either. A pixel difference alone is not a
+        successful scroll. A coordinate target and a non-Chromium element
+        are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        by that delta and reads it back. It does not grab the list, does not
+        hit-test it, and does not send notches. GTK scrolled windows expose
+        the value in pixels. A missing bar, or a write that jumps or does
+        not stick, raises `unsupported`. A shorter write is kept when one
+        more pixel will not move (the bar is at its end). Pixel scroll does
+        not need XTEST, so it is available on Wayland when a scroll bar is
         exposed.
         """
         if dry_run:
@@ -285,24 +291,66 @@ class LinuxDriver:
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
-        before = None
+        container = None
         if handle is not None and (int(dx) or int(dy)):
-            before = self._run(lambda: _atspi.visible_row_names(handle))
+            container = self._run(lambda: _atspi.list_container(handle))
+        if container is None:
+            _linux_input.scroll(x, y, dx=dx, dy=dy)
+            return None
+        box = self._run(lambda: _atspi.list_screen_box(container))
+        if box is None:
+            _linux_input.scroll(x, y, dx=dx, dy=dy)
+            return None
+        display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+        self.hover(Point(display_id, x, y))
+        before_grab = _grab_region(box)
+        saved = self._run(lambda: _atspi.ensure_shown_rows(container))
+        before_head = self._run(lambda: _atspi.row_head(saved))
         _linux_input.scroll(x, y, dx=dx, dy=dy)
-        if before is not None:
-            after = self._run(lambda: _atspi.wait_for_row_change(handle, before))
-            if after is None or after == before:
-                raise ComputerUseError(
-                    ErrorCode.UNSUPPORTED,
-                    "the rows on screen did not change after the wheel scroll",
-                    detail={
-                        "reason": "page_unchanged",
-                        "unit": "lines",
-                        "dx": int(dx),
-                        "dy": int(dy),
-                        "rows": list(before[:8]),
-                    },
-                )
+        after_grab = _grab_region(box)
+        mean = _region_mean_change(before_grab, after_grab)
+        shown = self._run(lambda: _atspi.row_names(saved))
+        if mean is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the list could not be compared after the wheel scroll, so it was not "
+                "reported as a success",
+                detail={
+                    "reason": "page_unseen",
+                    "unit": "lines",
+                    "dx": int(dx),
+                    "dy": int(dy),
+                    "rows": list(shown[:8]),
+                },
+            )
+        if mean <= _atspi._PAGE_MOVE_MEAN:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the rows on screen did not change after the wheel scroll",
+                detail={
+                    "reason": "page_unchanged",
+                    "unit": "lines",
+                    "dx": int(dx),
+                    "dy": int(dy),
+                    "mean_abs": mean,
+                    "rows": list(shown[:8]),
+                },
+            )
+        after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
+        if after is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the list moved on screen but the snapshot would still show the old rows",
+                detail={
+                    "reason": "rows_stale",
+                    "unit": "lines",
+                    "dx": int(dx),
+                    "dy": int(dy),
+                    "mean_abs": mean,
+                    "rows": list(shown[:8]),
+                },
+            )
+        self._run(lambda: _atspi.commit_shown_rows(container, after))
         return None
 
     def _scroll_pixels(self, target: Target, *, dx: int, dy: int) -> None:
@@ -665,6 +713,55 @@ def _grab_wayland() -> bytes | None:
     except Exception:
         return None
     return r.stdout if r.returncode == 0 and r.stdout else None
+
+
+def _grab_region(box: tuple[int, int, int, int]):
+    """PIL image of the list box. A failure is `unsupported`, not a scroll.
+
+    ``box`` is ``(x, y, width, height)`` in screen pixels. Tests replace
+    this with a fake grab. A coordinate line scroll and ``unit=pixels`` do
+    not call it.
+    """
+    import os
+
+    x, y, width, height = box
+    try:
+        from PIL import ImageGrab
+
+        return ImageGrab.grab(
+            bbox=(int(x), int(y), int(x) + int(width), int(y) + int(height)),
+            xdisplay=os.environ.get("DISPLAY"),
+        )
+    except Exception as exc:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "the list could not be captured, so the scroll was not judged a success",
+            detail={"reason": "page_unseen", "error": str(exc)},
+        ) from exc
+
+
+def _region_mean_change(before, after) -> float | None:
+    """Mean absolute difference of two grabs, across the RGB channels.
+
+    None when the two images cannot be compared. A still page is 0. This
+    number is a veto, not a success: a difference does not by itself make
+    the scroll succeed.
+    """
+    if before is None or after is None:
+        return None
+    try:
+        from PIL import ImageChops, ImageStat
+
+        left = before.convert("RGB")
+        right = after.convert("RGB")
+        if left.size != right.size:
+            return None
+        channels = ImageStat.Stat(ImageChops.difference(left, right)).mean[:3]
+        if not channels:
+            return None
+        return float(sum(channels) / len(channels))
+    except Exception:
+        return None
 
 
 def _grab_png() -> bytes:

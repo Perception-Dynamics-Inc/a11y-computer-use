@@ -354,10 +354,12 @@ def _stable_id(acc, attrs: dict | None = None) -> str | None:
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
-    For a Chromium list, ``refresh_visible`` replaces the cached children with
-    the rows a layout hit-test places inside the list's box. ``scroll_to_find``
-    searches the snapshot this accessor builds, so those rows are what a later
-    find sees. A non-Chromium tree is read from ``get_child_at_index`` as before.
+    For a Chromium list, ``refresh_visible`` uses the rows last confirmed for
+    that list box. A line scroll replaces them only after the list pixels move
+    and the head below the top sliver is stable. A later snapshot does not
+    probe again, so a hit test that names a row off screen cannot replace
+    them. ``scroll_to_find`` searches this snapshot. A non-Chromium tree is
+    read from ``get_child_at_index`` as before.
     """
 
     def __init__(self) -> None:
@@ -365,21 +367,22 @@ class ATSPIAccessor:
         self._visible_bounds: dict[int, tuple] = {}
 
     def refresh_visible(self, root: object) -> None:
-        """Point Chromium lists at the rows currently inside their boxes.
+        """Point Chromium lists at the rows last confirmed inside their boxes.
 
         No-op unless the tree's toolkit is Chromium. The cached child list is
-        left untouched on the accessible; only this walk uses the hit-test rows.
+        left untouched on the accessible. A list with no confirmed rows is
+        probed once and that result is kept; a later snapshot reuses it.
         """
         self._visible_children.clear()
         self._visible_bounds.clear()
         if root is None or not _chromium_app(root):
             return
         for container in _list_containers(root):
-            probed = _probe_visible_rows(container)
-            if len(probed) < 2:
+            rows = _shown_or_probe(container)
+            if len(_row_names(rows)) < 2:
                 continue
-            self._visible_children[id(container)] = [acc for acc, _pos, _size in probed]
-            for acc, pos, size in probed:
+            self._visible_children[id(container)] = [acc for acc, _pos, _size in rows]
+            for acc, pos, size in rows:
                 self._visible_bounds[id(acc)] = (pos, size)
 
     def read(self, node: object) -> RawNode:
@@ -878,11 +881,25 @@ def _node_name(acc) -> str:
 # never changes is the answer, not a timeout success.
 _HIT_TRIES = 3
 _HIT_PAUSE_S = 0.05
-_ROW_POLLS = 4
-_ROW_PAUSE_S = 0.04
+# The 0.4.12 retest still showed the pre-wheel head 1.5s after a 3-line scroll,
+# and a different wrong head about 2.7s later. Polling this long is what lets
+# the snapshot head leave the stale row. A head that never changes is not success.
+_HEAD_POLLS = 8
+_HEAD_PAUSE_S = 0.4
+# Pixels inside the list. A still grab is 0. The 0.4.12 retest measured 6.677
+# where the list moved and 0 where it did not. This sits between those.
+_PAGE_MOVE_MEAN = 1.0
+# The top of the list box can be a clipped row. On that retest the snapshot
+# started at ITEM-009 while the screen head was ITEM-010, and scroll_to_find
+# showed a clipped row above the visible run. Sampling below this sliver is
+# the on-screen head. It is not an OCR read.
+_CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
 _MAX_ROW_SAMPLES = 16
+# Rows last confirmed for a list box. A later hit test is not installed over
+# these unless a wheel's pixels moved and the head below the sliver changed.
+_SHOWN: dict[tuple, list] = {}
 
 
 def _chromium_app(acc) -> bool:
@@ -957,7 +974,10 @@ def _probe_visible_rows(container) -> list[tuple]:
     bottom = int(pos[1] + size[1])
     step = max(12, int(size[1] // 12) or 12)
     grouped: list[list] = []
-    y = top + 1
+    # Skip the clipped sliver at the top edge. A hit there is the row above
+    # the on-screen head, which is what 0.4.12 published as ITEM-009.
+    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
+    y = top + sliver
     samples = 0
     while y < bottom and samples < _MAX_ROW_SAMPLES:
         samples += 1
@@ -984,40 +1004,135 @@ def _row_names(probed) -> tuple[str, ...]:
     return tuple(names)
 
 
-def visible_row_names(acc) -> tuple[str, ...] | None:
-    """Names of the layout rows inside the nearest Chromium list, top to bottom.
-
-    None when ``acc`` is not a Chromium list and has no Chromium list ancestor
-    or descendant, or when fewer than two named rows are hit. The cached
-    children are not this result.
+def _list_key(container) -> tuple | None:
+    """Stable identity of a list box. Not ``id()``: a live walk wraps a new
+    Python object each time, while the box itself does not move when the
+    rows scroll.
     """
-    if acc is None or not _chromium_app(acc):
+    pos, size = _extents(container)
+    if pos is None:
+        return None
+    return (
+        _role_name(container),
+        _node_name(container),
+        int(pos[0]),
+        int(pos[1]),
+        int(size[0]),
+        int(size[1]),
+    )
+
+
+def reset_shown_rows() -> None:
+    """Drop confirmed list rows. Tests call this so one list cannot leak
+    into the next."""
+    _SHOWN.clear()
+
+
+def saved_rows(container) -> list | None:
+    """Rows last confirmed for ``container``, or None when nothing is saved."""
+    key = _list_key(container)
+    if key is None:
+        return None
+    return _SHOWN.get(key)
+
+
+def commit_shown_rows(container, rows) -> None:
+    """Remember ``rows`` as the on-screen contents of ``container``.
+
+    Fewer than two named rows are not a page, and are not stored.
+    """
+    key = _list_key(container)
+    if key is None or len(_row_names(rows or ())) < 2:
+        return
+    _SHOWN[key] = list(rows)
+
+
+def row_head(rows) -> str | None:
+    """The first named row, which is the snapshot head."""
+    names = _row_names(rows or ())
+    return names[0] if names else None
+
+
+def row_names(rows) -> tuple[str, ...]:
+    return _row_names(rows or ())
+
+
+def list_container(acc):
+    """The Chromium list, table, or tree that contains ``acc``.
+
+    ``acc`` may be that list or a row inside it. The walk uses parents.
+    None when no such list is found, or when the list's application is not
+    Chromium. A coordinate target has no accessible and is not checked.
+    """
+    if acc is None:
         return None
     node = acc
     seen: set[int] = set()
-    for _ in range(_LIST_ANCESTORS):
+    for _ in range(8):
         if node is None or id(node) in seen:
-            break
+            return None
         seen.add(id(node))
-        containers = [node] if _role_name(node) in _LIST_ROLES else _list_containers(node, limit=1)
-        for container in containers[:1]:
-            names = _row_names(_probe_visible_rows(container))
-            if len(names) >= 2:
-                return names
+        if _role_name(node) in _LIST_ROLES and _extents(node)[0] is not None:
+            return node if _chromium_app(node) else None
         node = _parent_of(node)
     return None
 
 
-def wait_for_row_change(acc, previous: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Poll the layout rows until they differ from ``previous``, or the tries end."""
-    seen: tuple[str, ...] | None = previous
-    for attempt in range(_ROW_POLLS):
-        seen = visible_row_names(acc)
-        if seen != previous:
-            return seen
-        if attempt + 1 < _ROW_POLLS:
-            time.sleep(_ROW_PAUSE_S)
-    return seen
+def list_screen_box(container) -> tuple[int, int, int, int] | None:
+    """Screen box of the list widget, ``(x, y, width, height)``.
+
+    This is the list's own extents, not a row's. None when the list has
+    no box.
+    """
+    pos, size = _extents(container)
+    if pos is None:
+        return None
+    return (int(pos[0]), int(pos[1]), int(size[0]), int(size[1]))
+
+
+def _shown_or_probe(container) -> list:
+    """Confirmed rows for ``container``, probing only when none are saved.
+
+    A saved window is returned as-is. The hit test is not consulted again,
+    so a later call that names a row off screen cannot replace the head.
+    """
+    key = _list_key(container)
+    if key is not None and key in _SHOWN:
+        return _SHOWN[key]
+    rows = _probe_visible_rows(container)
+    if key is not None and len(_row_names(rows)) >= 2:
+        _SHOWN[key] = rows
+    return rows
+
+
+def ensure_shown_rows(container) -> list | None:
+    """Confirmed rows, probing and storing them when the list has none yet."""
+    saved = saved_rows(container)
+    if saved is not None and len(_row_names(saved)) >= 2:
+        return saved
+    commit_shown_rows(container, _probe_visible_rows(container))
+    return saved_rows(container)
+
+
+def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
+    """Rows whose head differs from ``previous_head`` on two probes in a row.
+
+    One differing answer is not enough: the 0.4.12 retest still read the
+    pre-wheel head 1.5 seconds after the wheel, and a different wrong head
+    about 2.7 seconds later. None when the head never leaves
+    ``previous_head``. The caller does not treat that as a scroll.
+    """
+    last: str | None = None
+    for attempt in range(_HEAD_POLLS):
+        rows = _probe_visible_rows(container)
+        names = _row_names(rows)
+        head = names[0] if len(names) >= 2 else None
+        if head is not None and head == last and head != previous_head:
+            return rows
+        last = head
+        if attempt + 1 < _HEAD_POLLS:
+            time.sleep(_HEAD_PAUSE_S)
+    return None
 
 
 # Descendant names collected for one line-scroll signature. Chrome's row
