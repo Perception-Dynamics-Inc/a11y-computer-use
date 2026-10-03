@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "zoom",
     "screen_text",
     "click",
+    "hover",
     "type",
     "key",
     "scroll",
@@ -1458,6 +1459,117 @@ async def test_unknown_key_chord_is_invalid_arguments_not_an_internal_error(mcp_
     assert "internal_error" not in text
     assert "report_issue" not in text
     assert audit_entries(audit_dir) == []  # rejected before the permission gate
+
+
+class _HoverDriver:
+    """Records hover and click. ``name`` selects the Linux runtime path."""
+
+    def __init__(self, name: str = "linux") -> None:
+        self.name = name
+        self.hovered: list = []
+        self.clicked: list = []
+
+    def hover(self, target, **kwargs) -> None:
+        self.hovered.append(target)
+
+    def click(self, target, **kwargs) -> None:
+        self.clicked.append(target)
+
+    def main_display_id(self) -> int:
+        return 0
+
+    def resolve_ref(self, snap, ref, *, live=None):
+        return snap.element(ref)
+
+
+def _hover_runtime(tmp_path, driver: _HoverDriver) -> server.Runtime:
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("editor", safety.Tier.CLICK)
+    return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+
+def test_linux_hover_tool_act_step_and_run_once_move_without_a_click(tmp_path, monkeypatch) -> None:
+    """Fake driver only. Not a live tooltip. The three names that rejected hover
+    call the existing Runtime.hover and do not click."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+
+    assert rt.call_tool("hover", {"x": 10, "y": 20}) == "hovered (10, 20) on display 0"
+    assert rt.dispatch("hover", {"x": 30, "y": 40}) == "hovered (30, 40) on display 0"
+    steps = json.loads(rt.act_batch([{"do": "hover", "ref": "e2"}]))
+    assert steps == [{"i": 0, "do": "hover", "ok": True, "result": "hovered e2 (AXButton 'Save')"}]
+    assert [target.ref if isinstance(target, Element) else (target.x, target.y) for target in driver.hovered] == [
+        (10, 20),
+        (30, 40),
+        "e2",
+    ]
+    assert driver.clicked == []
+
+
+def test_hover_onto_another_apps_point_does_not_move_the_pointer(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: "com.other.overlay")
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    rt = _hover_runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as error:
+        rt.call_tool("hover", {"x": 10, "y": 20})
+    assert error.value.code is ErrorCode.FOCUS_CHANGED
+    assert driver.hovered == []
+    assert driver.clicked == []
+
+
+def test_hover_off_linux_is_unsupported_and_does_not_move(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    driver = _HoverDriver(name="macos")
+    rt = _hover_runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as error:
+        rt.call_tool("hover", {"x": 10, "y": 20})
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert "Linux" in error.value.message
+    assert driver.hovered == []
+    with pytest.raises(ComputerUseError):
+        rt.dispatch("hover", {"x": 1, "y": 2})
+    steps = json.loads(rt.act_batch([{"do": "hover", "x": 1, "y": 2}]))
+    assert steps[0]["ok"] is False and "unsupported" in steps[0]["error"]
+    assert driver.hovered == []
+
+
+async def test_mcp_hover_on_linux_moves_and_off_linux_is_unsupported(
+    store, audit_dir, monkeypatch
+) -> None:
+    """In-memory MCP transport. The driver is a fake, not a live pointer."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    store.set_tier("editor", safety.Tier.CLICK)
+    linux = _HoverDriver()
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir), driver=linux) as runtime:
+        mcp = server.build_server(runtime=runtime)
+        listed = await _tool_names(mcp)
+        assert "hover" in listed
+        result = await call_tool(mcp, "hover", {"x": 15, "y": 25})
+    assert not result.isError
+    assert result.content[0].text == "hovered (15, 25) on display 0"
+    assert len(linux.hovered) == 1 and linux.clicked == []
+
+    mac = _HoverDriver(name="macos")
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir), driver=mac) as runtime:
+        result = await call_tool(server.build_server(runtime=runtime), "hover", {"x": 1, "y": 2})
+    assert result.isError
+    assert "unsupported" in result.content[0].text
+    assert mac.hovered == []
+
+
+async def _tool_names(mcp_server) -> set[str]:
+    async with client_session(mcp_server) as client:
+        listed = (await client.list_tools()).tools
+    return {tool.name for tool in listed}
 
 
 def test_linux_runtime_rejects_an_unknown_chord_before_input(tmp_path) -> None:

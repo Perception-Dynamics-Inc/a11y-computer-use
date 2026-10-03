@@ -1,9 +1,9 @@
 """MCP server: the v1 tool surface (PLAN.md §8).
 
 The full MCP tool surface, one canonical schema shared with the CLI: observe
-(desktop_snapshot, find, screenshot, zoom), act (click, type, key, scroll, drag,
-wait_for, act, set_value, scroll_to_find), manage (app, window, clipboard), plus
-console and network when the browser backend provides those feeds. EVERY tool —
+(desktop_snapshot, find, screenshot, zoom), act (click, hover, type, key, scroll,
+drag, wait_for, act, set_value, scroll_to_find), manage (app, window, clipboard),
+plus console and network when the browser backend provides those feeds. EVERY tool —
 observation included —
 routes through `safety.check_action` and is recorded in the audit log;
 structured errors (`schema.ComputerUseError`) are rendered as clear
@@ -2278,6 +2278,7 @@ class Runtime:
 
         Step shapes (key ``do`` selects the action):
           {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
+          {"do":"hover","ref":"e5"}  (or x/y/display_id; no button)
           {"do":"type","text":"..."}
           {"do":"key","chord":"cmd+s"}
           {"do":"scroll","ref":"e3","dy":5}  (+ dx, unit, into_view, or x/y)
@@ -2324,6 +2325,8 @@ class Runtime:
             return self.click(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
                               step.get("button", "left"), step.get("count", 1),
                               step.get("modifiers"), confirm=confirm)
+        if do == "hover":
+            return self.hover(step.get("x"), step.get("y"), step.get("display_id"), step.get("ref"))
         if do == "type":
             return self.type_text(step["text"])
         if do == "key":
@@ -2342,7 +2345,7 @@ class Runtime:
                 raise ValueError("timeout_s must be finite and nonnegative")
             return self.wait_for(step["ref"], step.get("condition", "exists"),
                                  min(timeout_s, remaining_s))
-        raise ValueError(f"unknown step '{do}' — use click/type/key/scroll/drag/wait_for")
+        raise ValueError(f"unknown step '{do}' — use click/hover/type/key/scroll/drag/wait_for")
 
     @_serialized
     def set_value(self, ref: str, value: str) -> str:
@@ -2826,7 +2829,7 @@ class Runtime:
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
     #: need a live snapshot epoch, which a one-shot process never has.
     RUN_ONCE_TOOLS = frozenset(
-        {"click", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
+        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
     )
 
     @_serialized
@@ -2852,6 +2855,7 @@ class Runtime:
             "console": self.console,
             "network": self.network,
             "click": partial(self.click, confirm=confirm),
+            "hover": self.hover,
             "type": self.type_text,
             "key": self.key,
             "scroll": self.scroll,
@@ -3266,6 +3270,21 @@ def build_server(
             confirm=_confirmer_for(server.get_context()), verify=verify,
         )
 
+    @server.tool(name="hover")
+    async def hover(
+        ref: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        display_id: int | None = None,
+    ) -> str:
+        """Move the pointer to an element ref from the latest desktop_snapshot,
+        or to an x/y point in physical pixels, and deliver a hover. No button
+        is pressed: click, right-click, double-click, and drag are other tools.
+        Linux only. On any other driver the result is unsupported and the
+        pointer is not moved. Gated at tier 'click'. focus_changed means
+        another app owns the point; the pointer is not moved."""
+        return await run(runtime.hover, x, y, display_id, ref)
+
     @server.tool(name="type")
     async def type_text(text: str, app: str | None = None) -> str:
         """Type literal text into the focused element (clipboard-paste path
@@ -3342,6 +3361,7 @@ def build_server(
         a list of {"do": ...} objects executed in order; the batch STOPS at the
         first failure and reports it. Supported steps:
           {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
+          {"do":"hover","ref":"e5"}  (or "x"/"y"; no button)
           {"do":"type","text":"..."}
           {"do":"key","chord":"cmd+s"}
           {"do":"scroll","ref":"e3","dy":5}  (+ "into_view")
