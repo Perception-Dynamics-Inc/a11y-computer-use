@@ -4,9 +4,11 @@ platform-dispatching helpers so the Runtime's gating works on Linux.
 
 App identity on Linux is the process comm name (e.g. "gedit", "chrome") read
 from ``/proc/<pid>/comm`` — the analog of a macOS bundle id / Windows exe for
-permission-keying. Window/desktop facts come from EWMH properties over
-python-xlib (pure Python, no build deps); clipboard shells out to
-xclip/xsel/wl-clipboard.
+permission-keying. Comm is at most 15 bytes. A launcher the process drops
+(``google-chrome`` runs as ``chrome``) and a name cut at that limit
+(``gnome-terminal-server`` runs as ``gnome-terminal-``) resolve to the comm.
+Window/desktop facts come from EWMH properties over python-xlib (pure Python,
+no build deps); clipboard shells out to xclip/xsel/wl-clipboard.
 """
 
 from __future__ import annotations
@@ -134,12 +136,37 @@ def app_at_point_id(x: float, y: float) -> str | None:
     return None
 
 
+def _launcher_comm(identifier: str, comm: str) -> bool:
+    """Whether ``identifier`` names the same process as ``comm``.
+
+    ``/proc/<pid>/comm`` is at most 15 bytes, and a desktop launcher often
+    keeps a vendor prefix the process drops: Chrome's binary is
+    ``google-chrome`` and its comm is ``chrome``. A longer name that comm
+    truncates (``gnome-terminal-server`` → ``gnome-terminal-``) matches the
+    same way. A title is not an alias; callers that want titles use
+    ``resolve_app``.
+    """
+    if not identifier or not comm or identifier == comm:
+        return False
+    if identifier.endswith("-" + comm):
+        return True
+    return len(comm) == 15 and len(identifier) > 15 and identifier.startswith(comm)
+
+
 def resolve_app(identifier: str) -> str:
     """Resolve a window title / comm substring to the owning comm name (the
-    permission-keying id), or the identifier itself if unmatched."""
+    permission-keying id), or the identifier itself if unmatched.
+
+    A comm substring wins over a launcher alias, and both win over a window
+    title: ``krita`` stays Krita even when a Chrome tab is titled
+    "Donations | Krita". ``google-chrome`` and "Google Chrome" both resolve to
+    the running ``chrome`` process. An unmatched name is returned unchanged so
+    a grant or a launch can name an app that has no window yet.
+    """
     needle = (identifier or "").lower()
     if not needle:
         return identifier
+    by_alias: str | None = None
     by_title: str | None = None
     try:
         d = _display()
@@ -147,6 +174,8 @@ def resolve_app(identifier: str) -> str:
             comm = (_comm_for_pid(_pid_of(win, d)) or "").lower()
             if needle in comm:
                 return comm  # the app itself beats any window that merely names it
+            if by_alias is None and comm and _launcher_comm(needle, comm):
+                by_alias = comm
             # A title match is a fallback, never a winner over a comm match:
             # a Chromium tab "Donations | Krita" stacked above Krita's window
             # must not turn `krita` into `chrome`.
@@ -154,19 +183,21 @@ def resolve_app(identifier: str) -> str:
                 by_title = comm
     except Exception:
         pass
-    return by_title or identifier
+    return by_alias or by_title or identifier
 
 
 def pids_matching(identifier: str) -> set[int]:
-    """PIDs of the managed windows whose owner comm contains ``identifier``
-    (case-insensitive). Bridges the two Linux identities: the permission-keying
-    app id is the process comm ("python3"), while an AT-SPI application registers
-    under its program name ("cuatestapp"), so a comm-based lookup must find the
-    a11y application by PID, not by name. Titles are deliberately NOT matched
-    here: Runtime already maps a title to its comm via `resolve_app`, and a title
-    match at this layer would let any window whose title merely mentions the app
-    id (a browser tab "gedit - Google Search") hand find_root a foreign
-    application's tree."""
+    """PIDs of the managed windows whose owner comm is ``identifier``.
+
+    A comm substring matches, and so does a launcher alias (``google-chrome``
+    for comm ``chrome``). Bridges the two Linux identities: the
+    permission-keying app id is the process comm ("python3"), while an AT-SPI
+    application registers under its program name ("cuatestapp"), so a
+    comm-based lookup must find the a11y application by PID, not by name.
+    Titles are deliberately NOT matched here: Runtime already maps a title to
+    its comm via `resolve_app`, and a title match at this layer would let any
+    window whose title merely mentions the app id (a browser tab
+    "gedit - Google Search") hand find_root a foreign application's tree."""
     needle = (identifier or "").lower()
     pids: set[int] = set()
     if not needle:
@@ -178,7 +209,7 @@ def pids_matching(identifier: str) -> set[int]:
             if not pid:
                 continue
             comm = (_comm_for_pid(pid) or "").lower()
-            if needle in comm:
+            if needle in comm or _launcher_comm(needle, comm):
                 pids.add(pid)
     except Exception:
         pass

@@ -624,12 +624,65 @@ def insert_text(acc, text: str) -> bool:
     return bool(_call_first(eti, ("insert_text",), int(offset), text, len(text), default=False))
 
 
+def _editable_text(acc) -> str | None:
+    """The EditableText contents, or None when the Text interface cannot be read.
+
+    An empty field is ``""``. ``None`` means the read failed, which is different
+    from a field that is genuinely empty."""
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if count is None:
+        return None
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return ""
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    if got is None:
+        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if got is None:
+        return None
+    return str(got)
+
+
 def set_text(acc, text: str) -> bool:
-    """Replace the element's whole text via AT-SPI EditableText (True on success)."""
+    """Replace the element's whole text via AT-SPI EditableText.
+
+    GTK's ``set_text_contents`` replaces. Chromium's web text fields implement
+    that call as an insert and still return true, so the previous text stays
+    and the new string is appended. Read the contents back. When they already
+    equal ``text``, the write replaced and nothing is deleted. When they do
+    not, delete the range and insert ``text``, and return True only if the
+    field then equals ``text``. A toolkit that reports success but exposes no
+    readable text is trusted, so a replace is not refused just because
+    ``Text.get_text`` failed.
+    """
     eti = _editable_iface(acc)
     if eti is None:
         return False
-    return bool(_call_first(eti, ("set_text_contents",), text, default=False))
+    wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
+    current = _editable_text(acc)
+    if current == text:
+        return True
+    if current is None:
+        return wrote
+    end = _safe(lambda: _atspi().Text.get_character_count(acc))
+    try:
+        end_pos = int(end) if end is not None else len(current)
+    except (TypeError, ValueError):
+        end_pos = len(current)
+    if end_pos < 0:
+        end_pos = len(current)
+    if not _call_first(eti, ("delete_text",), 0, end_pos, default=False):
+        return False
+    if not _call_first(eti, ("insert_text",), 0, text, len(text), default=False):
+        return False
+    after = _editable_text(acc)
+    if after is None:
+        return True
+    return after == text
 
 
 def scroll_to(acc) -> bool:
@@ -667,6 +720,46 @@ def _parent_of(acc):
 
 def _is_scroll_bar(acc) -> bool:
     return _role_name(acc) == _SCROLL_BAR_ROLE
+
+
+def _node_name(acc) -> str:
+    return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
+
+
+def _named_children(acc) -> tuple[str, ...]:
+    names: list[str] = []
+    count = min(_child_count(acc), _MAX_SCROLL_NODES)
+    for index in range(count):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        name = _node_name(child)
+        if name:
+            names.append(name)
+    return tuple(names)
+
+
+def list_signature(acc) -> tuple[str, ...] | None:
+    """Names of a visible list under ``acc``, or of its siblings.
+
+    None when fewer than two named nodes are visible. A text area with no
+    sibling rows has nothing to compare, so a line scroll is not judged a
+    failure just because that one name stays put. A virtualized list (Chrome's
+    ITEM-001… rows) does, and an unchanged tuple means the tree did not follow
+    the wheel.
+    """
+    if acc is None:
+        return None
+    own = _named_children(acc)
+    if len(own) >= 2:
+        return own
+    parent = _parent_of(acc)
+    if parent is None:
+        return None
+    siblings = _named_children(parent)
+    if len(siblings) >= 2:
+        return siblings
+    return None
 
 
 def _collect_scrollbars(start) -> list:

@@ -278,6 +278,29 @@ def test_grant_target_accepts_an_installed_but_not_running_app(monkeypatch) -> N
     assert cli._grant_target(_RTOk(), "Whatever") == "com.resolved.app"
 
 
+def test_grant_of_the_chrome_display_name_stores_the_process_comm(home, monkeypatch, capsys) -> None:
+    """``grant "Google Chrome"`` keys the same id snapshot uses (``chrome``)."""
+    from a11y_computer_use.drivers import _linux_system
+
+    def resolve(ident: str) -> str:
+        if ident.lower() in {"google chrome", "google-chrome", "chrome"}:
+            return "chrome"
+        return ident
+
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    monkeypatch.setattr(_linux_system, "resolve_app", resolve)
+    assert server._permission_app_id("Google Chrome") == "chrome"
+    assert server._permission_app_id("google-chrome") == "chrome"
+    assert server._permission_app_id("not-running-yet") == "not-running-yet"
+    assert cli.main(["grant", "Google Chrome", "read"]) == 0
+    assert "granted chrome at tier 'read'" in capsys.readouterr().out
+    store = safety.PermissionStore()
+    assert store.get_tier("chrome") is safety.Tier.READ
+    assert store.get_tier("Google Chrome") is None
+    assert cli.main(["grant", "not-running-yet", "click"]) == 0
+    assert safety.PermissionStore().get_tier("not-running-yet") is safety.Tier.CLICK
+
+
 def test_keep_awake_runs_caffeinate_on_macos_and_stops_it(monkeypatch) -> None:
     calls: list = []
 
