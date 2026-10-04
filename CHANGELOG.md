@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.23] - 2026-10-04
+
+### Fixed
+
+- Linux `scroll_to_find` moves a fixed-height overflow list whose wheel does not. On the 0.4.22 retest that list was an AXList 1239 by 422 at (20, 139). The wheel landed inside the box, `mean_abs` stayed 0, the painted head stayed ITEM-001, and ITEM-180 never appeared (`page_unchanged`). The same wheel still moves a content-height list and a document group. A Chromium list whose own box sits fully on the screen now reveals a later row at the top of the list through AT-SPI `scroll_to` (about three rows per line, and not more than the rows already on screen). No wheel is sent when that reveal moves the pixels. A true no-move stays `page_unchanged`. The body-scroll find, an explicit scroll whose snapshot head is the painted row, and a still page at the bottom of a content-height list are unchanged. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.22] - 2026-10-04
 
 ### Fixed

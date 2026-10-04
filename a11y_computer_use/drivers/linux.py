@@ -111,6 +111,26 @@ def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, 
     return (left, top, right - left, bottom - top)
 
 
+def _box_inside_screen(box: tuple[int, int, int, int]) -> bool:
+    """True when ``box`` lies entirely on the screen.
+
+    The 0.4.22 overflow list was 1239 by 422 at (20, 139), which fits. A
+    content-height list is taller than the screen and does not.
+    """
+    x, y, width, height = (int(v) for v in box)
+    sw, sh = _screen_span()
+    if sw <= 0 or sh <= 0 or width < 1 or height < 1:
+        return False
+    return (
+        width <= sw
+        and height <= sh
+        and x >= 0
+        and y >= 0
+        and x + width <= sw
+        and y + height <= sh
+    )
+
+
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
 
@@ -345,11 +365,16 @@ class LinuxDriver:
         `unsupported` with ``reason=rows_stale`` and does not replace the
         rows either. A pixel difference alone is not a successful scroll.
         ``snapshot`` then lists the confirmed rows, which is what
-        ``scroll_to_find`` searches.         A coordinate target and a
-        non-Chromium element are not checked. A Chromium list is wheeled on
-        its first painted row, inside the document, not at the geometric
-        center of the list box. The 0.4.21 retest wheeled that center on a
-        1239 by 422 overflow list and the list stayed on ITEM-001. A document
+        ``scroll_to_find`` searches. A coordinate target and a
+        non-Chromium element are not checked. A Chromium list whose own
+        box sits fully on the screen is a fixed-height overflow list. On
+        the 0.4.22 retest that list was 1239 by 422 at (20, 139). The wheel
+        landed inside it and the pixels in that box stayed at mean_abs 0,
+        with the painted head still ITEM-001. Revealing a later row at the
+        top of that list through AT-SPI ``scroll_to`` moves it. The step is
+        about three rows per line and not more than the rows already on
+        screen. No wheel is sent when that reveal moves the pixels. A
+        content-height list and a document group keep the wheel. A document
         group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
@@ -387,19 +412,82 @@ class LinuxDriver:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))
+        raw_box = box
         if box is not None:
             box = _clip_box_to_screen(box)
         if box is None:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
         display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+        still: dict[str, object] = {}
+
+        def judge(mutate) -> bool:
+            """True when ``mutate`` moved the list and the head left the old row.
+
+            False when ``mutate`` did nothing or the pixels stayed, so the
+            caller can try the wheel. A grab that changed while the head
+            did not is ``rows_stale`` and is not retried.
+            """
+            before_grab = _grab_region(box)
+            saved = self._run(lambda: _atspi.ensure_shown_rows(container))
+            before_head = self._run(lambda: _atspi.row_head(saved))
+            if not mutate():
+                return False
+            mean, samples = _list_pixels_moved(before_grab, box)
+            shown = self._run(lambda: _atspi.row_names(saved))
+            still["mean"] = mean
+            still["samples"] = samples
+            still["shown"] = shown
+            if mean is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "the list could not be compared after the wheel scroll, so it was not "
+                    "reported as a success",
+                    detail={
+                        "reason": "page_unseen",
+                        "unit": "lines",
+                        "dx": int(dx),
+                        "dy": int(dy),
+                        "rows": list(shown[:8]),
+                    },
+                )
+            if mean <= _atspi._PAGE_MOVE_MEAN:
+                return False
+            after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
+            if after is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "the list moved on screen but the snapshot would still show the old rows",
+                    detail={
+                        "reason": "rows_stale",
+                        "unit": "lines",
+                        "dx": int(dx),
+                        "dy": int(dy),
+                        "mean_abs": mean,
+                        "rows": list(shown[:8]),
+                    },
+                )
+            self._run(lambda: _atspi.commit_shown_rows(container, after))
+            return True
+
+        # A viewport-sized Chromium list can ignore the wheel. Reveal a
+        # later row first. The pixel check still decides success.
+        if raw_box is not None and _box_inside_screen(raw_box) and int(dy):
+            if judge(lambda: bool(self._run(
+                lambda: _atspi.scroll_viewport_by_lines(container, int(dy))
+            ))):
+                return None
         self.hover(Point(display_id, x, y))
-        before_grab = _grab_region(box)
-        saved = self._run(lambda: _atspi.ensure_shown_rows(container))
-        before_head = self._run(lambda: _atspi.row_head(saved))
-        _linux_input.scroll(x, y, dx=dx, dy=dy)
-        mean, samples = _list_pixels_moved(before_grab, box)
-        shown = self._run(lambda: _atspi.row_names(saved))
+
+        def wheel() -> bool:
+            _linux_input.scroll(x, y, dx=dx, dy=dy)
+            return True
+
+        if judge(wheel):
+            return None
+        mean = still.get("mean")
+        samples = still.get("samples", 0)
+        shown = tuple(still.get("shown") or ())
         if mean is None:
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
@@ -413,37 +501,20 @@ class LinuxDriver:
                     "rows": list(shown[:8]),
                 },
             )
-        if mean <= _atspi._PAGE_MOVE_MEAN:
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "the rows on screen did not change after the wheel scroll",
-                detail={
-                    "reason": "page_unchanged",
-                    "unit": "lines",
-                    "dx": int(dx),
-                    "dy": int(dy),
-                    "mean_abs": mean,
-                    "samples": samples,
-                    "box": list(box),
-                    "rows": list(shown[:8]),
-                },
-            )
-        after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
-        if after is None:
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "the list moved on screen but the snapshot would still show the old rows",
-                detail={
-                    "reason": "rows_stale",
-                    "unit": "lines",
-                    "dx": int(dx),
-                    "dy": int(dy),
-                    "mean_abs": mean,
-                    "rows": list(shown[:8]),
-                },
-            )
-        self._run(lambda: _atspi.commit_shown_rows(container, after))
-        return None
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "the rows on screen did not change after the wheel scroll",
+            detail={
+                "reason": "page_unchanged",
+                "unit": "lines",
+                "dx": int(dx),
+                "dy": int(dy),
+                "mean_abs": mean,
+                "samples": samples,
+                "box": list(box),
+                "rows": list(shown[:8]),
+            },
+        )
 
     def _scroll_pixels(self, target: Target, *, dx: int, dy: int) -> None:
         from a11y_computer_use import observe

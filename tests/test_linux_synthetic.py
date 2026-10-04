@@ -617,6 +617,10 @@ class _FakeAtspi:
     class CoordType:
         SCREEN = 1
 
+    class ScrollType:
+        ANYWHERE = "ANYWHERE"
+        TOP_EDGE = "TOP_EDGE"
+
     class Text:
         @staticmethod
         def get_character_count(acc):
@@ -1473,8 +1477,8 @@ def test_wheel_point_of_a_content_height_list_stays_on_the_screen(monkeypatch) -
     assert 120 <= y < 800
     overflow = Element("e2", "AXList", "items", None, Bounds(0, 40, 100, 400, 160), "s")
     assert _wheel_point(overflow) == (240, 180)
-    # This helper still returns that center. A Chromium list does not wheel
-    # it: the overflow list's painted row is the point that scrolls.
+    # This helper still returns that center. The 0.4.22 overflow list was
+    # not moved by a wheel inside its box.
     low = Element("e3", "AXList", "items", None, Bounds(0, 16, 600, 1239, 422), "s")
     assert _wheel_point(low) == (16 + 1239 // 2, 600 + 422 // 2)
 
@@ -1582,67 +1586,59 @@ def test_scroll_to_find_finds_a_row_once_it_is_painted(
     assert "ITEM-180" in painted
 
 
-def _show_overflow_rows(listing: _Acc, rows: list[_Acc], head: int) -> None:
-    """Eight overflow rows starting at ``head``, flush with the list's top.
+def _layout_overflow(listing: _Acc, rows: list[_Acc], hit: _ListHit, head: int) -> None:
+    """Place every row. ``head`` (1-based) sits at y=144, pitch 28.
 
-    The list box is y=600, height 422. Its geometric center is below the
-    screen. The painted rows are the top of the on-screen part of that box.
+    The list box is (20, 139) 1239 by 422, the 0.4.22 overflow retest.
+    Rows below that box stay in the tree so a later row can be revealed.
     Synthetic boxes, not a live Chrome bounds read.
     """
-    visible = []
-    start = max(0, head - 1)
-    for index, row in enumerate(rows[start:start + 8]):
-        _place_row(row, 24, 608 + index * 24, 1100, 20)
-        visible.append(row)
-    _adopt(listing, *visible)
+    hit.screen = head
+    hit._at.clear()
+    for index, row in enumerate(rows):
+        _place_row(row, 29, 144 + (index - (head - 1)) * 28, 184, 19)
+    _adopt(listing, *rows)
 
 
-def test_overflow_list_scrolls_from_the_painted_row(
+def test_overflow_list_reaches_item_180_when_the_wheel_does_not_move(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
     """Synthetic overflow list, not a live Chrome window.
 
-    The anchor is the overflow list, 1239 by 422, not the tab strip. Its
-    geometric center is below the screen, and the center of the on-screen
-    crop is below the painted rows. Neither point scrolls. A wheel on the
-    first painted row does. ``scroll_to_find`` must not return
-    ``page_unchanged`` while the list is still on ITEM-001.
+    The anchor is the overflow AXList, 1239 by 422 at (20, 139), not the
+    tab strip. The wheel does not change that box: the 0.4.22 retest stayed
+    on ITEM-001 with mean_abs 0 whichever point inside the box was used.
+    Revealing a later row at the top of the list moves it. ``scroll_to_find``
+    ITEM-180 must not return ``page_unchanged`` while the painted head is
+    still ITEM-001, and it must not need the wheel to do it.
     """
     from a11y_computer_use import server
 
     window, listing, hit, _stuck = _chrome_list()
     rows = hit.rows
-    hit.x, hit.y, hit.width, hit.height = 16, 600, 1239, 422
+    hit.x, hit.y, hit.width, hit.height = 20, 139, 1239, 422
     app = window.get_application()
     document = _Acc("document web", name="Bench", width=1271, height=709)
-    document.component._rect.x = 0.0
-    document.component._rect.y = 90.0
+    document.component._rect.x = 4.0
+    document.component._rect.y = 86.0
     document.get_application = lambda: app
     _adopt(document, listing)
     _adopt(window, document)
     _add_tab_strip(window)
-    _show_overflow_rows(listing, rows, 1)
+    _layout_overflow(listing, rows, hit, 1)
+    wheels = {"n": 0}
+
+    def reveal(row, _scroll_type):
+        number = int(row.name.split("-")[1])
+        _layout_overflow(listing, rows, hit, number)
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: reveal(row, scroll_type)
     _wire_chrome_list(monkeypatch, window, hit, stuck=False)
-    center_y = 600 + 422 // 2
-    points: list[tuple[int, int]] = []
-    wired = _linux_input.scroll
-    shown = {"n": 1}
-
-    def record(x, y, dx=0, dy=0):
-        points.append((int(x), int(y)))
-        return wired(x, y, dx=dx, dy=dy)
-
-    monkeypatch.setattr(_linux_input, "scroll", record)
 
     def on_wheel():
-        _x, y = points[-1]
-        # The geometric center (y=811) and the on-screen crop (about y=700)
-        # are not the painted rows. Only the top of the list scrolls.
-        if not 600 <= y <= 660:
-            return
-        shown["n"] = min(177, shown["n"] + 8)
-        hit.screen = shown["n"]
-        _show_overflow_rows(listing, rows, shown["n"])
+        wheels["n"] += 1
 
     hit.on_wheel = on_wheel
     driver = LinuxDriver()
@@ -1650,16 +1646,52 @@ def test_overflow_list_scrolls_from_the_painted_row(
     first = driver.snapshot(Scope.WINDOW, "chrome")
     anchor = server._scroll_anchor(first)
     assert anchor.role == "AXList"
+    assert (anchor.bounds.x, anchor.bounds.y) == (20, 139)
     assert (anchor.bounds.width, anchor.bounds.height) == (1239, 422)
     assert _row_titles(first)[0] == "ITEM-001"
+    assert "ITEM-180" not in _row_titles(first)
     runtime = _runtime_for(driver, monkeypatch)
     out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
     assert "ITEM-180" in out
     assert "found after" in out
     assert "page_unchanged" not in out
-    assert points
-    assert all(600 <= y <= 660 for _x, y in points)
-    assert all(abs(y - center_y) > 30 for _x, y in points)
+    assert wheels["n"] == 0
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-180" in painted
+    assert painted[0] != "ITEM-001"
+
+
+def test_overflow_list_at_the_top_stays_page_unchanged_when_nothing_moves(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    An upward line from ITEM-001 has no row to reveal, and the wheel does
+    not move the box. The result is ``page_unchanged`` and the head stays
+    ITEM-001. A downward search that does move is the previous test.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    rows = hit.rows
+    hit.x, hit.y, hit.width, hit.height = 20, 139, 1239, 422
+    app = window.get_application()
+    for row in rows:
+        row.get_application = lambda: app
+    _layout_overflow(listing, rows, hit, 1)
+    for row in rows:
+        row.component.scroll_to = lambda _scroll_type: True
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    listing_el = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.role == "AXList"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(listing_el, dy=-1, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["dy"] == -1
+    assert error.value.detail["rows"][0] == "ITEM-001"
+    assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
 
 
 def test_explicit_scroll_head_is_the_painted_row_not_the_chrome_band(
