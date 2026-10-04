@@ -257,9 +257,11 @@ class LinuxDriver:
         On a Chromium list the wheel is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
         head below the top sliver leaves the pre-wheel row and stays on the
-        new row for two reads. A row whose own bounds do not cover the
-        sample, such as the pre-scroll row left above the viewport, is not
-        that head. The pixel check resamples the list's own screen box. The
+        new row for two reads. A row whose top is above that line is not
+        that head, even when its box still covers the sample. The 0.4.15
+        check only dropped a box that missed the sample. Children of the
+        list whose tops are on or below the line are the rows the snapshot
+        lists. The pixel check resamples the list's own screen box. The
         frame grabbed in the same turn as the wheel can still be the
         pre-paint image, which is what 0.4.13 reported as ``mean_abs`` 0.0
         while the list on screen had moved. A resample that stays at or
