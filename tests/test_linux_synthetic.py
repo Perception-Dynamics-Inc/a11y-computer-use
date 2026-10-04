@@ -1126,6 +1126,71 @@ class _ListHit:
         self.hold_until = 0
 
 
+def _add_tab_strip(window: _Acc) -> _Acc:
+    """Chrome's tab strip as a sibling of the window's current children.
+
+    A short page tab list at the top of the frame. Synthetic bounds, not a
+    live Chrome window. ``_adopt`` replaces the window's children, so the
+    previous children are passed back in.
+    """
+    tabs = _Acc("page tab list", name="tabs", width=1280, height=36)
+    tabs.component._rect.x = 0.0
+    tabs.component._rect.y = 0.0
+    tab = _Acc("page tab", name="Bench", width=140, height=28)
+    tab.component._rect.x = 8.0
+    tab.component._rect.y = 4.0
+    _adopt(tabs, tab)
+    previous = list(window.children)
+    _adopt(window, tabs, *previous)
+    app = window.get_application()
+    tabs.get_application = lambda: app
+    tab.get_application = lambda: app
+    return tabs
+
+
+def _document_scroll_page():
+    """A body-scroll page: the list box is the content height, taller than the window.
+
+    The document group is the viewport under the tab strip. Rows in the
+    snapshot are the eight that sit at the top of the list. ITEM-180 is not
+    among them until a wheel that lands on the page advances the window.
+    Synthetic tree, not a live Chrome window.
+    """
+    rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 201)]
+    hit = _ListHit(rows, [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 9)])
+    hit.x, hit.y, hit.width, hit.height = 40, 120, 1100, 6400
+    listing = _Acc("list", name="items")
+    listing.component = hit
+    app = _ChromeApp()
+    listing.get_application = lambda: app
+    _show_page_rows(listing, rows, 1)
+    for row in rows:
+        row.parent = listing
+    document = _Acc("document web", name="Bench", width=1280, height=680)
+    document.component._rect.x = 0.0
+    document.component._rect.y = 90.0
+    document.get_application = lambda: app
+    _adopt(document, listing)
+    window = _Acc("frame", name="bench", width=1280, height=800)
+    window.get_application = lambda: app
+    _adopt(window, document)
+    _add_tab_strip(window)
+    return window, listing, hit, rows
+
+
+def _show_page_rows(listing: _Acc, rows: list[_Acc], head: int) -> None:
+    """Eight rows starting at ``head`` (1-based), flush with the list top at y=120.
+
+    A row whose top is the list's top is the snapshot head. Synthetic boxes.
+    """
+    visible = []
+    start = max(0, head - 1)
+    for index, row in enumerate(rows[start:start + 8]):
+        _place_row(row, 40, 120 + index * 20, 1100, 20)
+        visible.append(row)
+    _adopt(listing, *visible)
+
+
 def _chrome_list(stuck: bool = False):
     rows = [_Acc("list item", name=f"ITEM-{i:03d}") for i in range(1, 201)]
     # Distinct objects from the cached children, so the second hit test is a
@@ -1220,6 +1285,193 @@ def test_snapshot_lists_layout_rows_not_the_cached_children(fake_atspi, monkeypa
     assert listing.get_child_at_index(0).name == "ITEM-001"
     assert hit.calls >= 2
     assert any(el.title == "ITEM-012" for el in observe.find_elements(snap, text="ITEM-012"))
+
+
+def _runtime_for(driver, monkeypatch):
+    from a11y_computer_use import server
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+    return runtime
+
+
+def _page_wheel(monkeypatch, hit, advance):
+    """Record wheel points. ``advance`` runs only when the point is on the page.
+
+    A wheel on the tab strip (y < 90) or below the screen (y >= 800) does not
+    move this synthetic page. Not a live Chrome wheel.
+    """
+    points: list[tuple[int, int]] = []
+    wired = _linux_input.scroll
+
+    def record(x, y, dx=0, dy=0):
+        points.append((int(x), int(y)))
+        return wired(x, y, dx=dx, dy=dy)
+
+    monkeypatch.setattr(_linux_input, "scroll", record)
+
+    def on_wheel():
+        _x, y = points[-1]
+        if y < 90 or y >= 800:
+            return
+        advance()
+
+    hit.on_wheel = on_wheel
+    return points
+
+
+def test_scroll_to_find_on_a_document_scroll_page_wheels_the_page(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic body-scroll page, not a live Chrome window.
+
+    The list is taller than the window and the tab strip is in the tree.
+    scroll_to_find has no ref. The wheel lands on the page, below the tab
+    strip and on the screen, and ITEM-180 comes into the snapshot. A wheel
+    on the strip would leave the head at ITEM-001.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, rows = _document_scroll_page()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def advance():
+        hit.screen += 8
+        hit._at.clear()
+        _show_page_rows(listing, rows, hit.screen)
+
+    points = _page_wheel(monkeypatch, hit, advance)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role != "AXTabGroup"
+    assert anchor.role in ("AXGroup", "AXList")
+    assert _row_titles(first)[0] == "ITEM-001"
+    assert "ITEM-180" not in _row_titles(first)
+
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert points
+    assert all(90 <= y < 800 for _x, y in points)
+
+
+def test_scroll_to_find_wheels_a_content_height_list_on_the_screen(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic body-scroll page with no document group, not a live Chrome window.
+
+    The list's own center is below the screen. The wheel uses the on-screen
+    part of that list, so the page moves and ITEM-180 is found. The grab is
+    the visible part of the list, not the content-height box.
+    """
+    window, listing, hit, rows = _document_scroll_page()
+    # Drop the document group: the list and the tab strip are the frame's children.
+    _adopt(window, listing)
+    _add_tab_strip(window)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    boxes: list[tuple] = []
+    import a11y_computer_use.drivers.linux as linux_mod
+
+    previous_grab = linux_mod._grab_region
+
+    def grab(box):
+        boxes.append(tuple(box))
+        return previous_grab(box)
+
+    monkeypatch.setattr(linux_mod, "_grab_region", grab)
+
+    def advance():
+        hit.screen += 8
+        hit._at.clear()
+        _show_page_rows(listing, rows, hit.screen)
+
+    points = _page_wheel(monkeypatch, hit, advance)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert points
+    assert all(90 <= y < 800 for _x, y in points)
+    assert boxes
+    assert all(y + height <= 800 for _x, y, _w, height in boxes)
+
+
+def test_overflow_list_still_beats_a_tab_strip(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The list is a fixed-height box. A tab strip in the same window does not
+    take the wheel. ITEM-180 is found.
+    """
+    from a11y_computer_use import server
+
+    window, _listing, hit, _stuck = _chrome_list()
+    _add_tab_strip(window)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    points = _page_wheel(monkeypatch, hit, hit.advance)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    assert server._scroll_anchor(first).role == "AXList"
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert points
+    # The overflow list sits at y=100, height 160, so its center is y=180.
+    assert all(100 <= y <= 260 for _x, y in points)
+
+
+def test_stuck_overflow_list_with_a_tab_strip_stays_page_unchanged(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The wheel lands on the list and the grab does not change. The result is
+    page_unchanged and the snapshot head stays ITEM-001. Wheeling the tab
+    strip would report not-found instead, because a tab strip is not a list.
+    """
+    window, listing, hit, _stuck = _chrome_list(stuck=True)
+    _add_tab_strip(window)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _runtime_for(driver, monkeypatch)
+    with pytest.raises(ComputerUseError) as error:
+        runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=6)
+    assert error.value.detail["reason"] == "page_unchanged"
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-001"
+    assert "ITEM-180" not in later
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+
+
+def test_wheel_point_of_a_content_height_list_stays_on_the_screen(monkeypatch) -> None:
+    """The geometric center of a content-height list is below the screen.
+
+    The line-scroll point is the center of the on-screen part. An overflow
+    list whose center is already on the screen keeps that center. Synthetic
+    bounds, not a live wheel.
+    """
+    from a11y_computer_use.drivers.linux import _wheel_point
+    from a11y_computer_use.schema import Bounds, Element
+
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    tall = Element("e1", "AXList", "items", None, Bounds(0, 40, 120, 1100, 6400), "s")
+    x, y = _wheel_point(tall)
+    assert 0 <= x < 1280
+    assert 120 <= y < 800
+    overflow = Element("e2", "AXList", "items", None, Bounds(0, 40, 100, 400, 160), "s")
+    assert _wheel_point(overflow) == (240, 180)
 
 
 def test_scroll_to_find_reaches_item_180_from_layout_rows(

@@ -42,6 +42,60 @@ def _point_of(target: Target) -> tuple[int, int]:
     return int(target.bounds.center.x), int(target.bounds.center.y)
 
 
+def _screen_span() -> tuple[int, int]:
+    """Primary screen size in pixels. 1280x800 when it cannot be read."""
+    from a11y_computer_use.drivers import _atspi
+
+    return _atspi._screen_size()
+
+
+def _wheel_point(target: Target) -> tuple[int, int]:
+    """Where a line-scroll wheel lands.
+
+    The element's center when that point is on the screen. A document list
+    reports its content height, so the center sits below the screen and a
+    wheel there never reaches the page. The wheel then uses the center of
+    the part of the element that is on the screen. A point target is unchanged.
+    ``unit=pixels`` does not call this.
+    """
+    if isinstance(target, Point):
+        return int(target.x), int(target.y)
+    bounds = target.bounds
+    cx, cy = int(bounds.center.x), int(bounds.center.y)
+    width, height = _screen_span()
+    if width <= 0 or height <= 0:
+        return cx, cy
+    if 0 <= cx < width and 0 <= cy < height:
+        return cx, cy
+    left = max(int(bounds.x), 0)
+    top = max(int(bounds.y), 0)
+    right = min(int(bounds.x) + int(bounds.width), width)
+    bottom = min(int(bounds.y) + int(bounds.height), height)
+    if right <= left or bottom <= top:
+        return cx, cy
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+    """The part of ``box`` that lies on the screen.
+
+    A content-height list extends below the screen. The pixel check photographs
+    the visible part. A box already on the screen is returned unchanged. None
+    when the box misses the screen.
+    """
+    x, y, width, height = (int(v) for v in box)
+    sw, sh = _screen_span()
+    if x >= 0 and y >= 0 and x + width <= sw and y + height <= sh:
+        return (x, y, width, height)
+    left = max(x, 0)
+    top = max(y, 0)
+    right = min(x + width, sw)
+    bottom = min(y + height, sh)
+    if right - left < 1 or bottom - top < 1:
+        return None
+    return (left, top, right - left, bottom - top)
+
+
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
 
@@ -274,7 +328,9 @@ class LinuxDriver:
         rows either. A pixel difference alone is not a successful scroll.
         ``snapshot`` then lists the confirmed rows, which is what
         ``scroll_to_find`` searches. A coordinate target and a
-        non-Chromium element are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        non-Chromium element are not checked. A list whose center is below the
+        screen is wheeled on the visible part of that list, and the pixel check
+        photographs that visible part. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -296,7 +352,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi, _linux_input
 
         self._focused_editable = None
-        x, y = _point_of(target)
+        x, y = _wheel_point(target)
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
@@ -307,6 +363,8 @@ class LinuxDriver:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))
+        if box is not None:
+            box = _clip_box_to_screen(box)
         if box is None:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None

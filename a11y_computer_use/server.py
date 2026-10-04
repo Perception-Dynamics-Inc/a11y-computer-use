@@ -245,32 +245,105 @@ def refusal_text(decision: safety.Decision) -> str:
 #: browser backend exposes an overflow ``<ul>`` as AXList and a scrolling
 #: ``<div>`` as AXGroup (CDP has no scroll-area role), so scroll_to_find must
 #: look past AXScrollArea or it wheels over the page and nothing moves.
-_SCROLL_CONTAINER_TIERS = (
-    ("AXScrollArea",),
-    ("AXList", "AXTable", "AXOutline", "AXGrid", "AXMenu", "AXTabGroup"),
-    ("AXGroup",),
-)
+#: AXTabGroup is not in this list: Chrome's tab strip shares that role with a
+#: page list, and a content box taller than the window used to be dropped,
+#: leaving the strip as the wheel target.
+_PAGE_LIST_ROLES = ("AXList", "AXTable", "AXOutline", "AXGrid")
+_SCROLL_REFERENCE_ROLES = ("AXWindow", "AXSheet", "AXDialog", "AXWebArea")
+_PAGE_GROUP_ROLES = ("AXGroup", "AXWebArea")
+
+
+def _element_area(el) -> int:
+    return el.bounds.width * el.bounds.height
+
+
+def _scroll_reference_area(snap) -> int:
+    """Area of the window, not of a content box that overflows it.
+
+    The cutoff below is "this container is the window". On a document-scroll
+    page AT-SPI reports the list at its content height, so that list is the
+    largest element. Using that area as the cutoff dropped the list (it is
+    0.9 of itself) and left Chrome's tab strip.
+    """
+    roots = [el for el in snap.elements if el.role in _SCROLL_REFERENCE_ROLES]
+    if roots:
+        return max(_element_area(el) for el in roots)
+    if snap.displays:
+        main = next((d for d in snap.displays if d.is_main), snap.displays[0])
+        return main.width * main.height
+    return max(_element_area(el) for el in snap.elements)
+
+
+def _page_group_ancestor(el, by_ref, below_window):
+    """Largest AXGroup/AXWebArea ancestor of ``el`` that is smaller than the window.
+
+    That ancestor is the document on a body-scroll page. A tab strip is a
+    sibling of the document, not an ancestor of the list, so it is not chosen.
+    None when the list has no such ancestor.
+    """
+    best = None
+    seen: set[str] = set()
+    parent_ref = el.parent
+    while parent_ref and parent_ref not in seen:
+        seen.add(parent_ref)
+        parent = by_ref.get(parent_ref)
+        if parent is None:
+            break
+        if parent.role in _PAGE_GROUP_ROLES and below_window(parent):
+            if best is None or _element_area(parent) > _element_area(best):
+                best = parent
+        parent_ref = parent.parent
+    return best
 
 
 def _scroll_anchor(snap):
-    """The element to scroll over while searching: the largest scroll area; else
-    the largest list/table/outline-like container that is not the whole window;
-    else the largest AXGroup below the window; else the largest element (the
-    window itself). None for an empty snapshot."""
+    """The element to wheel while searching.
+
+    A scroll area wins at any size. Otherwise the largest list, table,
+    outline, or grid smaller than the window (the overflow list). A list
+    taller than the window is the document's content box: the wheel goes to
+    the document group that contains it when that group is smaller than the
+    window, and otherwise to the list. It does not go to Chrome's tab strip.
+    A menu smaller than the window is used only when the page has no list.
+    None for an empty snapshot.
+    """
     if not snap.elements:
         return None
 
-    def area(el) -> int:
-        return el.bounds.width * el.bounds.height
+    def largest(pool):
+        return max(pool, key=_element_area)
 
-    root_area = max(area(el) for el in snap.elements)
-    for roles in _SCROLL_CONTAINER_TIERS:
-        pool = [el for el in snap.elements if el.role in roles]
-        if roles != ("AXScrollArea",):  # a container the size of the window is the window
-            pool = [el for el in pool if area(el) < 0.9 * root_area]
-        if pool:
-            return max(pool, key=area)
-    return max(snap.elements, key=area)
+    reference = _scroll_reference_area(snap)
+
+    def below_window(el) -> bool:
+        return _element_area(el) < 0.9 * reference
+
+    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
+    if areas:
+        return largest(areas)
+
+    lists = [el for el in snap.elements if el.role in _PAGE_LIST_ROLES]
+    inner = [el for el in lists if below_window(el)]
+    if inner:
+        return largest(inner)
+
+    if not lists:
+        menus = [el for el in snap.elements if el.role == "AXMenu" and below_window(el)]
+        if menus:
+            return largest(menus)
+        groups = [el for el in snap.elements if el.role == "AXGroup" and below_window(el)]
+        if groups:
+            return largest(groups)
+        tabs = [el for el in snap.elements if el.role == "AXTabGroup" and below_window(el)]
+        if tabs:
+            return largest(tabs)
+        return largest(snap.elements)
+
+    by_ref = {el.ref: el for el in snap.elements}
+    page = _page_group_ancestor(largest(lists), by_ref, below_window)
+    if page is not None:
+        return page
+    return largest(lists)
 
 
 # ---------------------------------------------------------------------------
@@ -2394,7 +2467,8 @@ class Runtime:
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
-        without it the largest scroll container in each snapshot is used.
+        without it the anchor is the overflow list, or the document on a
+        body-scroll page, not the window's tab strip.
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
@@ -3436,8 +3510,9 @@ def build_server(
         not been tried and the target has not been shown; that return pass is
         one line at a time. If the other direction does not move either, the
         still-page error stands. Pass ref to wheel over a specific
-        scrolling element (the list itself); otherwise the largest scroll
-        container in view is used. Gated at tier 'click' (it scrolls).
+        scrolling element (the list itself); otherwise the anchor is the
+        overflow list, or the document on a body-scroll page, not the
+        window's tab strip. Gated at tier 'click' (it scrolls).
         After a stale_ref whose reason is title_changed (the list reordered or
         refreshed under the ref, and the row at that position is now another
         one), call find(text=...) or scroll_to_find again and act on the ref it

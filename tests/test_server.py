@@ -1262,6 +1262,41 @@ def test_scroll_anchor_prefers_a_scroll_container_below_the_window() -> None:
     assert server._scroll_anchor(snap()) is None
 
 
+def test_scroll_anchor_wheels_the_document_not_the_tab_strip() -> None:
+    """A document-scroll list is taller than the window, so it is the largest
+    element. 0.4.19 dropped it (area >= 0.9 of the largest element) and the
+    tab strip, in the same tier, won. The wheel belongs on the document, or
+    on the list when the document group is not in the tree. Synthetic bounds,
+    not a live Chrome window."""
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def el(ref, role, x, y, w, h, parent=None):
+        return Element(ref=ref, role=role, title="", value=None,
+                       bounds=Bounds(0, x, y, w, h), snapshot_id="s", parent=parent)
+
+    def snap(*els):
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="chrome", pid=1, created_at=0.0,
+                        displays=(Display(0, 1280, 800, 1.0, True),), elements=tuple(els))
+
+    window = el("e1", "AXWindow", 0, 0, 1280, 800)
+    tabs = el("e2", "AXTabGroup", 0, 0, 1280, 40, parent="e1")
+    document = el("e3", "AXGroup", 0, 88, 1280, 680, parent="e1")
+    listing = el("e4", "AXList", 40, 120, 1100, 6400, parent="e3")
+    assert server._scroll_anchor(snap(window, tabs, document, listing)).ref == "e3"
+    # The document group collapsed away: the list is the content, not the strip.
+    bare = el("e4", "AXList", 40, 120, 1100, 6400, parent="e1")
+    assert server._scroll_anchor(snap(window, tabs, bare)).ref == "e4"
+    # A fixed-height overflow list stays the anchor when a tab strip is present,
+    # including when the tab group is a large notebook rather than a thin strip.
+    overflow = el("e5", "AXList", 24, 101, 362, 382, parent="e3")
+    assert server._scroll_anchor(snap(window, tabs, document, overflow)).ref == "e5"
+    notebook = el("e6", "AXTabGroup", 0, 60, 1280, 700, parent="e1")
+    assert server._scroll_anchor(snap(window, notebook, overflow)).ref == "e5"
+    # No list at all: a notebook-sized tab group is still a place to wheel.
+    assert server._scroll_anchor(snap(window, notebook)).ref == "e6"
+
+
 def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:
     from a11y_computer_use import server
     from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
