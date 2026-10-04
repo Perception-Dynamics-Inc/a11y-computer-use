@@ -354,13 +354,12 @@ def _stable_id(acc, attrs: dict | None = None) -> str | None:
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
-    For a Chromium list, ``refresh_visible`` uses the rows last confirmed for
-    that list box. A line scroll replaces them only after the list pixels move
-    and the head below the top sliver is stable. A later snapshot reuses that
-    window unless the confirmed head's own top is now above the line. A hit
-    test that names a row off screen does not replace a head that is still
-    inside the list. ``scroll_to_find`` searches this snapshot. A non-Chromium
-    tree is read from ``get_child_at_index`` as before.
+    For a Chromium list, the snapshot lists rows of the list node it is
+    reading whose own tops are on or below the head line. A saved head from
+    a different Python wrapper is not that list: a live walk wraps a new
+    object each time, and the 0.4.16 retest still showed the pre-scroll row
+    at y=-2. ``scroll_to_find`` searches this snapshot. A non-Chromium tree
+    is read from ``get_child_at_index`` as before.
     """
 
     def __init__(self) -> None:
@@ -368,11 +367,12 @@ class ATSPIAccessor:
         self._visible_bounds: dict[int, tuple] = {}
 
     def refresh_visible(self, root: object) -> None:
-        """Point Chromium lists at the rows last confirmed inside their boxes.
+        """Point Chromium lists at the rows inside their boxes.
 
         No-op unless the tree's toolkit is Chromium. The cached child list is
-        left untouched on the accessible. A list with no confirmed rows is
-        probed once and that result is kept; a later snapshot reuses it.
+        left untouched on the accessible. Rows are taken from the list node
+        this walk is reading. A saved head stored on a different wrapper is
+        not reused ahead of those rows.
         """
         self._visible_children.clear()
         self._visible_bounds.clear()
@@ -418,6 +418,18 @@ class ATSPIAccessor:
         )
 
     def children(self, node: object) -> Sequence[object]:
+        # The pruner's list object is not the wrapper ``refresh_visible``
+        # probed. Keying the overlay by ``id()`` published the cached first
+        # child, whose live top was above the viewport (y=-2, y=-18, y=-26
+        # on the 0.4.16 retest). Read this node.
+        if _role_name(node) in _LIST_ROLES and _chromium_app(node):
+            live = _in_view_named_rows(node)
+            if len(_row_names(live)) >= 2:
+                accs = []
+                for acc, pos, size in live:
+                    self._visible_bounds[id(acc)] = (pos, size)
+                    accs.append(acc)
+                return accs
         visible = self._visible_children.get(id(node))
         if visible is not None:
             return list(visible)
@@ -907,11 +919,14 @@ _CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
 _MAX_ROW_SAMPLES = 16
-# Children consulted when the hit test is stuck on the pre-scroll row. One
-# screen of rows, plus one wrapper level, not the whole virtualized list.
-_CHILD_ROW_CAP = 40
-_ROW_ROLES = frozenset({
-    "list item", "tree item", "table cell", "table row", "row", "list box option",
+# Nodes examined while looking for the on-screen head. Rows parked above
+# the viewport do not count as a reason to stop: the 0.4.16 cap of 40
+# could end before the first visible row, and a wrapper whose top is above
+# the line was not opened even when it held that row.
+_VISIBLE_WALK_CAP = _MAX_CHILDREN_FETCH
+_VISIBLE_DESCEND = 4
+_SKIP_ROW_ROLES = frozenset({
+    "scroll bar", "separator", "menu bar", "tool bar", "status bar",
 })
 # Rows last confirmed for a list box. A later hit test is not installed over
 # these unless a wheel's pixels moved and the head below the sliver changed,
@@ -1013,68 +1028,91 @@ def _settle_hit(comp, x: int, y: int, coord):
     return None
 
 
-def _in_view_child_rows(container, line: float) -> list[tuple]:
-    """Named rows under ``container`` whose own top is on or below ``line``.
+def _in_view_named_rows(container) -> list[tuple]:
+    """Named rows under ``container`` whose own top is on or below the head line.
 
-    The hit test can stay on the pre-scroll row while these children already
-    sit inside the list. A node with no box is a wrapper and is opened one
-    level. A node whose top is above the line is not opened and is not a
-    row. The walk stops at ``_CHILD_ROW_CAP`` nodes. Each rectangle is that
-    child's own box, clipped to the list, so the snapshot y is not the
-    pre-scroll y above the viewport.
+    Each entry is ``(accessible, (x, y), (width, height))``. The walk reads
+    ``container`` itself. A row entirely above the head line is skipped and
+    the scan continues, including past the first forty such rows. A wrapper
+    whose top is above the line is opened when its box still covers the
+    list, which is where the on-screen rows sit. A node tall enough to be
+    that wrapper is not itself a row. The rectangle is the node's own box
+    clipped to the list, so the snapshot y is not the pre-scroll y.
     """
-    pos, size = _extents(container)
-    if pos is None or size is None:
+    if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
+    pos, size = _extents(container)
+    if pos is None or size is None or size[1] < 4 or size[0] < 1:
+        return []
+    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
+    line = float(pos[1]) + sliver
     box_x, box_y = float(pos[0]), float(pos[1])
     box_w, box_h = float(size[0]), float(size[1])
     box_r, box_b = box_x + box_w, box_y + box_h
     found: list[tuple] = []
     seen = 0
-    queue: list[tuple] = []
-    for index in range(min(_child_count(container), _CHILD_ROW_CAP)):
-        child = _child_at(container, index)
-        if child is not None:
-            queue.append((child, 1))
-    while queue and seen < _CHILD_ROW_CAP:
-        node, depth = queue.pop(0)
+
+    def walk(node, depth: int) -> None:
+        nonlocal seen
+        if node is None or node is container or seen >= _VISIBLE_WALK_CAP or len(found) >= _MAX_ROW_SAMPLES:
+            return
         seen += 1
-        if node is container:
-            continue
         npos, nsize = _extents(node)
         if npos is None or nsize is None:
             if depth > 0:
-                room = _CHILD_ROW_CAP - seen
-                for index in range(min(_child_count(node), max(0, room))):
-                    child = _child_at(node, index)
-                    if child is not None:
-                        queue.append((child, 0))
-            continue
+                for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+                    walk(_child_at(node, index), depth - 1)
+                    if len(found) >= _MAX_ROW_SAMPLES:
+                        return
+            return
         top = float(npos[1])
-        if top < line - 1:
-            continue
+        height = float(nsize[1])
         left = float(npos[0])
         width = float(nsize[0])
-        height = float(nsize[1])
         if width <= 0 or height <= 0:
+            return
+        bottom = top + height
+        if bottom < line - 1 or top > box_b or left + width < box_x or left > box_r:
+            return
+        role = _role_name(node)
+        spans = height > box_h * 0.9
+        in_view = top >= line - 1
+        name = _node_name(node)
+        if (
+            in_view
+            and name
+            and not spans
+            and role not in _SKIP_ROW_ROLES
+            and role not in _LIST_ROLES
+        ):
+            row_top = max(top, box_y)
+            row_left = max(left, box_x)
+            row_height = max(1.0, min(height, box_b - row_top))
+            row_width = max(1.0, min(width, box_r - row_left))
+            found.append((node, (row_left, row_top), (row_width, row_height)))
+            return
+        if depth > 0 and top < box_b:
+            for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+                walk(_child_at(node, index), depth - 1)
+                if len(found) >= _MAX_ROW_SAMPLES:
+                    return
+
+    total = min(_child_count(container), _VISIBLE_WALK_CAP)
+    for index in range(total):
+        if len(found) >= _MAX_ROW_SAMPLES:
+            break
+        child = _child_at(container, index)
+        if child is None:
             continue
-        if left + width < box_x or left > box_r or top + height < box_y or top > box_b:
-            continue
-        if _role_name(node) not in _ROW_ROLES:
-            if depth > 0:
-                room = _CHILD_ROW_CAP - seen
-                for index in range(min(_child_count(node), max(0, room))):
-                    child = _child_at(node, index)
-                    if child is not None:
-                        queue.append((child, 0))
-            continue
-        if not _node_name(node):
-            continue
-        row_top = max(top, box_y)
-        row_left = max(left, box_x)
-        row_height = max(1.0, min(height, box_b - row_top))
-        row_width = max(1.0, min(width, box_r - row_left))
-        found.append((node, (row_left, row_top), (row_width, row_height)))
+        cpos, csize = _extents(child)
+        if (
+            found
+            and cpos is not None
+            and csize is not None
+            and float(cpos[1]) > box_b
+        ):
+            break
+        walk(child, _VISIBLE_DESCEND)
     found.sort(key=lambda item: (item[1][1], item[1][0]))
     return found
 
@@ -1096,7 +1134,7 @@ def _probe_visible_rows(container) -> list[tuple]:
     bottom = int(pos[1] + size[1])
     sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
     line = float(top + sliver)
-    child_rows = _in_view_child_rows(container, line)
+    child_rows = _in_view_named_rows(container)
     if len(_row_names(child_rows)) >= 2:
         return child_rows
     comp = _component(container)
@@ -1268,14 +1306,21 @@ def list_screen_box(container) -> tuple[int, int, int, int] | None:
 
 
 def _shown_or_probe(container) -> list:
-    """Confirmed rows for ``container``.
+    """Rows for ``container``.
 
-    A saved window is returned as-is while its head's own top is still on
-    or below the line, or when that top is unknown. A head that has moved
-    above the line is probed again. A later hit test does not replace a
-    head that is still inside the list. A probe whose head is above the
-    line is not stored.
+    Rows whose own tops are on or below the head line come first. A saved
+    head is not returned ahead of them: the 0.4.16 retest kept ITEM-001 at
+    y=-2 for 12 seconds after the pixels had moved. A saved window is used
+    only when this list has no such rows, and only while its head is not
+    above the line. A later hit test does not replace a head that is still
+    inside the list. A probe whose head is above the line is not stored.
     """
+    live = _in_view_named_rows(container)
+    if len(_row_names(live)) >= 2 and not _known_head_above(container, live):
+        key = _list_key(container)
+        if key is not None:
+            _SHOWN[key] = list(live)
+        return live
     saved = _saved_for(container)
     if saved is not None and not _known_head_above(container, saved):
         return saved
@@ -1303,12 +1348,13 @@ def ensure_shown_rows(container) -> list | None:
 def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
     """Rows whose head differs from ``previous_head`` on two probes in a row.
 
-    A row whose top is above the list is not a head, even when its box
-    covers the sample. The 0.4.15 retest moved the pixels (mean_abs about
-    6.83 and 6.98) and still published ITEM-001 at y=-2, so ``rows_stale``
-    stopped the find. None when no on-screen head ever leaves
-    ``previous_head``. The caller does not treat that as a scroll and does
-    not install the off-screen row.
+    The head is the first row whose own top is on or below the list's head
+    line. A row above that line is not a head, even when its box covers the
+    sample or it is the first cached child. The 0.4.16 retest moved the
+    pixels and still published that child (ITEM-001 at y=-2, and ITEM-013
+    at y=-26). None when no on-screen head ever leaves ``previous_head``.
+    The caller does not treat that as a scroll and does not install the
+    off-screen row.
     """
     last: str | None = None
     for attempt in range(_HEAD_POLLS):
