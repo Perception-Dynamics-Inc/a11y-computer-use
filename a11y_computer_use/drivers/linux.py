@@ -220,7 +220,17 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
 
         def _do() -> Snapshot:
-            root = _atspi.find_root(app, scope)  # None -> empty snapshot
+            root = _atspi.find_root(app, scope)
+            # An empty tree is a running app with nothing to show. No AT-SPI
+            # application at all is the same answer menu list already gives:
+            # the app is not running. An empty snapshot there told the agent
+            # the app was open and custom-drawn.
+            if root is None:
+                raise ComputerUseError(
+                    ErrorCode.APP_NOT_FOUND,
+                    f"no running application matches {app!r}",
+                    detail={"app": app},
+                )
             pid = _atspi.pid_of(root) if root is not None else None
             accessor = _atspi.ATSPIAccessor()
             # Chromium lists: the rows are read from the list node this walk
@@ -373,11 +383,22 @@ class LinuxDriver:
         move the painted rows: the list stayed on ITEM-001 and the call
         ended on ``page_unchanged``. When that value write does not move
         the pixels, a left click lands on the vertical track (the lower
-        track to go down, the upper track to go up). The click is one
+        track to go down, the upper track to go up).         The click is one
         page, inside the list. No wheel is sent when the click moves the
         pixels and the on-screen head. The bar write is still tried first
-        and still has to move the pixels. A content-height list and a
-        document group keep the wheel. A document group is not a list and
+        and still has to move the pixels. A grab under 1 can still be that
+        move: uniform rows leave ``mean_abs`` about 0.5 to 0.7 while the
+        on-screen head leaves the old row. That head change is the step.
+        The bar write is not undone, and no track click or wheel follows
+        it. A still grab, at or under the uniform-row floor, is not a step
+        even if a later hit names another row. ``page_unchanged`` is only
+        the case where the head stays and the grab stays at or under 1.
+        A list inside a shorter ancestor, the overflow wrapper, uses that
+        wrapper as the painted viewport. Rows the wrapper hides are not
+        the head. The same bar, ``scroll_to``, and track checks scroll
+        that wrapper, and no wheel is sent when the step moves the head.
+        A content-height list whose parent is the document, and a document
+        group, keep the wheel. A document group is not a list and
         keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
@@ -407,6 +428,10 @@ class LinuxDriver:
         container = None
         if handle is not None and (int(dx) or int(dy)):
             container = self._run(lambda: _atspi.list_container(handle))
+            # A content-height list inside an overflow wrapper is not the
+            # anchor. The document is. The wrapper is what scrolls.
+            if container is None:
+                container = self._run(lambda: _atspi.list_with_overflow_ancestor(handle))
         if container is not None:
             point = self._run(lambda: _atspi.list_wheel_point(container))
             if point is not None:
@@ -416,7 +441,11 @@ class LinuxDriver:
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))
         raw_box = box
-        if box is not None:
+        ancestor_box = self._run(lambda: _atspi.overflow_ancestor_box(container))
+        if ancestor_box is not None:
+            painted = _clip_box_to_screen(ancestor_box)
+            box = painted if painted is not None else ancestor_box
+        elif box is not None:
             box = _clip_box_to_screen(box)
         if box is None:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
@@ -454,30 +483,39 @@ class LinuxDriver:
                         "rows": list(shown[:8]),
                     },
                 )
-            if mean <= _atspi._PAGE_MOVE_MEAN:
+            # A still grab is not a move. Looking up the head here would
+            # turn the invented row in the stuck-page tests into a scroll.
+            if mean <= _atspi._UNIFORM_ROW_MEAN:
                 return False
             after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
-            if after is None:
-                raise ComputerUseError(
-                    ErrorCode.UNSUPPORTED,
-                    "the list moved on screen but the snapshot would still show the old rows",
-                    detail={
-                        "reason": "rows_stale",
-                        "unit": "lines",
-                        "dx": int(dx),
-                        "dy": int(dy),
-                        "mean_abs": mean,
-                        "rows": list(shown[:8]),
-                    },
-                )
-            self._run(lambda: _atspi.commit_shown_rows(container, after))
-            return True
+            if after is not None:
+                # Uniform rows stay under the still-page threshold of 1 and
+                # the head has still left the old row. That is the step.
+                # Do not fall through to a track click or a wheel.
+                self._run(lambda: _atspi.commit_shown_rows(container, after))
+                return True
+            if mean <= _atspi._PAGE_MOVE_MEAN:
+                return False
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the list moved on screen but the snapshot would still show the old rows",
+                detail={
+                    "reason": "rows_stale",
+                    "unit": "lines",
+                    "dx": int(dx),
+                    "dy": int(dy),
+                    "mean_abs": mean,
+                    "rows": list(shown[:8]),
+                },
+            )
 
         # A viewport-sized Chromium list can ignore the wheel and
         # ``scroll_to``. Step its own vertical bar first. The pixel check
         # still decides success. A bar that is present and does not move
         # the list is not followed by ``scroll_to``.
-        if raw_box is not None and _box_inside_screen(raw_box) and int(dy):
+        if raw_box is not None and (
+            _box_inside_screen(raw_box) or ancestor_box is not None
+        ) and int(dy):
             outcome: dict[str, object] = {"kind": "absent", "undo": None}
 
             def nudge() -> bool:
@@ -810,15 +848,20 @@ class LinuxDriver:
         return self._run(lambda: _linux_menus.menu_press(root, path))
 
     def menu_state(self, app: str) -> dict:
-        """Open menu path, or closed when the app or the bus is unavailable.
+        """Open menu path, or closed when the bus is unavailable.
 
-        The Runtime asks before keystrokes. A missing app must not raise there.
+        An app that is not running is ``app_not_found``, the same answer as
+        menu list. The Runtime asks before keystrokes and catches that error.
+        A missing AT-SPI bus is not that answer: the menu is not known, and
+        the call stays closed so a keystroke is not blocked on the bus.
         """
         from a11y_computer_use.drivers import _linux_menus
 
         try:
             root = self._menu_root(app)
-        except ComputerUseError:
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.APP_NOT_FOUND:
+                raise
             return {"open": False, "path": []}
         try:
             return self._run(lambda: _linux_menus.menu_state(root))
@@ -826,17 +869,20 @@ class LinuxDriver:
             return {"open": False, "path": []}
 
     def menu_close(self, app: str) -> list[str]:
-        """Close the open menu. A missing app returns no path.
+        """Close the open menu. An app that is not running is ``app_not_found``.
 
-        A menu that is still open after Escape raises. That error is not
-        turned into an empty path: an empty path means nothing was open, and
-        the Runtime would report success.
+        A missing AT-SPI bus returns no path. A menu that is still open
+        after Escape raises. That error is not turned into an empty path:
+        an empty path means nothing was open, and the Runtime would report
+        success.
         """
         from a11y_computer_use.drivers import _linux_menus
 
         try:
             root = self._menu_root(app)
-        except ComputerUseError:
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.APP_NOT_FOUND:
+                raise
             return []
 
         def read() -> dict:

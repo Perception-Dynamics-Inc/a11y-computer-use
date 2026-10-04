@@ -440,26 +440,42 @@ def launch_app(identifier: str) -> None:
 
 def activate_app(identifier: str) -> str:
     """Raise+focus a window whose comm/title matches ``identifier`` (EWMH
-    _NET_ACTIVE_WINDOW client message). Returns the resolved app id."""
-    from Xlib import X, protocol
+    _NET_ACTIVE_WINDOW client message). Returns the resolved app id.
+
+    No matching window is ``app_not_found``. The call does not report that
+    it activated an app that was never launched. That answer does not build
+    an X client message, so a desktop with no matching window does not need
+    the X connection beyond the window list.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     needle = (identifier or "").lower()
     d = _display()
-    root = d.screen().root
     resolved = identifier
+    matched = None
     for win in _managed_windows(d):
         comm = (_comm_for_pid(_pid_of(win, d)) or "").lower()
         title = _win_title(win, d).lower()
         if needle and (needle in comm or needle in title):
             resolved = comm or identifier
-            event = protocol.event.ClientMessage(
-                window=win, client_type=_atom(d, "_NET_ACTIVE_WINDOW"),
-                data=(32, [1, X.CurrentTime, 0, 0, 0]),
-            )
-            mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
-            root.send_event(event, event_mask=mask)
-            d.flush()
+            matched = win
             break
+    if matched is None:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"no running application matches {identifier!r}",
+            detail={"app": identifier},
+        )
+    from Xlib import X, protocol
+
+    root = d.screen().root
+    event = protocol.event.ClientMessage(
+        window=matched, client_type=_atom(d, "_NET_ACTIVE_WINDOW"),
+        data=(32, [1, X.CurrentTime, 0, 0, 0]),
+    )
+    mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
+    root.send_event(event, event_mask=mask)
+    d.flush()
     return resolved
 
 

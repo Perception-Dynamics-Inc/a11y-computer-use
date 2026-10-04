@@ -348,6 +348,33 @@ def test_close_on_wayland_does_not_report_success(monkeypatch) -> None:
     assert file_menu.pressed == []
 
 
+def test_missing_app_is_app_not_found_for_snapshot_and_menus(monkeypatch) -> None:
+    """No AT-SPI application is the same answer menu list already gives.
+
+    An empty tree of a running app is not this case. A missing bus is not
+    this case either: that stays closed, covered by the next test.
+    Synthetic find_root, not a live desktop.
+    """
+
+    def find_root(name, scope):
+        assert name == "xfce4-terminal"
+        return None
+
+    monkeypatch.setattr("a11y_computer_use.drivers._atspi.find_root", find_root)
+    driver = LinuxDriver()
+    for call in (
+        lambda: driver.snapshot(Scope.WINDOW, "xfce4-terminal"),
+        lambda: driver.menu_state("xfce4-terminal"),
+        lambda: driver.menu_close("xfce4-terminal"),
+        lambda: driver.menu_items("xfce4-terminal", None),
+    ):
+        with pytest.raises(ComputerUseError) as exc:
+            call()
+        assert exc.value.code is ErrorCode.APP_NOT_FOUND
+        assert exc.value.detail["app"] == "xfce4-terminal"
+        assert "activated" not in exc.value.message
+
+
 def test_menu_state_without_a_bus_does_not_raise(monkeypatch) -> None:
     def boom(name, scope):
         raise ImportError("no gi")
