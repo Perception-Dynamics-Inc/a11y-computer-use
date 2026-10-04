@@ -1075,6 +1075,9 @@ class _ListHit:
         # row parked above the list. Not a live Chrome bounds read.
         self.blind_until = 0
         self.offscreen: _Acc | None = None
+        # When set, every hit is this row. Used when that row's box still
+        # covers the sample so the 0.4.15 bounds check would accept it.
+        self.force_row: _Acc | None = None
         self.x, self.y, self.width, self.height = 40, 100, 400, 160
         self._at: dict[tuple[int, int], int] = {}
 
@@ -1103,6 +1106,8 @@ class _ListHit:
 
     def get_accessible_at_point(self, _x, y, _coord):
         self.calls += 1
+        if self.force_row is not None:
+            return self.force_row
         if self.offscreen is not None and self.clock < self.blind_until:
             return self.offscreen
         key = (int(_x), int(y))
@@ -1411,6 +1416,160 @@ def test_moved_pixels_do_not_keep_the_row_parked_above_the_list(
     assert kept[0] == "ITEM-010"
     assert "ITEM-192" not in kept
     assert "ITEM-001" not in kept
+
+
+def _place_row(row: _Acc, x: float, y: float, width: float, height: float) -> _Acc:
+    if row.component is None:
+        row.component = _Geom(width, height)
+    row.component._rect.x = x
+    row.component._rect.y = y
+    row.component._rect.width = width
+    row.component._rect.height = height
+    return row
+
+
+def _positioned_window(rows: list[_Acc], head: int) -> list[_Acc]:
+    """Eight rows starting at ``head`` (1-based), tops on the list's head line.
+
+    The list fixture sits at y=100. The head line is y=108. Synthetic boxes,
+    not a live Chrome bounds read.
+    """
+    visible = []
+    start = max(0, head - 1)
+    for index, row in enumerate(rows[start:start + 8]):
+        _place_row(row, 40, 108 + index * 16, 400, 16)
+        visible.append(row)
+    return visible
+
+
+def _overlapping_named(name: str) -> _Acc:
+    """A row at y=-2 whose height still covers the sample at y=108.
+
+    The 0.4.15 check kept this shape. A height of 4 at the same y does not
+    cover the sample and is a different case.
+    """
+    row = _Acc("list item", name=name, width=400, height=120)
+    row.component._rect.x = 40
+    row.component._rect.y = -2
+    return row
+
+
+def test_overlapping_row_above_the_list_is_not_the_snapshot_head(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The 0.4.15 driver dropped a hit only when its box missed the sample.
+    Here ITEM-001 sits at y=-2 with height 120, so it covers the sample at
+    y=108, and the hit test returns that row for every point. The list's
+    children also include ITEM-010 and the rows after it, with tops on the
+    head line. A 3-line scroll whose pixels move returns None, and the
+    snapshot head is ITEM-010 inside the list. A following wheel whose
+    pixels stay put is page_unchanged and does not install ITEM-192.
+    This does not prove the live Chrome list.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    _adopt(listing, *_positioned_window(hit.rows, 1))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        parked = hit.rows[0]
+        _place_row(parked, 40, -2, 400, 120)
+        hit.screen = 10
+        hit.force_row = parked
+        hit.invent = None
+        hit.hold_until = 0
+        hit._at.clear()
+        _adopt(listing, parked, *_positioned_window(hit.rows, 10))
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert row.bounds.y >= 100
+    assert driver.scroll(row, dy=3, unit=ScrollUnit.LINES) is None
+    parked = hit.rows[0]
+    assert parked.component._rect.y == -2
+    assert _atspi._point_in_extents(parked, 240, 108) is True
+    assert _atspi._top_above_line(parked, 108) is True
+    later_snap = driver.snapshot(Scope.WINDOW, "chrome")
+    later = _row_titles(later_snap)
+    assert later[0] == "ITEM-010"
+    assert "ITEM-017" in later
+    assert "ITEM-001" not in later
+    head = next(el for el in later_snap.elements if el.role == "AXRow" and el.title == "ITEM-010")
+    assert head.bounds.y >= 100
+    assert head.bounds.y != -2
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+
+    def still():
+        hit.invent = 192
+        fresh = _overlapping_named("ITEM-192")
+        hit.force_row = fresh
+        newbie = [
+            _place_row(_Acc("list item", name=f"ITEM-{i:03d}", width=400, height=16),
+                       40, 108 + index * 16, 400, 16)
+            for index, i in enumerate(range(192, 200))
+        ]
+        _adopt(listing, fresh, *newbie)
+
+    hit.on_wheel = still
+    anchor = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.role == "AXRow" and el.title == "ITEM-010"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert kept[0] == "ITEM-010"
+    assert "ITEM-192" not in kept
+    assert "ITEM-001" not in kept
+
+
+def test_scroll_to_find_passes_an_overlapping_stale_head(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    Each wheel moves the pixels. The hit test keeps returning a row at
+    y=-2 whose box still covers the sample, which is the row 0.4.15 kept.
+    The list children are that row plus the rows now inside the list.
+    scroll_to_find reaches ITEM-180 and does not stop on rows_stale.
+    This does not prove the live Chrome list.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, _stuck = _chrome_list()
+    _adopt(listing, *_positioned_window(hit.rows, 1))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        previous = hit.screen
+        hit.advance()
+        overlap = _overlapping_named(hit.rows[previous - 1].name)
+        _adopt(listing, overlap, *_positioned_window(hit.rows, hit.screen))
+        hit.force_row = overlap
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert _atspi._point_in_extents(hit.force_row, 240, 108) is True
+    assert listing.get_child_at_index(0).name != "ITEM-180"
 
 
 def test_scroll_to_find_passes_the_offscreen_stale_head(

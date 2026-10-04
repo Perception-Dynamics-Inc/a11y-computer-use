@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.16] - 2026-10-04
+
+### Fixed
+
+- Linux line scroll on a Chromium list no longer treats a row whose box still covers the sample as the snapshot head when that row's own top is above the list. On the 0.4.15 retest the pixels did move (`mean_abs` about 6.83 and 6.98) and the on-screen head became ITEM-010, but the snapshot head stayed ITEM-001 at y=-2, so `scroll_to_find` ITEM-180 returned `unsupported` with `reason=rows_stale`. The 0.4.15 check only dropped a box that missed the sample. A row at y=-2 tall enough to cover the sample is not the head. Children whose tops are on or below the head line are the rows the snapshot lists. A grab that stays still is still `unsupported` with `reason=page_unchanged` and does not install a new head. `unit=pixels` is unchanged. Synthetic hit tests and solid grabs, not a live Chrome run (#33) (2026-10-04).
+
 ## [0.4.15] - 2026-10-03
 
 ### Fixed

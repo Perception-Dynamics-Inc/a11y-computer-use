@@ -356,10 +356,11 @@ class ATSPIAccessor:
 
     For a Chromium list, ``refresh_visible`` uses the rows last confirmed for
     that list box. A line scroll replaces them only after the list pixels move
-    and the head below the top sliver is stable. A later snapshot does not
-    probe again, so a hit test that names a row off screen cannot replace
-    them. ``scroll_to_find`` searches this snapshot. A non-Chromium tree is
-    read from ``get_child_at_index`` as before.
+    and the head below the top sliver is stable. A later snapshot reuses that
+    window unless the confirmed head's own top is now above the line. A hit
+    test that names a row off screen does not replace a head that is still
+    inside the list. ``scroll_to_find`` searches this snapshot. A non-Chromium
+    tree is read from ``get_child_at_index`` as before.
     """
 
     def __init__(self) -> None:
@@ -906,8 +907,15 @@ _CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
 _MAX_ROW_SAMPLES = 16
+# Children consulted when the hit test is stuck on the pre-scroll row. One
+# screen of rows, plus one wrapper level, not the whole virtualized list.
+_CHILD_ROW_CAP = 40
+_ROW_ROLES = frozenset({
+    "list item", "tree item", "table cell", "table row", "row", "list box option",
+})
 # Rows last confirmed for a list box. A later hit test is not installed over
-# these unless a wheel's pixels moved and the head below the sliver changed.
+# these unless a wheel's pixels moved and the head below the sliver changed,
+# or the confirmed head's own top has moved above that line.
 _SHOWN: dict[tuple, list] = {}
 
 
@@ -943,8 +951,9 @@ def _point_in_extents(acc, x: int, y: int) -> bool | None:
     """Whether ``acc``'s own screen box covers ``(x, y)``.
 
     None when the accessible has no box. False when it has a box and the
-    point is outside it. The 0.4.14 retest's snapshot head was the pre-scroll
-    row at y=-2, above the list, while the on-screen head was ITEM-010.
+    point is outside it. Covering the point is not enough: the 0.4.15 retest
+    still published ITEM-001 at y=-2, and a row that tall still covers a
+    sample inside the list. ``_top_above_line`` is what drops that row.
     """
     pos, size = _extents(acc)
     if pos is None or size is None:
@@ -956,15 +965,36 @@ def _point_in_extents(acc, x: int, y: int) -> bool | None:
     return (left - 1) <= x <= (left + width + 1) and (top - 1) <= y <= (top + height + 1)
 
 
+def _head_line(container) -> float | None:
+    """Y of the first on-screen row: the list top plus the clipped sliver."""
+    pos, size = _extents(container)
+    if pos is None or size is None or size[1] < 4 or size[0] < 1:
+        return None
+    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
+    return float(pos[1]) + sliver
+
+
+def _top_above_line(acc, line: float) -> bool:
+    """True when ``acc``'s own top is above the on-screen head line.
+
+    False when the accessible has no box. A row at y=-2 whose height still
+    covers the sample is above the line. The 0.4.15 check kept that row
+    because the box covered the point.
+    """
+    pos, size = _extents(acc)
+    if pos is None or size is None:
+        return False
+    return float(pos[1]) < line - 1
+
+
 def _settle_hit(comp, x: int, y: int, coord):
     """The accessible at ``(x, y)`` that covers that point.
 
-    Chromium's first answer can be the pre-scroll row. On the 0.4.14 retest
-    that row's bounds had moved to y=-2, above the viewport, while the hit
-    test still named it. A row that does not cover ``(x, y)`` is not the
-    on-screen head. Two covering answers with the same name are the result.
-    Python identity is not the check: a new wrapper for the same row is
-    still that row.
+    Chromium's first answer can be the pre-scroll row. A row that does not
+    cover ``(x, y)`` is ignored. A row that covers the point can still start
+    above the list; the probe drops that one. Two covering answers with the
+    same name are the result. Python identity is not the check: a new
+    wrapper for the same row is still that row.
     """
     previous_name = None
     for attempt in range(_HIT_TRIES):
@@ -983,35 +1013,111 @@ def _settle_hit(comp, x: int, y: int, coord):
     return None
 
 
-def _probe_visible_rows(container) -> list[tuple]:
-    """Rows whose layout hit-test falls inside ``container``'s screen box.
+def _in_view_child_rows(container, line: float) -> list[tuple]:
+    """Named rows under ``container`` whose own top is on or below ``line``.
 
-    Each entry is ``(accessible, (x, y), (width, height))``. The rectangle is
-    the span of samples that hit that accessible, inside the container, so a
-    snapshot keeps the row even when the accessible's own extents are stale.
-    Samples that hit the container itself are skipped.
+    The hit test can stay on the pre-scroll row while these children already
+    sit inside the list. A node with no box is a wrapper and is opened one
+    level. A node whose top is above the line is not opened and is not a
+    row. The walk stops at ``_CHILD_ROW_CAP`` nodes. Each rectangle is that
+    child's own box, clipped to the list, so the snapshot y is not the
+    pre-scroll y above the viewport.
+    """
+    pos, size = _extents(container)
+    if pos is None or size is None:
+        return []
+    box_x, box_y = float(pos[0]), float(pos[1])
+    box_w, box_h = float(size[0]), float(size[1])
+    box_r, box_b = box_x + box_w, box_y + box_h
+    found: list[tuple] = []
+    seen = 0
+    queue: list[tuple] = []
+    for index in range(min(_child_count(container), _CHILD_ROW_CAP)):
+        child = _child_at(container, index)
+        if child is not None:
+            queue.append((child, 1))
+    while queue and seen < _CHILD_ROW_CAP:
+        node, depth = queue.pop(0)
+        seen += 1
+        if node is container:
+            continue
+        npos, nsize = _extents(node)
+        if npos is None or nsize is None:
+            if depth > 0:
+                room = _CHILD_ROW_CAP - seen
+                for index in range(min(_child_count(node), max(0, room))):
+                    child = _child_at(node, index)
+                    if child is not None:
+                        queue.append((child, 0))
+            continue
+        top = float(npos[1])
+        if top < line - 1:
+            continue
+        left = float(npos[0])
+        width = float(nsize[0])
+        height = float(nsize[1])
+        if width <= 0 or height <= 0:
+            continue
+        if left + width < box_x or left > box_r or top + height < box_y or top > box_b:
+            continue
+        if _role_name(node) not in _ROW_ROLES:
+            if depth > 0:
+                room = _CHILD_ROW_CAP - seen
+                for index in range(min(_child_count(node), max(0, room))):
+                    child = _child_at(node, index)
+                    if child is not None:
+                        queue.append((child, 0))
+            continue
+        if not _node_name(node):
+            continue
+        row_top = max(top, box_y)
+        row_left = max(left, box_x)
+        row_height = max(1.0, min(height, box_b - row_top))
+        row_width = max(1.0, min(width, box_r - row_left))
+        found.append((node, (row_left, row_top), (row_width, row_height)))
+    found.sort(key=lambda item: (item[1][1], item[1][0]))
+    return found
+
+
+def _probe_visible_rows(container) -> list[tuple]:
+    """Rows on screen inside ``container``.
+
+    Each entry is ``(accessible, (x, y), (width, height))``. Children whose
+    own tops are on or below the head line win over the hit test: the 0.4.15
+    retest kept ITEM-001 at y=-2 because that box still covered the sample.
+    A hit whose top is above the line is dropped even when it covers the
+    sample. Otherwise the rectangle is the span of samples that hit that
+    accessible. Samples that hit the container itself are skipped.
     """
     pos, size = _extents(container)
     if pos is None or size[1] < 4 or size[0] < 1:
         return []
+    top = int(pos[1])
+    bottom = int(pos[1] + size[1])
+    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
+    line = float(top + sliver)
+    child_rows = _in_view_child_rows(container, line)
+    if len(_row_names(child_rows)) >= 2:
+        return child_rows
     comp = _component(container)
     if comp is None:
         return []
     coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
     x = int(pos[0] + size[0] / 2)
-    top = int(pos[1])
-    bottom = int(pos[1] + size[1])
     step = max(12, int(size[1] // 12) or 12)
     grouped: list[list] = []
     # Skip the clipped sliver at the top edge. A hit there is the row above
     # the on-screen head, which is what 0.4.12 published as ITEM-009.
-    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
     y = top + sliver
     samples = 0
     while y < bottom and samples < _MAX_ROW_SAMPLES:
         samples += 1
         hit = _settle_hit(comp, x, y, coord)
-        if hit is not None and hit is not container:
+        if (
+            hit is not None
+            and hit is not container
+            and not _top_above_line(hit, line)
+        ):
             if grouped and grouped[-1][0] is hit:
                 grouped[-1][2] = y + step
             else:
@@ -1092,13 +1198,28 @@ def saved_rows(container) -> list | None:
     return _saved_for(container)
 
 
+def _known_head_above(container, rows) -> bool:
+    """True when the first row's own top is above the on-screen head line.
+
+    False when that row has no box. A stored sample rectangle is not the
+    check: the accessible's live extents are.
+    """
+    line = _head_line(container)
+    if line is None or not rows:
+        return False
+    return _top_above_line(rows[0][0], line)
+
+
 def commit_shown_rows(container, rows) -> None:
     """Remember ``rows`` as the on-screen contents of ``container``.
 
-    Fewer than two named rows are not a page, and are not stored.
+    Fewer than two named rows are not a page, and are not stored. A head
+    whose own top is above the list is not stored either.
     """
     key = _list_key(container)
     if key is None or len(_row_names(rows or ())) < 2:
+        return
+    if _known_head_above(container, rows):
         return
     _SHOWN[key] = list(rows)
 
@@ -1147,18 +1268,26 @@ def list_screen_box(container) -> tuple[int, int, int, int] | None:
 
 
 def _shown_or_probe(container) -> list:
-    """Confirmed rows for ``container``, probing only when none are saved.
+    """Confirmed rows for ``container``.
 
-    A saved window is returned as-is. The hit test is not consulted again,
-    so a later call that names a row off screen cannot replace the head.
+    A saved window is returned as-is while its head's own top is still on
+    or below the line, or when that top is unknown. A head that has moved
+    above the line is probed again. A later hit test does not replace a
+    head that is still inside the list. A probe whose head is above the
+    line is not stored.
     """
     saved = _saved_for(container)
-    if saved is not None:
+    if saved is not None and not _known_head_above(container, saved):
         return saved
     key = _list_key(container)
     rows = _probe_visible_rows(container)
+    if _known_head_above(container, rows):
+        rows = []
     if key is not None and len(_row_names(rows)) >= 2:
         _SHOWN[key] = rows
+        return rows
+    if saved is not None and not _known_head_above(container, saved):
+        return saved
     return rows
 
 
@@ -1174,12 +1303,12 @@ def ensure_shown_rows(container) -> list | None:
 def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
     """Rows whose head differs from ``previous_head`` on two probes in a row.
 
-    A probe that only hits the pre-scroll row parked above the list is not
-    a head. The 0.4.14 retest moved the pixels (mean_abs about 6.8) and
-    then returned ``rows_stale`` because that row was still named ITEM-001
-    at y=-2. None when no on-screen head ever leaves ``previous_head``.
-    The caller does not treat that as a scroll and does not install the
-    off-screen row.
+    A row whose top is above the list is not a head, even when its box
+    covers the sample. The 0.4.15 retest moved the pixels (mean_abs about
+    6.83 and 6.98) and still published ITEM-001 at y=-2, so ``rows_stale``
+    stopped the find. None when no on-screen head ever leaves
+    ``previous_head``. The caller does not treat that as a scroll and does
+    not install the off-screen row.
     """
     last: str | None = None
     for attempt in range(_HEAD_POLLS):
