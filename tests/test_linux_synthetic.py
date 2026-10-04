@@ -598,6 +598,9 @@ class _ValueApi:
 
     @staticmethod
     def set_current_value(acc, new):
+        hook = getattr(acc, "on_value", None)
+        if hook is not None:
+            return hook(acc, new)
         if acc.jump is not None:
             acc.value = acc.value + acc.jump
             acc.jump = None
@@ -1659,6 +1662,308 @@ def test_overflow_list_reaches_item_180_when_the_wheel_does_not_move(
     painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert "ITEM-180" in painted
     assert painted[0] != "ITEM-001"
+
+
+def _overflow_page():
+    """Fixed-height overflow list, 1239 by 422 at (20, 139). Synthetic."""
+    window, listing, hit, _stuck = _chrome_list()
+    rows = hit.rows
+    hit.x, hit.y, hit.width, hit.height = 20, 139, 1239, 422
+    app = window.get_application()
+    document = _Acc("document web", name="Bench", width=1271, height=709)
+    document.component._rect.x = 4.0
+    document.component._rect.y = 86.0
+    document.get_application = lambda: app
+    for row in rows:
+        row.get_application = lambda: app
+    _adopt(document, listing)
+    _adopt(window, document)
+    _add_tab_strip(window)
+    _layout_overflow(listing, rows, hit, 1)
+    return window, document, listing, hit, rows
+
+
+def _keep_overflow_bar(listing, rows, hit, bar, head: int) -> None:
+    """Place ``head`` and put ``bar`` back when it is a child of the list.
+
+    ``_layout_overflow`` replaces the list's children. A sibling bar stays
+    on the document. Synthetic boxes, not a live Chrome tree.
+    """
+    parent = bar.parent
+    _layout_overflow(listing, rows, hit, head)
+    if parent is listing:
+        listing.children.append(bar)
+        bar.parent = listing
+
+
+def _bind_overflow_bar(bar, listing, rows, hit, *, jump: bool = False) -> list[float]:
+    """Map a bar write onto the row layout. Returns the values written."""
+    writes: list[float] = []
+
+    def on_value(acc, new):
+        writes.append(float(new))
+        if jump and float(new) > acc.value + 1e-9:
+            acc.value = acc.maximum
+        else:
+            upper = min(acc.maximum, acc.visual_max)
+            acc.value = min(max(float(new), acc.minimum), upper)
+        span = acc.maximum - acc.minimum
+        if span <= 2:
+            frac = 0.0 if span <= 0 else (acc.value - acc.minimum) / span
+            head = 1 + int(round(frac * 199))
+        else:
+            head = 1 + int(round(acc.value / 28))
+        _keep_overflow_bar(listing, rows, hit, bar, max(1, min(186, head)))
+        return True
+
+    bar.on_value = on_value
+    return writes
+
+
+def _overflow_bar(*, minimum=0.0, maximum=5572.0, value=0.0) -> _Acc:
+    bar = _Acc(
+        "scroll bar", states=("VERTICAL",), value=value, minimum=minimum, maximum=maximum,
+        width=14, height=422,
+    )
+    bar.component._rect.x = 1240.0
+    bar.component._rect.y = 139.0
+    return bar
+
+
+def test_overflow_list_steps_its_scroll_bar_when_scroll_to_and_the_wheel_do_not_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The 0.4.23 retest: anchor AXList 1239 by 422 at (20, 139), wheel
+    mean_abs 0, ``scroll_to`` returning true did not paint ITEM-180, and
+    ``scroll_to_find`` ended on ``page_unchanged`` with the head still
+    ITEM-001. Here ``scroll_to`` returns true and does not move the rows,
+    and the wheel does not either. The vertical bar is the last of the 200
+    rows, which the pixel-scroll walk does not read. Writing that bar by
+    about three rows per line paints a later row. ITEM-180 is found, the
+    wheel is not sent, and ``scroll_to`` is not called.
+    """
+    from a11y_computer_use import server
+
+    window, _document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar()
+    listing.children.append(bar)
+    bar.parent = listing
+    writes = _bind_overflow_bar(bar, listing, rows, hit)
+    calls = {"scroll_to": 0}
+
+    def scroll_to(_scroll_type, row=None):
+        calls["scroll_to"] += 1
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: scroll_to(scroll_type, row)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    wheels = {"n": 0}
+    wired_scroll = _linux_input.scroll
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+
+    def _fail_pixel_walk(*_args, **_kwargs):
+        raise AssertionError("line scroll must not use the pixel-scroll bar walk")
+
+    monkeypatch.setattr(_atspi, "_collect_scrollbars", _fail_pixel_walk)
+    monkeypatch.setattr(_atspi, "_nudge_scrollbar", _fail_pixel_walk)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXList"
+    assert (anchor.bounds.x, anchor.bounds.y) == (20, 139)
+    assert (anchor.bounds.width, anchor.bounds.height) == (1239, 422)
+    assert _row_titles(first)[0] == "ITEM-001"
+    assert "ITEM-180" not in _row_titles(first)
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "page_unchanged" not in out
+    assert calls["scroll_to"] == 0
+    assert wheels["n"] == 0
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-180" in painted
+    assert painted[0] != "ITEM-001"
+    assert writes
+    assert max(writes) < bar.maximum
+    steps = [writes[0]] + [writes[i] - writes[i - 1] for i in range(1, len(writes))]
+    assert max(steps) < 500
+
+
+def test_overflow_fractional_bar_reaches_item_180_without_jumping(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The bar's range is 0 to 1 and it is a sibling of the list, lined up
+    with the box. A step is a fraction of the rows' extent, not a clamp to
+    1. ``scroll_to`` does not move the rows and the wheel is not sent.
+    ITEM-180 is found while the bar is still below the end.
+    """
+    window, document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar(maximum=1.0)
+    document.children.append(bar)
+    bar.parent = document
+    writes = _bind_overflow_bar(bar, listing, rows, hit)
+    for row in rows:
+        row.component.scroll_to = lambda _scroll_type: True
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    wheels = {"n": 0}
+    wired_scroll = _linux_input.scroll
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    assert "ITEM-180" in out
+    assert "page_unchanged" not in out
+    assert wheels["n"] == 0
+    assert writes
+    assert max(writes) < 0.95
+    assert bar.value < 0.95
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert painted[0] != "ITEM-001"
+    assert "ITEM-180" in painted
+
+
+def test_overflow_scroll_bar_jump_is_not_a_line_scroll(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    A 0-to-1 bar that clamps a small write to the end is undone. The list
+    stays on ITEM-001. ``scroll_to`` is not used to paper over that jump,
+    and the stuck wheel is ``page_unchanged``.
+    """
+    window, document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar(maximum=1.0)
+    document.children.append(bar)
+    bar.parent = document
+    calls = {"scroll_to": 0}
+    _bind_overflow_bar(bar, listing, rows, hit, jump=True)
+
+    def scroll_to(_scroll_type):
+        calls["scroll_to"] += 1
+        return True
+
+    for row in rows:
+        row.component.scroll_to = scroll_to
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    listing_el = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.role == "AXList"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["rows"][0] == "ITEM-001"
+    assert calls["scroll_to"] == 0
+    assert bar.value == 0
+    assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
+
+
+def test_overflow_bar_at_rest_does_not_scroll_up(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The bar is already at its minimum and the painted head is ITEM-001.
+    An upward line does not write the bar, does not follow ``scroll_to``,
+    and stays ``page_unchanged``.
+    """
+    window, _document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar()
+    listing.children.append(bar)
+    bar.parent = listing
+    calls = {"scroll_to": 0}
+    _bind_overflow_bar(bar, listing, rows, hit)
+
+    def scroll_to(_scroll_type):
+        calls["scroll_to"] += 1
+        _keep_overflow_bar(listing, rows, hit, bar, 50)
+        return True
+
+    for row in rows:
+        row.component.scroll_to = scroll_to
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    listing_el = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.role == "AXList"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(listing_el, dy=-1, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["dy"] == -1
+    assert error.value.detail["rows"][0] == "ITEM-001"
+    assert calls["scroll_to"] == 0
+    assert bar.value == 0
+    assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
+
+
+def test_content_height_line_scroll_does_not_write_the_scroll_bar(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic content-height list, not a live Chrome window.
+
+    The list is taller than the screen, which is the body-scroll case.
+    A line scroll keeps the wheel. It does not write the list's bar.
+    The snapshot head is the painted row.
+    """
+    window, listing, hit, rows = _document_scroll_page()
+    bar = _Acc(
+        "scroll bar", states=("VERTICAL",), value=10, minimum=0, maximum=8000,
+        width=14, height=400,
+    )
+    bar.component._rect.x = 1140.0
+    bar.component._rect.y = 90.0
+    listing.children.append(bar)
+    bar.parent = listing
+    _show_page_rows(listing, rows, 1)
+    listing.children.append(bar)
+    bar.parent = listing
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit.screen = 12
+        hit.x, hit.y, hit.width, hit.height = 40, -200, 1100, 6400
+        for index, row in enumerate(rows[8:11]):
+            _place_row(row, 40, index * 30, 1100, 24)
+        visible = []
+        for index, row in enumerate(rows[11:19]):
+            _place_row(row, 40, 90 + index * 28, 1100, 24)
+            visible.append(row)
+        _adopt(listing, *rows[8:11], *visible)
+        listing.children.append(bar)
+        bar.parent = listing
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    listing_el = next(el for el in snap.elements if el.role == "AXList")
+    assert driver.scroll(listing_el, dy=3, unit=ScrollUnit.LINES) is None
+    assert bar.value == 10
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-012"
+    assert "ITEM-009" not in later
 
 
 def test_overflow_list_at_the_top_stays_page_unchanged_when_nothing_moves(

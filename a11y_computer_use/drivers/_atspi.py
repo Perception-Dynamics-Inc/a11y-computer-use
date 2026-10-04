@@ -1384,6 +1384,176 @@ def scroll_viewport_by_lines(container, dy: int) -> bool:
     return scroll_to_edge(ordered[target], "TOP_EDGE")
 
 
+def _child_scrollbars(node) -> list:
+    """Scroll bars that are direct children of ``node``, including late ones.
+
+    A fixed-height list can hold every row and put the bar after them.
+    ``_collect_scrollbars`` only peeks at the first children of a long
+    parent, which misses that bar. This walk is only the direct children,
+    capped, and it does not replace ``_collect_scrollbars``.
+    """
+    found: list = []
+    count = min(_child_count(node), _VISIBLE_WALK_CAP)
+    for index in range(count):
+        child = _child_at(node, index)
+        if _is_scroll_bar(child):
+            found.append(child)
+    return found
+
+
+def _bar_range(bar) -> tuple[float, float, float] | None:
+    """``(current, minimum, maximum)`` for a vertical scroll bar with a range."""
+    if _bar_axis(bar) != "vertical":
+        return None
+    current = _read_value(bar)
+    if current is None:
+        return None
+    minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), current)
+    maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), current)
+    if maximum <= minimum:
+        return None
+    return current, minimum, maximum
+
+
+def _bar_sits_on_list(bar, origin, size) -> bool:
+    """True when ``bar`` overlaps the list, or sits on its right edge.
+
+    A sibling of the list is the overflow bar only when it lines up with
+    that box. A document bar elsewhere is not.
+    """
+    pos, bar_size = _extents(bar)
+    if pos is None or bar_size is None:
+        return False
+    left = float(origin[0])
+    top = float(origin[1])
+    right = left + float(size[0])
+    bottom = top + float(size[1])
+    bx = float(pos[0])
+    by = float(pos[1])
+    bh = float(bar_size[1])
+    if by + bh < top or by > bottom:
+        return False
+    return left - 1 <= bx <= right + 32
+
+
+def _viewport_vertical_bar(container):
+    """The overflow list's vertical bar, or a sibling that sits on the list.
+
+    None when the only bars are elsewhere. Direct children win, so a bar
+    inside the list is not replaced by a document bar on the parent.
+    """
+    for bar in _child_scrollbars(container):
+        if _bar_range(bar) is not None:
+            return bar
+    parent = _parent_of(container)
+    if parent is None:
+        return None
+    origin, size = _extents(container)
+    if origin is None or size is None:
+        return None
+    for bar in _child_scrollbars(parent):
+        if _bar_range(bar) is None or not _bar_sits_on_list(bar, origin, size):
+            continue
+        return bar
+    return None
+
+
+def _viewport_bar_delta(container, dy: int, span: float) -> float | None:
+    """Signed bar step for one line scroll, or None when the scale is unknown.
+
+    One line is about three rows, and not more than the rows already on
+    screen. The 0.4.23 overflow rows were 28px apart, so five lines is
+    about fourteen rows. When the named rows extend past the viewport,
+    that extent is the scroll range: a bar on that scale (pixels) is
+    stepped by the pixel distance, and a smaller bar (a fraction, or one
+    unit per row) is stepped by the same distance as a fraction of the
+    extent. A bar that does not show rows past the viewport is stepped
+    only when its range is already in pixels. Guessing a fraction there
+    would jump to the end.
+    """
+    rows = _in_view_named_rows(container)
+    if len(rows) < 2:
+        return None
+    pitch = abs(float(rows[1][1][1]) - float(rows[0][1][1]))
+    if pitch < 1:
+        pitch = max(1.0, float(rows[0][2][1]))
+    step_rows = min(abs(int(dy)) * _ROWS_PER_LINE, max(1, len(rows) - 1))
+    pixel_step = step_rows * pitch
+    if pixel_step <= 0 or span <= 0:
+        return None
+    ordered = _named_rows_in_order(container)
+    if len(ordered) < 2:
+        return None
+    tops = [_row_top(acc) for acc in ordered]
+    row_span = max(tops) - min(tops)
+    _origin, size = _extents(container)
+    if size is None:
+        return None
+    viewport_h = float(size[1])
+    if row_span > viewport_h:
+        if span >= row_span * 0.5:
+            magnitude = pixel_step * (span / row_span)
+        else:
+            magnitude = pixel_step / row_span * span
+    elif span >= viewport_h and span >= pixel_step:
+        magnitude = pixel_step
+    else:
+        return None
+    if magnitude <= 0:
+        return None
+    return magnitude if int(dy) > 0 else -magnitude
+
+
+def nudge_viewport_scrollbar(container, dy: int) -> tuple[str, object]:
+    """Step the overflow list's vertical bar. No wheel and no ``scroll_to``.
+
+    Returns ``("moved", undo)`` when the value changed by the requested
+    step. ``undo`` writes the previous value. ``"absent"`` means this list
+    has no vertical bar, so the caller may try ``scroll_to``. ``"rejected"``
+    means a bar is there and this step is not a scroll: the bar is already
+    at that end, the write jumped past the request, or the bar's scale is
+    not one this function will guess. A jump is undone here. The caller
+    still requires the list pixels and the on-screen head to change, and
+    undoes a write that does not. This does not call ``_collect_scrollbars``
+    or ``_nudge_scrollbar``.
+    """
+    if not int(dy) or _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
+        return "absent", None
+    bar = _viewport_vertical_bar(container)
+    if bar is None:
+        return "absent", None
+    found = _bar_range(bar)
+    if found is None:
+        return "rejected", None
+    current, minimum, maximum = found
+    span = maximum - minimum
+    delta = _viewport_bar_delta(container, int(dy), span)
+    if delta is None:
+        return "rejected", None
+    target = min(max(current + float(delta), minimum), maximum)
+    expected = target - current
+    floor = 1e-4 if span <= 2 else 0.5
+    if abs(expected) < floor:
+        return "rejected", None
+    _write_value(bar, target)
+    updated = _read_value(bar)
+    if updated is None:
+        _write_value(bar, current)
+        return "rejected", None
+    actual = updated - current
+    tolerance = max(span * 0.02, 1e-4) if span <= 2 else max(1.0, abs(expected) * 0.05)
+    jumped = abs(actual) > abs(expected) + tolerance
+    wrong_way = (expected > 0 and actual < 0) or (expected < 0 and actual > 0)
+    if jumped or wrong_way or abs(actual) < floor:
+        _write_value(bar, current)
+        return "rejected", None
+
+    def undo() -> None:
+        _write_value(bar, current)
+
+    return "moved", undo
+
+
 def _probe_visible_rows(container) -> list[tuple]:
     """Rows on screen inside ``container``.
 

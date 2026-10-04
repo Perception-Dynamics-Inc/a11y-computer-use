@@ -368,14 +368,18 @@ class LinuxDriver:
         ``scroll_to_find`` searches. A coordinate target and a
         non-Chromium element are not checked. A Chromium list whose own
         box sits fully on the screen is a fixed-height overflow list. On
-        the 0.4.22 retest that list was 1239 by 422 at (20, 139). The wheel
-        landed inside it and the pixels in that box stayed at mean_abs 0,
-        with the painted head still ITEM-001. Revealing a later row at the
-        top of that list through AT-SPI ``scroll_to`` moves it. The step is
-        about three rows per line and not more than the rows already on
-        screen. No wheel is sent when that reveal moves the pixels. A
-        content-height list and a document group keep the wheel. A document
-        group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        the 0.4.23 retest that list was 1239 by 422 at (20, 139). The wheel
+        inside that box stayed at mean_abs 0, AT-SPI ``scroll_to`` did not
+        leave a later row painted, and the call ended on ``page_unchanged``
+        with the head still ITEM-001. That list's vertical AT-SPI scroll
+        bar is written by about three rows per line, and not more than the
+        rows already on screen. A bar whose range is a fraction of the
+        rows' extent is stepped by that fraction. A write that jumps past
+        the request is undone and is not a success. No wheel is sent when
+        the bar step moves the pixels and the on-screen head. When the list
+        has no such bar, ``scroll_to`` is still tried and still has to move
+        the pixels. A content-height list and a document group keep the
+        wheel. A document group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -470,10 +474,25 @@ class LinuxDriver:
             self._run(lambda: _atspi.commit_shown_rows(container, after))
             return True
 
-        # A viewport-sized Chromium list can ignore the wheel. Reveal a
-        # later row first. The pixel check still decides success.
+        # A viewport-sized Chromium list can ignore the wheel and
+        # ``scroll_to``. Step its own vertical bar first. The pixel check
+        # still decides success. A bar that is present and does not move
+        # the list is not followed by ``scroll_to``.
         if raw_box is not None and _box_inside_screen(raw_box) and int(dy):
-            if judge(lambda: bool(self._run(
+            outcome: dict[str, object] = {"kind": "absent", "undo": None}
+
+            def nudge() -> bool:
+                kind, undo = _atspi.nudge_viewport_scrollbar(container, int(dy))
+                outcome["kind"] = kind
+                outcome["undo"] = undo
+                return kind == "moved"
+
+            if judge(lambda: bool(self._run(nudge))):
+                return None
+            undo = outcome.get("undo")
+            if undo is not None:
+                self._run(undo)
+            if outcome["kind"] == "absent" and judge(lambda: bool(self._run(
                 lambda: _atspi.scroll_viewport_by_lines(container, int(dy))
             ))):
                 return None
