@@ -257,18 +257,20 @@ class LinuxDriver:
         On a Chromium list the wheel is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
         head below the top sliver leaves the pre-wheel row and stays on the
-        new row for two reads. The pixel check resamples the list's own
-        screen box. The frame grabbed in the same turn as the wheel can
-        still be the pre-paint image, which is what 0.4.13 reported as
-        ``mean_abs`` 0.0 while the list on screen had moved. A resample
-        that stays at or below the still-page threshold raises
-        `unsupported` with ``reason=page_unchanged`` and does not replace
-        the rows. A grab that changed while the head never leaves the old
-        row raises `unsupported` with ``reason=rows_stale`` and does not
-        replace the rows either. A pixel difference alone is not a
-        successful scroll. ``snapshot`` then lists the confirmed rows,
-        which is what ``scroll_to_find`` searches. A coordinate target and
-        a non-Chromium element are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        new row for two reads. A row whose own bounds do not cover the
+        sample, such as the pre-scroll row left above the viewport, is not
+        that head. The pixel check resamples the list's own screen box. The
+        frame grabbed in the same turn as the wheel can still be the
+        pre-paint image, which is what 0.4.13 reported as ``mean_abs`` 0.0
+        while the list on screen had moved. A resample that stays at or
+        below the still-page threshold raises `unsupported` with
+        ``reason=page_unchanged`` and does not replace the rows. A grab
+        that changed while no on-screen head leaves the old row raises
+        `unsupported` with ``reason=rows_stale`` and does not replace the
+        rows either. A pixel difference alone is not a successful scroll.
+        ``snapshot`` then lists the confirmed rows, which is what
+        ``scroll_to_find`` searches. A coordinate target and a
+        non-Chromium element are not checked. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does

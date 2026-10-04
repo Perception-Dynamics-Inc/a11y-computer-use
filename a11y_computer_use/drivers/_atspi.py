@@ -939,28 +939,48 @@ def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:
     return found
 
 
-def _settle_hit(comp, x: int, y: int, coord):
-    """The accessible at ``(x, y)`` after Chromium's layout hit test can land.
+def _point_in_extents(acc, x: int, y: int) -> bool | None:
+    """Whether ``acc``'s own screen box covers ``(x, y)``.
 
-    The first call returns the bounds guess and starts the renderer hit test.
-    A later call that returns a different accessible is that layout result.
-    When every call returns the same accessible, that accessible is the answer.
+    None when the accessible has no box. False when it has a box and the
+    point is outside it. The 0.4.14 retest's snapshot head was the pre-scroll
+    row at y=-2, above the list, while the on-screen head was ITEM-010.
     """
-    first = None
-    latest = None
+    pos, size = _extents(acc)
+    if pos is None or size is None:
+        return None
+    left, top = pos
+    width, height = size
+    if width <= 0 or height <= 0:
+        return False
+    return (left - 1) <= x <= (left + width + 1) and (top - 1) <= y <= (top + height + 1)
+
+
+def _settle_hit(comp, x: int, y: int, coord):
+    """The accessible at ``(x, y)`` that covers that point.
+
+    Chromium's first answer can be the pre-scroll row. On the 0.4.14 retest
+    that row's bounds had moved to y=-2, above the viewport, while the hit
+    test still named it. A row that does not cover ``(x, y)`` is not the
+    on-screen head. Two covering answers with the same name are the result.
+    Python identity is not the check: a new wrapper for the same row is
+    still that row.
+    """
+    previous_name = None
     for attempt in range(_HIT_TRIES):
         hit = _call_first(
             comp, ("get_accessible_at_point", "getAccessibleAtPoint"), x, y, coord
         )
+        if hit is not None and _point_in_extents(hit, x, y) is False:
+            hit = None
         if hit is not None:
-            latest = hit
-            if first is None:
-                first = hit
-            elif hit is not first:
+            name = _node_name(hit)
+            if previous_name is not None and name and name == previous_name:
                 return hit
+            previous_name = name
         if attempt + 1 < _HIT_TRIES:
             time.sleep(_HIT_PAUSE_S)
-    return latest
+    return None
 
 
 def _probe_visible_rows(container) -> list[tuple]:
@@ -1037,12 +1057,39 @@ def reset_shown_rows() -> None:
     _SHOWN.clear()
 
 
-def saved_rows(container) -> list | None:
-    """Rows last confirmed for ``container``, or None when nothing is saved."""
+def _saved_for(container) -> list | None:
+    """Rows last confirmed for this list, including when its box jitters.
+
+    The exact box is the first choice. A one-pixel change in the reported
+    extents must not miss that entry and fall through to the cached
+    children: after a scroll those children are the pre-scroll row parked
+    above the viewport.
+    """
     key = _list_key(container)
     if key is None:
         return None
-    return _SHOWN.get(key)
+    found = _SHOWN.get(key)
+    if found is not None:
+        return found
+    role, name, x, y, width, height = key
+    best = None
+    best_area = 0
+    for saved_key, rows in _SHOWN.items():
+        if len(saved_key) != 6 or saved_key[0] != role or saved_key[1] != name:
+            continue
+        sx, sy, sw, sh = saved_key[2], saved_key[3], saved_key[4], saved_key[5]
+        overlap_w = min(x + width, sx + sw) - max(x, sx)
+        overlap_h = min(y + height, sy + sh) - max(y, sy)
+        area = max(0, overlap_w) * max(0, overlap_h)
+        if area > best_area:
+            best = rows
+            best_area = area
+    return best
+
+
+def saved_rows(container) -> list | None:
+    """Rows last confirmed for ``container``, or None when nothing is saved."""
+    return _saved_for(container)
 
 
 def commit_shown_rows(container, rows) -> None:
@@ -1105,9 +1152,10 @@ def _shown_or_probe(container) -> list:
     A saved window is returned as-is. The hit test is not consulted again,
     so a later call that names a row off screen cannot replace the head.
     """
+    saved = _saved_for(container)
+    if saved is not None:
+        return saved
     key = _list_key(container)
-    if key is not None and key in _SHOWN:
-        return _SHOWN[key]
     rows = _probe_visible_rows(container)
     if key is not None and len(_row_names(rows)) >= 2:
         _SHOWN[key] = rows
@@ -1126,10 +1174,12 @@ def ensure_shown_rows(container) -> list | None:
 def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
     """Rows whose head differs from ``previous_head`` on two probes in a row.
 
-    One differing answer is not enough: the 0.4.12 retest still read the
-    pre-wheel head 1.5 seconds after the wheel, and a different wrong head
-    about 2.7 seconds later. None when the head never leaves
-    ``previous_head``. The caller does not treat that as a scroll.
+    A probe that only hits the pre-scroll row parked above the list is not
+    a head. The 0.4.14 retest moved the pixels (mean_abs about 6.8) and
+    then returned ``rows_stale`` because that row was still named ITEM-001
+    at y=-2. None when no on-screen head ever leaves ``previous_head``.
+    The caller does not treat that as a scroll and does not install the
+    off-screen row.
     """
     last: str | None = None
     for attempt in range(_HEAD_POLLS):
