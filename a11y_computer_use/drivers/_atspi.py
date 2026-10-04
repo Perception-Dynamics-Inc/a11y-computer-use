@@ -982,6 +982,19 @@ def _node_name(acc) -> str:
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
 
 
+def _is_list_marker(name: str) -> bool:
+    """True when ``name`` is a list bullet, not the row's text.
+
+    Chromium's default ``<ul>`` exposes the marker as a static named "•"
+    and the row text as its sibling. A one-character name that is not a
+    letter or digit is that marker. ``ITEM-001`` is a row.
+    """
+    text = name.strip()
+    if text in _LIST_MARKERS:
+        return True
+    return len(text) == 1 and not text.isalnum()
+
+
 # Chromium's first GetAccessibleAtPoint answer is an approximate hit test of
 # the accessibility bounds, which stay stale across a wheel. That call starts
 # a layout hit test in the renderer. A later call at the same point returns
@@ -1029,10 +1042,18 @@ _MAX_LIST_CONTAINERS = 4
 # 520px list of 18px rows (about 29 painted) published ITEM-001 through
 # ITEM-016 and left the rest out with no elision marker.
 _MAX_ROW_SAMPLES = 16
-# The 0.4.22 body-scroll find reached ITEM-177 in 10 steps of dy=5, about
-# three rows per line. A viewport step uses that pace and never advances by
-# more rows than are already on screen, so the next snapshot still overlaps.
-_ROWS_PER_LINE = 3
+# One requested line is one content row. The 0.4.26 retest stepped dy=5 by
+# 15 rows on a fixed-height list and by 14 on overflow-y:auto, which is
+# five times the old three-rows-per-line pace. The step still stays inside
+# the rows already on screen, so the next snapshot overlaps this one.
+_ROWS_PER_LINE = 1
+# Chromium draws a list marker as its own static ("•") beside the row text.
+# The list item's name is empty. Treating the marker as the head leaves the
+# head unchanged after a real move, so the line step is rejected and a wheel
+# follows. A marker is not a row.
+_LIST_MARKERS = frozenset({
+    "•", "●", "◦", "▪", "▫", "▸", "‣", "·", "○", "■", "□", "∙", "◉",
+})
 _ROW_SEQUENCE_CAP = 240
 # Nodes examined while looking for the on-screen head. Rows parked above
 # the viewport do not count as a reason to stop: the 0.4.16 cap of 40
@@ -1431,6 +1452,11 @@ def _in_view_named_rows(container) -> list[tuple]:
         spans = height > full_h * 0.9
         in_view = _on_screen_row(top, bottom, box_y, box_b, sliver)
         name = _node_name(node)
+        if name and _is_list_marker(name):
+            if depth > 0 and top < box_b:
+                for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+                    walk(_child_at(node, index), depth - 1)
+            return
         if (
             in_view
             and name
@@ -1478,56 +1504,55 @@ def _named_rows_in_order(container) -> list:
     """Named rows under ``container``, including those below the viewport.
 
     Each entry is the accessible, ordered by screen y. A recorded row is
-    not opened. A scroll bar is skipped. A node taller than the list is a
-    wrapper and is opened. This does not change which rows the snapshot
-    lists; it only chooses a row for ``scroll_viewport_by_lines`` to reveal.
+    not opened. A scroll bar is skipped. A list marker is not a row; the
+    walk continues into it for the row text. A node taller than the list is
+    a wrapper and is opened. Each direct child is visited on its own, so a
+    marker plus a label on an early row does not stop the walk before
+    ITEM-100. This does not change which rows the snapshot lists; it only
+    chooses a row for ``scroll_viewport_by_lines`` to reveal.
     """
     _pos, size = _extents(container)
     if size is None:
         return []
     full_h = float(size[1])
     found: list = []
-    seen = 0
 
-    def descend(node, depth: int) -> None:
+    def descend(node, depth: int, budget: list[int]) -> None:
         if depth <= 0:
             return
-        count = min(_child_count(node), max(0, _VISIBLE_WALK_CAP - seen))
+        count = _child_count(node)
         for index in range(count):
-            walk(_child_at(node, index), depth - 1)
-            if len(found) >= _ROW_SEQUENCE_CAP:
+            if budget[0] <= 0 or len(found) >= _ROW_SEQUENCE_CAP:
                 return
+            walk(_child_at(node, index), depth - 1, budget)
 
-    def walk(node, depth: int) -> None:
-        nonlocal seen
-        if (
-            node is None
-            or node is container
-            or seen >= _VISIBLE_WALK_CAP
-            or len(found) >= _ROW_SEQUENCE_CAP
-        ):
+    def walk(node, depth: int, budget: list[int]) -> None:
+        if node is None or node is container or len(found) >= _ROW_SEQUENCE_CAP or budget[0] <= 0:
             return
-        seen += 1
+        budget[0] -= 1
         role = _role_name(node)
         if role in _SKIP_ROW_ROLES or role in _LIST_ROLES:
             return
         npos, nsize = _extents(node)
         if npos is None or nsize is None or float(nsize[0]) <= 0 or float(nsize[1]) <= 0:
-            descend(node, depth)
+            descend(node, depth, budget)
             return
         if float(nsize[1]) > full_h * 0.9:
-            descend(node, depth)
+            descend(node, depth, budget)
             return
-        if not _node_name(node):
-            descend(node, depth)
+        name = _node_name(node)
+        if not name or _is_list_marker(name):
+            descend(node, depth, budget)
             return
         found.append(node)
 
-    total = min(_child_count(container), _VISIBLE_WALK_CAP)
+    total = min(_child_count(container), _ROW_SEQUENCE_CAP)
     for index in range(total):
         if len(found) >= _ROW_SEQUENCE_CAP:
             break
-        walk(_child_at(container, index), _VISIBLE_DESCEND)
+        # Eight nodes cover a list item, its marker, and its label. The
+        # budget is per row so row 100 is still a scroll_to target.
+        walk(_child_at(container, index), _VISIBLE_DESCEND, [8])
     found.sort(key=_row_top)
     return found
 
@@ -1538,7 +1563,7 @@ def scroll_viewport_by_lines(container, dy: int) -> bool:
     False when ``container`` is not a Chromium list, when no further row
     exists, or when ``scroll_to`` is unavailable. True means ``scroll_to``
     was called. The caller still requires the list pixels to move. One
-    line is about three rows. The step is not larger than the rows already
+    line is one content row. The step is not larger than the rows already
     on screen, so a later snapshot still overlaps this one. Already being
     on the first or last row returns False and does not call ``scroll_to``.
     """
@@ -1639,9 +1664,9 @@ def _viewport_vertical_bar(container):
 def _viewport_bar_delta(container, dy: int, span: float) -> float | None:
     """Signed bar step for one line scroll, or None when the scale is unknown.
 
-    One line is about three rows, and not more than the rows already on
+    One line is one content row, and not more than the rows already on
     screen. The 0.4.23 overflow rows were 28px apart, so five lines is
-    about fourteen rows. When the named rows extend past the viewport,
+    five rows. When the named rows extend past the viewport,
     that extent is the scroll range: a bar on that scale (pixels) is
     stepped by the pixel distance, and a smaller bar (a fraction, or one
     unit per row) is stepped by the same distance as a fraction of the
