@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.19] - 2026-10-04
+
+### Fixed
+
+- Linux Chromium snapshot includes a fully visible row whose own top is the list's top. On 0.4.17 and 0.4.18 the on-screen check required that top to clear an 8px sliver below the list, so a row flush with the box (ITEM-001 fully on screen) was omitted and the snapshot's first list row was the next one (ITEM-002). A row that only fills that sliver is still not the head, and a row whose top is above the list is still not the head, including one at y=-2 whose box covers a sample. `scroll_to_find`'s turnaround after a still page is unchanged. Synthetic trees, not a live Chrome run (#46) (2026-10-04).
+
 ## [0.4.18] - 2026-10-04
 
 ### Fixed

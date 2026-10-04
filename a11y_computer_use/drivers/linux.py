@@ -254,13 +254,15 @@ class LinuxDriver:
         6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
         On a Chromium list the wheel is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
-        head below the top sliver leaves the pre-wheel row and stays on the
-        new row for two reads. The head is the first row of the list node
-        being read whose own top is on or below that line. A row parked
-        above the line is not the head, even when its box covers the sample
-        or a saved wrapper still names it. The scan keeps going through
-        rows above the viewport and opens a wrapper that starts above the
-        line when that wrapper still covers the list. The pixel check
+        head leaves the pre-wheel row and stays on the new row for two
+        reads. The head is the first row of the list node being read whose
+        own top is on or below the list's top and which extends below the
+        8px clipped edge. A fully visible row flush with that top is the
+        head. A row parked above the list is not the head, even when its
+        box covers the sample or a saved wrapper still names it. The scan
+        keeps going through rows above the viewport and opens a wrapper
+        that starts above the list when that wrapper still covers the list.
+        The pixel check
         resamples the list's own screen box. The
         frame grabbed in the same turn as the wheel can still be the
         pre-paint image, which is what 0.4.13 reported as ``mean_abs`` 0.0

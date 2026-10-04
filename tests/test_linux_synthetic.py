@@ -1552,10 +1552,10 @@ def _place_row(row: _Acc, x: float, y: float, width: float, height: float) -> _A
 
 
 def _positioned_window(rows: list[_Acc], head: int) -> list[_Acc]:
-    """Eight rows starting at ``head`` (1-based), tops on the list's head line.
+    """Eight rows starting at ``head`` (1-based), first top 8px below the list.
 
-    The list fixture sits at y=100. The head line is y=108. Synthetic boxes,
-    not a live Chrome bounds read.
+    The list fixture sits at y=100, so these rows start at y=108. That is
+    inside the viewport. Synthetic boxes, not a live Chrome bounds read.
     """
     visible = []
     start = max(0, head - 1)
@@ -1977,6 +1977,96 @@ def test_line_scroll_of_an_unmoved_layout_is_not_success(
     assert "ITEM-180" not in later
     assert events[0][0] == _X_MOTION
     assert (_X_BPRESS, 5, 0, 0) in [(kind, detail, x, y) for kind, detail, x, y in events]
+
+
+def _rows_from(rows: list[_Acc], head: int, y: float, height: float = 20.0) -> list[_Acc]:
+    """Place eight rows starting at ``head`` (1-based) with the first top at ``y``.
+
+    The list fixture's top is y=100. Synthetic boxes, not a live Chrome read.
+    """
+    visible = []
+    start = max(0, head - 1)
+    for index, row in enumerate(rows[start:start + 8]):
+        _place_row(row, 40, y + index * height, 400, height)
+        visible.append(row)
+    return visible
+
+
+def test_snapshot_includes_the_fully_visible_row_at_the_list_top(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    ITEM-001's own top is the list's top (y=100) and the row is 20px tall,
+    so it extends below the 8px edge. 0.4.17 and 0.4.18 required the top to
+    clear y=107 and the snapshot started at ITEM-002. The snapshot head is
+    ITEM-001, and that row is stored. A row at y=-2 is still above the list.
+    This does not prove the live Chrome list.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    placed = _rows_from(hit.rows, 1, 100)
+    _adopt(listing, *placed)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-001"
+    assert "ITEM-002" in titles
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert row.bounds.y == 100
+    assert _atspi._head_line(listing) == 100
+    assert _atspi._top_above_line(placed[0], 100) is False
+    assert _atspi._known_head_above(listing, [(placed[0], (40.0, 100.0), (400.0, 20.0))]) is False
+    _atspi.commit_shown_rows(
+        listing,
+        [
+            (placed[0], (40.0, 100.0), (400.0, 20.0)),
+            (placed[1], (40.0, 120.0), (400.0, 20.0)),
+        ],
+    )
+    assert _atspi.row_head(_atspi.saved_rows(listing)) == "ITEM-001"
+    parked = _offscreen_item_001()
+    assert _atspi._known_head_above(listing, [(parked, (0.0, -2.0), (20.0, 4.0))]) is True
+
+
+def test_snapshot_includes_a_fully_visible_row_inset_inside_the_old_sliver(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    ITEM-001 starts 4px below the list top, inside the 8px edge 0.4.17
+    treated as off screen, and the row is 20px tall. The snapshot head is
+    ITEM-001. This does not prove the live Chrome list.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    _adopt(listing, *_rows_from(hit.rows, 1, 104))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert row.bounds.y == 104
+
+
+def test_clipped_edge_and_a_row_above_the_list_are_not_the_snapshot_head(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    A 6px box at the list's top does not extend below the 8px edge. A row
+    at y=92 starts above the list. The next full row is the snapshot head.
+    This does not prove the live Chrome list.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    parked = _place_row(hit.rows[0], 40, 92, 400, 20)
+    sliver = _place_row(hit.rows[8], 40, 100, 400, 6)
+    full = _rows_from(hit.rows, 10, 106)
+    _adopt(listing, parked, sliver, *full)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    titles = _row_titles(LinuxDriver().snapshot(Scope.WINDOW, "chrome"))
+    assert titles[0] == "ITEM-010"
+    assert "ITEM-009" not in titles
+    assert "ITEM-001" not in titles
+    assert "ITEM-017" in titles
 
 
 def test_gtk_snapshot_keeps_cached_children(fake_atspi, monkeypatch) -> None:
