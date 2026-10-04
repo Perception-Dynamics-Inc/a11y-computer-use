@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.24] - 2026-10-04
+
+### Fixed
+
+- Linux line scroll steps a fixed-height overflow list by its own vertical AT-SPI scroll bar. On the 0.4.23 retest that list was an AXList 1239 by 422 at (20, 139). The wheel inside the box stayed at `mean_abs` 0, AT-SPI `scroll_to` did not leave ITEM-180 painted, and `scroll_to_find` ended on `page_unchanged` (dy=-1, rows ITEM-001 through ITEM-008). Six later dy=-1 audit rows were `ok` while the before and after screenshots both stayed on ITEM-001. The bar is stepped by about three rows per line, and not more than the rows already on screen. A bar whose range matches the rows' extent is stepped in that unit. A smaller range (a fraction from 0 to 1, or one unit per row) is stepped by that same distance as a fraction of the extent. A write that jumps past the request is undone and is not a success. The list pixels and the on-screen head still have to change. No wheel is sent when the bar step moves the list. A list with no such bar still tries `scroll_to`, and that still has to move the pixels. A content-height list and a document group keep the wheel. `unit=pixels` still uses the existing scroll-bar walk and does not send a wheel. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.23] - 2026-10-04
 
 ### Fixed
