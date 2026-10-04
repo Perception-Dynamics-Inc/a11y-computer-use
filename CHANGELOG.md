@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.20] - 2026-10-04
+
+### Fixed
+
+- Linux `scroll_to_find` without a ref on a document-scroll page wheels the page, not Chrome's tab strip. On 0.4.19 the anchor treated the largest element as the window. A list whose AT-SPI bounds are the content height is that element, so the filter dropped it and the tab strip, in the same tier, won. The wheel hit the strip, the page stayed at the top, and the call returned not found. The anchor is now the document group that contains that list, or the list itself when the document group is not in the tree. A content-height list is wheeled on the part that is on the screen. A fixed-height overflow list, an explicit ref, and a still page (`page_unchanged`, no new head) are unchanged. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.19] - 2026-10-04
 
 ### Fixed
