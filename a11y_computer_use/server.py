@@ -2394,7 +2394,14 @@ class Runtime:
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
-        without it the largest scroll container in each snapshot is used."""
+        without it the largest scroll container in each snapshot is used.
+
+        A downward step of several lines can pass the target and land at the
+        end of the list. A wheel that does not move pixels there
+        (``page_unchanged``) is not the end of the search while the other
+        direction has not been tried: the search comes back one line at a
+        time. If that direction does not move either, the still-page error
+        stands. The still grab does not install a new head."""
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
         if direction not in ("down", "up"):
@@ -2409,12 +2416,24 @@ class Runtime:
         dy = 5 if direction == "down" else -5
         self._require_permission(Scroll(target=Point(0, 0, 0), dy=dy), bundle)
 
-        def inject_scroll(anchor: Element) -> None:
+        def inject_scroll(anchor: Element, step: int) -> None:
             self._refuse_secure(anchor)
-            self.driver.scroll(anchor, dy=dy)
+            self.driver.scroll(anchor, dy=step)
+
+        def page_unchanged(exc: ComputerUseError) -> bool:
+            return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "page_unchanged"
 
         def execute() -> str:
-            for i in range(max_scrolls + 1):
+            # Several lines per step can jump past the target. On the 0.4.17
+            # retest the search reached ITEM-193 and stopped on page_unchanged
+            # while ITEM-180 had never been shown. One still page in this
+            # direction turns the search around, one line at a time. A second
+            # still page means both ends have been reached.
+            step = dy
+            issued = 0
+            turned = False
+            limit = max_scrolls
+            while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
                 self._current = snap
                 if pinned is not None and (pinned[0].app is None or pinned[0].app != snap.app):
@@ -2425,8 +2444,8 @@ class Runtime:
                     )
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
-                    return f"found after {i} scroll(s):\n{observe.render_matches(snap, matches)}"
-                if i >= max_scrolls:
+                    return f"found after {issued} scroll(s):\n{observe.render_matches(snap, matches)}"
+                if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
                           if pinned is not None else _scroll_anchor(snap))
@@ -2434,11 +2453,24 @@ class Runtime:
                     break
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
-                self._run_gated(
-                    Scroll(target=anchor, dy=dy), bundle, partial(inject_scroll, anchor),
-                    recheck=partial(self._recheck_target, target=anchor),
-                )
-            return f"not found after {max_scrolls} scroll(s): no element matches text={text!r} role={role!r}"
+                try:
+                    self._run_gated(
+                        Scroll(target=anchor, dy=step), bundle,
+                        partial(inject_scroll, anchor, step),
+                        recheck=partial(self._recheck_target, target=anchor),
+                    )
+                except ComputerUseError as exc:
+                    if not page_unchanged(exc):
+                        raise
+                    issued += 1
+                    if turned:
+                        raise
+                    turned = True
+                    step = -1 if step > 0 else 1
+                    limit = issued + max_scrolls
+                    continue
+                issued += 1
+            return f"not found after {issued} scroll(s): no element matches text={text!r} role={role!r}"
 
         # Each injected scroll has its own receipt, including those that
         # complete before a later iteration fails; the outer row is observation.
@@ -3399,7 +3431,11 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. Pass ref to wheel over a specific
+        matching ref(s) or a not-found note. A wheel that does not move the page
+        (page_unchanged) does not end the search while the other direction has
+        not been tried and the target has not been shown; that return pass is
+        one line at a time. If the other direction does not move either, the
+        still-page error stands. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the largest scroll
         container in view is used. Gated at tier 'click' (it scrolls).
         After a stale_ref whose reason is title_changed (the list reordered or

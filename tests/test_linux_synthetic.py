@@ -1184,6 +1184,20 @@ def _wire_chrome_list(monkeypatch, window, hit, stuck: bool):
     monkeypatch.setattr(_linux_input, "scroll", scrolling)
 
 
+def _record_wheel_dy(monkeypatch, hit):
+    """Remember the dy ``scroll`` was called with before the wired wheel runs.
+
+    ``_wire_chrome_list`` calls ``on_wheel`` without the delta. Synthetic.
+    """
+    wired = _linux_input.scroll
+
+    def record(x, y, dx=0, dy=0):
+        hit.last_dy = int(dy)
+        return wired(x, y, dx=dx, dy=dy)
+
+    monkeypatch.setattr(_linux_input, "scroll", record)
+
+
 def _row_titles(snap) -> list[str]:
     return [el.title for el in snap.elements if el.role == "AXRow"]
 
@@ -1239,6 +1253,115 @@ def test_scroll_to_find_reaches_item_180_from_layout_rows(
     assert listing.children[-1].name == "ITEM-008"
     assert events[0][0] == _X_MOTION
     assert (_X_BPRESS, 5, 0, 0) in [(kind, detail, x, y) for kind, detail, x, y in events]
+
+
+def test_scroll_to_find_comes_back_after_the_page_stops_past_the_target(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    A 5-line step jumps the window by 40 rows, from ITEM-001 to ITEM-193,
+    and never shows ITEM-180. The next wheel does not change the grab, so
+    the driver raises page_unchanged and does not install a new head. The
+    search then steps back one line at a time (four rows per step here)
+    until the window contains ITEM-180. This does not prove the live Chrome list.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, _stuck = _chrome_list()
+    hit.steps = []
+    _adopt(listing, *_positioned_window(hit.rows, 1))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    _record_wheel_dy(monkeypatch, hit)
+
+    def on_wheel():
+        dy = int(hit.last_dy)
+        hit.steps.append(dy)
+        if dy > 0 and hit.screen >= 193:
+            return
+        if dy < 0 and hit.screen <= 1:
+            return
+        if dy > 0:
+            hit.screen = min(193, hit.screen + 40)
+        elif dy < 0:
+            hit.screen = max(1, hit.screen - 4)
+        else:
+            return
+        hit.invent = None
+        hit.force_row = None
+        hit.hold_until = 0
+        hit._at.clear()
+        _adopt(listing, *_positioned_window(hit.rows, hit.screen))
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=6)
+    assert "ITEM-180" in out
+    assert "found after 10 scroll(s)" in out
+    assert "found after 0 scroll" not in out
+    assert hit.steps == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
+    assert -5 not in hit.steps
+    titles = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-180" in titles
+    assert titles[0] == "ITEM-177"
+
+
+def test_scroll_to_find_stops_when_the_chrome_list_will_not_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The window is ITEM-193 through ITEM-200. ITEM-180 is not in it. Neither
+    direction changes the grab, so both wheels are page_unchanged. The
+    search stops on the second one and the snapshot head stays ITEM-193.
+    A hit test that names ITEM-192 is not installed. This does not prove
+    the live Chrome list.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, _stuck = _chrome_list()
+    hit.screen = 193
+    hit.steps = []
+    _adopt(listing, *_positioned_window(hit.rows, 193))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    _record_wheel_dy(monkeypatch, hit)
+
+    def on_wheel():
+        hit.steps.append(int(hit.last_dy))
+        hit.invent = 192
+        hit.force_row = _overlapping_named("ITEM-192")
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    with pytest.raises(ComputerUseError) as error:
+        runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=6)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    assert error.value.detail["dy"] == -1
+    assert hit.steps == [5, -1]
+    kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert kept[0] == "ITEM-193"
+    assert "ITEM-200" in kept
+    assert "ITEM-180" not in kept
+    assert "ITEM-192" not in kept
 
 
 def test_three_line_scroll_snapshot_starts_at_the_on_screen_head(

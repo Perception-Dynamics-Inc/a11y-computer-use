@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.18] - 2026-10-04
+
+### Fixed
+
+- `scroll_to_find` keeps searching when a wheel does not move the page and the target has not been shown. On the 0.4.17 retest the snapshot head matched the visible rows (ITEM-193 through ITEM-200) and the call returned `unsupported` with `reason=page_unchanged` and `mean_abs` 0.0, while ITEM-180 was above that window and had never appeared. A still page at that end turns the search around, one line at a time, instead of stopping. A second still page, with nowhere left in the other direction, still returns `page_unchanged` and does not install a new head. `unit=pixels` is unchanged. Synthetic driver, not a live Chrome run (#33) (2026-10-04).
+
 ## [0.4.17] - 2026-10-04
 
 ### Fixed
