@@ -355,11 +355,12 @@ class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
     For a Chromium list, the snapshot lists rows of the list node it is
-    reading whose own tops are on or below the head line. A saved head from
-    a different Python wrapper is not that list: a live walk wraps a new
-    object each time, and the 0.4.16 retest still showed the pre-scroll row
-    at y=-2. ``scroll_to_find`` searches this snapshot. A non-Chromium tree
-    is read from ``get_child_at_index`` as before.
+    reading whose own tops are on or below the list's top and which extend
+    below the clipped top edge. A row flush with that top is on screen.
+    A saved head from a different Python wrapper is not that list: a live
+    walk wraps a new object each time, and the 0.4.16 retest still showed
+    the pre-scroll row at y=-2. ``scroll_to_find`` searches this snapshot.
+    A non-Chromium tree is read from ``get_child_at_index`` as before.
     """
 
     def __init__(self) -> None:
@@ -911,10 +912,13 @@ _PAGE_MOVE_MEAN = 1.0
 # stays at or under the threshold for the whole window is unchanged.
 _PAINT_POLLS = 12
 _PAINT_PAUSE_S = 0.15
-# The top of the list box can be a clipped row. On that retest the snapshot
-# started at ITEM-009 while the screen head was ITEM-010, and scroll_to_find
-# showed a clipped row above the visible run. Sampling below this sliver is
-# the on-screen head. It is not an OCR read.
+# The top of the list box can be a clipped row. On the 0.4.12 retest the
+# snapshot started at ITEM-009 while the screen head was ITEM-010, and
+# scroll_to_find showed a clipped row above the visible run. Hit-test
+# samples start below this sliver so that edge is not the head. It is not
+# an OCR read. A row whose own top is the list's top is fully on screen:
+# 0.4.17 and 0.4.18 required that top to clear these 8px, and the snapshot
+# then started at the next row.
 _CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
@@ -980,26 +984,58 @@ def _point_in_extents(acc, x: int, y: int) -> bool | None:
     return (left - 1) <= x <= (left + width + 1) and (top - 1) <= y <= (top + height + 1)
 
 
+def _clip_sliver(height: float) -> float:
+    """Pixels of clipped row at the top of a list that are not a head.
+
+    8 when the list is tall enough to have an edge distinct from its rows.
+    1 when the box is only a few pixels tall.
+    """
+    if height > _CLIP_SLIVER_PX * 2:
+        return float(_CLIP_SLIVER_PX)
+    return 1.0
+
+
 def _head_line(container) -> float | None:
-    """Y of the first on-screen row: the list top plus the clipped sliver."""
+    """Y of the list's top edge.
+
+    A row whose own top is above this edge is outside the viewport. The
+    8px sliver is not added: 0.4.17 and 0.4.18 did, and a fully visible row
+    flush with the list then failed the check, so the snapshot started at
+    the next row.
+    """
     pos, size = _extents(container)
     if pos is None or size is None or size[1] < 4 or size[0] < 1:
         return None
-    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
-    return float(pos[1]) + sliver
+    return float(pos[1])
 
 
 def _top_above_line(acc, line: float) -> bool:
-    """True when ``acc``'s own top is above the on-screen head line.
+    """True when ``acc``'s own top is above ``line``.
 
-    False when the accessible has no box. A row at y=-2 whose height still
-    covers the sample is above the line. The 0.4.15 check kept that row
-    because the box covered the point.
+    False when the accessible has no box. Callers pass the list's top edge.
+    A row at y=-2 is above a list at y=100, including when its height still
+    covers a sample inside the list. The 0.4.15 check kept that row because
+    the box covered the point. A row whose top is the list's top is not
+    above the line.
     """
     pos, size = _extents(acc)
     if pos is None or size is None:
         return False
     return float(pos[1]) < line - 1
+
+
+def _on_screen_row(top: float, bottom: float, box_y: float, box_b: float, sliver: float) -> bool:
+    """True when a row is on screen inside the list, not the clipped edge.
+
+    The row's own top is on or below the list's top, within 1px, and its
+    bottom is below the top sliver. A fully visible row that starts on the
+    list's top is included. A box that only fills that sliver is the clipped
+    edge. A row whose top is above the list is the parked row (y=-2 on the
+    0.4.16 retest) and is not included.
+    """
+    if top < box_y - 1 or top > box_b:
+        return False
+    return min(bottom, box_b) > box_y + sliver
 
 
 def _settle_hit(comp, x: int, y: int, coord):
@@ -1029,26 +1065,27 @@ def _settle_hit(comp, x: int, y: int, coord):
 
 
 def _in_view_named_rows(container) -> list[tuple]:
-    """Named rows under ``container`` whose own top is on or below the head line.
+    """Named rows under ``container`` that are on screen in the list.
 
     Each entry is ``(accessible, (x, y), (width, height))``. The walk reads
-    ``container`` itself. A row entirely above the head line is skipped and
-    the scan continues, including past the first forty such rows. A wrapper
-    whose top is above the line is opened when its box still covers the
+    ``container`` itself. A row entirely above the list is skipped and the
+    scan continues, including past the first forty such rows. A wrapper
+    whose top is above the list is opened when its box still covers the
     list, which is where the on-screen rows sit. A node tall enough to be
-    that wrapper is not itself a row. The rectangle is the node's own box
-    clipped to the list, so the snapshot y is not the pre-scroll y.
+    that wrapper is not itself a row. A row is on screen when its own top
+    is on or below the list's top and it extends below the clipped edge.
+    The rectangle is the node's own box clipped to the list, so the
+    snapshot y is not the pre-scroll y.
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
     pos, size = _extents(container)
     if pos is None or size is None or size[1] < 4 or size[0] < 1:
         return []
-    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
-    line = float(pos[1]) + sliver
     box_x, box_y = float(pos[0]), float(pos[1])
     box_w, box_h = float(size[0]), float(size[1])
     box_r, box_b = box_x + box_w, box_y + box_h
+    sliver = _clip_sliver(box_h)
     found: list[tuple] = []
     seen = 0
 
@@ -1072,11 +1109,11 @@ def _in_view_named_rows(container) -> list[tuple]:
         if width <= 0 or height <= 0:
             return
         bottom = top + height
-        if bottom < line - 1 or top > box_b or left + width < box_x or left > box_r:
+        if bottom < box_y - 1 or top > box_b or left + width < box_x or left > box_r:
             return
         role = _role_name(node)
         spans = height > box_h * 0.9
-        in_view = top >= line - 1
+        in_view = _on_screen_row(top, bottom, box_y, box_b, sliver)
         name = _node_name(node)
         if (
             in_view
@@ -1121,19 +1158,19 @@ def _probe_visible_rows(container) -> list[tuple]:
     """Rows on screen inside ``container``.
 
     Each entry is ``(accessible, (x, y), (width, height))``. Children whose
-    own tops are on or below the head line win over the hit test: the 0.4.15
-    retest kept ITEM-001 at y=-2 because that box still covered the sample.
-    A hit whose top is above the line is dropped even when it covers the
-    sample. Otherwise the rectangle is the span of samples that hit that
-    accessible. Samples that hit the container itself are skipped.
+    own tops are on or below the list's top win over the hit test: the
+    0.4.15 retest kept ITEM-001 at y=-2 because that box still covered the
+    sample. A hit whose top is above the list is dropped even when it
+    covers the sample. Otherwise the rectangle is the span of samples that
+    hit that accessible. Samples that hit the container itself are skipped.
+    Samples start below the clipped edge so that edge is not the head.
     """
     pos, size = _extents(container)
     if pos is None or size[1] < 4 or size[0] < 1:
         return []
     top = int(pos[1])
     bottom = int(pos[1] + size[1])
-    sliver = _CLIP_SLIVER_PX if size[1] > _CLIP_SLIVER_PX * 2 else 1
-    line = float(top + sliver)
+    sliver = int(_clip_sliver(float(size[1])))
     child_rows = _in_view_named_rows(container)
     if len(_row_names(child_rows)) >= 2:
         return child_rows
@@ -1154,7 +1191,7 @@ def _probe_visible_rows(container) -> list[tuple]:
         if (
             hit is not None
             and hit is not container
-            and not _top_above_line(hit, line)
+            and not _top_above_line(hit, float(top))
         ):
             if grouped and grouped[-1][0] is hit:
                 grouped[-1][2] = y + step
@@ -1237,10 +1274,11 @@ def saved_rows(container) -> list | None:
 
 
 def _known_head_above(container, rows) -> bool:
-    """True when the first row's own top is above the on-screen head line.
+    """True when the first row's own top is above the list's top edge.
 
     False when that row has no box. A stored sample rectangle is not the
-    check: the accessible's live extents are.
+    check: the accessible's live extents are. A row flush with the list
+    is not above the edge.
     """
     line = _head_line(container)
     if line is None or not rows:
@@ -1308,12 +1346,12 @@ def list_screen_box(container) -> tuple[int, int, int, int] | None:
 def _shown_or_probe(container) -> list:
     """Rows for ``container``.
 
-    Rows whose own tops are on or below the head line come first. A saved
+    Rows whose own tops are on or below the list's top come first. A saved
     head is not returned ahead of them: the 0.4.16 retest kept ITEM-001 at
     y=-2 for 12 seconds after the pixels had moved. A saved window is used
     only when this list has no such rows, and only while its head is not
-    above the line. A later hit test does not replace a head that is still
-    inside the list. A probe whose head is above the line is not stored.
+    above the list. A later hit test does not replace a head that is still
+    inside the list. A probe whose head is above the list is not stored.
     """
     live = _in_view_named_rows(container)
     if len(_row_names(live)) >= 2 and not _known_head_above(container, live):
@@ -1348,9 +1386,10 @@ def ensure_shown_rows(container) -> list | None:
 def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
     """Rows whose head differs from ``previous_head`` on two probes in a row.
 
-    The head is the first row whose own top is on or below the list's head
-    line. A row above that line is not a head, even when its box covers the
-    sample or it is the first cached child. The 0.4.16 retest moved the
+    The head is the first row whose own top is on or below the list's top
+    and which extends below the clipped edge. A row above the list is not
+    a head, even when its box covers the sample or it is the first cached
+    child. The 0.4.16 retest moved the
     pixels and still published that child (ITEM-001 at y=-2, and ITEM-013
     at y=-26). None when no on-screen head ever leaves ``previous_head``.
     The caller does not treat that as a scroll and does not install the
