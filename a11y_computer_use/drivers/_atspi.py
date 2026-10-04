@@ -857,6 +857,24 @@ def scroll_to(acc) -> bool:
     return bool(_call_first(comp, ("scroll_to",), stype, default=False))
 
 
+def scroll_to_edge(acc, edge: str) -> bool:
+    """Reveal ``acc`` on one AT-SPI edge. No wheel and no pointer move.
+
+    ``edge`` is an ``Atspi.ScrollType`` member name. ``TOP_EDGE`` puts the
+    row at the top of its scroller. False when the binding has no such
+    member, the accessible has no component, or ``scroll_to`` is missing.
+    ``scroll_to`` still uses ``ANYWHERE`` and is a different call.
+    """
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return False
+    scroll_type = getattr(getattr(Atspi, "ScrollType", None), edge, None)
+    if scroll_type is None:
+        return False
+    return bool(_call_first(comp, ("scroll_to",), scroll_type, default=False))
+
+
 # Pixel scroll walks a few ancestors and their immediate children looking for
 # scroll bars. A text buffer can report thousands of children; cap the walk so
 # one pixel scroll cannot turn into a full-tree D-Bus crawl.
@@ -923,6 +941,11 @@ _CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
 _MAX_ROW_SAMPLES = 16
+# The 0.4.22 body-scroll find reached ITEM-177 in 10 steps of dy=5, about
+# three rows per line. A viewport step uses that pace and never advances by
+# more rows than are already on screen, so the next snapshot still overlaps.
+_ROWS_PER_LINE = 3
+_ROW_SEQUENCE_CAP = 240
 # Nodes examined while looking for the on-screen head. Rows parked above
 # the viewport do not count as a reason to stop: the 0.4.16 cap of 40
 # could end before the first visible row, and a wrapper whose top is above
@@ -1091,15 +1114,14 @@ def _head_line(container) -> float | None:
 
 
 def list_wheel_point(container) -> tuple[int, int] | None:
-    """Where a line-scroll wheel lands on a Chromium list.
+    """Where a line-scroll wheel lands on a Chromium list, when a wheel is sent.
 
-    The center of the first painted row. The 0.4.21 retest wheeled the
-    geometric center of the overflow list (1239 by 422) and the list stayed
-    on ITEM-001 (``page_unchanged``, ``mean_abs`` 0). That center is not the
-    scrolling client. A point on the first row inside the painted page is.
+    The center of the first painted row, clamped into the painted page.
     None when ``container`` is not a Chromium list, so a document group keeps
     its own wheel point. No hit test: the row walk is enough, and a list
-    with no named rows is wheeled just below its clipped top edge.
+    with no named rows is wheeled just below its clipped top edge. The
+    0.4.22 overflow list was wheeled here and did not move; a viewport list
+    uses ``scroll_viewport_by_lines`` before this point.
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return None
@@ -1264,6 +1286,102 @@ def _in_view_named_rows(container) -> list[tuple]:
         walk(child, _VISIBLE_DESCEND)
     found.sort(key=lambda item: (item[1][1], item[1][0]))
     return found
+
+
+def _row_top(acc) -> float:
+    """Screen y of ``acc``, or 0 when it has no box."""
+    pos, _size = _extents(acc)
+    if pos is None:
+        return 0.0
+    return float(pos[1])
+
+
+def _named_rows_in_order(container) -> list:
+    """Named rows under ``container``, including those below the viewport.
+
+    Each entry is the accessible, ordered by screen y. A recorded row is
+    not opened. A scroll bar is skipped. A node taller than the list is a
+    wrapper and is opened. This does not change which rows the snapshot
+    lists; it only chooses a row for ``scroll_viewport_by_lines`` to reveal.
+    """
+    _pos, size = _extents(container)
+    if size is None:
+        return []
+    full_h = float(size[1])
+    found: list = []
+    seen = 0
+
+    def descend(node, depth: int) -> None:
+        if depth <= 0:
+            return
+        count = min(_child_count(node), max(0, _VISIBLE_WALK_CAP - seen))
+        for index in range(count):
+            walk(_child_at(node, index), depth - 1)
+            if len(found) >= _ROW_SEQUENCE_CAP:
+                return
+
+    def walk(node, depth: int) -> None:
+        nonlocal seen
+        if (
+            node is None
+            or node is container
+            or seen >= _VISIBLE_WALK_CAP
+            or len(found) >= _ROW_SEQUENCE_CAP
+        ):
+            return
+        seen += 1
+        role = _role_name(node)
+        if role in _SKIP_ROW_ROLES or role in _LIST_ROLES:
+            return
+        npos, nsize = _extents(node)
+        if npos is None or nsize is None or float(nsize[0]) <= 0 or float(nsize[1]) <= 0:
+            descend(node, depth)
+            return
+        if float(nsize[1]) > full_h * 0.9:
+            descend(node, depth)
+            return
+        if not _node_name(node):
+            descend(node, depth)
+            return
+        found.append(node)
+
+    total = min(_child_count(container), _VISIBLE_WALK_CAP)
+    for index in range(total):
+        if len(found) >= _ROW_SEQUENCE_CAP:
+            break
+        walk(_child_at(container, index), _VISIBLE_DESCEND)
+    found.sort(key=_row_top)
+    return found
+
+
+def scroll_viewport_by_lines(container, dy: int) -> bool:
+    """Reveal a row a few lines from the on-screen head. No wheel.
+
+    False when ``container`` is not a Chromium list, when no further row
+    exists, or when ``scroll_to`` is unavailable. True means ``scroll_to``
+    was called. The caller still requires the list pixels to move. One
+    line is about three rows. The step is not larger than the rows already
+    on screen, so a later snapshot still overlaps this one. Already being
+    on the first or last row returns False and does not call ``scroll_to``.
+    """
+    if not int(dy) or _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
+        return False
+    ordered = _named_rows_in_order(container)
+    if len(ordered) < 2:
+        return False
+    names = _row_names(_in_view_named_rows(container))
+    if not names:
+        return False
+    head = names[0]
+    index = next((i for i, acc in enumerate(ordered) if _node_name(acc) == head), None)
+    if index is None:
+        return False
+    step = min(abs(int(dy)) * _ROWS_PER_LINE, max(1, len(names) - 1))
+    target = index + step if int(dy) > 0 else index - step
+    target = max(0, min(len(ordered) - 1, target))
+    if target == index:
+        return False
+    return scroll_to_edge(ordered[target], "TOP_EDGE")
 
 
 def _probe_visible_rows(container) -> list[tuple]:
