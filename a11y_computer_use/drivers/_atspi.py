@@ -1000,15 +1000,58 @@ def _clip_sliver(height: float) -> float:
     return 1.0
 
 
+# Chromium's page, as opposed to the browser chrome around it. The 0.4.21
+# retest's document group was 1271 by 709 on an 800px screen, so about three
+# rows sit between the screen top and the page. Those rows are not painted.
+_PAGE_ANCESTOR_ROLES = frozenset({"document web", "document frame", "html container"})
+
+
+def _page_edges(container) -> tuple[float, float, float, float] | None:
+    """Screen box of the document that contains ``container``, if it has one.
+
+    None when no document ancestor has a box. The nearest document wins.
+    """
+    node = _parent_of(container)
+    seen: set[int] = set()
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        if _role_name(node) in _PAGE_ANCESTOR_ROLES:
+            pos, size = _extents(node)
+            if pos is None or size is None or size[1] < 4 or size[0] < 1:
+                return None
+            left = float(pos[0])
+            top = float(pos[1])
+            return left, top, left + float(size[0]), top + float(size[1])
+        node = _parent_of(node)
+    return None
+
+
+def _intersect_edges(
+    box: tuple[float, float, float, float],
+    other: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """The overlap of two ``(left, top, right, bottom)`` boxes, or None."""
+    left = max(box[0], other[0])
+    top = max(box[1], other[1])
+    right = min(box[2], other[2])
+    bottom = min(box[3], other[3])
+    if right - left < 1 or bottom - top < 4:
+        return None
+    return left, top, right, bottom
+
+
 def _viewport_edges(container) -> tuple[float, float, float, float] | None:
-    """On-screen edges of a list: left, top, right, bottom.
+    """Edges of the painted page inside a list: left, top, right, bottom.
 
     The head line is this top. An overflow list that already sits on the
-    screen keeps its own top, so a row flush with that top stays the head
-    and a row above the list stays out. A content-height list whose top has
-    scrolled above the screen (about y=-4847 on the 0.4.20 retest) uses the
-    screen's top. Rows parked at the content origin are then not the head,
-    and a row painted in the window can be.
+    page keeps its own top, so a row flush with that top stays the head and
+    a row above the list stays out. A content-height list is clipped to the
+    document, then to the screen. The document starts below the screen top
+    (the browser chrome). Rows in that band are on the screen and are not
+    painted; they are not the head. A list with no document ancestor is
+    clipped to the screen only.
     """
     pos, size = _extents(container)
     if pos is None or size is None or size[1] < 4 or size[0] < 1:
@@ -1017,16 +1060,18 @@ def _viewport_edges(container) -> tuple[float, float, float, float] | None:
     top = float(pos[1])
     right = left + float(size[0])
     bottom = top + float(size[1])
+    page = _page_edges(container)
+    if page is not None:
+        clipped = _intersect_edges((left, top, right, bottom), page)
+        if clipped is not None:
+            left, top, right, bottom = clipped
     sw, sh = _screen_size()
     if sw <= 0 or sh <= 0:
         return left, top, right, bottom
-    view_left = max(left, 0.0)
-    view_top = max(top, 0.0)
-    view_right = min(right, float(sw))
-    view_bottom = min(bottom, float(sh))
-    if view_right - view_left < 1 or view_bottom - view_top < 4:
+    screen = _intersect_edges((left, top, right, bottom), (0.0, 0.0, float(sw), float(sh)))
+    if screen is None:
         return left, top, right, bottom
-    return view_left, view_top, view_right, view_bottom
+    return screen
 
 
 def _head_line(container) -> float | None:
@@ -1036,12 +1081,43 @@ def _head_line(container) -> float | None:
     list's own top is on the screen, that top is the edge: the 8px sliver is
     not added. 0.4.17 and 0.4.18 added it, and a fully visible row flush with
     the list then failed the check, so the snapshot started at the next row.
-    When the list's own top is above the screen, the edge is the screen top.
+    When the list's own top is above the page, the edge is the document top,
+    not the screen top. Rows between those two lines are browser chrome.
     """
     edges = _viewport_edges(container)
     if edges is None:
         return None
     return edges[1]
+
+
+def list_wheel_point(container) -> tuple[int, int] | None:
+    """Where a line-scroll wheel lands on a Chromium list.
+
+    The center of the first painted row. The 0.4.21 retest wheeled the
+    geometric center of the overflow list (1239 by 422) and the list stayed
+    on ITEM-001 (``page_unchanged``, ``mean_abs`` 0). That center is not the
+    scrolling client. A point on the first row inside the painted page is.
+    None when ``container`` is not a Chromium list, so a document group keeps
+    its own wheel point. No hit test: the row walk is enough, and a list
+    with no named rows is wheeled just below its clipped top edge.
+    """
+    if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
+        return None
+    edges = _viewport_edges(container)
+    if edges is None:
+        return None
+    left, top, right, bottom = edges
+    rows = _in_view_named_rows(container)
+    if rows:
+        _acc, (x, y), (width, height) = rows[0]
+        cx = int(x + width / 2)
+        cy = int(y + height / 2)
+    else:
+        cx = int((left + right) / 2)
+        cy = int(top + _clip_sliver(bottom - top) + 1)
+    cx = min(max(cx, int(left)), max(int(left), int(right) - 1))
+    cy = min(max(cy, int(top)), max(int(top), int(bottom) - 1))
+    return cx, cy
 
 
 def _top_above_line(acc, line: float) -> bool:

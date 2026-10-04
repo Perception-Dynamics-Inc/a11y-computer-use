@@ -50,16 +50,15 @@ def _screen_span() -> tuple[int, int]:
 
 
 def _wheel_point(target: Target) -> tuple[int, int]:
-    """Where a line-scroll wheel lands.
+    """Where a line-scroll wheel lands for an element that is not a Chromium list.
 
     The element's center when that point is on the screen, and also when
-    the element itself is no larger than the screen. A fixed-height overflow
-    list is that size. 0.4.20 moved its center onto the reported screen, and
-    the list then stayed on ITEM-001 (``page_unchanged``, ``mean_abs`` 0).
-    A document list reports its content height, so the center sits below the
-    screen and a wheel there never reaches the page. The wheel then uses the
-    center of the part of the element that is on the screen. A point target
-    is unchanged. ``unit=pixels`` does not call this.
+    the element itself is no larger than the screen. A document group is
+    that size: the body-scroll find wheels its center. A content-height box
+    whose center sits below the screen is wheeled at the center of the part
+    on the screen. A Chromium list does not use this point; ``list_wheel_point``
+    lands on the first painted row. A point target is unchanged.
+    ``unit=pixels`` does not call this.
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
@@ -346,11 +345,12 @@ class LinuxDriver:
         `unsupported` with ``reason=rows_stale`` and does not replace the
         rows either. A pixel difference alone is not a successful scroll.
         ``snapshot`` then lists the confirmed rows, which is what
-        ``scroll_to_find`` searches. A coordinate target and a
-        non-Chromium element are not checked. A list taller than the screen is
-        wheeled on the visible part of that list, and the pixel check
-        photographs that visible part. A list no larger than the screen is
-        wheeled at its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        ``scroll_to_find`` searches.         A coordinate target and a
+        non-Chromium element are not checked. A Chromium list is wheeled on
+        its first painted row, inside the document, not at the geometric
+        center of the list box. The 0.4.21 retest wheeled that center on a
+        1239 by 422 overflow list and the list stayed on ITEM-001. A document
+        group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -379,6 +379,10 @@ class LinuxDriver:
         container = None
         if handle is not None and (int(dx) or int(dy)):
             container = self._run(lambda: _atspi.list_container(handle))
+        if container is not None:
+            point = self._run(lambda: _atspi.list_wheel_point(container))
+            if point is not None:
+                x, y = point
         if container is None:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None

@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.22] - 2026-10-04
+
+### Fixed
+
+- Linux list rows are clipped to the document, not the screen top. On the 0.4.21 retest the body-scroll find held, and the snapshot head was three rows above the paint: ITEM-168 while the first full row was ITEM-171, ITEM-009 after a scroll whose painted head was ITEM-012, and ITEM-174 while the screen showed ITEM-177. The document group is 1271 by 709, so those rows sit in the browser chrome above the page. A row flush with an overflow list's own top is still the head. A fixed-height overflow list is wheeled on its first painted row. 0.4.20 and 0.4.21 wheeled the list box (1239 by 422) and the list stayed on ITEM-001 (`page_unchanged`, `mean_abs` 0). A true no-move stays `page_unchanged` and names the rows on screen. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.21] - 2026-10-04
 
 ### Fixed
