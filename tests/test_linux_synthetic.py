@@ -3334,3 +3334,219 @@ def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder)
     assert driver._focused_editable is text
     assert vertical.value == 100
     assert events == []
+
+
+def _layout_fixed_rows(listing: _Acc, rows: list[_Acc], hit: _ListHit, head: int) -> None:
+    """Place every row. ``head`` (1-based) is flush with the list top.
+
+    The box is (20, 139) 400 by 520. Pitch and row height are 18px, so
+    ITEM-001 through ITEM-029 sit inside the box when ``head`` is 1, and
+    ITEM-172 through ITEM-200 when ``head`` is 172. Synthetic boxes, not a
+    live Chrome bounds read.
+    """
+    origin_y = 139
+    pitch = 18
+    hit.screen = head
+    hit.x, hit.y, hit.width, hit.height = 20, origin_y, 400, 520
+    hit._at.clear()
+    start = head - 1
+    for index, row in enumerate(rows):
+        _place_row(row, 29, origin_y + (index - start) * pitch, 360, pitch)
+    _adopt(listing, *rows)
+
+
+def _fixed_height_page():
+    """200-row overflow list, 400 by 520, 18px rows. Not a live Chrome window."""
+    window, listing, hit, _stuck = _chrome_list()
+    rows = hit.rows
+    app = window.get_application()
+    document = _Acc("document web", name="Bench", width=1271, height=709)
+    document.component._rect.x = 4.0
+    document.component._rect.y = 86.0
+    document.get_application = lambda: app
+    for row in rows:
+        row.get_application = lambda: app
+    _adopt(document, listing)
+    _adopt(window, document)
+    _add_tab_strip(window)
+    _layout_fixed_rows(listing, rows, hit, 1)
+    return window, listing, hit, rows
+
+
+def _assert_no_elision(snap) -> None:
+    """The painted rows were not dropped with a ``… N more`` marker."""
+    for line in observe.render_text(snap).splitlines():
+        assert not (line.strip().startswith("…") and line.strip().endswith(" more"))
+
+
+def test_fixed_height_list_snapshot_lists_every_painted_row(fake_atspi, monkeypatch) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    A 520px box of 18px rows paints 29 rows. The 0.4.22 through 0.4.26
+    snapshot stopped at 16 and showed no elision marker, so find missed
+    ITEM-020. At the bottom the painted run is ITEM-172 through ITEM-200,
+    and find must match ITEM-190 and ITEM-200. The hit-test sample count
+    stays 16.
+    """
+    window, listing, hit, rows = _fixed_height_page()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    assert _atspi._MAX_ROW_SAMPLES == 16
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-001"
+    assert titles[-1] == "ITEM-029"
+    assert len(titles) == 29
+    assert "ITEM-016" in titles
+    assert "ITEM-017" in titles
+    assert "ITEM-020" in titles
+    assert "ITEM-030" not in titles
+    assert observe.find_elements(snap, text="ITEM-020")
+    assert observe.find_elements(snap, text="ITEM-029")
+    _assert_no_elision(snap)
+    names = _atspi.row_names(_atspi._in_view_named_rows(listing))
+    assert names[0] == "ITEM-001"
+    assert names[-1] == "ITEM-029"
+    assert len(names) == 29
+
+    _layout_fixed_rows(listing, rows, hit, 172)
+    _atspi.reset_shown_rows()
+    bottom = driver.snapshot(Scope.WINDOW, "chrome")
+    later = _row_titles(bottom)
+    assert later[0] == "ITEM-172"
+    assert later[-1] == "ITEM-200"
+    assert len(later) == 29
+    assert "ITEM-187" in later
+    assert "ITEM-188" in later
+    assert "ITEM-190" in later
+    assert "ITEM-200" in later
+    assert "ITEM-171" not in later
+    assert "ITEM-001" not in later
+    assert observe.find_elements(bottom, text="ITEM-190")
+    assert observe.find_elements(bottom, text="ITEM-200")
+    _assert_no_elision(bottom)
+
+
+@pytest.mark.parametrize("target", ["ITEM-180", "ITEM-190", "ITEM-199", "ITEM-200"])
+def test_scroll_to_find_matches_a_row_past_the_sixteenth_painted_row(
+    fake_atspi, xtest_recorder, monkeypatch, target: str
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    ``scroll_to`` reveals a later row at the top of the 520px list. The
+    target is not in the opening 29 rows. Once it is painted it is in the
+    snapshot, including when it sits past the old 16-row window. The search
+    does not finish on ``page_unchanged`` and does not leave the list on
+    ITEM-001. ITEM-180 still has to be found.
+    """
+    window, listing, hit, rows = _fixed_height_page()
+
+    def reveal(row, _scroll_type):
+        number = int(row.name.split("-")[1])
+        _layout_fixed_rows(listing, rows, hit, number)
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: reveal(row, scroll_type)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    wheels = {"n": 0}
+
+    def on_wheel():
+        wheels["n"] += 1
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert first[0] == "ITEM-001"
+    assert target not in first
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text=target, max_scrolls=40)
+    assert target in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert "not found" not in out
+    assert "page_unchanged" not in out
+    assert wheels["n"] == 0
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert target in painted
+    assert painted[0] != "ITEM-001"
+
+
+def _layout_body_rows(listing: _Acc, rows: list[_Acc], hit: _ListHit, head: int) -> None:
+    """Place all 200 rows at a 28px pitch. ``head`` (1-based) sits at y=120.
+
+    The list is the content height. The document fixture clips what is
+    painted. Synthetic boxes, not a live Chrome bounds read.
+    """
+    pitch = 28
+    origin = 120 - (head - 1) * pitch
+    hit.screen = head
+    hit.x, hit.y, hit.width, hit.height = 40, origin, 1100, pitch * len(rows)
+    hit._at.clear()
+    for index, row in enumerate(rows):
+        _place_row(row, 40, origin + index * pitch, 1100, pitch)
+    _adopt(listing, *rows)
+
+
+def test_body_snapshot_lists_painted_rows_past_the_sixteenth(fake_atspi, monkeypatch) -> None:
+    """Synthetic body-scroll page, not a live Chrome window.
+
+    28px rows, and the document paints more than 16 of them. The snapshot
+    includes ITEM-020 and the last painted row, and it does not include the
+    next row, which is below the page.
+    """
+    window, listing, hit, rows = _document_scroll_page()
+    _layout_body_rows(listing, rows, hit, 1)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    titles = _row_titles(snap)
+    assert titles[0] == "ITEM-001"
+    assert "ITEM-016" in titles
+    assert "ITEM-017" in titles
+    assert "ITEM-020" in titles
+    assert "ITEM-024" in titles
+    assert "ITEM-025" not in titles
+    assert len(titles) > 16
+    assert observe.find_elements(snap, text="ITEM-020")
+    assert observe.find_elements(snap, text="ITEM-024")
+    _assert_no_elision(snap)
+
+
+def test_body_scroll_to_find_matches_the_last_row_when_it_is_painted(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic body-scroll page, not a live Chrome window.
+
+    The wheel moves the page. When ITEM-200 is inside the document the
+    snapshot contains it, so scroll_to_find does not return not-found while
+    that row is painted.
+    """
+    window, listing, hit, rows = _document_scroll_page()
+    _layout_body_rows(listing, rows, hit, 1)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    head = {"n": 1}
+
+    def advance():
+        head["n"] = min(177, head["n"] + 8)
+        _layout_body_rows(listing, rows, hit, head["n"])
+
+    points = _page_wheel(monkeypatch, hit, advance)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    opening = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert opening[0] == "ITEM-001"
+    assert "ITEM-200" not in opening
+    assert "ITEM-017" in opening
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-200", max_scrolls=40)
+    assert "ITEM-200" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert "not found" not in out
+    assert "page_unchanged" not in out
+    assert points
+    assert all(90 <= y < 800 for _x, y in points)
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-200" in painted
+    assert painted[0] != "ITEM-001"
