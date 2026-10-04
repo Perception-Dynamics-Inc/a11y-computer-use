@@ -1654,7 +1654,7 @@ def test_overflow_list_reaches_item_180_when_the_wheel_does_not_move(
     assert _row_titles(first)[0] == "ITEM-001"
     assert "ITEM-180" not in _row_titles(first)
     runtime = _runtime_for(driver, monkeypatch)
-    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=40)
     assert "ITEM-180" in out
     assert "found after" in out
     assert "page_unchanged" not in out
@@ -1741,7 +1741,7 @@ def test_overflow_list_steps_its_scroll_bar_when_scroll_to_and_the_wheel_do_not_
     ITEM-001. Here ``scroll_to`` returns true and does not move the rows,
     and the wheel does not either. The vertical bar is the last of the 200
     rows, which the pixel-scroll walk does not read. Writing that bar by
-    about three rows per line paints a later row. ITEM-180 is found, the
+    five content rows per five lines paints a later row. ITEM-180 is found, the
     wheel is not sent, and ``scroll_to`` is not called.
     """
     from a11y_computer_use import server
@@ -1784,7 +1784,7 @@ def test_overflow_list_steps_its_scroll_bar_when_scroll_to_and_the_wheel_do_not_
     assert _row_titles(first)[0] == "ITEM-001"
     assert "ITEM-180" not in _row_titles(first)
     runtime = _runtime_for(driver, monkeypatch)
-    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=40)
     assert "ITEM-180" in out
     assert "found after" in out
     assert "page_unchanged" not in out
@@ -1909,7 +1909,7 @@ def test_overflow_fractional_bar_reaches_item_180_without_jumping(
     driver = LinuxDriver()
     driver.ensure_trusted = lambda: None
     runtime = _runtime_for(driver, monkeypatch)
-    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=40)
     assert "ITEM-180" in out
     assert "page_unchanged" not in out
     assert wheels["n"] == 0
@@ -3103,13 +3103,12 @@ def test_uniform_rows_keep_one_bar_step_and_do_not_wheel(
 ) -> None:
     """Synthetic overflow list, not a live Chrome window.
 
-    dy=5 writes the vertical bar by one capped step (about three rows per
-    line, and not more than the rows already on screen). The grab changes
-    by one channel of 2, so mean_abs is 2/3: under the still-page threshold
-    of 1 and above the uniform-row floor. The painted head leaves ITEM-001.
-    That is the step. The bar write is not undone, and no track click or
-    wheel follows it. A second action would skip rows the first window
-    never showed.
+    dy=5 writes the vertical bar by one step of five content rows, and not
+    more than the rows already on screen. The grab changes by one channel
+    of 2, so mean_abs is 2/3: under the still-page threshold of 1 and above
+    the uniform-row floor. The painted head leaves ITEM-001. That is the
+    step. The bar write is not undone, and no track click or wheel follows
+    it. A second action would skip rows the first window never showed.
     """
     window, _document, listing, hit, rows = _overflow_page()
     bar = _overflow_bar()
@@ -3157,10 +3156,10 @@ def test_uniform_rows_keep_one_bar_step_and_do_not_wheel(
     assert wheels["n"] == 0
     assert clicks == []
     assert calls["scroll_to"] == 0
-    assert writes == [392.0]
-    assert bar.value == 392.0
+    assert writes == [140.0]
+    assert bar.value == 140.0
     painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
-    assert painted[0] == "ITEM-015"
+    assert painted[0] == "ITEM-006"
     assert "ITEM-001" not in painted
 
 
@@ -3255,6 +3254,108 @@ def test_wrapped_list_finds_item_040_without_wheeling_past_it(
     assert "ITEM-186" not in painted
     assert listing.component._rect.y == 124.0
     assert listing.component._rect.height == 5600
+
+
+def _hang_markers(rows: list[_Acc]) -> None:
+    """Give each row a bullet and a label. The list item's own name is empty.
+
+    Chromium's default ``<ul>`` looks like this. The bullet is not the row.
+    Synthetic boxes, not a live Chrome tree.
+    """
+    for row in rows:
+        label = _Acc("static", name=row.name, width=160, height=16)
+        bullet = _Acc("static", name="•", width=12, height=16)
+        app = row.get_application
+        bullet.get_application = app
+        label.get_application = app
+        row.name = ""
+        _adopt(row, bullet, label)
+
+
+def _sync_markers(rows: list[_Acc]) -> None:
+    for row in rows:
+        if len(row.children) < 2 or row.component is None:
+            continue
+        x = float(row.component._rect.x)
+        y = float(row.component._rect.y)
+        _place_row(row.children[0], x, y, 12, 16)
+        _place_row(row.children[1], x + 16, y, 160, 16)
+
+
+def test_wrapped_list_markers_are_not_the_head_and_five_lines_move_five_rows(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic wrapped list, not a live Chrome window.
+
+    Each row is an unnamed list item, a "•" marker, and ``ITEM-NNN`` text.
+    The snapshot head is the text inside the panel (ITEM-003). dy=5 reveals
+    ITEM-008, five content rows later. ``scroll_to_find`` matches ITEM-040
+    and ITEM-100 through ``scroll_to``. A wheel, if one were sent, jumps
+    the paint to ITEM-186.
+    """
+    from a11y_computer_use import server
+
+    window, document, _panel, listing, hit, rows = _wrapped_overflow_list()
+    _hang_markers(rows)
+    _sync_markers(rows)
+    wheels = {"n": 0}
+
+    def place(number: int) -> None:
+        hit.screen = number
+        for index, item in enumerate(rows):
+            _place_row(item, 29, 180 + (index - (number - 1)) * 28, 184, 19)
+        _sync_markers(rows)
+
+    def reveal(label, _scroll_type):
+        number = int(label.name.split("-")[1].split()[0])
+        place(number)
+        return True
+
+    for row in rows:
+        label = row.children[1]
+        label.component.scroll_to = lambda scroll_type, label=label: reveal(label, scroll_type)
+
+    def on_wheel():
+        wheels["n"] += 1
+        place(186)
+
+    hit.on_wheel = on_wheel
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXGroup"
+    assert anchor.title == document.name
+    titles = [el.title for el in first.elements if el.title.startswith("ITEM-") or el.title == "•"]
+    assert titles[0] == "ITEM-003"
+    assert "•" not in titles
+    assert "ITEM-001" not in titles
+    assert "ITEM-040" not in titles
+    assert driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES) is None
+    assert wheels["n"] == 0
+    stepped = [
+        el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.title.startswith("ITEM-") or el.title == "•"
+    ]
+    assert stepped[0] == "ITEM-008"
+    assert "ITEM-003" not in stepped
+    runtime = _runtime_for(driver, monkeypatch)
+    found_040 = runtime.scroll_to_find("chrome", text="ITEM-040", max_scrolls=25)
+    assert "ITEM-040" in found_040
+    assert "found after" in found_040
+    assert "not found" not in found_040
+    found_100 = runtime.scroll_to_find("chrome", text="ITEM-100", max_scrolls=25)
+    assert "ITEM-100" in found_100
+    assert "found after" in found_100
+    assert "not found" not in found_100
+    assert wheels["n"] == 0
+    painted = [
+        el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.title.startswith("ITEM-")
+    ]
+    assert "ITEM-100" in painted
+    assert "ITEM-186" not in painted
 
 
 def _bare_runtime(driver):
