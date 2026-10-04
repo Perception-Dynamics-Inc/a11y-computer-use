@@ -14,7 +14,15 @@ import pytest
 
 from a11y_computer_use import menus, safety, server
 from a11y_computer_use.drivers import browser, linux, windows
-from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
+from a11y_computer_use.schema import (
+    Bounds,
+    ComputerUseError,
+    Display,
+    Element,
+    ErrorCode,
+    Scope,
+    Snapshot,
+)
 from tests.test_menus import FakeAccessor, Node, bar_item, item, menu
 
 APP = "com.apple.TextEdit"
@@ -190,7 +198,26 @@ def test_a_driver_without_menu_support_is_left_alone(tmp_path) -> None:
 
 @pytest.mark.parametrize("driver", [
     linux.LinuxDriver(), windows.WindowsDriver(), browser.BrowserDriver(endpoint="http://127.0.0.1:1"),
-])
+], ids=["linux", "windows", "browser"])
 def test_other_drivers_report_no_open_menu(driver) -> None:
+    """A name with no running app.
+
+    Linux asks AT-SPI and answers ``app_not_found``, the same as menu list.
+    The name is not ``x``: that string is inside XFCE application names, so
+    on an XFCE session it is a running app. Windows and the browser have no
+    such lookup in this test and report that no menu is open.
+    """
+    if getattr(driver, "name", None) == "linux":
+        missing = "no-such-app-a11y"
+        for call in (
+            lambda: driver.menu_state(missing),
+            lambda: driver.menu_close(missing),
+        ):
+            with pytest.raises(ComputerUseError) as exc:
+                call()
+            assert exc.value.code is ErrorCode.APP_NOT_FOUND
+            assert exc.value.detail["app"] == missing
+            assert "no running application matches" in exc.value.message
+        return
     assert driver.menu_state("x") == {"open": False, "path": []}
     assert driver.menu_close("x") == []
