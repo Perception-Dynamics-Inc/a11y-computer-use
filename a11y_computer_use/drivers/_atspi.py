@@ -936,6 +936,11 @@ _SKIP_ROW_ROLES = frozenset({
 # these unless a wheel's pixels moved and the head below the sliver changed,
 # or the confirmed head's own top has moved above that line.
 _SHOWN: dict[tuple, list] = {}
+# A one-pixel change in the reported list origin still names the same box.
+# A content-height list that scrolls moves its origin by thousands of pixels
+# (y=120 to about y=-4847). Those two boxes overlap, and the overlap must
+# not resurrect the rows saved at the old origin.
+_BOX_JITTER_PX = 4
 
 
 def _chromium_app(acc) -> bool:
@@ -995,18 +1000,48 @@ def _clip_sliver(height: float) -> float:
     return 1.0
 
 
-def _head_line(container) -> float | None:
-    """Y of the list's top edge.
+def _viewport_edges(container) -> tuple[float, float, float, float] | None:
+    """On-screen edges of a list: left, top, right, bottom.
 
-    A row whose own top is above this edge is outside the viewport. The
-    8px sliver is not added: 0.4.17 and 0.4.18 did, and a fully visible row
-    flush with the list then failed the check, so the snapshot started at
-    the next row.
+    The head line is this top. An overflow list that already sits on the
+    screen keeps its own top, so a row flush with that top stays the head
+    and a row above the list stays out. A content-height list whose top has
+    scrolled above the screen (about y=-4847 on the 0.4.20 retest) uses the
+    screen's top. Rows parked at the content origin are then not the head,
+    and a row painted in the window can be.
     """
     pos, size = _extents(container)
     if pos is None or size is None or size[1] < 4 or size[0] < 1:
         return None
-    return float(pos[1])
+    left = float(pos[0])
+    top = float(pos[1])
+    right = left + float(size[0])
+    bottom = top + float(size[1])
+    sw, sh = _screen_size()
+    if sw <= 0 or sh <= 0:
+        return left, top, right, bottom
+    view_left = max(left, 0.0)
+    view_top = max(top, 0.0)
+    view_right = min(right, float(sw))
+    view_bottom = min(bottom, float(sh))
+    if view_right - view_left < 1 or view_bottom - view_top < 4:
+        return left, top, right, bottom
+    return view_left, view_top, view_right, view_bottom
+
+
+def _head_line(container) -> float | None:
+    """Y of the on-screen top of the list.
+
+    A row whose own top is above this edge is outside the viewport. When the
+    list's own top is on the screen, that top is the edge: the 8px sliver is
+    not added. 0.4.17 and 0.4.18 added it, and a fully visible row flush with
+    the list then failed the check, so the snapshot started at the next row.
+    When the list's own top is above the screen, the edge is the screen top.
+    """
+    edges = _viewport_edges(container)
+    if edges is None:
+        return None
+    return edges[1]
 
 
 def _top_above_line(acc, line: float) -> bool:
@@ -1074,18 +1109,19 @@ def _in_view_named_rows(container) -> list[tuple]:
     list, which is where the on-screen rows sit. A node tall enough to be
     that wrapper is not itself a row. A row is on screen when its own top
     is on or below the list's top and it extends below the clipped edge.
-    The rectangle is the node's own box clipped to the list, so the
-    snapshot y is not the pre-scroll y.
+    The rectangle is the node's own box clipped to the on-screen part of
+    the list, so the snapshot y is not the pre-scroll y. A row at the
+    content origin of a list whose top is above the screen is not on screen.
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
     pos, size = _extents(container)
-    if pos is None or size is None or size[1] < 4 or size[0] < 1:
+    edges = _viewport_edges(container)
+    if pos is None or size is None or edges is None:
         return []
-    box_x, box_y = float(pos[0]), float(pos[1])
-    box_w, box_h = float(size[0]), float(size[1])
-    box_r, box_b = box_x + box_w, box_y + box_h
-    sliver = _clip_sliver(box_h)
+    box_x, box_y, box_r, box_b = edges
+    full_h = float(size[1])
+    sliver = _clip_sliver(box_b - box_y)
     found: list[tuple] = []
     seen = 0
 
@@ -1112,7 +1148,7 @@ def _in_view_named_rows(container) -> list[tuple]:
         if bottom < box_y - 1 or top > box_b or left + width < box_x or left > box_r:
             return
         role = _role_name(node)
-        spans = height > box_h * 0.9
+        spans = height > full_h * 0.9
         in_view = _on_screen_row(top, bottom, box_y, box_b, sliver)
         name = _node_name(node)
         if (
@@ -1158,19 +1194,22 @@ def _probe_visible_rows(container) -> list[tuple]:
     """Rows on screen inside ``container``.
 
     Each entry is ``(accessible, (x, y), (width, height))``. Children whose
-    own tops are on or below the list's top win over the hit test: the
-    0.4.15 retest kept ITEM-001 at y=-2 because that box still covered the
-    sample. A hit whose top is above the list is dropped even when it
-    covers the sample. Otherwise the rectangle is the span of samples that
-    hit that accessible. Samples that hit the container itself are skipped.
-    Samples start below the clipped edge so that edge is not the head.
+    own tops are on or below the on-screen top of the list win over the hit
+    test: the 0.4.15 retest kept ITEM-001 at y=-2 because that box still
+    covered the sample. A hit whose top is above that edge is dropped even
+    when it covers the sample. Otherwise the rectangle is the span of
+    samples that hit that accessible. Samples that hit the container itself
+    are skipped. Samples start below the clipped edge so that edge is not
+    the head. The samples cover the on-screen part of the list, not the
+    content origin: a list at y=-4847 is not sampled there.
     """
-    pos, size = _extents(container)
-    if pos is None or size[1] < 4 or size[0] < 1:
+    edges = _viewport_edges(container)
+    if edges is None:
         return []
-    top = int(pos[1])
-    bottom = int(pos[1] + size[1])
-    sliver = int(_clip_sliver(float(size[1])))
+    box_x, box_y, box_r, box_b = edges
+    top = int(box_y)
+    bottom = int(box_b)
+    sliver = int(_clip_sliver(box_b - box_y))
     child_rows = _in_view_named_rows(container)
     if len(_row_names(child_rows)) >= 2:
         return child_rows
@@ -1178,8 +1217,8 @@ def _probe_visible_rows(container) -> list[tuple]:
     if comp is None:
         return []
     coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
-    x = int(pos[0] + size[0] / 2)
-    step = max(12, int(size[1] // 12) or 12)
+    x = int((box_x + box_r) / 2)
+    step = max(12, int((bottom - top) // 12) or 12)
     grouped: list[list] = []
     # Skip the clipped sliver at the top edge. A hit there is the row above
     # the on-screen head, which is what 0.4.12 published as ITEM-009.
@@ -1201,7 +1240,7 @@ def _probe_visible_rows(container) -> list[tuple]:
     rows = []
     for acc, y0, y1 in grouped:
         height = max(1, min(y1, bottom) - y0)
-        rows.append((acc, (float(pos[0]), float(y0)), (float(size[0]), float(height))))
+        rows.append((acc, (float(box_x), float(y0)), (float(box_r - box_x), float(height))))
     return rows
 
 
@@ -1244,7 +1283,8 @@ def _saved_for(container) -> list | None:
     The exact box is the first choice. A one-pixel change in the reported
     extents must not miss that entry and fall through to the cached
     children: after a scroll those children are the pre-scroll row parked
-    above the viewport.
+    above the viewport. A content-height list whose origin has moved by
+    more than a few pixels is a different box: the old rows are not it.
     """
     key = _list_key(container)
     if key is None:
@@ -1259,6 +1299,8 @@ def _saved_for(container) -> list | None:
         if len(saved_key) != 6 or saved_key[0] != role or saved_key[1] != name:
             continue
         sx, sy, sw, sh = saved_key[2], saved_key[3], saved_key[4], saved_key[5]
+        if abs(sx - x) > _BOX_JITTER_PX or abs(sy - y) > _BOX_JITTER_PX:
+            continue
         overlap_w = min(x + width, sx + sw) - max(x, sx)
         overlap_h = min(y + height, sy + sh) - max(y, sy)
         area = max(0, overlap_w) * max(0, overlap_h)
