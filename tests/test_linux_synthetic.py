@@ -1071,6 +1071,10 @@ class _ListHit:
         self._paint_left = 0
         self._frozen: int | None = None
         self.grab_colors: list[int] = []
+        # While clock < blind_until, every hit is ``offscreen``: the pre-scroll
+        # row parked above the list. Not a live Chrome bounds read.
+        self.blind_until = 0
+        self.offscreen: _Acc | None = None
         self.x, self.y, self.width, self.height = 40, 100, 400, 160
         self._at: dict[tuple[int, int], int] = {}
 
@@ -1099,6 +1103,8 @@ class _ListHit:
 
     def get_accessible_at_point(self, _x, y, _coord):
         self.calls += 1
+        if self.offscreen is not None and self.clock < self.blind_until:
+            return self.offscreen
         key = (int(_x), int(y))
         n = self._at.get(key, 0) + 1
         self._at[key] = n
@@ -1339,6 +1345,108 @@ def test_late_paint_is_not_reported_as_an_unmoved_page(
     assert kept[0] == "ITEM-010"
     assert "ITEM-192" not in kept
     assert "ITEM-001" not in kept
+
+
+def _offscreen_item_001() -> _Acc:
+    """The pre-scroll row parked above the list. Its box does not cover a
+    sample inside the list. Synthetic, not a live Chrome bounds read."""
+    row = _Acc("list item", name="ITEM-001", width=20, height=4)
+    row.component._rect.x = 0
+    row.component._rect.y = -2
+    return row
+
+
+def test_moved_pixels_do_not_keep_the_row_parked_above_the_list(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The pixels move from ITEM-001 to ITEM-010. The hit test first answers
+    ITEM-001 with bounds at y=-2, which does not cover the list. That row
+    is not the snapshot head. When the hit test answers the rows inside the
+    list, the snapshot starts at ITEM-010. A later wheel whose pixels stay
+    put is page_unchanged and does not install ITEM-192.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    offscreen = _offscreen_item_001()
+
+    def on_wheel():
+        hit.offscreen = offscreen
+        hit.blind_until = hit.clock + 1
+        hit.screen = 10
+        hit.clip = True
+        hit.invent = None
+        hit.hold_until = 0
+        hit._at.clear()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert driver.scroll(row, dy=3, unit=ScrollUnit.LINES) is None
+    later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert later[0] == "ITEM-010"
+    assert "ITEM-017" in later
+    assert "ITEM-001" not in later
+    assert offscreen.component._rect.y == -2
+    assert listing.get_child_at_index(0).name == "ITEM-001"
+
+    def still():
+        hit.invent = 192
+        hit.blind_until = 0
+        hit._at.clear()
+
+    hit.on_wheel = still
+    anchor = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.role == "AXRow" and el.title == "ITEM-010"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert kept[0] == "ITEM-010"
+    assert "ITEM-192" not in kept
+    assert "ITEM-001" not in kept
+
+
+def test_scroll_to_find_passes_the_offscreen_stale_head(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    Each wheel moves the pixels, and the first hit answers are the pre-scroll
+    row at y=-2. scroll_to_find keeps going and finds ITEM-180. It does not
+    stop on rows_stale.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, _stuck = _chrome_list()
+    hit.offscreen = _offscreen_item_001()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+
+    def on_wheel():
+        hit.blind_until = hit.clock + 1
+        hit.advance()
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert listing.get_child_at_index(0).name == "ITEM-001"
 
 
 def test_unmoved_page_stays_unsupported_and_keeps_the_on_screen_rows(

@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.15] - 2026-10-03
+
+### Fixed
+
+- Linux line scroll on a Chromium list no longer stops on `rows_stale` when the hit test is still the pre-scroll row parked above the list. On the 0.4.14 retest the pixels did move (`mean_abs` about 6.83 and 6.86) and the on-screen head became ITEM-010, but the snapshot head stayed ITEM-001 at y=-2, so `scroll_to_find` ITEM-180 returned `unsupported` with `reason=rows_stale`. A row whose own bounds do not cover the sample is not the head. The snapshot head is the row inside the list, once that row is stable. A grab that stays still is still `unsupported` with `reason=page_unchanged` and does not install a new head. `unit=pixels` is unchanged. Synthetic hit tests and solid grabs, not a live Chrome run (#33) (2026-10-03).
+
 ## [0.4.14] - 2026-10-03
 
 ### Fixed
