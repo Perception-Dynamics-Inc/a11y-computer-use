@@ -1504,15 +1504,11 @@ def test_overlapping_row_above_the_list_is_not_the_snapshot_head(
     assert listing.get_child_at_index(0).name == "ITEM-001"
 
     def still():
+        # The hit test names a row that is not on screen. The child list stays
+        # the rows already inside the list. A still grab must not install the
+        # hit-test row.
         hit.invent = 192
-        fresh = _overlapping_named("ITEM-192")
-        hit.force_row = fresh
-        newbie = [
-            _place_row(_Acc("list item", name=f"ITEM-{i:03d}", width=400, height=16),
-                       40, 108 + index * 16, 400, 16)
-            for index, i in enumerate(range(192, 200))
-        ]
-        _adopt(listing, fresh, *newbie)
+        hit.force_row = _overlapping_named("ITEM-192")
 
     hit.on_wheel = still
     anchor = next(
@@ -1570,6 +1566,159 @@ def test_scroll_to_find_passes_an_overlapping_stale_head(
     assert "found after 0 scroll" not in out
     assert _atspi._point_in_extents(hit.force_row, 240, 108) is True
     assert listing.get_child_at_index(0).name != "ITEM-180"
+
+
+def _fresh_list_shells(window, listing, hit) -> None:
+    """Each child read of the window returns a new list wrapper.
+
+    The rows stay on ``listing``. The wrapper ``refresh_visible`` probed and
+    the wrapper the snapshot walk reads are different objects. Synthetic,
+    not a live AT-SPI wrapper.
+    """
+
+    def child_at(index):
+        if index != 0:
+            return None
+        shell = _Acc("list", name="items", width=400, height=160)
+        shell.component._rect.x = hit.x
+        shell.component._rect.y = hit.y
+        shell.get_application = listing.get_application
+        shell.get_child_count = listing.get_child_count
+        shell.get_child_at_index = listing.get_child_at_index
+        shell.parent = window
+        return shell
+
+    window.get_child_at_index = child_at
+    window.get_child_count = lambda: 1
+
+
+def _bury_visible_window(listing, hit, head: int, parked_name: str) -> _Acc:
+    """Visible rows nested under a wrapper that starts above the list.
+
+    Forty-five rows above the head line come first, then a row at y=-2 whose
+    height still covers the sample, then the on-screen window at ``head``.
+    The 0.4.16 scan did not open that wrapper and stopped at forty nodes.
+    Synthetic boxes, not a live Chrome list.
+    """
+    parked = _overlapping_named(parked_name)
+    above = [
+        _place_row(_Acc("list item", name=f"OLD-{index:03d}"), 40, -800 + index * 8, 400, 8)
+        for index in range(45)
+    ]
+    group = _Acc("panel", name="client", width=400, height=5000)
+    _place_row(group, 40, -400, 400, 5000)
+    _adopt(group, parked, *above, *_positioned_window(hit.rows, head))
+    _adopt(listing, group)
+    hit.force_row = parked
+    return parked
+
+
+def test_walked_list_starts_at_the_row_inside_the_viewport(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    The list the snapshot walk reads is a different object from the one a
+    saved head was stored on. Its child is a wrapper whose top is above the
+    list, then forty-five rows above the head line, then ITEM-001 at y=-2
+    with height 120 (that box covers the sample), then ITEM-010 inside the
+    list. The hit test returns ITEM-001 for every point. A 3-line scroll
+    whose pixels move returns None and the snapshot head is ITEM-010 inside
+    the list. A following wheel whose pixels stay put is page_unchanged and
+    does not install ITEM-192. This does not prove the live Chrome list.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    _adopt(listing, *_positioned_window(hit.rows, 1))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    _fresh_list_shells(window, listing, hit)
+    assert window.get_child_at_index(0) is not window.get_child_at_index(0)
+
+    def on_wheel():
+        hit.screen = 10
+        hit.invent = None
+        hit.hold_until = 0
+        hit._at.clear()
+        _bury_visible_window(listing, hit, 10, "ITEM-001")
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    row = next(el for el in snap.elements if el.role == "AXRow" and el.title == "ITEM-001")
+    assert row.bounds.y >= 100
+    assert driver.scroll(row, dy=3, unit=ScrollUnit.LINES) is None
+    parked = hit.force_row
+    assert parked.component._rect.y == -2
+    assert _atspi._point_in_extents(parked, 240, 108) is True
+    assert _atspi._top_above_line(parked, 108) is True
+    later_snap = driver.snapshot(Scope.WINDOW, "chrome")
+    later = _row_titles(later_snap)
+    assert later[0] == "ITEM-010"
+    assert "ITEM-017" in later
+    assert "ITEM-001" not in later
+    assert "OLD-000" not in later
+    head = next(el for el in later_snap.elements if el.role == "AXRow" and el.title == "ITEM-010")
+    assert head.bounds.y >= 100
+    assert head.bounds.y != -2
+
+    def still():
+        hit.invent = 192
+        hit.force_row = _overlapping_named("ITEM-192")
+
+    hit.on_wheel = still
+    anchor = next(
+        el for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.role == "AXRow" and el.title == "ITEM-010"
+    )
+    with pytest.raises(ComputerUseError) as error:
+        driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES)
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["mean_abs"] == 0
+    kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert kept[0] == "ITEM-010"
+    assert "ITEM-192" not in kept
+    assert "ITEM-001" not in kept
+
+
+def test_scroll_to_find_passes_rows_nested_under_the_parked_wrapper(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic Chromium list, not a live Chrome window.
+
+    Each wheel moves the pixels. The on-screen rows are nested under a
+    wrapper whose top is above the list, behind forty-five rows above the
+    head line and a row at y=-2 that still covers the sample. The hit test
+    returns that row. scroll_to_find reaches ITEM-180 and does not stop on
+    rows_stale. This does not prove the live Chrome list.
+    """
+    from a11y_computer_use import server
+
+    window, listing, hit, _stuck = _chrome_list()
+    _adopt(listing, *_positioned_window(hit.rows, 1))
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    _fresh_list_shells(window, listing, hit)
+
+    def on_wheel():
+        previous = hit.screen
+        hit.advance()
+        _bury_visible_window(listing, hit, hit.screen, f"ITEM-{previous:03d}")
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda _name: (None, "chrome"))
+
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=25)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert _atspi._point_in_extents(hit.force_row, 240, 108) is True
 
 
 def test_scroll_to_find_passes_the_offscreen_stale_head(

@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.17] - 2026-10-04
+
+### Fixed
+
+- Linux line scroll on a Chromium list reads the on-screen rows from the list node the snapshot walk is holding. On the 0.4.16 retest the pixels did move (`mean_abs` about 7.07 and 6.94) but the snapshot head stayed a row above the viewport: ITEM-001 at y=-2 after a 3-line scroll, and ITEM-013 at y=-26 while the first fully visible row was ITEM-023. `scroll_to_find` ITEM-180 returned `unsupported` with `reason=rows_stale`. The 0.4.16 check stored rows on one Python wrapper and the walk read another, so it published the cached child whose own top was above the viewport. That scan also stopped after forty nodes and did not open a wrapper that starts above the list. The walk now keeps going through those rows and opens that wrapper, and the head is the first row whose own top is on or below the list's head line. A grab that stays still is still `unsupported` with `reason=page_unchanged` and does not install a new head. `unit=pixels` is unchanged. Synthetic trees, not a live Chrome run (#33) (2026-10-04).
+
 ## [0.4.16] - 2026-10-04
 
 ### Fixed

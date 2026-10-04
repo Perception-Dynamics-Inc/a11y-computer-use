@@ -134,10 +134,8 @@ class LinuxDriver:
             root = _atspi.find_root(app, scope)  # None -> empty snapshot
             pid = _atspi.pid_of(root) if root is not None else None
             accessor = _atspi.ATSPIAccessor()
-            # Chromium lists: the snapshot lists the rows last confirmed for
-            # that list box. A line scroll replaces them only after the pixels
-            # move and the head below the top sliver is stable. This read does
-            # not probe again.
+            # Chromium lists: the rows are read from the list node this walk
+            # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
             return observe.build_snapshot(
                 root, accessor, scope=scope, app=app, pid=pid,
@@ -257,11 +255,13 @@ class LinuxDriver:
         On a Chromium list the wheel is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
         head below the top sliver leaves the pre-wheel row and stays on the
-        new row for two reads. A row whose top is above that line is not
-        that head, even when its box still covers the sample. The 0.4.15
-        check only dropped a box that missed the sample. Children of the
-        list whose tops are on or below the line are the rows the snapshot
-        lists. The pixel check resamples the list's own screen box. The
+        new row for two reads. The head is the first row of the list node
+        being read whose own top is on or below that line. A row parked
+        above the line is not the head, even when its box covers the sample
+        or a saved wrapper still names it. The scan keeps going through
+        rows above the viewport and opens a wrapper that starts above the
+        line when that wrapper still covers the list. The pixel check
+        resamples the list's own screen box. The
         frame grabbed in the same turn as the wheel can still be the
         pre-paint image, which is what 0.4.13 reported as ``mean_abs`` 0.0
         while the list on screen had moved. A resample that stays at or
