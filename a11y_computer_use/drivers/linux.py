@@ -80,6 +80,101 @@ def _wheel_point(target: Target) -> tuple[int, int]:
     return (left + right) // 2, (top + bottom) // 2
 
 
+def _app_has_window(app: str) -> bool:
+    """True when a managed window is owned by ``app``.
+
+    Synthetic trees and a headless run have no such window. The geometric
+    scroll point stays put in that case: there is no dock to hit-test.
+    """
+    if not app:
+        return False
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        return bool(_linux_system.pids_matching(app))
+    except Exception:
+        return False
+
+
+def _on_screen_box(bounds: Bounds) -> tuple[int, int, int, int] | None:
+    """``(left, top, right, bottom)`` of ``bounds`` clipped to the screen."""
+    width, height = _screen_span()
+    if width <= 0 or height <= 0:
+        return None
+    left = max(int(bounds.x), 0)
+    top = max(int(bounds.y), 0)
+    right = min(int(bounds.x) + max(int(bounds.width), 0), width)
+    bottom = min(int(bounds.y) + max(int(bounds.height), 0), height)
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def point_on_target_app(
+    bounds: Bounds, app: str, *, prefer: tuple[int, int]
+) -> tuple[int, int] | None:
+    """A point inside ``bounds`` that belongs to ``app``.
+
+    ``prefer`` when that point is on ``app`` or on no window. When ``prefer``
+    is another app (the dock, over the bottom of a form), a point higher in
+    the same box that ``app`` owns. None when every sampled point is some
+    other app. Does not look outside ``bounds``.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    box = _on_screen_box(bounds)
+    if box is None:
+        return None
+    left, top, right, bottom = box
+
+    def inside(x: int, y: int) -> bool:
+        return left <= x < right and top <= y < bottom
+
+    def owner_at(x: int, y: int) -> str | None:
+        return _linux_system.app_at_point_id(x, y)
+
+    px, py = int(prefer[0]), int(prefer[1])
+    if inside(px, py):
+        found = owner_at(px, py)
+        if found is None or found == app:
+            return px, py
+    span_x = right - left
+    span_y = bottom - top
+    xs = sorted({
+        left,
+        min(right - 1, left + max(span_x // 4, 1)),
+        min(right - 1, left + span_x // 2),
+        min(right - 1, left + 3 * span_x // 4),
+        right - 1,
+    })
+    ys = []
+    for frac in (0.15, 0.35, 0.5, 0.65, 0.85):
+        ys.append(min(bottom - 1, top + int(span_y * frac)))
+    owned: tuple[int, int] | None = None
+    unknown: tuple[int, int] | None = None
+    for y in ys:
+        for x in xs:
+            if (x, y) == (px, py) or not inside(x, y):
+                continue
+            found = owner_at(x, y)
+            if found == app and owned is None:
+                owned = (x, y)
+            elif found is None and unknown is None:
+                unknown = (x, y)
+        if owned is not None:
+            return owned
+    return owned or unknown
+
+
+def keep_point_on_app(
+    bounds: Bounds, app: str | None, prefer: tuple[int, int]
+) -> tuple[int, int] | None:
+    """``prefer`` unless ``app`` has a window and that point is another app."""
+    if not app or not _app_has_window(app):
+        return int(prefer[0]), int(prefer[1])
+    return point_on_target_app(bounds, app, prefer=(int(prefer[0]), int(prefer[1])))
+
+
 def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
     """The part of ``box`` that lies on the screen.
 
@@ -173,6 +268,13 @@ class LinuxDriver:
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
+        # The gated app for the scroll in progress. Unset, the wheel point
+        # stays geometric: synthetic tests have no window to hit-test.
+        self._scroll_app: str | None = None
+
+    def set_scroll_app(self, app: str | None) -> None:
+        """Remember which app a line scroll must keep its point on."""
+        self._scroll_app = app or None
 
     def _run(self, fn):
         """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
@@ -375,7 +477,9 @@ class LinuxDriver:
         about three rows per line and not more than the rows already on
         screen. No wheel is sent when that reveal moves the pixels. A
         content-height list and a document group keep the wheel. A document
-        group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        group is not a list and keeps its own center. When the gated app has
+        a window and that point belongs to another app, the wheel moves to a
+        point in the same box that the app still owns. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -408,6 +512,20 @@ class LinuxDriver:
             point = self._run(lambda: _atspi.list_wheel_point(container))
             if point is not None:
                 x, y = point
+        if isinstance(target, Element) and self._scroll_app:
+            bounds = target.bounds
+            if container is not None:
+                box = self._run(lambda: _atspi.list_screen_box(container))
+                if box is not None:
+                    bounds = Bounds(target.bounds.display_id, box[0], box[1], box[2], box[3])
+            kept = keep_point_on_app(bounds, self._scroll_app, (x, y))
+            if kept is None:
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_CHANGED,
+                    "the scroll point is not on the target app",
+                    detail={"gated_app": self._scroll_app},
+                )
+            x, y = kept
         if container is None:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
@@ -526,6 +644,11 @@ class LinuxDriver:
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
         x, y = _point_of(target)
+        app = self._scroll_app
+        if app and isinstance(target, Element):
+            kept = keep_point_on_app(target.bounds, app, (x, y))
+            if kept is not None:
+                x, y = kept
 
         def do() -> bool:
             if handle is not None and _atspi.scroll_by_pixels(handle, dx=dx, dy=dy):

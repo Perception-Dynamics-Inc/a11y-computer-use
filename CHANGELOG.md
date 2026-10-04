@@ -9,7 +9,10 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Linux Chrome snapshots re-read a document that is still empty, and say so when it stays empty. A `document web` node can already be named (Login | Figma) while Chrome has not attached the page. Depth and child caps do not produce that shape: a named document with on-screen children keeps them, and a cap leaves an elision marker. The walk waits and reads the document again. Children that arrive (email, password, buttons) are the snapshot. A document that is still empty, including an embedded frame, is named in the result as `web_content_unexposed`. Browser chrome can be present in the same tree; the note is about that document, not a silent empty group. A screenshot can still show the painted form. This snapshot does not invent controls Chrome did not expose, and it does not add an OCR path. Synthetic trees, not a live Chrome run (#56) (2026-10-04).
+- Linux line scroll keeps the wheel on the target app when the element's center is another window. A form scroll area whose box hangs over the dock used that center, and the recheck returned `focus_changed` ("the app under the target point is now the dock, not Chrome") before the wheel. The point stays inside the same box, on a part the target app owns. When the app has no window to hit-test, the geometric point is unchanged. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel; a dock under the element's center does not block that write. A Chromium list or table that keeps named on-screen rows also keeps an entry, password, combobox, or button that is not inside one of those rows, and a SHOWING form control with no AT-SPI box is kept so `set_value` can target the object Chrome exposed. A group Chrome leaves with no such child is still a group. Synthetic trees, not a live Chrome run (#55) (2026-10-04).
 
 ## [0.4.23] - 2026-10-04
 

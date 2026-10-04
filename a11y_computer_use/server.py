@@ -1059,6 +1059,43 @@ class Runtime:
             return self._recheck_frontmost_app(app)
         _recheck_target_app(app, target)
 
+    def _arm_scroll_app(self, app: str | None) -> None:
+        """Tell a Linux driver which app the wheel must stay on."""
+        arm = getattr(self.driver, "set_scroll_app", None)
+        if arm is not None:
+            arm(app)
+
+    def _recheck_scroll(self, app: str, target: Target, unit: ScrollUnit = ScrollUnit.LINES) -> None:
+        """Same-window check for a scroll.
+
+        A line scroll wheels a point. The element's center can sit on the
+        dock while the rest of the box is still the target app; the point
+        checked here is the one the wheel will use. A Linux pixel scroll of
+        an element writes that element's AT-SPI scroll bar and does not move
+        the pointer, so a dock under the center is not the injection target.
+        """
+        if getattr(self.driver, "name", None) != "linux" or self._resolves_apps():
+            self._recheck_target(app, target)
+            return
+        if unit is ScrollUnit.PIXELS and isinstance(target, Element):
+            return
+        if unit is ScrollUnit.LINES and isinstance(target, Element):
+            from a11y_computer_use.drivers.linux import _app_has_window, keep_point_on_app, _wheel_point
+
+            if _app_has_window(app):
+                xy = keep_point_on_app(target.bounds, app, _wheel_point(target))
+                if xy is None:
+                    owner = _app_at_point(target.bounds.center)
+                    raise ComputerUseError(
+                        ErrorCode.FOCUS_CHANGED,
+                        f"the app under the target point is now {owner}, not the gated "
+                        f"{app}; re-observe and retry",
+                        detail={"gated_app": app, "app_at_point": owner},
+                    )
+                _recheck_target_app(app, Point(target.bounds.display_id, xy[0], xy[1]))
+                return
+        self._recheck_target(app, target)
+
     # -- gate + audit -------------------------------------------------------
 
     def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
@@ -2256,10 +2293,15 @@ class Runtime:
                 return
             self._refuse_secure(target)  # the wheel path moves the pointer onto the target
             self._guard_user(app)
-            self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
+            self._arm_scroll_app(app)
+            try:
+                self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
+            finally:
+                self._arm_scroll_app(None)
 
         self._run_gated(
-            action, app, execute, recheck=partial(self._recheck_target, target=target)
+            action, app, execute,
+            recheck=partial(self._recheck_scroll, target=target, unit=parsed_unit),
         )
         if into_view:
             return f"scrolled {self._label(ref, target)} into view"
@@ -2492,7 +2534,11 @@ class Runtime:
 
         def inject_scroll(anchor: Element, step: int) -> None:
             self._refuse_secure(anchor)
-            self.driver.scroll(anchor, dy=step)
+            self._arm_scroll_app(bundle)
+            try:
+                self.driver.scroll(anchor, dy=step)
+            finally:
+                self._arm_scroll_app(None)
 
         def page_unchanged(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "page_unchanged"
@@ -2531,7 +2577,9 @@ class Runtime:
                     self._run_gated(
                         Scroll(target=anchor, dy=step), bundle,
                         partial(inject_scroll, anchor, step),
-                        recheck=partial(self._recheck_target, target=anchor),
+                        recheck=partial(
+                            self._recheck_scroll, target=anchor, unit=ScrollUnit.LINES
+                        ),
                     )
                 except ComputerUseError as exc:
                     if not page_unchanged(exc):

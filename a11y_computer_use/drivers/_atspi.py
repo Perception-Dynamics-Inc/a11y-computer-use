@@ -366,6 +366,10 @@ class ATSPIAccessor:
     def __init__(self) -> None:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
+        # Chromium document nodes that were empty on the first read. A second
+        # walk must not wait again, and must not repeat the same note.
+        self._documents_settled: set[int] = set()
+        self.snapshot_notes: list[str] = []
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -397,6 +401,10 @@ class ATSPIAccessor:
             position, size = override
         else:
             position, size = _extents(node)
+            if position is None or size is None:
+                borrowed = self._box_for_shown_control(node)
+                if borrowed is not None:
+                    position, size = borrowed
         enabled, focused, checked, selected, expanded = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
@@ -423,25 +431,67 @@ class ATSPIAccessor:
         # probed. Keying the overlay by ``id()`` published the cached first
         # child, whose live top was above the viewport (y=-2, y=-18, y=-26
         # on the 0.4.16 retest). Read this node.
-        if _role_name(node) in _LIST_ROLES and _chromium_app(node):
+        role = _role_name(node)
+        if role in _LIST_ROLES and _chromium_app(node):
             live = _in_view_named_rows(node)
             if len(_row_names(live)) >= 2:
                 accs = []
+                covered: set[int] = set()
                 for acc, pos, size in live:
                     self._visible_bounds[id(acc)] = (pos, size)
                     accs.append(acc)
+                    covered.add(id(acc))
+                # Named rows are the list head. An unnamed entry beside those
+                # rows (a city field next to its label) is not a row, and
+                # dropping it left the label with no input to set_value.
+                for control in _form_controls_not_under(node, covered):
+                    if id(control) in covered:
+                        continue
+                    covered.add(id(control))
+                    accs.append(control)
                 return accs
         visible = self._visible_children.get(id(node))
         if visible is not None:
             return list(visible)
-        count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
-        count = min(int(count), _MAX_CHILDREN_FETCH)
-        kids = []
-        for i in range(count):
-            child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
-            if child is not None:
-                kids.append(child)
+        kids = _read_children(node)
+        if kids or role not in _DOCUMENT_ROLES or not _chromium_app(node):
+            return kids
+        # The document title is published before Chrome attaches the page.
+        # One read then is an empty group. Wait once and read again.
+        # Only the first few empty documents wait: a page of empty iframes
+        # must not add a pause to every later snapshot.
+        if id(node) not in self._documents_settled:
+            self._documents_settled.add(id(node))
+            if len(self.snapshot_notes) < _MAX_DOCUMENT_NOTES:
+                kids = _await_document_children(node)
+                if not kids:
+                    self.snapshot_notes.append(_unexposed_document_note(node))
         return kids
+
+    def _box_for_shown_control(self, node: object) -> tuple | None:
+        """A small on-screen box for a form control Chrome exposed without one.
+
+        ``_extents`` turns a zero rectangle into no box, and the pruner then
+        drops the node. A SHOWING entry, password, combobox, or button still
+        has an AT-SPI object ``set_value`` or ``do_action`` can target. The
+        box is a sliver of the nearest ancestor that has one, so the node
+        stays in the snapshot. It is not the painted control's rectangle.
+        """
+        if not _is_form_control(node) or not _state_shown(node):
+            return None
+        parent = _parent_of(node)
+        for _ in range(6):
+            if parent is None:
+                return None
+            override = self._visible_bounds.get(id(parent))
+            if override is not None:
+                pos, size = override
+            else:
+                pos, size = _extents(parent)
+            if pos is not None and size is not None and size[0] >= 4 and size[1] >= 4:
+                return pos, (min(8.0, float(size[0])), min(8.0, float(size[1])))
+            parent = _parent_of(parent)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +988,133 @@ _PAINT_PAUSE_S = 0.15
 # 0.4.17 and 0.4.18 required that top to clear these 8px, and the snapshot
 # then started at the next row.
 _CLIP_SLIVER_PX = 8
+# Chromium publishes the document's title before it attaches the page, and an
+# iframe is also ``document web`` (or ``embedded``) until its child tree lands.
+_DOCUMENT_ROLES = frozenset({"document web", "document frame", "embedded"})
+_DOCUMENT_SETTLE_TRIES = 4
+_DOCUMENT_SETTLE_S = 0.1
+_MAX_DOCUMENT_NOTES = 3
+# Controls a list-row walk must not drop. A named label is a "row"; the entry
+# beside it is not, and the snapshot was labels only.
+_FORM_ROLES = frozenset({
+    "entry", "password text", "combo box", "spin button", "push button", "toggle button",
+})
+_FORM_XML_ROLES = frozenset({"textbox", "searchbox", "combobox"})
+_FORM_CONTAINER_ROLES = frozenset({
+    "section", "panel", "grouping", "filler", "form", "embedded",
+})
+
+
+def _read_children(node) -> list:
+    """Children of ``node`` via ``get_child_at_index``, capped."""
+    count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
+    try:
+        count = min(int(count), _MAX_CHILDREN_FETCH)
+    except (TypeError, ValueError):
+        return []
+    kids = []
+    for index in range(count):
+        child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), index)
+        if child is not None:
+            kids.append(child)
+    return kids
+
+
+def _await_document_children(node) -> list:
+    """Re-read a Chromium document that was empty on the first fetch.
+
+    The title is already on the node while the renderer tree is still
+    attaching. A later read is the page. Still empty means Chrome did not
+    expose that document.
+    """
+    for _ in range(_DOCUMENT_SETTLE_TRIES):
+        time.sleep(_DOCUMENT_SETTLE_S)
+        kids = _read_children(node)
+        if kids:
+            return kids
+    return []
+
+
+def _unexposed_document_note(node) -> str:
+    """The snapshot line for a Chromium document that stayed empty."""
+    name = (_call_first(node, ("get_name",), default="") or "").strip() or "untitled"
+    attrs = _get_attributes(node)
+    tag = (attrs.get("tag") or "").lower()
+    embedded = _role_name(node) == "embedded" or tag == "iframe"
+    kind = "embedded document" if embedded else "document"
+    return (
+        "web_content_unexposed: Chrome's "
+        f"{kind} {name!r} is in the AT-SPI tree and has no children. "
+        "This page's controls are not exposed over AT-SPI, so there is no "
+        "text field, secure field, or form button from that document to target. "
+        "A screenshot can still show what is painted; this snapshot cannot invent those controls."
+    )
+
+
+def _state_shown(acc) -> bool:
+    """True when AT-SPI marks ``acc`` SHOWING or VISIBLE."""
+    Atspi = _atspi()
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return False
+    states = getattr(Atspi, "StateType", None)
+
+    def has(name: str) -> bool:
+        member = getattr(states, name, None)
+        if member is None:
+            member = name
+        return bool(_safe(lambda: sset.contains(member), False))
+
+    return has("SHOWING") or has("VISIBLE")
+
+
+def _is_form_control(node) -> bool:
+    """An entry, password, combobox, button, or ARIA textbox/combobox."""
+    role = _role_name(node)
+    if role in _FORM_ROLES:
+        return True
+    if role not in _FORM_CONTAINER_ROLES:
+        return False
+    attrs = _get_attributes(node)
+    return any(token in _FORM_XML_ROLES for token in (attrs.get("xml-roles") or "").split())
+
+
+def _form_controls_not_under(container, covered: set[int]) -> list:
+    """Form controls under ``container`` that are not inside a kept row.
+
+    The list walk keeps named on-screen rows and stops. A city entry that is
+    the label's sibling is not one of those rows. Controls inside a kept row
+    stay nested; the pruner reads that row's own children.
+    """
+    found: list = []
+    seen = 0
+
+    def walk(node, under: bool) -> None:
+        nonlocal seen
+        if node is None or node is container or seen >= _VISIBLE_WALK_CAP or len(found) >= 32:
+            return
+        seen += 1
+        if id(node) in covered:
+            under = True
+        if under:
+            return
+        if _is_form_control(node):
+            found.append(node)
+            return
+        count = min(_child_count(node), max(0, _VISIBLE_WALK_CAP - seen))
+        for index in range(count):
+            walk(_child_at(node, index), False)
+            if len(found) >= 32:
+                return
+
+    total = min(_child_count(container), _VISIBLE_WALK_CAP)
+    for index in range(total):
+        if len(found) >= 32 or seen >= _VISIBLE_WALK_CAP:
+            break
+        walk(_child_at(container, index), False)
+    return found
+
+
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
 _MAX_ROW_SAMPLES = 16

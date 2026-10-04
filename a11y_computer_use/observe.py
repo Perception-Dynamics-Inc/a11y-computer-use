@@ -284,7 +284,8 @@ def build_snapshot(
     if root is not None:
         pruned = _prune_root(root, accessor, tuple(geometry))
         _flatten(pruned, None, (), snapshot_id, elements, elisions, handles, full_values)
-    _register_epoch(snapshot_id, elisions, handles, full_values)
+    notes = tuple(getattr(accessor, "snapshot_notes", ()) or ())
+    _register_epoch(snapshot_id, elisions, handles, full_values, notes)
     return Snapshot(
         snapshot_id=snapshot_id,
         scope=scope,
@@ -533,7 +534,23 @@ def render_text(
         entries = _interactive_entries(snap, include_bounds)
     else:
         entries = _full_entries(snap, include_bounds)
+    entries = _with_notes(snap, entries)
     return "\n".join(_apply_budget(entries, budget))
+
+
+def _with_notes(snap: Snapshot, entries: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Insert snapshot notes under the header.
+
+    A Chromium document Chrome left empty is one of these lines. The header
+    stays first so a token budget cannot drop the reason before the tree.
+    """
+    notes = _NOTES.get(snap.snapshot_id, ())
+    if not notes or not entries:
+        return entries
+    noted = [entries[0]]
+    noted.extend((note, False) for note in notes)
+    noted.extend(entries[1:])
+    return noted
 
 
 def _children_map(snap: Snapshot) -> dict[str | None, list[Element]]:
@@ -1307,6 +1324,8 @@ _HANDLES: OrderedDict[str, dict[str, object]] = OrderedDict()
 #: the model and the audit anchor never see a whole document; `find_elements`
 #: reads this so a substring past the cap still matches. Same bounded FIFO.
 _FULL_VALUES: OrderedDict[str, dict[str, str]] = OrderedDict()
+#: snapshot_id -> lines render_text prints under the header (empty documents).
+_NOTES: OrderedDict[str, tuple[str, ...]] = OrderedDict()
 
 
 def _register_epoch(
@@ -1314,16 +1333,20 @@ def _register_epoch(
     elisions: dict[str, int],
     handles: dict[str, object],
     full_values: dict[str, str] | None = None,
+    notes: tuple[str, ...] = (),
 ) -> None:
     _EPOCHS[snapshot_id] = elisions
     _HANDLES[snapshot_id] = handles
     _FULL_VALUES[snapshot_id] = full_values or {}
+    _NOTES[snapshot_id] = tuple(notes)
     while len(_EPOCHS) > _MAX_EPOCHS:
         _EPOCHS.popitem(last=False)
     while len(_HANDLES) > _MAX_EPOCHS:
         _HANDLES.popitem(last=False)
     while len(_FULL_VALUES) > _MAX_EPOCHS:
         _FULL_VALUES.popitem(last=False)
+    while len(_NOTES) > _MAX_EPOCHS:
+        _NOTES.popitem(last=False)
 
 
 def ax_handle_for(snapshot_id: str, ref: str) -> object | None:

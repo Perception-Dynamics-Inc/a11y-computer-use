@@ -28,6 +28,7 @@ from a11y_computer_use.schema import (
     Point,
     Scope,
     ScrollUnit,
+    Snapshot,
 )
 
 
@@ -2712,3 +2713,424 @@ def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder)
     assert driver._focused_editable is text
     assert vertical.value == 100
     assert events == []
+
+
+# --- Chrome documents and form controls (synthetic AT-SPI, not live Chrome) ---
+
+
+class _LateDoc(_Acc):
+    """A document whose child count stays 0 for the first ``hide_reads`` reads.
+
+    Chromium publishes the title before the page attaches. The first reads
+    are that gap. Later reads are the real children. Not a live Chrome tree.
+    """
+
+    def __init__(self, *args, hide_reads: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hide_reads = hide_reads
+        self.reads = 0
+
+    def get_child_count(self):
+        self.reads += 1
+        if self.reads <= self.hide_reads:
+            return 0
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        if self.reads <= self.hide_reads:
+            return None
+        return self.children[index]
+
+
+def _own(app, node: _Acc) -> None:
+    node.get_application = lambda app=app: app
+    for child in list(node.children):
+        _own(app, child)
+
+
+def _chrome_window(document: _Acc, *chrome: _Acc) -> _Acc:
+    window = _place_row(_Acc("frame", name="Google Chrome", width=1280, height=800), 0, 0, 1280, 800)
+    _adopt(window, *chrome, document)
+    _own(_ChromeApp(), window)
+    return window
+
+
+def _snap(monkeypatch, window: _Acc, sleeps: list | None = None):
+    _atspi.reset_shown_rows()
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    if sleeps is not None:
+        monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: sleeps.append(_seconds))
+    return LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+
+
+def _login_fields() -> tuple[_Acc, _Acc, _Acc, _Acc]:
+    email = _place_row(_Acc("entry", name="Email", width=280, height=32), 80, 180, 280, 32)
+    email.text = "ada@figma.com"
+    password = _place_row(_Acc("password text", name="Password", width=280, height=32), 80, 230, 280, 32)
+    google = _place_row(_Acc("push button", name="Continue with Google", width=280, height=36), 80, 120, 280, 36)
+    login = _place_row(_Acc("push button", name="Log in", width=280, height=36), 80, 280, 280, 36)
+    return email, password, google, login
+
+
+def test_late_chrome_document_exposes_fields_that_attach(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium document, not a live Figma login.
+
+    The title is already set. The first child reads are empty. A later read
+    has the email, the password, and the buttons. Those are the snapshot.
+    """
+    email, password, google, login = _login_fields()
+    document = _place_row(
+        _LateDoc("document web", name="Login | Figma", width=1000, height=600, hide_reads=2),
+        0, 90, 1000, 600,
+    )
+    _adopt(document, email, password, google, login)
+    back = _place_row(_Acc("push button", name="Back", width=40, height=32), 8, 8, 40, 32)
+    sleeps: list[float] = []
+    snap = _snap(monkeypatch, _chrome_window(document, back), sleeps)
+    assert sleeps, "an empty first read waits and reads the document again"
+    text = observe.render_text(snap)
+    assert "web_content_unexposed" not in text
+    fields = [el for el in snap.elements if el.role == "AXTextField"]
+    assert any(el.title == "Email" and el.editable and el.value == "ada@figma.com" for el in fields)
+    secure = [el for el in snap.elements if el.secure]
+    assert len(secure) == 1 and secure[0].title == "Password" and secure[0].value is None
+    titles = {el.title for el in snap.elements if el.role == "AXButton"}
+    assert {"Continue with Google", "Log in", "Back"} <= titles
+
+
+def test_empty_chrome_document_names_itself_in_the_snapshot(fake_atspi, monkeypatch) -> None:
+    """A document that stays empty is not a silent group.
+
+    Browser chrome is still in the tree, so the snapshot is not free of
+    buttons. The note names this document. Synthetic, not a live Chrome page.
+    """
+    document = _place_row(
+        _LateDoc("document web", name="Login | Figma", width=1000, height=600, hide_reads=10**6),
+        0, 90, 1000, 600,
+    )
+    back = _place_row(_Acc("push button", name="Back", width=40, height=32), 8, 8, 40, 32)
+    sleeps: list[float] = []
+    snap = _snap(monkeypatch, _chrome_window(document, back), sleeps)
+    assert len(sleeps) == _atspi._DOCUMENT_SETTLE_TRIES
+    assert observe.interactive_count(snap) > 0
+    text = observe.render_text(snap)
+    assert text.count("web_content_unexposed") == 1
+    assert "Login | Figma" in text
+    assert "embedded document" not in text
+    assert "document" in text
+    assert "text field" in text
+    group = next(el for el in snap.elements if el.title == "Login | Figma")
+    assert group.role == "AXGroup"
+    assert not [el for el in snap.elements if el.parent == group.ref]
+    assert not any(el.role in {"AXTextField", "AXSecureTextField"} for el in snap.elements)
+    assert any(el.title == "Back" for el in snap.elements)
+
+
+def test_empty_document_waits_once_per_snapshot(fake_atspi, monkeypatch) -> None:
+    document = _Acc("document web", name="Login | Figma", width=400, height=300)
+    document.get_application = lambda: _ChromeApp()
+    sleeps: list[float] = []
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: sleeps.append(_seconds))
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.children(document) == []
+    assert len(sleeps) == _atspi._DOCUMENT_SETTLE_TRIES
+    assert len(accessor.snapshot_notes) == 1
+    assert accessor.snapshot_notes[0].startswith("web_content_unexposed:")
+    sleeps.clear()
+    assert accessor.children(document) == []
+    assert sleeps == []
+    assert len(accessor.snapshot_notes) == 1
+
+
+def test_empty_embedded_document_is_named_as_embedded(fake_atspi, monkeypatch) -> None:
+    embedded = _Acc("embedded", name="accounts.google.com", width=400, height=200)
+    embedded.get_application = lambda: _ChromeApp()
+    frame = _Acc("document web", name="Login | Figma", width=400, height=200)
+    frame.get_attributes = lambda: {"tag": "iframe"}
+    frame.get_application = lambda: _ChromeApp()
+    sleeps: list[float] = []
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: sleeps.append(_seconds))
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.children(embedded) == []
+    assert accessor.children(frame) == []
+    notes = "\n".join(accessor.snapshot_notes)
+    assert notes.count("embedded document") == 2
+    assert "accounts.google.com" in notes
+    assert "Login | Figma" in notes
+
+
+def test_populated_chrome_document_does_not_wait_or_note(fake_atspi, monkeypatch) -> None:
+    email, password, google, login = _login_fields()
+    document = _place_row(
+        _Acc("document web", name="Login | Figma", width=1000, height=600),
+        0, 90, 1000, 600,
+    )
+    _adopt(document, email, password, google, login)
+    sleeps: list[float] = []
+    snap = _snap(monkeypatch, _chrome_window(document), sleeps)
+    assert sleeps == []
+    assert "web_content_unexposed" not in observe.render_text(snap)
+    assert any(el.title == "Email" and el.editable for el in snap.elements)
+
+
+def test_gtk_document_does_not_wait_or_note(fake_atspi, monkeypatch) -> None:
+    document = _place_row(
+        _Acc("document web", name="Login | Figma", width=1000, height=600),
+        0, 90, 1000, 600,
+    )
+
+    class _Gtk:
+        def get_toolkit_name(self):
+            return "GTK"
+
+        def get_name(self):
+            return "gedit"
+
+    window = _chrome_window(document)
+    _own(_Gtk(), window)
+    sleeps: list[float] = []
+    snap = _snap(monkeypatch, window, sleeps)
+    assert sleeps == []
+    assert "web_content_unexposed" not in observe.render_text(snap)
+
+
+def test_child_cap_and_wrapper_depth_do_not_empty_a_named_document() -> None:
+    """The pruner does not turn a populated document into a childless group.
+
+    A fan-out past the child cap leaves an elision marker. Untitled wrappers
+    collapse and do not consume a level, so a button under twenty of them
+    is still in the snapshot. Synthetic RawNodes, not AT-SPI.
+    """
+    buttons = [
+        _node("AXButton", f"B{i}", actions=("AXPress",), pos=(10.0, 20.0 + i), size=(80.0, 16.0))
+        for i in range(30)
+    ]
+    tree = _node(
+        "AXWindow", "Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+        children=[_node(
+            "AXGroup", "Login | Figma", pos=(0.0, 80.0), size=(1200.0, 700.0),
+            children=buttons,
+        )],
+    )
+    snap = build_snapshot(
+        tree, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    text = observe.render_text(snap)
+    assert "Login | Figma" in text
+    assert "… " in text and " more" in text
+    assert any(el.role == "AXButton" for el in snap.elements)
+    button = _node("AXButton", "Log in", actions=("AXPress",), pos=(40.0, 40.0), size=(80.0, 30.0))
+    wrapped = button
+    for _ in range(20):
+        wrapped = _node("AXGroup", "", pos=(0.0, 80.0), size=(400.0, 300.0), children=[wrapped])
+    tree = _node(
+        "AXWindow", "Chrome", pos=(0.0, 0.0), size=(800.0, 600.0), children=[wrapped],
+    )
+    snap = build_snapshot(
+        tree, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    assert any(el.role == "AXButton" and el.title == "Log in" for el in snap.elements)
+
+
+def test_chromium_list_keeps_entries_that_are_not_named_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium list, not a live form.
+
+    Named labels become the list head. An unnamed entry beside them is not a
+    row. A scroll bar in the same list is not a form control, so the row
+    replacement omits it: seeing the entries without that bar is the hoist.
+    A SHOWING entry with no box stays, parented to its group. A group with
+    no entry stays a group. An entry that is not SHOWING and has no box is
+    dropped.
+    """
+    city = _place_row(_Acc("label", name="City", width=160, height=24), 50, 150, 160, 24)
+    city_entry = _place_row(_Acc("entry", name="", width=200, height=24), 250, 150, 200, 24)
+    city_entry.text = "springfield"
+    postal = _place_row(_Acc("label", name="Postal", width=160, height=24), 50, 190, 160, 24)
+    postal_entry = _place_row(_Acc("entry", name="", width=200, height=24), 250, 190, 200, 24)
+    postal_entry.text = "94107"
+    country = _place_row(_Acc("combo box", name="Country", width=120, height=28), 60, 240, 120, 28)
+    phone_entry = _Acc("entry", name="", states=("SHOWING",))
+    phone_entry.text = "5551234"
+    phone = _place_row(_Acc("panel", name="Phone", width=400, height=80), 50, 230, 400, 80)
+    _adopt(phone, country, phone_entry)
+    call = _place_row(_Acc("label", name="Call us", width=120, height=20), 60, 340, 120, 20)
+    callback = _place_row(_Acc("panel", name="Callback", width=200, height=40), 50, 330, 200, 40)
+    _adopt(callback, call)
+    ghost = _Acc("entry", name="Ghost")
+    ghost.text = "hidden"
+    bar = _place_row(
+        _Acc("scroll bar", name="Vertical", states=("VERTICAL",), width=14, height=180),
+        900, 140, 14, 180,
+    )
+    listing = _place_row(_Acc("list", name="address", width=900, height=400), 40, 120, 900, 400)
+    _adopt(listing, city, city_entry, postal, postal_entry, phone, callback, ghost, bar)
+    document = _place_row(_Acc("document web", name="Form", width=1200, height=640), 0, 80, 1200, 640)
+    _adopt(document, listing)
+    snap = _snap(monkeypatch, _chrome_window(document))
+    assert not any(el.role == "AXScrollBar" for el in snap.elements)
+    assert not any(el.title == "Ghost" for el in snap.elements)
+    assert any(el.title == "City" for el in snap.elements)
+    assert any(el.title == "Postal" for el in snap.elements)
+    texts = [el for el in snap.elements if el.role == "AXTextField"]
+    assert {el.value for el in texts} >= {"springfield", "94107", "5551234"}
+    phone_el = next(el for el in snap.elements if el.title == "Phone")
+    assert phone_el.role == "AXGroup"
+    phone_kids = [el for el in snap.elements if el.parent == phone_el.ref]
+    assert any(el.role == "AXComboBox" and el.title == "Country" for el in phone_kids)
+    assert any(el.role == "AXTextField" and el.value == "5551234" and el.editable for el in phone_kids)
+    callback_el = next(el for el in snap.elements if el.title == "Callback")
+    assert callback_el.role == "AXGroup"
+    assert not any(
+        el.parent == callback_el.ref and el.role == "AXTextField" for el in snap.elements
+    )
+
+
+def test_plain_document_keeps_an_entry_beside_its_label(fake_atspi, monkeypatch) -> None:
+    """A document that is not a list already walks the entry. Synthetic."""
+    label = _place_row(_Acc("label", name="City", width=80, height=24), 40, 140, 80, 24)
+    entry = _place_row(_Acc("entry", name="", width=160, height=24), 140, 140, 160, 24)
+    entry.text = "springfield"
+    document = _place_row(
+        _Acc("document web", name="Form", width=800, height=500), 0, 80, 800, 500,
+    )
+    _adopt(document, label, entry)
+    snap = _snap(monkeypatch, _chrome_window(document))
+    assert any(el.role == "AXTextField" and el.value == "springfield" for el in snap.elements)
+    assert any(el.title == "City" for el in snap.elements)
+
+
+def _dock_desktop(monkeypatch):
+    """Screen 1280x800. y >= 740 is the dock. Chrome owns a window."""
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+
+    def at_point(x, y):
+        return "gnome-shell" if int(y) >= 740 else "chrome"
+
+    def pids(identifier):
+        return {7} if identifier == "chrome" else set()
+
+    monkeypatch.setattr(_linux_system, "app_at_point_id", at_point)
+    monkeypatch.setattr(_linux_system, "pids_matching", pids)
+
+
+def test_line_scroll_moves_off_the_dock_onto_chrome(fake_atspi, xtest_recorder, monkeypatch) -> None:
+    """The center of this box is on the dock. The wheel is not.
+
+    Bounds (40, 560, 1000, 400) on a 1280x800 screen: the center is y=760.
+    The dock owns y >= 740. Synthetic hit-test, not a live dock.
+    """
+    events, _display = xtest_recorder
+    _dock_desktop(monkeypatch)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args, **_kwargs: object())
+    element = Element(
+        "e9", "AXScrollArea", "form", None, Bounds(0, 40, 560, 1000, 400), "snap-dock",
+    )
+    driver = LinuxDriver()
+    driver.set_scroll_app("chrome")
+    driver.scroll(element, dy=1, unit=ScrollUnit.LINES)
+    assert events[0][0] == _X_MOTION
+    x, y = events[0][2], events[0][3]
+    assert 40 <= x < 1040
+    assert 560 <= y < 740
+
+
+def test_pixel_scroll_writes_the_bar_when_the_center_is_the_dock(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    events, _display = xtest_recorder
+    _dock_desktop(monkeypatch)
+    text, vertical, horizontal = _scrolled_text()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args, **_kwargs: text)
+    element = Element(
+        "e4", "AXTextArea", "Body", "hello", Bounds(0, 40, 560, 1000, 400), "snap-dock",
+    )
+    driver = LinuxDriver()
+    driver.set_scroll_app("chrome")
+    driver.scroll(element, dx=5, dy=3, unit=ScrollUnit.PIXELS)
+    assert vertical.value == 103 and horizontal.value == 45
+    assert events == []
+
+
+def _scroll_runtime(tmp_path, monkeypatch, element: Element):
+    from a11y_computer_use import safety, server
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("chrome", safety.Tier.CLICK)
+    recorded: list = []
+    checked: list[tuple[int, int]] = []
+    _dock_desktop(monkeypatch)
+
+    class _Driver:
+        name = "linux"
+        resolves_apps = False
+
+        def set_scroll_app(self, app):
+            recorded.append(("arm", app))
+
+        def scroll(self, target, dx=0, dy=0, unit=ScrollUnit.LINES, dry_run=False):
+            recorded.append(("scroll", int(dx), int(dy), unit))
+
+        def main_display_id(self):
+            return 0
+
+        def ensure_trusted(self):
+            return None
+
+    def app_at_point(point):
+        checked.append((int(point.x), int(point.y)))
+        return "gnome-shell" if int(point.y) >= 740 else "chrome"
+
+    monkeypatch.setattr(server, "_app_at_point", app_at_point)
+    snap = Snapshot(
+        snapshot_id=element.snapshot_id,
+        scope=Scope.WINDOW,
+        app="chrome",
+        pid=7,
+        created_at=0.0,
+        displays=(Display(0, 1280, 800, 1.0, True),),
+        elements=(element,),
+    )
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_Driver(),
+    )
+    monkeypatch.setattr(runtime, "_resolve", lambda _ref, _kind: (snap, element))
+    return runtime, recorded, checked
+
+
+def test_runtime_line_scroll_checks_a_point_on_chrome(tmp_path, monkeypatch) -> None:
+    element = Element(
+        "e1", "AXScrollArea", "form", None, Bounds(0, 40, 560, 1000, 400), "snap-dock",
+    )
+    runtime, recorded, checked = _scroll_runtime(tmp_path, monkeypatch, element)
+    assert "scrolled" in runtime.scroll(ref="e1", dy=1)
+    assert ("scroll", 0, 1, ScrollUnit.LINES) in recorded
+    assert checked and all(y < 740 for _x, y in checked)
+
+
+def test_runtime_line_scroll_refuses_when_the_box_is_the_dock(tmp_path, monkeypatch) -> None:
+    element = Element(
+        "e1", "AXScrollArea", "form", None, Bounds(0, 40, 760, 200, 30), "snap-dock",
+    )
+    runtime, recorded, _checked = _scroll_runtime(tmp_path, monkeypatch, element)
+    with pytest.raises(ComputerUseError) as error:
+        runtime.scroll(ref="e1", dy=1)
+    assert error.value.code is ErrorCode.FOCUS_CHANGED
+    assert "gnome-shell" in error.value.message
+    assert "chrome" in error.value.message
+    assert not any(item[0] == "scroll" for item in recorded)
+
+
+def test_runtime_pixel_scroll_is_not_blocked_by_a_dock_under_the_center(
+    tmp_path, monkeypatch
+) -> None:
+    element = Element(
+        "e1", "AXScrollArea", "form", None, Bounds(0, 40, 560, 1000, 400), "snap-dock",
+    )
+    runtime, recorded, checked = _scroll_runtime(tmp_path, monkeypatch, element)
+    assert "scrolled" in runtime.scroll(ref="e1", dy=3, unit="pixels")
+    assert ("scroll", 0, 3, ScrollUnit.PIXELS) in recorded
+    assert checked == []
