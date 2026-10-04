@@ -75,12 +75,24 @@ def _launch_app(tmp_path) -> subprocess.Popen:
 
 
 def _wait_for_snapshot(driver, timeout_s: float = 15.0):
+    """Poll until the GTK app is on the bus and its entry is in the snapshot.
+
+    Until the process registers, snapshot is ``app_not_found``. That is the
+    same answer as a name that was never launched, so the wait retries it.
+    Any other error stops the wait.
+    """
     deadline = time.monotonic() + timeout_s
     last = None
     while time.monotonic() < deadline:
-        last = driver.snapshot(Scope.WINDOW, _APP)
-        if last.elements and any(el.editable for el in last.elements):
-            return last
+        try:
+            last = driver.snapshot(Scope.WINDOW, _APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if last.elements and any(el.editable for el in last.elements):
+                return last
         time.sleep(0.5)
     return last
 

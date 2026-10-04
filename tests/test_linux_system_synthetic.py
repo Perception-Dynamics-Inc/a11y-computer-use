@@ -350,3 +350,15 @@ def test_app_launch_of_a_missing_program_does_not_wait_for_a_window(tmp_path, mo
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
     assert "not on PATH" in exc.value.message
     assert calls == [] and waited == []
+
+
+def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
+    """A granted name with no window is not activated. Synthetic window list."""
+    monkeypatch.setattr(_linux_system, "_display", lambda: object())
+    monkeypatch.setattr(_linux_system, "_managed_windows", lambda _display: [])
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.activate_app("xfce4-terminal")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["app"] == "xfce4-terminal"
+    assert "xfce4-terminal" in exc.value.message
+    assert "activated" not in exc.value.message

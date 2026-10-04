@@ -3098,6 +3098,233 @@ def test_pixel_scroll_does_not_probe_layout_rows(fake_atspi, xtest_recorder, mon
     assert events == []
 
 
+def test_uniform_rows_keep_one_bar_step_and_do_not_wheel(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    dy=5 writes the vertical bar by one capped step (about three rows per
+    line, and not more than the rows already on screen). The grab changes
+    by one channel of 2, so mean_abs is 2/3: under the still-page threshold
+    of 1 and above the uniform-row floor. The painted head leaves ITEM-001.
+    That is the step. The bar write is not undone, and no track click or
+    wheel follows it. A second action would skip rows the first window
+    never showed.
+    """
+    window, _document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar()
+    listing.children.append(bar)
+    bar.parent = listing
+    writes = _bind_overflow_bar(bar, listing, rows, hit)
+    calls = {"scroll_to": 0}
+
+    def scroll_to(_scroll_type, row=None):
+        calls["scroll_to"] += 1
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: scroll_to(scroll_type, row)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+
+    def grab(_box):
+        from PIL import Image
+
+        channel = 0 if hit.screen <= 1 else 2
+        return Image.new("RGB", (4, 4), (channel, 0, 0))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+    wheels = {"n": 0}
+    clicks: list[tuple[int, int]] = []
+    wired_scroll = _linux_input.scroll
+    wired_click = _linux_input.click
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    def clicking(x, y, button="left", count=1):
+        clicks.append((int(x), int(y)))
+        return wired_click(x, y, button=button, count=count)
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+    monkeypatch.setattr(_linux_input, "click", clicking)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    listing_el = next(el for el in snap.elements if el.role == "AXList")
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert wheels["n"] == 0
+    assert clicks == []
+    assert calls["scroll_to"] == 0
+    assert writes == [392.0]
+    assert bar.value == 392.0
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert painted[0] == "ITEM-015"
+    assert "ITEM-001" not in painted
+
+
+def _wrapped_overflow_list():
+    """A content-height list inside a shorter panel. The panel scrolls.
+
+    The list box starts two rows above the panel, so those rows are hidden.
+    The panel's parent is the document, so a search with no ref anchors on
+    the document. Synthetic boxes, not a live Chrome window.
+    """
+    window, listing, hit, _stuck = _chrome_list()
+    rows = hit.rows
+    app = window.get_application()
+    listing.component = _Geom(1200, 5600)
+    listing.component._rect.x = 20.0
+    listing.component._rect.y = 124.0
+    hit.screen = 3
+    for index, row in enumerate(rows):
+        row.get_application = lambda: app
+        _place_row(row, 29, 124 + index * 28, 184, 19)
+    _adopt(listing, *rows)
+    panel = _Acc("panel", name="scroller", width=1239, height=420)
+    panel.component._rect.x = 20.0
+    panel.component._rect.y = 180.0
+    panel.get_application = lambda: app
+    document = _Acc("document web", name="Bench", width=1280, height=680)
+    document.component._rect.x = 0.0
+    document.component._rect.y = 90.0
+    document.get_application = lambda: app
+    _adopt(panel, listing)
+    _adopt(document, panel)
+    _adopt(window, document)
+    _add_tab_strip(window)
+    return window, document, panel, listing, hit, rows
+
+
+def test_wrapped_list_finds_item_040_without_wheeling_past_it(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic wrapped list, not a live Chrome window.
+
+    The list does not scroll. The panel around it does. The snapshot head
+    is the first row inside the panel (ITEM-003); ITEM-001 and ITEM-002
+    sit above that panel. ``scroll_to_find`` ITEM-040 reveals it through
+    ``scroll_to``. A wheel, if one were sent, jumps the paint to ITEM-186
+    and skips the target.
+    """
+    from a11y_computer_use import server
+
+    window, document, _panel, listing, hit, rows = _wrapped_overflow_list()
+    wheels = {"n": 0}
+
+    def reveal(row, _scroll_type):
+        number = int(row.name.split("-")[1])
+        hit.screen = number
+        for index, item in enumerate(rows):
+            _place_row(item, 29, 180 + (index - (number - 1)) * 28, 184, 19)
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: reveal(row, scroll_type)
+
+    def on_wheel():
+        wheels["n"] += 1
+        hit.screen = 186
+        for index, item in enumerate(rows):
+            _place_row(item, 29, 180 + (index - 185) * 28, 184, 19)
+
+    hit.on_wheel = on_wheel
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXGroup"
+    assert anchor.title == document.name
+    assert anchor.bounds.height > 420
+    titles = _row_titles(first)
+    assert titles[0] == "ITEM-003"
+    assert "ITEM-001" not in titles
+    assert "ITEM-002" not in titles
+    assert "ITEM-040" not in titles
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-040", max_scrolls=25)
+    assert "ITEM-040" in out
+    assert "found after" in out
+    assert "not found" not in out
+    assert wheels["n"] == 0
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-040" in painted
+    assert painted[0] != "ITEM-186"
+    assert "ITEM-186" not in painted
+    assert listing.component._rect.y == 124.0
+    assert listing.component._rect.height == 5600
+
+
+def _bare_runtime(driver):
+    from a11y_computer_use import server
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = driver
+    runtime._run_gated = lambda _action, _app, execute, **_kwargs: execute()
+    runtime._require_permission = lambda *_args, **_kwargs: None
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    return runtime
+
+
+def test_tools_for_an_app_that_is_not_running_return_app_not_found(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic missing app, not a live desktop.
+
+    Resolving the name still returns it, so a grant can precede launch.
+    Every app-targeted tool then says the app is not running. Focus does
+    not say it activated a terminal that was never launched.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_linux_system, "_display", lambda: object())
+    monkeypatch.setattr(_linux_system, "_managed_windows", lambda _display: [])
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _bare_runtime(driver)
+    calls = (
+        lambda: runtime.desktop_snapshot("xfce4-terminal"),
+        lambda: runtime.find("xfce4-terminal", text="ITEM-001"),
+        lambda: runtime.scroll_to_find("xfce4-terminal", text="ITEM-001"),
+        lambda: runtime.menu("xfce4-terminal", action="state"),
+        lambda: runtime.menu("xfce4-terminal", action="close"),
+        lambda: runtime.app("focus", "xfce4-terminal"),
+    )
+    for call in calls:
+        with pytest.raises(ComputerUseError) as exc:
+            call()
+        assert exc.value.code is ErrorCode.APP_NOT_FOUND
+        assert exc.value.detail["app"] == "xfce4-terminal"
+        assert "activated" not in exc.value.message
+        assert "no elements match" not in exc.value.message
+        assert "not found after" not in exc.value.message
+        assert "no menu was open" not in exc.value.message
+
+
+def test_running_app_with_an_empty_tree_is_not_app_not_found(fake_atspi, monkeypatch) -> None:
+    """A frame with no children is an open app. Synthetic tree, not a live desktop."""
+
+    class _Term:
+        def get_toolkit_name(self):
+            return "gtk"
+
+        def get_name(self):
+            return "xfce4-terminal"
+
+    window = _Acc("frame", name="Terminal", width=640, height=480)
+    window.get_application = lambda: _Term()
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "xfce4-terminal")
+    assert snap.app == "xfce4-terminal"
+    assert snap.elements
+    assert snap.elements[0].role == "AXWindow"
+
+
 def test_pixel_scroll_dry_run_does_not_write_or_move(fake_atspi, xtest_recorder) -> None:
     events, _display = xtest_recorder
     text, vertical, _horizontal = _scrolled_text()

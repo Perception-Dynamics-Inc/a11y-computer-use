@@ -924,6 +924,13 @@ _HEAD_PAUSE_S = 0.4
 # This threshold still sits between a still grab and those moves. A single
 # difference above it is not a successful scroll.
 _PAGE_MOVE_MEAN = 1.0
+# Uniform rows move the list and change few pixels. The 0.4.25 retest of a
+# fixed-height list reported page_unchanged at mean_abs about 0.5 to 0.7
+# while the painted head had moved, then sent a wheel or a track click as
+# well. A grab above this floor, with a new on-screen head, is that move.
+# A grab at or under it is still: the invented head in the stuck-page tests
+# stays at 0 and is not a scroll.
+_UNIFORM_ROW_MEAN = 0.4
 # The grab taken in the same turn as the wheel can still be the pre-paint
 # frame. 0.4.13 compared that one pair and returned page_unchanged, so the
 # snapshot never advanced. Resample until the pixels change. A box that
@@ -1065,16 +1072,103 @@ def _intersect_edges(
     return left, top, right, bottom
 
 
+# Ancestors that are not an overflow wrapper around a list. The document
+# clip is separate: treating it as the wrapper would step a body-scroll
+# page with the overflow bar. The frame is the window.
+_SCROLLPORT_STOP_ROLES = _PAGE_ANCESTOR_ROLES | frozenset({
+    "frame", "window", "application", "dialog", "alert",
+})
+
+
+def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | None:
+    """Screen box of the overflow wrapper around ``container``, or None.
+
+    A plain list inside ``overflow:auto`` does not scroll. The wrapper is
+    shorter than the list, and the list extends outside it. Rows in that
+    band are hidden by the wrapper. The nearest such ancestor wins. The
+    document and the frame are not it. None when the list is its own
+    scrollport, which is the fixed-height overflow list.
+    """
+    pos, size = _extents(container)
+    if pos is None or size is None:
+        return None
+    list_left = float(pos[0])
+    list_top = float(pos[1])
+    list_width = float(size[0])
+    list_height = float(size[1])
+    list_right = list_left + list_width
+    list_bottom = list_top + list_height
+    node = _parent_of(container)
+    seen: set[int] = set()
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        if _role_name(node) in _SCROLLPORT_STOP_ROLES:
+            return None
+        ppos, psize = _extents(node)
+        node = _parent_of(node)
+        if ppos is None or psize is None:
+            continue
+        width = float(psize[0])
+        height = float(psize[1])
+        if width < 4 or height < 4 or height >= list_height - 8:
+            continue
+        left = float(ppos[0])
+        top = float(ppos[1])
+        right = left + width
+        bottom = top + height
+        if list_top >= top - 1 and list_bottom <= bottom + 1:
+            continue
+        overlap = min(right, list_right) - max(left, list_left)
+        if overlap < min(width, list_width) * 0.5:
+            continue
+        return left, top, right, bottom
+    return None
+
+
+def overflow_ancestor_box(container) -> tuple[int, int, int, int] | None:
+    """``(x, y, width, height)`` of the overflow wrapper, or None.
+
+    See ``_overflow_ancestor_edges``. The caller photographs this box and
+    steps the list it scrolls. A body-scroll document is not this box.
+    """
+    edges = _overflow_ancestor_edges(container)
+    if edges is None:
+        return None
+    left, top, right, bottom = edges
+    if right - left < 1 or bottom - top < 4:
+        return None
+    return int(left), int(top), int(right - left), int(bottom - top)
+
+
+def list_with_overflow_ancestor(root):
+    """A Chromium list under ``root`` that an ancestor wrapper scrolls.
+
+    None when no list has that wrapper, so a body-scroll document keeps
+    the wheel. The first list in the bounded walk wins. A fixed-height
+    overflow list whose own box is the scrollport is not returned: its
+    parent is the document, and that is not this wrapper.
+    """
+    if root is None or not _chromium_app(root):
+        return None
+    for container in _list_containers(root):
+        if _overflow_ancestor_edges(container) is not None:
+            return container
+    return None
+
+
 def _viewport_edges(container) -> tuple[float, float, float, float] | None:
     """Edges of the painted page inside a list: left, top, right, bottom.
 
     The head line is this top. An overflow list that already sits on the
     page keeps its own top, so a row flush with that top stays the head and
-    a row above the list stays out. A content-height list is clipped to the
-    document, then to the screen. The document starts below the screen top
-    (the browser chrome). Rows in that band are on the screen and are not
-    painted; they are not the head. A list with no document ancestor is
-    clipped to the screen only.
+    a row above the list stays out. A list inside a shorter ancestor is
+    clipped to that wrapper first, so a row the wrapper hides is not the
+    head. A content-height list is clipped to the document, then to the
+    screen. The document starts below the screen top (the browser chrome).
+    Rows in that band are on the screen and are not painted; they are not
+    the head. A list with no document ancestor is clipped to the screen only.
     """
     pos, size = _extents(container)
     if pos is None or size is None or size[1] < 4 or size[0] < 1:
@@ -1083,6 +1177,11 @@ def _viewport_edges(container) -> tuple[float, float, float, float] | None:
     top = float(pos[1])
     right = left + float(size[0])
     bottom = top + float(size[1])
+    ancestor = _overflow_ancestor_edges(container)
+    if ancestor is not None:
+        clipped = _intersect_edges((left, top, right, bottom), ancestor)
+        if clipped is not None:
+            left, top, right, bottom = clipped
     page = _page_edges(container)
     if page is not None:
         clipped = _intersect_edges((left, top, right, bottom), page)
@@ -1578,7 +1677,8 @@ def viewport_track_point(container, dy: int) -> tuple[int, int] | None:
         ):
             box = (int(pos[0]), int(pos[1]), int(size[0]), int(size[1]))
     if box is None:
-        list_box = list_screen_box(container)
+        ancestor = overflow_ancestor_box(container)
+        list_box = ancestor if ancestor is not None else list_screen_box(container)
         if list_box is None:
             return None
         x, y, width, height = list_box
