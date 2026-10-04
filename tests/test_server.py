@@ -951,6 +951,177 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
 
 
+def _item_window(head: int) -> Snapshot:
+    """Eight rows starting at ``head``. Synthetic snapshot, not a Chrome list."""
+    els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                   bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+    for offset, number in enumerate(range(head, head + 8)):
+        els.append(Element(
+            ref=f"r{number}", role="AXRow", title=f"ITEM-{number:03d}", value=None,
+            bounds=Bounds(0, 20, 40 + offset * 16, 400, 16), snapshot_id="s",
+        ))
+    return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                    displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+
+def _still_page(dy: int) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the rows on screen did not change after the wheel scroll",
+        detail={"reason": "page_unchanged", "unit": "lines", "dx": 0, "dy": dy, "mean_abs": 0.0},
+    )
+
+
+def test_scroll_to_find_comes_back_after_a_still_page_past_the_target(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome list.
+
+    A downward step jumps forty rows and lands on ITEM-193 through ITEM-200
+    without showing ITEM-180. The next wheel does not move and raises
+    page_unchanged. The search then steps back one line at a time until the
+    window contains ITEM-180. The default budget of 6 is extended for that
+    return pass.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        screen = 1
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(_D.screen)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy > 0:
+                if _D.screen >= 193:
+                    raise _still_page(dy)
+                _D.screen = min(193, _D.screen + 40)
+                return
+            if _D.screen <= 1:
+                raise _still_page(dy)
+            _D.screen = max(1, _D.screen - 4)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-180")
+    assert "ITEM-180" in out
+    assert "found after 10 scroll(s)" in out
+    assert "found after 0" not in out
+    assert scrolls == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
+    assert -5 not in scrolls
+
+
+def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome list.
+
+    The target is not on screen. The first wheel and the one-line return
+    both report page_unchanged. That second still page is the error the
+    caller sees. The search does not keep scrolling.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(193)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            raise _still_page(dy)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    with pytest.raises(ComputerUseError) as error:
+        rt.scroll_to_find("app", text="ITEM-180")
+    assert error.value.code is ErrorCode.UNSUPPORTED
+    assert error.value.detail["reason"] == "page_unchanged"
+    assert error.value.detail["dy"] == -1
+    assert scrolls == [5, -1]
+
+
+def test_scroll_to_find_does_not_turn_around_on_rows_stale(monkeypatch) -> None:
+    """A rows_stale scroll is not a still page. The search does not reverse."""
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(1)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the list moved on screen but the snapshot would still show the old rows",
+                detail={"reason": "rows_stale", "unit": "lines", "dy": 5},
+            )
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    with pytest.raises(ComputerUseError) as error:
+        rt.scroll_to_find("app", text="ITEM-180")
+    assert error.value.detail["reason"] == "rows_stale"
+    assert scrolls == [5]
+
+
+def test_scroll_to_find_returns_a_target_already_on_screen(monkeypatch) -> None:
+    """The target is in the first snapshot, so no wheel is sent."""
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(177)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            raise _still_page(int(kw.get("dy") or 0))
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-180")
+    assert "found after 0 scroll(s)" in out and "ITEM-180" in out
+    assert scrolls == []
+
+
 def test_scroll_to_find_matches_text_past_the_value_clip(monkeypatch) -> None:
     """Text already in the field, past the 200-character value cap, is a hit
     on the first observation. It is not scrolled out of view."""
