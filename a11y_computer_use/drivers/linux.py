@@ -366,20 +366,19 @@ class LinuxDriver:
         rows either. A pixel difference alone is not a successful scroll.
         ``snapshot`` then lists the confirmed rows, which is what
         ``scroll_to_find`` searches. A coordinate target and a
-        non-Chromium element are not checked. A Chromium list whose own
+        non-Chromium element are not checked.         A Chromium list whose own
         box sits fully on the screen is a fixed-height overflow list. On
-        the 0.4.23 retest that list was 1239 by 422 at (20, 139). The wheel
-        inside that box stayed at mean_abs 0, AT-SPI ``scroll_to`` did not
-        leave a later row painted, and the call ended on ``page_unchanged``
-        with the head still ITEM-001. That list's vertical AT-SPI scroll
-        bar is written by about three rows per line, and not more than the
-        rows already on screen. A bar whose range is a fraction of the
-        rows' extent is stepped by that fraction. A write that jumps past
-        the request is undone and is not a success. No wheel is sent when
-        the bar step moves the pixels and the on-screen head. When the list
-        has no such bar, ``scroll_to`` is still tried and still has to move
-        the pixels. A content-height list and a document group keep the
-        wheel. A document group is not a list and keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        the 0.4.24 retest that list was 1239 by 422 at (20, 139). Stepping
+        its vertical AT-SPI scroll bar and AT-SPI ``scroll_to`` did not
+        move the painted rows: the list stayed on ITEM-001 and the call
+        ended on ``page_unchanged``. When that value write does not move
+        the pixels, a left click lands on the vertical track (the lower
+        track to go down, the upper track to go up). The click is one
+        page, inside the list. No wheel is sent when the click moves the
+        pixels and the on-screen head. The bar write is still tried first
+        and still has to move the pixels. A content-height list and a
+        document group keep the wheel. A document group is not a list and
+        keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
@@ -496,6 +495,19 @@ class LinuxDriver:
                 lambda: _atspi.scroll_viewport_by_lines(container, int(dy))
             ))):
                 return None
+            # The value write and scroll_to can both report success without
+            # moving the painted rows. A track click is a pointer event on
+            # the bar itself. The same pixel and head checks decide it.
+            point = self._run(lambda: _atspi.viewport_track_point(container, int(dy)))
+            if point is not None:
+                self.hover(Point(display_id, point[0], point[1]))
+
+                def click_track() -> bool:
+                    _linux_input.click(point[0], point[1])
+                    return True
+
+                if judge(click_track):
+                    return None
         self.hover(Point(display_id, x, y))
 
         def wheel() -> bool:

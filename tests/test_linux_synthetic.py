@@ -1799,6 +1799,87 @@ def test_overflow_list_steps_its_scroll_bar_when_scroll_to_and_the_wheel_do_not_
     assert max(steps) < 500
 
 
+def test_overflow_track_click_moves_painted_rows_when_the_bar_value_does_not(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not a live Chrome window.
+
+    The 0.4.24 retest stayed on ITEM-001. Writing the vertical bar's value
+    changes the value and does not move the painted rows. ``scroll_to``
+    returns true and does not move them either. The wheel does not move
+    them. A left click on the vertical track does: the painted head leaves
+    ITEM-001 and ``scroll_to_find`` ITEM-180 finds that row. The value
+    write is undone. No wheel is sent.
+    """
+    from a11y_computer_use import server
+
+    window, _document, listing, hit, rows = _overflow_page()
+    bar = _overflow_bar(maximum=1.0)
+    listing.children.append(bar)
+    bar.parent = listing
+    writes: list[float] = []
+
+    def on_value(acc, new):
+        writes.append(float(new))
+        upper = min(acc.maximum, acc.visual_max)
+        acc.value = min(max(float(new), acc.minimum), upper)
+        return True
+
+    bar.on_value = on_value
+    calls = {"scroll_to": 0}
+
+    def scroll_to(_scroll_type, row=None):
+        calls["scroll_to"] += 1
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: scroll_to(scroll_type, row)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    wheels = {"n": 0}
+    clicks: list[tuple[int, int]] = []
+    wired_scroll = _linux_input.scroll
+    wired_click = _linux_input.click
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    def clicking(x, y, button="left", count=1):
+        clicks.append((int(x), int(y)))
+        wired_click(x, y, button=button, count=count)
+        # Only a point on the track moves the painted rows. A click on the
+        # text does not. One page keeps an overlap with the rows on screen.
+        if int(x) >= 1230:
+            head = min(186, int(hit.screen) + 14)
+            _keep_overflow_bar(listing, rows, hit, bar, head)
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+    monkeypatch.setattr(_linux_input, "click", clicking)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXList"
+    assert (anchor.bounds.x, anchor.bounds.y) == (20, 139)
+    assert (anchor.bounds.width, anchor.bounds.height) == (1239, 422)
+    assert _row_titles(first)[0] == "ITEM-001"
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=30)
+    assert "ITEM-180" in out
+    assert "found after" in out
+    assert "page_unchanged" not in out
+    assert wheels["n"] == 0
+    assert calls["scroll_to"] == 0
+    assert writes
+    assert bar.value == 0
+    assert clicks
+    assert all(x >= 1230 for x, _y in clicks)
+    assert all(139 <= y <= 561 for _x, y in clicks)
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert painted[0] != "ITEM-001"
+    assert "ITEM-180" in painted
+
+
 def test_overflow_fractional_bar_reaches_item_180_without_jumping(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
@@ -1955,12 +2036,21 @@ def test_content_height_line_scroll_does_not_write_the_scroll_bar(
         bar.parent = listing
 
     hit.on_wheel = on_wheel
+    clicks = {"n": 0}
+    wired_click = _linux_input.click
+
+    def counting_click(x, y, button="left", count=1):
+        clicks["n"] += 1
+        return wired_click(x, y, button=button, count=count)
+
+    monkeypatch.setattr(_linux_input, "click", counting_click)
     driver = LinuxDriver()
     snap = driver.snapshot(Scope.WINDOW, "chrome")
     assert _row_titles(snap)[0] == "ITEM-001"
     listing_el = next(el for el in snap.elements if el.role == "AXList")
     assert driver.scroll(listing_el, dy=3, unit=ScrollUnit.LINES) is None
     assert bar.value == 10
+    assert clicks["n"] == 0
     later = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert later[0] == "ITEM-012"
     assert "ITEM-009" not in later
