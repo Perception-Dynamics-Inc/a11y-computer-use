@@ -1554,6 +1554,50 @@ def nudge_viewport_scrollbar(container, dy: int) -> tuple[str, object]:
     return "moved", undo
 
 
+def viewport_track_point(container, dy: int) -> tuple[int, int] | None:
+    """A point on the overflow list's vertical track. No value write.
+
+    Downward is the lower track. Upward is the upper track. The bar's own
+    box is used when that bar sits on the list. Otherwise the point is
+    inside the list, in the right-hand gutter, where the track is drawn.
+    The arrow buttons at the ends of a classic bar are not the point.
+    None when ``container`` is not a Chromium list or has no box. The
+    caller still requires the painted rows to change.
+    """
+    if not int(dy) or _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
+        return None
+    box: tuple[int, int, int, int] | None = None
+    bar = _viewport_vertical_bar(container)
+    if bar is not None:
+        pos, size = _extents(bar)
+        if (
+            pos is not None
+            and size is not None
+            and float(size[0]) >= 1
+            and float(size[1]) >= 8
+        ):
+            box = (int(pos[0]), int(pos[1]), int(size[0]), int(size[1]))
+    if box is None:
+        list_box = list_screen_box(container)
+        if list_box is None:
+            return None
+        x, y, width, height = list_box
+        if width < 16 or height < 16:
+            return None
+        gutter = min(14, width // 5)
+        box = (x + width - gutter, y, gutter, height)
+    bx, by, bw, bh = box
+    margin = min(max(bh // 8, 4), max(bh // 3, 1))
+    if int(dy) > 0:
+        y = by + bh - margin
+    else:
+        y = by + margin
+    y = min(max(y, by + 1), by + max(bh - 2, 1))
+    x = bx + max(bw // 2, 0)
+    x = min(max(x, bx), bx + max(bw - 1, 0))
+    return int(x), int(y)
+
+
 def _probe_visible_rows(container) -> list[tuple]:
     """Rows on screen inside ``container``.
 

@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.25] - 2026-10-04
+
+### Fixed
+
+- Linux line scroll clicks the vertical track of a fixed-height overflow list when writing that list's AT-SPI scroll bar does not move the painted rows. On the 0.4.24 retest the list was an AXList 1239 by 422 at (20, 139). The bar step and AT-SPI `scroll_to` left the paint on ITEM-001, and `scroll_to_find` ITEM-180 ended on `page_unchanged` (dy=-1, `mean_abs` 0). A left click on the lower track moves the painted rows one page down. The upper track moves them up. The list pixels and the on-screen head still have to change. No wheel is sent when the click moves the list. The bar write is still tried first. A content-height list and a document group keep the wheel. `unit=pixels` still writes the AT-SPI scroll bar by the requested pixels and does not send a wheel. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.24] - 2026-10-04
 
 ### Fixed
