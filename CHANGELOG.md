@@ -11,6 +11,12 @@ Within a group, lines are ordered by theme, then by date.
 
 Nothing yet.
 
+## [0.4.21] - 2026-10-04
+
+### Fixed
+
+- Linux `scroll_to_find` reports a row that is painted in the window. On the 0.4.20 retest a document-scroll page did move (the wheel hit a document group, not the tab strip) and ITEM-180 was on screen, but the snapshot had no ITEM rows: the AXList origin was about y=-4847, and the row walk treated that content box as the viewport, so it published the rows at the content origin and the pruner dropped them. The same saved rows (ITEM-001 through ITEM-008) were reused for a later still page, because the huge boxes still overlapped. The on-screen top of the list is now the head line. A list whose own top is on the screen is unchanged: a fully visible row flush with that top is the head, and a row above the list or a row that only fills the 8px edge stays omitted. A fixed-height overflow list is wheeled at its own center. 0.4.20 moved that center onto the reported screen, and the list stayed on ITEM-001 (`page_unchanged`, `mean_abs` 0). An explicit ref whose pixels move takes the painted row as the head. A true no-move stays `page_unchanged` and names the rows on screen. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel. Synthetic trees, not a live Chrome run (#49) (2026-10-04).
+
 ## [0.4.20] - 2026-10-04
 
 ### Fixed

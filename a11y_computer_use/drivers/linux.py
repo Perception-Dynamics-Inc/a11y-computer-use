@@ -52,11 +52,14 @@ def _screen_span() -> tuple[int, int]:
 def _wheel_point(target: Target) -> tuple[int, int]:
     """Where a line-scroll wheel lands.
 
-    The element's center when that point is on the screen. A document list
-    reports its content height, so the center sits below the screen and a
-    wheel there never reaches the page. The wheel then uses the center of
-    the part of the element that is on the screen. A point target is unchanged.
-    ``unit=pixels`` does not call this.
+    The element's center when that point is on the screen, and also when
+    the element itself is no larger than the screen. A fixed-height overflow
+    list is that size. 0.4.20 moved its center onto the reported screen, and
+    the list then stayed on ITEM-001 (``page_unchanged``, ``mean_abs`` 0).
+    A document list reports its content height, so the center sits below the
+    screen and a wheel there never reaches the page. The wheel then uses the
+    center of the part of the element that is on the screen. A point target
+    is unchanged. ``unit=pixels`` does not call this.
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
@@ -64,6 +67,8 @@ def _wheel_point(target: Target) -> tuple[int, int]:
     cx, cy = int(bounds.center.x), int(bounds.center.y)
     width, height = _screen_span()
     if width <= 0 or height <= 0:
+        return cx, cy
+    if bounds.height <= height and bounds.width <= width:
         return cx, cy
     if 0 <= cx < width and 0 <= cy < height:
         return cx, cy
@@ -80,11 +85,22 @@ def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, 
     """The part of ``box`` that lies on the screen.
 
     A content-height list extends below the screen. The pixel check photographs
-    the visible part. A box already on the screen is returned unchanged. None
-    when the box misses the screen.
+    the visible part. A box already on the screen is returned unchanged. A box
+    no larger than the screen is also returned unchanged: cropping a
+    fixed-height overflow list to the reported screen photographed a region
+    that did not move. None when a content-height box misses the screen.
     """
     x, y, width, height = (int(v) for v in box)
     sw, sh = _screen_span()
+    if (
+        height <= sh
+        and width <= sw
+        and x < sw
+        and y < sh
+        and x + width > 0
+        and y + height > 0
+    ):
+        return (x, y, width, height)
     if x >= 0 and y >= 0 and x + width <= sw and y + height <= sh:
         return (x, y, width, height)
     left = max(x, 0)
@@ -310,12 +326,15 @@ class LinuxDriver:
         both true: the pixels inside the list box change, and the snapshot
         head leaves the pre-wheel row and stays on the new row for two
         reads. The head is the first row of the list node being read whose
-        own top is on or below the list's top and which extends below the
-        8px clipped edge. A fully visible row flush with that top is the
-        head. A row parked above the list is not the head, even when its
-        box covers the sample or a saved wrapper still names it. The scan
-        keeps going through rows above the viewport and opens a wrapper
-        that starts above the list when that wrapper still covers the list.
+        own top is on or below the on-screen top of the list and which
+        extends below the 8px clipped edge. That top is the list's own top
+        when the list sits on the screen. A fully visible row flush with
+        that top is the head. A row parked above the list, and a row at the
+        content origin of a list whose top is above the screen, are not the
+        head, even when the box covers a sample or a saved wrapper still
+        names it. The scan keeps going through rows above the viewport and
+        opens a wrapper that starts above the list when that wrapper still
+        covers the list.
         The pixel check
         resamples the list's own screen box. The
         frame grabbed in the same turn as the wheel can still be the
@@ -328,9 +347,10 @@ class LinuxDriver:
         rows either. A pixel difference alone is not a successful scroll.
         ``snapshot`` then lists the confirmed rows, which is what
         ``scroll_to_find`` searches. A coordinate target and a
-        non-Chromium element are not checked. A list whose center is below the
-        screen is wheeled on the visible part of that list, and the pixel check
-        photographs that visible part. ``unit=pixels`` writes the AT-SPI scroll-bar value
+        non-Chromium element are not checked. A list taller than the screen is
+        wheeled on the visible part of that list, and the pixel check
+        photographs that visible part. A list no larger than the screen is
+        wheeled at its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back. It does not grab the list, does not
         hit-test it, and does not send notches. GTK scrolled windows expose
         the value in pixels. A missing bar, or a write that jumps or does
