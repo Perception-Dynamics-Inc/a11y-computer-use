@@ -9,6 +9,7 @@ header; `menu(action="state"|"close")` expose the same to the planner.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -202,12 +203,14 @@ def test_a_driver_without_menu_support_is_left_alone(tmp_path) -> None:
 def test_other_drivers_report_no_open_menu(driver) -> None:
     """A name with no running app.
 
-    Linux asks AT-SPI and answers ``app_not_found``, the same as menu list.
-    The name is not ``x``: that string is inside XFCE application names, so
-    on an XFCE session it is a running app. Windows and the browser have no
-    such lookup in this test and report that no menu is open.
+    On Linux the Linux driver asks AT-SPI and answers ``app_not_found``,
+    the same as menu list. The name is not ``x``: that string is inside
+    XFCE application names, so on an XFCE session it is a running app.
+    Off Linux the same driver has no AT-SPI bus, so the menu is not known
+    and the call stays closed. Windows and the browser report that no
+    menu is open.
     """
-    if getattr(driver, "name", None) == "linux":
+    if getattr(driver, "name", None) == "linux" and sys.platform.startswith("linux"):
         missing = "no-such-app-a11y"
         for call in (
             lambda: driver.menu_state(missing),
