@@ -9,7 +9,9 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- Linux Chromium snapshot and find list every on-screen row of a list. On 0.4.22 through 0.4.26 a 520px overflow list with 18px rows painted about 29 rows, and a body-scroll page painted rows past the 16th, but the snapshot stopped at 16 (ITEM-001 through ITEM-016, or ITEM-172 through ITEM-187 at the bottom) and showed no elision marker. `find` and `scroll_to_find` could not match a painted row past that window, including ITEM-020 and, at the bottom, ITEM-190, ITEM-199, and ITEM-200. `scroll_to_find` for those last rows then ran to a still page, turned around, and failed with `page_unchanged` (dy=-1) after the list had been scrolled back to ITEM-001. The 16-row cap is the hit-test sample count, and the on-screen walk was using it as the row set. The walk now keeps every on-screen row. When that is more than the snapshot child cap, the rows are grouped so the cap does not drop the tail. The hit-test sample count stays 16. `scroll_to_find` ITEM-180 on a fixed-height list still succeeds. A still page that has not shown the target still turns around, and a second still page is still `page_unchanged`. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel. Synthetic trees, not a live Chrome run (#65) (2026-10-04).
 
 ## [0.4.26] - 2026-10-04
 

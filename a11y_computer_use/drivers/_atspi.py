@@ -24,7 +24,7 @@ import os
 import time
 from collections.abc import Sequence
 
-from a11y_computer_use.observe import DisplayGeometry, RawNode
+from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode
 from a11y_computer_use.schema import Display
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
@@ -351,12 +351,90 @@ def _stable_id(acc, attrs: dict | None = None) -> str | None:
     return None
 
 
+class _BandRect:
+    """Screen box for a snapshot-only row group. Not an AT-SPI rect."""
+
+    def __init__(self, x: float, y: float, width: float, height: float) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+
+class _OnScreenBand:
+    """Group of on-screen rows the snapshot walk can keep. Not an AT-SPI object.
+
+    The shared pruner keeps at most ``MAX_CHILDREN`` children of one node and
+    drops the rest. A Chromium list can paint more rows than that (29 rows of
+    18px in a 520px box). A band stays within the cap, so find still matches
+    the last painted row. A shorter run is not wrapped.
+    """
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._rows = rows
+        left = min(float(pos[0]) for _acc, pos, _size in rows)
+        top = min(float(pos[1]) for _acc, pos, _size in rows)
+        right = max(float(pos[0]) + float(size[0]) for _acc, pos, size in rows)
+        bottom = max(float(pos[1]) + float(size[1]) for _acc, pos, size in rows)
+        self._rect = _BandRect(left, top, max(1.0, right - left), max(1.0, bottom - top))
+
+    def get_role_name(self) -> str:
+        return "panel"
+
+    def get_name(self) -> str:
+        return ""
+
+    def get_description(self) -> str:
+        return ""
+
+    def get_child_count(self) -> int:
+        return len(self._rows)
+
+    def get_child_at_index(self, index: int):
+        return self._rows[int(index)][0]
+
+    def get_component_iface(self):
+        return self
+
+    def get_extents(self, _coord):
+        return self._rect
+
+
+def _bands_for_snapshot(rows: list[tuple]) -> list:
+    """Row accessibles, grouped when they would exceed the snapshot child cap."""
+    if len(rows) <= MAX_CHILDREN:
+        return [acc for acc, _pos, _size in rows]
+    return [
+        _OnScreenBand(rows[start:start + MAX_CHILDREN])
+        for start in range(0, len(rows), MAX_CHILDREN)
+    ]
+
+
+def _cached_rows_for_snapshot(bounds: dict, accs: list) -> list:
+    """The saved row list, grouped the same way as a live walk.
+
+    A saved row with no box is returned flat, which is the previous list.
+    """
+    rows = []
+    for acc in accs:
+        found = bounds.get(id(acc))
+        if found is None:
+            return list(accs)
+        pos, size = found
+        rows.append((acc, pos, size))
+    return _bands_for_snapshot(rows)
+
+
 class ATSPIAccessor:
     """`observe.TreeAccessor` over `Atspi.Accessible` handles.
 
-    For a Chromium list, the snapshot lists rows of the list node it is
-    reading whose own tops are on or below the list's top and which extend
-    below the clipped top edge. A row flush with that top is on screen.
+    For a Chromium list, the snapshot lists every row of the list node it
+    is reading whose own top is on or below the list's top and which
+    extends below the clipped top edge. A row flush with that top is on
+    screen. The walk does not stop after 16 rows: that number is the
+    hit-test sample count, and using it as the row set omitted painted
+    rows with no elision marker. When more rows are on screen than the
+    shared child cap, they are grouped so the cap does not drop the tail.
     A saved head from a different Python wrapper is not that list: a live
     walk wraps a new object each time, and the 0.4.16 retest still showed
     the pre-scroll row at y=-2. ``scroll_to_find`` searches this snapshot.
@@ -426,14 +504,12 @@ class ATSPIAccessor:
         if _role_name(node) in _LIST_ROLES and _chromium_app(node):
             live = _in_view_named_rows(node)
             if len(_row_names(live)) >= 2:
-                accs = []
                 for acc, pos, size in live:
                     self._visible_bounds[id(acc)] = (pos, size)
-                    accs.append(acc)
-                return accs
+                return _bands_for_snapshot(live)
         visible = self._visible_children.get(id(node))
         if visible is not None:
-            return list(visible)
+            return _cached_rows_for_snapshot(self._visible_bounds, visible)
         count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
         count = min(int(count), _MAX_CHILDREN_FETCH)
         kids = []
@@ -947,6 +1023,11 @@ _PAINT_PAUSE_S = 0.15
 _CLIP_SLIVER_PX = 8
 _LIST_ROLES = frozenset({"list", "list box", "table", "tree", "tree table"})
 _MAX_LIST_CONTAINERS = 4
+# Hit-test points in ``_probe_visible_rows`` when the child walk has not
+# already named the rows. Not a cap on the rows snapshot and find list.
+# 0.4.22 through 0.4.26 also stopped the on-screen walk at this count, so a
+# 520px list of 18px rows (about 29 painted) published ITEM-001 through
+# ITEM-016 and left the rest out with no elision marker.
 _MAX_ROW_SAMPLES = 16
 # The 0.4.22 body-scroll find reached ITEM-177 in 10 steps of dy=5, about
 # three rows per line. A viewport step uses that pace and never advances by
@@ -1299,16 +1380,20 @@ def _settle_hit(comp, x: int, y: int, coord):
 def _in_view_named_rows(container) -> list[tuple]:
     """Named rows under ``container`` that are on screen in the list.
 
-    Each entry is ``(accessible, (x, y), (width, height))``. The walk reads
-    ``container`` itself. A row entirely above the list is skipped and the
-    scan continues, including past the first forty such rows. A wrapper
-    whose top is above the list is opened when its box still covers the
-    list, which is where the on-screen rows sit. A node tall enough to be
-    that wrapper is not itself a row. A row is on screen when its own top
-    is on or below the list's top and it extends below the clipped edge.
-    The rectangle is the node's own box clipped to the on-screen part of
-    the list, so the snapshot y is not the pre-scroll y. A row at the
-    content origin of a list whose top is above the screen is not on screen.
+    Each entry is ``(accessible, (x, y), (width, height))``. Every on-screen
+    row is included. ``_MAX_ROW_SAMPLES`` is not applied here: it only
+    limits hit-test points, and stopping this walk at 16 left painted rows
+    out of the snapshot. The walk reads ``container`` itself. A row entirely
+    above the list is skipped and the scan continues, including past the
+    first forty such rows. A wrapper whose top is above the list is opened
+    when its box still covers the list, which is where the on-screen rows
+    sit. A node tall enough to be that wrapper is not itself a row. A row
+    is on screen when its own top is on or below the list's top and it
+    extends below the clipped edge. The rectangle is the node's own box
+    clipped to the on-screen part of the list, so the snapshot y is not the
+    pre-scroll y. A row at the content origin of a list whose top is above
+    the screen is not on screen. Nodes examined are still bounded by
+    ``_VISIBLE_WALK_CAP``.
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
@@ -1324,7 +1409,7 @@ def _in_view_named_rows(container) -> list[tuple]:
 
     def walk(node, depth: int) -> None:
         nonlocal seen
-        if node is None or node is container or seen >= _VISIBLE_WALK_CAP or len(found) >= _MAX_ROW_SAMPLES:
+        if node is None or node is container or seen >= _VISIBLE_WALK_CAP:
             return
         seen += 1
         npos, nsize = _extents(node)
@@ -1332,8 +1417,6 @@ def _in_view_named_rows(container) -> list[tuple]:
             if depth > 0:
                 for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
                     walk(_child_at(node, index), depth - 1)
-                    if len(found) >= _MAX_ROW_SAMPLES:
-                        return
             return
         top = float(npos[1])
         height = float(nsize[1])
@@ -1364,13 +1447,9 @@ def _in_view_named_rows(container) -> list[tuple]:
         if depth > 0 and top < box_b:
             for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
                 walk(_child_at(node, index), depth - 1)
-                if len(found) >= _MAX_ROW_SAMPLES:
-                    return
 
     total = min(_child_count(container), _VISIBLE_WALK_CAP)
     for index in range(total):
-        if len(found) >= _MAX_ROW_SAMPLES:
-            break
         child = _child_at(container, index)
         if child is None:
             continue
