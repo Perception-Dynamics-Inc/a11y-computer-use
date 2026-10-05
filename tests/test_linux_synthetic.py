@@ -3163,6 +3163,170 @@ def test_uniform_rows_keep_one_bar_step_and_do_not_wheel(
     assert "ITEM-001" not in painted
 
 
+def _uniform_text_grab(monkeypatch, hit):
+    """Grab for a list whose rows look almost the same. Synthetic pixels.
+
+    While ``hit.uniform`` is set, every grab is one channel of 1, so a
+    five-row step measures mean 0, at or under the uniform-row floor.
+    Clearing the flag uses the head as the channel, so a page measures
+    well above 1. Not a capture from Tester's display.
+    """
+
+    def grab(_box):
+        from PIL import Image
+
+        channel = 1 if getattr(hit, "uniform", False) else int(hit.screen) * 4
+        hit.grab_colors.append(channel)
+        return Image.new("RGB", (4, 4), (channel, 0, 0))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+
+
+def _item_number(title: str) -> int:
+    return int(title.split("-")[1].split()[0])
+
+
+def test_low_mean_five_line_step_does_not_page_or_skip_a_row(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic fixed-height list, not Tester's display and not a live pass.
+
+    dy=5 reveals the row five places down. The grab stays at mean 0, which
+    is the uniform-row floor the 0.4.28 retest sat under. On that retest the
+    driver still clicked the track, so the heads were ITEM-001, ITEM-032,
+    ITEM-037, ITEM-068: moves of +31, +5, +31. The page landed with a
+    clipped row above the tree, and ITEM-030 was in neither window. Here
+    the track click pages by 26 rows on top of the five. Each step must
+    stay five rows, the windows must overlap, and ITEM-030 must be listed.
+    No track click and no wheel.
+    """
+    window, listing, hit, rows = _fixed_height_page()
+    hit.uniform = True
+
+    def reveal(row, _scroll_type):
+        hit.uniform = True
+        _layout_fixed_rows(listing, rows, hit, _item_number(row.name))
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: reveal(row, scroll_type)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    _uniform_text_grab(monkeypatch, hit)
+    wheels = {"n": 0}
+    clicks: list[tuple[int, int]] = []
+    wired_scroll = _linux_input.scroll
+    wired_click = _linux_input.click
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    def clicking(x, y, button="left", count=1):
+        clicks.append((int(x), int(y)))
+        wired_click(x, y, button=button, count=count)
+        # The 0.4.28 second gesture: one page on top of the five-row step.
+        hit.uniform = False
+        _layout_fixed_rows(listing, rows, hit, min(172, int(hit.screen) + 26))
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+    monkeypatch.setattr(_linux_input, "click", clicking)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    assert _row_titles(snap)[0] == "ITEM-001"
+    assert "ITEM-030" not in _row_titles(snap)
+    listing_el = next(el for el in snap.elements if el.role == "AXList")
+    heads = [1]
+    seen: set[int] = set(range(1, 30))
+    for _ in range(6):
+        assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+        titles = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+        heads.append(_item_number(titles[0]))
+        seen.update(_item_number(title) for title in titles)
+    moves = [heads[index + 1] - heads[index] for index in range(len(heads) - 1)]
+    assert moves == [5, 5, 5, 5, 5, 5]
+    assert 31 not in moves
+    # The opening window is ITEM-001 through ITEM-029, so ITEM-030 is not
+    # in the seed. A later five-row window lists it. A +31 jump from
+    # ITEM-001 lands on ITEM-032 and never does.
+    assert 30 in seen
+    for index in range(len(heads) - 1):
+        assert heads[index] < heads[index + 1] <= heads[index] + 28
+    assert clicks == []
+    assert wheels["n"] == 0
+
+
+def test_low_mean_wrapper_search_finds_item_040_without_paging_past_it(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic overflow list, not Tester's display and not a live pass.
+
+    About fifteen rows are on screen. dy=5 reveals five rows and the grab
+    stays at mean 0. On the 0.4.28 retest that rejection was followed by a
+    page, and the heads alternated +18, +5. The windows were ITEM-024
+    through ITEM-038 and then ITEM-042, so ITEM-040 was never listed.
+    ``scroll_to_find`` then ran on to the bottom, ITEM-186 through
+    ITEM-200. The same search must match ITEM-040 while it is on screen.
+    A track click pages by 13 rows. A wheel, if one were sent, jumps to
+    ITEM-186. Neither one runs.
+    """
+    from a11y_computer_use import server
+
+    window, _document, listing, hit, rows = _overflow_page()
+    hit.uniform = True
+
+    def reveal(row, _scroll_type):
+        hit.uniform = True
+        _layout_overflow(listing, rows, hit, _item_number(row.name))
+        return True
+
+    for row in rows:
+        row.component.scroll_to = lambda scroll_type, row=row: reveal(row, scroll_type)
+
+    def on_wheel():
+        hit.uniform = False
+        _layout_overflow(listing, rows, hit, 186)
+
+    hit.on_wheel = on_wheel
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    _uniform_text_grab(monkeypatch, hit)
+    wheels = {"n": 0}
+    clicks: list[tuple[int, int]] = []
+    wired_scroll = _linux_input.scroll
+    wired_click = _linux_input.click
+
+    def counting(x, y, dx=0, dy=0):
+        wheels["n"] += 1
+        return wired_scroll(x, y, dx=dx, dy=dy)
+
+    def clicking(x, y, button="left", count=1):
+        clicks.append((int(x), int(y)))
+        wired_click(x, y, button=button, count=count)
+        hit.uniform = False
+        _layout_overflow(listing, rows, hit, min(186, int(hit.screen) + 13))
+
+    monkeypatch.setattr(_linux_input, "scroll", counting)
+    monkeypatch.setattr(_linux_input, "click", clicking)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXList"
+    assert _row_titles(first)[:15] == [f"ITEM-{i:03d}" for i in range(1, 16)]
+    assert "ITEM-040" not in _row_titles(first)
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-040", max_scrolls=25)
+    assert "ITEM-040" in out
+    assert "found after" in out
+    assert "not found" not in out
+    assert wheels["n"] == 0
+    assert clicks == []
+    painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
+    assert "ITEM-040" in painted
+    assert "ITEM-186" not in painted
+    assert _item_number(painted[0]) <= 40
+
+
 def _wrapped_overflow_list():
     """A content-height list inside a shorter panel. The panel scrolls.
 
