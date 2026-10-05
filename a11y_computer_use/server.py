@@ -280,7 +280,8 @@ def _page_group_ancestor(el, by_ref, below_window):
     A titled group wins. On a body-scroll page and on a list inside an
     overflow wrapper, that group is the document. An empty Chrome panel
     between the document and the window can be larger than the document and
-    still under 90% of the window. The 0.4.29 retest anchored on that panel.
+    still under 90% of the window. The 0.4.29 and 0.4.30 retests anchored
+    on that panel.
     The overflow list sits too deep in the panel for the bounded list walk,
     so the wheel was not judged, and ``scroll_to_find`` ran to the bottom
     (ITEM-186 through ITEM-200) without listing ITEM-040 or ITEM-100. A tab
