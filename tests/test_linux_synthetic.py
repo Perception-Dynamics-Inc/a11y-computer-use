@@ -3522,6 +3522,131 @@ def test_wrapped_list_markers_are_not_the_head_and_five_lines_move_five_rows(
     assert "ITEM-186" not in painted
 
 
+def _shell_wrapped_overflow_list():
+    """The wrapped list, under an empty Chrome panel larger than the document.
+
+    The panel is still under 90% of the window, so the old anchor (the
+    largest group) is this panel. Its first 35 children are empty, and the
+    document is the next one. A list walk that reads 30 children from the
+    panel never reaches the list. The snapshot walk reads 200 and keeps the
+    titled document. Synthetic boxes, not a live Chrome window.
+    """
+    window, document, panel, listing, hit, rows = _wrapped_overflow_list()
+    app = window.get_application()
+    shell = _Acc("panel", name="", width=1280, height=710)
+    shell.component._rect.x = 0.0
+    shell.component._rect.y = 80.0
+    shell.get_application = lambda: app
+    fillers = []
+    for _index in range(35):
+        filler = _Acc("panel", name="", width=10, height=10)
+        filler.component._rect.x = 4.0
+        filler.component._rect.y = 84.0
+        filler.get_application = lambda: app
+        fillers.append(filler)
+    _adopt(shell, *fillers, document)
+    others = [child for child in window.children if child is not document]
+    _adopt(window, *others, shell)
+    return window, document, shell, panel, listing, hit, rows
+
+
+def test_empty_chrome_panel_does_not_take_the_overflow_search(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic wrapped list, not Tester's display and not a live pass.
+
+    On the 0.4.29 retest the content-height list sat under an empty Chrome
+    panel. That panel was larger than the titled document and still under
+    90% of the window, so ``scroll_to_find`` anchored on it. The list walk
+    from the panel stops at 30 children, before the document, and each of
+    the 25 steps sent a wheel. The wheel jumped the paint to ITEM-186
+    through ITEM-200 and still returned success, so ITEM-040 and ITEM-100
+    were never listed. The anchor is the titled document. From there the
+    overflow list is found and dy=5 reveals five rows. A wheel, if one
+    were sent, jumps the paint to ITEM-186.
+    """
+    from a11y_computer_use import server
+
+    window, document, shell, _panel, _listing, hit, rows = _shell_wrapped_overflow_list()
+    _hang_markers(rows)
+    _sync_markers(rows)
+    wheels = {"n": 0}
+
+    def place(number: int) -> None:
+        hit.screen = number
+        for index, item in enumerate(rows):
+            _place_row(item, 29, 180 + (index - (number - 1)) * 28, 184, 19)
+        _sync_markers(rows)
+
+    def reveal(label, _scroll_type):
+        number = int(label.name.split("-")[1].split()[0])
+        place(number)
+        return True
+
+    for row in rows:
+        label = row.children[1]
+        label.component.scroll_to = lambda scroll_type, label=label: reveal(label, scroll_type)
+
+    def on_wheel():
+        wheels["n"] += 1
+        place(186)
+
+    hit.on_wheel = on_wheel
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    assert _atspi.list_with_overflow_ancestor(shell) is None
+    assert _atspi.list_with_overflow_ancestor(document) is not None
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    first = driver.snapshot(Scope.WINDOW, "chrome")
+    anchor = server._scroll_anchor(first)
+    assert anchor.role == "AXGroup"
+    assert anchor.title == document.name
+    by_ref = {el.ref: el for el in first.elements}
+    listing_el = next(el for el in first.elements if el.role == "AXList")
+    chain = []
+    node = listing_el
+    while node is not None:
+        chain.append(node)
+        node = by_ref.get(node.parent) if node.parent else None
+    shell_el = next(el for el in chain if el.bounds.height == 710)
+    document_el = next(el for el in chain if el.title == document.name)
+    window_el = next(el for el in first.elements if el.role == "AXWindow")
+    assert shell_el.title == ""
+    assert shell_el.bounds.width * shell_el.bounds.height > (
+        document_el.bounds.width * document_el.bounds.height
+    )
+    assert shell_el.bounds.width * shell_el.bounds.height < 0.9 * (
+        window_el.bounds.width * window_el.bounds.height
+    )
+    titles = [el.title for el in first.elements if el.title.startswith("ITEM-") or el.title == "•"]
+    assert titles[0] == "ITEM-003"
+    assert "ITEM-040" not in titles
+    assert "ITEM-100" not in titles
+    assert driver.scroll(anchor, dy=5, unit=ScrollUnit.LINES) is None
+    assert wheels["n"] == 0
+    stepped = [
+        el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.title.startswith("ITEM-") or el.title == "•"
+    ]
+    assert stepped[0] == "ITEM-008"
+    runtime = _runtime_for(driver, monkeypatch)
+    found_040 = runtime.scroll_to_find("chrome", text="ITEM-040", max_scrolls=25)
+    assert "ITEM-040" in found_040
+    assert "found after" in found_040
+    assert "not found" not in found_040
+    found_100 = runtime.scroll_to_find("chrome", text="ITEM-100", max_scrolls=25)
+    assert "ITEM-100" in found_100
+    assert "found after" in found_100
+    assert "not found" not in found_100
+    assert wheels["n"] == 0
+    painted = [
+        el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements
+        if el.title.startswith("ITEM-")
+    ]
+    assert "ITEM-100" in painted
+    assert "ITEM-186" not in painted
+
+
 def _bare_runtime(driver):
     from a11y_computer_use import server
 

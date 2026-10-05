@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.31] - 2026-10-05
+
+### Fixed
+
+- Linux `scroll_to_find` on a list inside an overflow:auto wrapper anchors on the titled document instead of a larger empty Chrome panel. On the 0.4.29 retest the page was a 420px `overflow-y:auto` div around a plain 200-row list, and the address bar query was only `?n=`. Before each search the tree showed ITEM-001 through ITEM-015. `scroll_to_find` for ITEM-040, ITEM-100, and ITEM-040 again each returned not found after 25 scrolls in about 6 seconds, and the tree then showed ITEM-186 through ITEM-200. A judged five-row step pauses to read the head, so that timing is an unjudged wheel. The content-height list is taller than the window, so the anchor is a page group under 90% of the window. The empty panel between the document and the window was larger than the titled document and still under that cutoff. The list walk from that panel reads 30 children and stops before the document, so no overflow list was found and each step sent a wheel. The wheel moved the wrapper in large jumps and still returned success, so the search never turned around. On 0.4.28, ITEM-100 was found after 6 scrolls. ITEM-040 already ended on ITEM-186 through ITEM-200. The titled document is the anchor when any ancestor group has a title. From that document the overflow list is found and `scroll_to` steps five rows, which overlaps ITEM-040 and ITEM-100. An untitled tree still uses the largest group. A fixed-height list smaller than the window stays the list anchor. dy=5 on that list still moves five rows. A body-scroll page still wheels the document. `unit=pixels` still writes the AT-SPI scroll bar and does not send a wheel. Synthetic trees, not Tester's display :58 (#63) (2026-10-05).
+
 ## [0.4.30] - 2026-10-05
 
 ### Fixed

@@ -275,13 +275,21 @@ def _scroll_reference_area(snap) -> int:
 
 
 def _page_group_ancestor(el, by_ref, below_window):
-    """Largest AXGroup/AXWebArea ancestor of ``el`` that is smaller than the window.
+    """The document group around ``el``, when that group is smaller than the window.
 
-    That ancestor is the document on a body-scroll page. A tab strip is a
-    sibling of the document, not an ancestor of the list, so it is not chosen.
-    None when the list has no such ancestor.
+    A titled group wins. On a body-scroll page and on a list inside an
+    overflow wrapper, that group is the document. An empty Chrome panel
+    between the document and the window can be larger than the document and
+    still under 90% of the window. The 0.4.29 retest anchored on that panel.
+    The overflow list sits too deep in the panel for the bounded list walk,
+    so the wheel was not judged, and ``scroll_to_find`` ran to the bottom
+    (ITEM-186 through ITEM-200) without listing ITEM-040 or ITEM-100. A tab
+    strip is a sibling of the document, not an ancestor of the list, so it
+    is not chosen. When every ancestor group is untitled, the largest group
+    under the window is used. None when the list has no such ancestor.
     """
     best = None
+    titled = None
     seen: set[str] = set()
     parent_ref = el.parent
     while parent_ref and parent_ref not in seen:
@@ -292,8 +300,12 @@ def _page_group_ancestor(el, by_ref, below_window):
         if parent.role in _PAGE_GROUP_ROLES and below_window(parent):
             if best is None or _element_area(parent) > _element_area(best):
                 best = parent
+            if (parent.title or "").strip() and (
+                titled is None or _element_area(parent) > _element_area(titled)
+            ):
+                titled = parent
         parent_ref = parent.parent
-    return best
+    return titled if titled is not None else best
 
 
 def _scroll_anchor(snap):
