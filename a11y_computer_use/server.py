@@ -2806,12 +2806,24 @@ class Runtime:
 
     @_serialized
     def file_dialog(self, action: str, path: str, app: str | None = None) -> str:
-        """Drive the frontmost open/save panel of ``app`` (default: frontmost) to ``path``."""
+        """Drive the frontmost open/save panel of ``app`` (default: frontmost) to ``path``.
+
+        Linux does not drive a chooser. The grant still applies, then the
+        driver raises the documented unsupported error. The frontmost
+        recheck is skipped on that driver only: a background app, or a
+        granted name that is not running, would otherwise be
+        ``focus_changed`` and a retry hint for a tool that cannot succeed.
+        Type, key, click, and every other driver's ``file_dialog`` keep
+        the recheck.
+        """
         verb = FileDialogVerb(action)
         bundle = self._frontmost() if app is None else self._resolve_app(app)[1]
+        recheck = self._recheck_frontmost_app
+        if getattr(self.driver, "name", None) == "linux":
+            recheck = None
         result = self._run_gated(FileDialogOp(verb=verb, path=path), bundle,
                                  lambda: self.driver.file_dialog(verb.value, path, app or bundle),
-                                 recheck=self._recheck_frontmost_app)
+                                 recheck=recheck)
         return json.dumps(result)
 
     @_serialized
@@ -3488,7 +3500,11 @@ def build_server(
         """Set an editable field's value in ONE deterministic op via the
         accessibility API — no per-character typing, no focus/click dance. ref is
         an editable element from the latest desktop_snapshot/find. Falls back to
-        focus+type when the app exposes no settable value. Gated at tier 'full';
+        focus+type when the app exposes no settable value. On Linux, a ref that
+        is not an editable text element is an error saying it is not editable,
+        and that call sends no keystrokes, clicks, or focus changes. An editable
+        Linux field succeeds when AT-SPI Text.get_text(0, -1) equals the new
+        string. Gated at tier 'full';
         refuses secure/password fields (secrets are entered by the human, never
         this tool). Ideal for filling forms fast."""
         return await run(runtime.set_value, ref, value)
@@ -3584,8 +3600,10 @@ def build_server(
         Save As…'), then call this. Returns JSON with the steps taken; a
         structured `unsupported` error names the problem when no panel is
         showing or it is the other kind. Tier 'full' (it types). Implemented on
-        macOS. On Linux the result is unsupported: GTK and portal file choosers
-        are not driven; open the chooser, then set_value or type into the
+        macOS. On Linux the result is unsupported whether or not the named app
+        is frontmost: GTK and portal file choosers
+        are not driven, and the call does not report focus_changed. Open the
+        chooser, then set_value or type into the
         location or name field shown in the snapshot (Ctrl+L focuses the
         location bar in a GTK 3 chooser). Windows and the browser also return
         unsupported."""

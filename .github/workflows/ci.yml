@@ -60,8 +60,8 @@ jobs:
       # modules (the CGEvent executor, the overlay) skip at collection.
       - name: pytest (full hermetic suite)
         run: pytest -q -rs -p no:cacheprovider
-      # The MCP server (Runtime + the full 16-tool surface; console/network are
-      # added only on the browser backend) must import and build on Windows: an
+      # The MCP server (Runtime + the 25-tool surface; console, network, and
+      # webmcp are added only on the browser backend) must import and build on Windows: an
       # agent has to be able to run `a11y-computer-use mcp` there.
       - name: MCP server imports + builds on Windows
         run: >
@@ -207,8 +207,8 @@ jobs:
       # and bus-dependent tests skip here and run in the live step below.
       - name: pytest (full hermetic suite)
         run: .venv/bin/pytest -q -rs -p no:cacheprovider
-      # The MCP server (Runtime + the full 16-tool surface; console/network are
-      # added only on the browser backend) must import and build on Linux: an
+      # The MCP server (Runtime + the 25-tool surface; console, network, and
+      # webmcp are added only on the browser backend) must import and build on Linux: an
       # agent has to be able to run `a11y-computer-use mcp` there.
       - name: MCP server imports + builds on Linux
         run: >
