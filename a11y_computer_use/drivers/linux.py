@@ -162,6 +162,29 @@ def _secure_focus_error(api: str) -> ComputerUseError:
     )
 
 
+def _accepts_text(element: Element) -> bool:
+    """True when ``set_value`` may write ``element``.
+
+    The snapshot sets ``editable`` from the role. A synthetic element can name
+    an editable role without that flag; the role set is the one the pruner
+    uses. A menu, static text, or button is not in it.
+    """
+    if element.editable:
+        return True
+    from a11y_computer_use.observe import _EDITABLE_ROLES
+
+    return element.role in _EDITABLE_ROLES
+
+
+def _not_editable(element: Element) -> ComputerUseError:
+    title = f" {element.title!r}" if element.title else ""
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"{element.ref} ({element.role}{title}) is not editable",
+        detail={"ref": element.ref, "role": element.role, "reason": "not_editable"},
+    )
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -284,9 +307,15 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        self._focused_editable = None
         if element.secure:
+            self._focused_editable = None
             return False
+        # A menu, heading, label, or button is not a text target. Raising
+        # here is what stops the Runtime from focusing it and typing the
+        # value into whatever is frontmost. No key, click, or focus is sent.
+        if not _accepts_text(element):
+            raise _not_editable(element)
+        self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
@@ -349,11 +378,20 @@ class LinuxDriver:
                dry_run: bool = False) -> object:
         """Scroll ``target``.
 
-        ``unit=lines`` is one XTEST wheel notch per unit (X buttons 4/5 and
-        6/7), the same line-sized step macOS posts as ``kCGScrollEventUnitLine``.
-        On a Chromium list the wheel is a success only when two things are
+        ``unit=lines`` sends one XTEST wheel notch per unit (X buttons 4/5
+        and 6/7) when the target is not a Chromium list. A Chromium list
+        whose own box sits fully on the screen, or a list inside a shorter
+        overflow ancestor, steps its vertical AT-SPI scroll bar by one
+        content row per line first. One line is one row, and not more than
+        the rows already on screen. A missing bar tries AT-SPI ``scroll_to``
+        (``TOP_EDGE``). When that value write or ``scroll_to`` does not move
+        the painted rows, a left click lands on the vertical track. The
+        wheel runs only when those do not move the list. A content-height
+        list whose parent is the document, and a document group, keep the
+        wheel.
+        On a Chromium list a step is a success only when two things are
         both true: the pixels inside the list box change, and the snapshot
-        head leaves the pre-wheel row and stays on the new row for two
+        head leaves the pre-step row and stays on the new row for two
         reads. The head is the first row of the list node being read whose
         own top is on or below the on-screen top of the list and which
         extends below the 8px clipped edge. That top is the list's own top
