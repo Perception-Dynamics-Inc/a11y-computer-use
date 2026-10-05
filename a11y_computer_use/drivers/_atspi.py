@@ -1017,8 +1017,10 @@ _PAGE_MOVE_MEAN = 1.0
 # fixed-height list reported page_unchanged at mean_abs about 0.5 to 0.7
 # while the painted head had moved, then sent a wheel or a track click as
 # well. A grab above this floor, with a new on-screen head, is that move.
-# A grab at or under it is still: the invented head in the stuck-page tests
-# stays at 0 and is not a scroll.
+# A grab at or under it is still when the head did not move by about the
+# requested lines. The 0.4.28 retest moved five rows and stayed under this
+# floor, then clicked the track: five rows plus one page. A far hit-test
+# name on a still grab is not that step.
 _UNIFORM_ROW_MEAN = 0.4
 # The grab taken in the same turn as the wheel can still be the pre-paint
 # frame. 0.4.13 compared that one pair and returned page_unchanged, so the
@@ -1958,6 +1960,38 @@ def row_head(rows) -> str | None:
     """The first named row, which is the snapshot head."""
     names = _row_names(rows or ())
     return names[0] if names else None
+
+
+def shown_line_step(container, before_head: str | None, rows, dy: int) -> bool:
+    """True when the head moved by at most one content row per requested line.
+
+    The 0.4.28 retest asked for five lines. The list moved five rows, and
+    the grab stayed at or under the uniform-row floor, so the driver
+    treated the step as no move and clicked the track. Five rows plus that
+    page is the jump of 31 on a fixed-height list and 18 on overflow:auto,
+    and the next window skipped the rows in between. A move of about
+    ``dy`` rows is the line step. A page is not. A hit-test name that is
+    not a row within that count is not, so a still page that names a far
+    row stays still.
+    """
+    if not int(dy) or not before_head or not rows:
+        return False
+    after = row_head(rows)
+    if after is None or after == before_head:
+        return False
+    names: list[str] = []
+    for acc in _named_rows_in_order(container):
+        name = _node_name(acc)
+        if name and (not names or names[-1] != name):
+            names.append(name)
+    try:
+        delta = names.index(after) - names.index(before_head)
+    except ValueError:
+        return False
+    limit = abs(int(dy)) * _ROWS_PER_LINE
+    if int(dy) > 0:
+        return 1 <= delta <= limit
+    return -limit <= delta <= -1
 
 
 def row_names(rows) -> tuple[str, ...]:

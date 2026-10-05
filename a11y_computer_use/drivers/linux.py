@@ -386,12 +386,16 @@ class LinuxDriver:
         track to go down, the upper track to go up).         The click is one
         page, inside the list. No wheel is sent when the click moves the
         pixels and the on-screen head. The bar write is still tried first
-        and still has to move the pixels. A grab under 1 can still be that
+        and still has to move the pixels.         A grab under 1 can still be that
         move: uniform rows leave ``mean_abs`` about 0.5 to 0.7 while the
         on-screen head leaves the old row. That head change is the step.
         The bar write is not undone, and no track click or wheel follows
-        it. A still grab, at or under the uniform-row floor, is not a step
-        even if a later hit names another row. ``page_unchanged`` is only
+        it. A grab at or under the uniform-row floor is still that step
+        when the head moved by about the requested lines, and not by a
+        page. The 0.4.28 retest's dy=5 moved five rows under that floor
+        and then clicked the track, so the list jumped 31 or 18 rows and
+        skipped the ones in between. A far hit-test name on a still grab
+        is not a step. ``page_unchanged`` is only
         the case where the head stays and the grab stays at or under 1.
         A list inside a shorter ancestor, the overflow wrapper, uses that
         wrapper as the painted viewport. Rows the wrapper hides are not
@@ -483,9 +487,18 @@ class LinuxDriver:
                         "rows": list(shown[:8]),
                     },
                 )
-            # A still grab is not a move. Looking up the head here would
-            # turn the invented row in the stuck-page tests into a scroll.
+            # A grab at or under the uniform-row floor is still a line
+            # step when the head moved by about ``dy`` rows. The 0.4.28
+            # retest left that five-row scroll_to in place and then
+            # clicked the track. A page-sized jump is not the step, and
+            # neither is a hit-test name that is not one of those rows.
             if mean <= _atspi._UNIFORM_ROW_MEAN:
+                after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
+                if after is not None and self._run(
+                    lambda: _atspi.shown_line_step(container, before_head, after, int(dy))
+                ):
+                    self._run(lambda: _atspi.commit_shown_rows(container, after))
+                    return True
                 return False
             after = self._run(lambda: _atspi.wait_for_shown_rows(container, before_head))
             if after is not None:
