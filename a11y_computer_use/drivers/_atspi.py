@@ -1374,6 +1374,108 @@ def _on_screen_row(top: float, bottom: float, box_y: float, box_b: float, sliver
     return min(bottom, box_b) > box_y + sliver
 
 
+def _vertical_span(acc) -> tuple[float, float] | None:
+    """``(top, bottom)`` of ``acc``, or None when it has no positive box."""
+    pos, size = _extents(acc)
+    if pos is None or size is None:
+        return None
+    width = float(size[0])
+    height = float(size[1])
+    if width <= 0 or height <= 0:
+        return None
+    top = float(pos[1])
+    return top, top + height
+
+
+def _child_vertical_span(node, index: int) -> tuple[float, float] | None:
+    """Span of child ``index``, skipping scroll bars and separators.
+
+    None when that child is missing, has no box, or is not a row.
+    """
+    child = _child_at(node, index)
+    if child is None or _role_name(child) in _SKIP_ROW_ROLES:
+        return None
+    return _vertical_span(child)
+
+
+def _first_index_reaching(node, line: float, count: int) -> int:
+    """First child index that is not entirely above ``line``.
+
+    0 when ``count`` fits in ``_VISIBLE_WALK_CAP``, when the ends have no
+    box or are not top-to-bottom, or when child 0 already reaches the
+    line. A short list keeps the walk that starts at child 0. On the
+    0.4.31 live list a 520px scroller held 2000 ``list item`` children.
+    With ITEM-0201 at the top of the box the walk spent the cap on the
+    rows above the viewport, so the snapshot stopped at ITEM-0224. With
+    ITEM-0226 at the top it stopped at ITEM-0237. Past child 250 it
+    listed nothing. The cap still bounds how many children are read
+    after this index. A run that is not top-to-bottom is not skipped.
+    """
+    if count <= 0 or count <= _VISIBLE_WALK_CAP:
+        return 0
+    first = _child_vertical_span(node, 0)
+    last_index = count - 1
+    last = _child_vertical_span(node, last_index)
+    if last is None:
+        for index in range(count - 2, max(-1, count - 6), -1):
+            last = _child_vertical_span(node, index)
+            if last is not None:
+                last_index = index
+                break
+    if first is None or last is None or last[0] < first[0] - 1:
+        return 0
+    # ``bottom < line - 1`` is the walk's "entirely above" test.
+    if first[1] >= line - 1:
+        return 0
+    lo = 0
+    hi = last_index
+    while lo < hi:
+        mid = (lo + hi) // 2
+        span = _child_vertical_span(node, mid)
+        if span is None or span[0] < first[0] - 1:
+            return 0
+        if span[1] < line - 1:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _child_scan_range(node, line: float, limit: int) -> range:
+    """Child indexes to read, at most ``limit``, from the first that reaches ``line``.
+
+    ``limit`` is the remaining node budget. A short child list starts at
+    0, which is the previous walk.
+    """
+    count = _child_count(node)
+    if count <= 0 or limit <= 0:
+        return range(0)
+    start = _first_index_reaching(node, line, count)
+    return range(start, min(count, start + limit))
+
+
+def _content_ends_span(container) -> float | None:
+    """Distance from the first child's top to the last row's top.
+
+    None when an end has no box or the run is not top-to-bottom. A scroll
+    bar at the end is not the last row. The on-screen window is not this
+    distance: a fractional bar scaled by that window steps past the rows
+    in between.
+    """
+    count = _child_count(container)
+    if count < 2:
+        return None
+    first = _child_vertical_span(container, 0)
+    last = None
+    for index in range(count - 1, max(-1, count - 6), -1):
+        last = _child_vertical_span(container, index)
+        if last is not None:
+            break
+    if first is None or last is None or last[0] < first[0] - 1:
+        return None
+    return last[0] - first[0]
+
+
 def _settle_hit(comp, x: int, y: int, coord):
     """The accessible at ``(x, y)`` that covers that point.
 
@@ -1416,7 +1518,11 @@ def _in_view_named_rows(container) -> list[tuple]:
     clipped to the on-screen part of the list, so the snapshot y is not the
     pre-scroll y. A row at the content origin of a list whose top is above
     the screen is not on screen. Nodes examined are still bounded by
-    ``_VISIBLE_WALK_CAP``.
+    ``_VISIBLE_WALK_CAP``, counted from the first child whose box reaches
+    the viewport. A list longer than that cap is not read from child 0:
+    the rows above the viewport would use up the cap, and the on-screen
+    rows past it would be missing. A run that is not top-to-bottom is
+    still read from child 0.
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
@@ -1438,7 +1544,9 @@ def _in_view_named_rows(container) -> list[tuple]:
         npos, nsize = _extents(node)
         if npos is None or nsize is None:
             if depth > 0:
-                for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+                for index in _child_scan_range(node, box_y, _VISIBLE_WALK_CAP - seen):
+                    if seen >= _VISIBLE_WALK_CAP:
+                        break
                     walk(_child_at(node, index), depth - 1)
             return
         top = float(npos[1])
@@ -1456,7 +1564,9 @@ def _in_view_named_rows(container) -> list[tuple]:
         name = _node_name(node)
         if name and _is_list_marker(name):
             if depth > 0 and top < box_b:
-                for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+                for index in _child_scan_range(node, box_y, _VISIBLE_WALK_CAP - seen):
+                    if seen >= _VISIBLE_WALK_CAP:
+                        break
                     walk(_child_at(node, index), depth - 1)
             return
         if (
@@ -1473,11 +1583,12 @@ def _in_view_named_rows(container) -> list[tuple]:
             found.append((node, (row_left, row_top), (row_width, row_height)))
             return
         if depth > 0 and top < box_b:
-            for index in range(min(_child_count(node), _VISIBLE_WALK_CAP - seen)):
+            for index in _child_scan_range(node, box_y, _VISIBLE_WALK_CAP - seen):
+                if seen >= _VISIBLE_WALK_CAP:
+                    break
                 walk(_child_at(node, index), depth - 1)
 
-    total = min(_child_count(container), _VISIBLE_WALK_CAP)
-    for index in range(total):
+    for index in _child_scan_range(container, box_y, _VISIBLE_WALK_CAP):
         child = _child_at(container, index)
         if child is None:
             continue
@@ -1512,6 +1623,9 @@ def _named_rows_in_order(container) -> list:
     marker plus a label on an early row does not stop the walk before
     ITEM-100. This does not change which rows the snapshot lists; it only
     chooses a row for ``scroll_viewport_by_lines`` to reveal.
+    A list longer than ``_ROW_SEQUENCE_CAP`` is not read from child 0.
+    The sequence starts a few rows above the viewport, so a line step
+    can still see the previous head, and it still stops at that cap.
     """
     _pos, size = _extents(container)
     if size is None:
@@ -1523,6 +1637,20 @@ def _named_rows_in_order(container) -> list:
         if depth <= 0:
             return
         count = _child_count(node)
+        # A wrapper that holds the whole list is one child of the list.
+        # Sharing this call's eight-node budget across those rows stops
+        # before the viewport. Each row gets its own budget, and the
+        # read starts near the viewport rather than at child 0.
+        if count > _ROW_SEQUENCE_CAP:
+            edges = _viewport_edges(container)
+            line = edges[1] if edges is not None else 0.0
+            start = _first_index_reaching(node, line, count)
+            start = max(0, start - 40)
+            for index in range(start, min(count, start + _ROW_SEQUENCE_CAP)):
+                if len(found) >= _ROW_SEQUENCE_CAP:
+                    return
+                walk(_child_at(node, index), depth - 1, [8])
+            return
         for index in range(count):
             if budget[0] <= 0 or len(found) >= _ROW_SEQUENCE_CAP:
                 return
@@ -1548,8 +1676,18 @@ def _named_rows_in_order(container) -> list:
             return
         found.append(node)
 
-    total = min(_child_count(container), _ROW_SEQUENCE_CAP)
-    for index in range(total):
+    count = _child_count(container)
+    if count <= _ROW_SEQUENCE_CAP:
+        indexes = range(count)
+    else:
+        edges = _viewport_edges(container)
+        line = edges[1] if edges is not None else 0.0
+        start = _first_index_reaching(container, line, count)
+        # Forty children above the viewport cover the previous head of
+        # a line step. The cap still bounds the read.
+        start = max(0, start - 40)
+        indexes = range(start, min(count, start + _ROW_SEQUENCE_CAP))
+    for index in indexes:
         if len(found) >= _ROW_SEQUENCE_CAP:
             break
         # Eight nodes cover a list item, its marker, and its label. The
@@ -1691,6 +1829,14 @@ def _viewport_bar_delta(container, dy: int, span: float) -> float | None:
         return None
     tops = [_row_top(acc) for acc in ordered]
     row_span = max(tops) - min(tops)
+    # A long list's ordered window is the viewport, not the content.
+    # Scaling a fractional bar by that window jumps. The ends are the
+    # content height. A list that fits in the sequence cap keeps the
+    # span of the rows it already collected.
+    if _child_count(container) > _ROW_SEQUENCE_CAP:
+        extent = _content_ends_span(container)
+        if extent is not None and extent > row_span:
+            row_span = extent
     _origin, size = _extents(container)
     if size is None:
         return None

@@ -401,7 +401,11 @@ class LinuxDriver:
         head, even when the box covers a sample or a saved wrapper still
         names it. The scan keeps going through rows above the viewport and
         opens a wrapper that starts above the list when that wrapper still
-        covers the list.
+        covers the list. A list with more children than the child-fetch
+        cap is not read from child 0. The on-screen walk starts at the
+        first child whose box reaches the viewport, so a row past that
+        cap is listed when it is on screen. Rows the tree does not
+        expose are not invented.
         The pixel check
         resamples the list's own screen box. The
         frame grabbed in the same turn as the wheel can still be the

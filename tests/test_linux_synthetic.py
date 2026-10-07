@@ -3940,3 +3940,207 @@ def test_body_scroll_to_find_matches_the_last_row_when_it_is_painted(
     painted = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert "ITEM-200" in painted
     assert painted[0] != "ITEM-001"
+
+
+def _long_list_page(count: int = 2000, wrapped: bool = False):
+    """Synthetic Chromium list of ``count`` unnamed items, not a live window.
+
+    Each item's name is on a ``static`` child, ITEM-0001 onward. ``wrapped``
+    puts those items under one group so the list's own child count is 1.
+    """
+    app = _ChromeApp()
+    items: list[_Acc] = []
+    labels: list[_Acc] = []
+    for number in range(1, count + 1):
+        label = _Acc("static", name=f"ITEM-{number:04d}")
+        item = _Acc("list item", name="")
+        label.get_application = lambda: app
+        item.get_application = lambda: app
+        _adopt(item, label)
+        items.append(item)
+        labels.append(label)
+    hit = _ListHit(items, [])
+    hit.x, hit.y, hit.width, hit.height = 20, 139, 400, 520
+    listing = _Acc("list", name="")
+    listing.component = hit
+    listing.get_application = lambda: app
+    group = None
+    if wrapped:
+        group = _Acc("panel", name="", width=400, height=520)
+        group.component._rect.x = 20.0
+        group.component._rect.y = 139.0
+        group.get_application = lambda: app
+        _adopt(group, *items)
+        _adopt(listing, group)
+    document = _Acc("document web", name="long-list", width=1271, height=709)
+    document.component._rect.x = 4.0
+    document.component._rect.y = 86.0
+    document.get_application = lambda: app
+    _adopt(document, listing)
+    window = _Acc("frame", name="long-list", width=1280, height=800)
+    window.get_application = lambda: app
+    _adopt(window, document)
+    _add_tab_strip(window)
+    _layout_long_rows(listing, items, labels, hit, 1, group=group)
+    return window, listing, hit, items, labels, group
+
+
+def _layout_long_rows(listing, items, labels, hit, head: int, *, group=None) -> None:
+    """Place every row. ``head`` (1-based) is flush with the list top.
+
+    The box is (20, 139) 400 by 520. Pitch and row height are 18px, so
+    29 rows are on screen. Synthetic boxes, not a live Chrome bounds read.
+    """
+    origin_y = 139
+    pitch = 18
+    hit.screen = head
+    hit.x, hit.y, hit.width, hit.height = 20, origin_y, 400, 520
+    hit._at.clear()
+    start = head - 1
+    for index, (item, label) in enumerate(zip(items, labels)):
+        y = origin_y + (index - start) * pitch
+        _place_row(item, 20, y, 360, pitch)
+        _place_row(label, 28, y, 80, pitch)
+    if group is None:
+        _adopt(listing, *items)
+    else:
+        _place_row(group, 20, origin_y, 400, 520)
+        _adopt(group, *items)
+        _adopt(listing, group)
+
+
+def _long_titles(listing) -> list[str]:
+    return list(_atspi.row_names(_atspi._in_view_named_rows(listing)))
+
+
+def test_long_list_snapshot_lists_every_painted_row_past_child_250(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 2000-row list, not a live Chrome window.
+
+    A 520px box of 18px rows paints 29 rows. On 0.4.31 the walk started
+    at child 0 and stopped after 250 nodes, so ITEM-0201 through
+    ITEM-0229 came back as ITEM-0201 through ITEM-0224, ITEM-0226 through
+    ITEM-0254 came back as ITEM-0226 through ITEM-0237, and a later
+    window came back empty. The hit-test sample count stays 16.
+    """
+    window, listing, hit, items, labels, _group = _long_list_page()
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    assert _atspi._MAX_ROW_SAMPLES == 16
+    assert _atspi._VISIBLE_WALK_CAP == 250
+    driver = LinuxDriver()
+
+    def painted(head: int) -> list[str]:
+        _layout_long_rows(listing, items, labels, hit, head)
+        _atspi.reset_shown_rows()
+        names = _long_titles(listing)
+        snap = driver.snapshot(Scope.WINDOW, "chrome")
+        titles = [el.title for el in snap.elements if el.title.startswith("ITEM-")]
+        assert titles == names
+        _assert_no_elision(snap)
+        return names
+
+    assert painted(1) == [f"ITEM-{number:04d}" for number in range(1, 30)]
+    assert painted(201) == [f"ITEM-{number:04d}" for number in range(201, 230)]
+    assert "ITEM-0224" in painted(201)
+    assert painted(226) == [f"ITEM-{number:04d}" for number in range(226, 255)]
+    assert "ITEM-0237" in painted(226)
+    assert "ITEM-0254" in painted(226)
+    assert painted(456) == [f"ITEM-{number:04d}" for number in range(456, 485)]
+    assert observe.find_elements(driver.snapshot(Scope.WINDOW, "chrome"), text="ITEM-0456")
+    assert observe.find_elements(driver.snapshot(Scope.WINDOW, "chrome"), text="ITEM-0484")
+
+
+def test_wrapped_long_list_lists_the_painted_rows_past_child_250(fake_atspi, monkeypatch) -> None:
+    """Synthetic group of 2000 rows, not a live Chrome window.
+
+    The list's only child is a panel. The on-screen rows are still that
+    panel's children past index 250.
+    """
+    window, listing, hit, items, labels, group = _long_list_page(wrapped=True)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    _layout_long_rows(listing, items, labels, hit, 456, group=group)
+    _atspi.reset_shown_rows()
+    names = _long_titles(listing)
+    assert names == [f"ITEM-{number:04d}" for number in range(456, 485)]
+    assert names[0] == "ITEM-0456"
+    assert names[-1] == "ITEM-0484"
+
+
+def _bind_long_scroll(labels, listing, items, hit) -> None:
+    def reveal(label, _scroll_type):
+        number = int(label.name.split("-")[1])
+        _layout_long_rows(listing, items, labels, hit, number)
+        return True
+
+    for label in labels:
+        label.component.scroll_to = lambda scroll_type, label=label: reveal(label, scroll_type)
+
+
+@pytest.mark.parametrize("target", ["ITEM-0240", "ITEM-0270", "ITEM-0400"])
+def test_scroll_to_find_reaches_a_row_past_child_250(
+    fake_atspi, xtest_recorder, monkeypatch, target: str
+) -> None:
+    """Synthetic 2000-row list, not a live Chrome window.
+
+    ``scroll_to`` reveals a later row at the top. The search lists the
+    target once it is on screen and does not stop on ``rows_stale``.
+    ITEM-0400 is past what 60 steps of five rows can reach from ITEM-0001.
+    """
+    window, listing, hit, items, labels, _group = _long_list_page()
+    _layout_long_rows(listing, items, labels, hit, 1)
+    _bind_long_scroll(labels, listing, items, hit)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    wheels = {"n": 0}
+
+    def on_wheel():
+        wheels["n"] += 1
+
+    hit.on_wheel = on_wheel
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    opening = [el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.title.startswith("ITEM-")]
+    assert opening[0] == "ITEM-0001"
+    assert target not in opening
+    runtime = _runtime_for(driver, monkeypatch)
+    limit = 60 if target != "ITEM-0400" else 80
+    out = runtime.scroll_to_find("chrome", text=target, max_scrolls=limit)
+    # Five rows per scroll from ITEM-0001. The target is inside the 29-row
+    # window on that step: 43, 49, and 75. ITEM-0400 needs more than 60.
+    expected = {"ITEM-0240": 43, "ITEM-0270": 49, "ITEM-0400": 75}[target]
+    assert out.startswith(f"found after {expected} scroll")
+    assert target in out
+    assert "found after" in out
+    assert "found after 0 scroll" not in out
+    assert "not found" not in out
+    assert "rows_stale" not in out
+    assert "page_unchanged" not in out
+    assert wheels["n"] == 0
+    painted = [el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.title.startswith("ITEM-")]
+    assert target in painted
+    assert painted[0] != "ITEM-0001"
+
+
+def test_sixty_scrolls_toward_item_0400_are_not_rows_stale(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic 2000-row list, not a live Chrome window.
+
+    Sixty steps of five rows from ITEM-0001 end around ITEM-0301. That
+    is not far enough for ITEM-0400. The call returns not found. It does
+    not raise ``rows_stale``.
+    """
+    window, listing, hit, items, labels, _group = _long_list_page()
+    _layout_long_rows(listing, items, labels, hit, 1)
+    _bind_long_scroll(labels, listing, items, hit)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _runtime_for(driver, monkeypatch)
+    out = runtime.scroll_to_find("chrome", text="ITEM-0400", max_scrolls=60)
+    assert out.startswith("not found after 60 scroll")
+    assert "rows_stale" not in out
+    painted = [el.title for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.title.startswith("ITEM-")]
+    assert painted[0] == "ITEM-0301"
+    assert "ITEM-0329" in painted
+    assert "ITEM-0400" not in painted
