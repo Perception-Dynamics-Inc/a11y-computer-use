@@ -6,6 +6,7 @@ Hermetic: fake drivers and a mocked clipboard subprocess. No display.
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -312,6 +313,8 @@ def test_clipboard_write_keeps_unicode_nul_and_large_payloads(monkeypatch) -> No
     _linux_system.write_clipboard(text)
     assert captured["text"] is False
     assert captured["kwargs"].get("capture_output") is not True
+    assert captured["kwargs"].get("stdout") is subprocess.DEVNULL
+    assert captured["kwargs"].get("stderr") is subprocess.DEVNULL
     assert captured["input"] == text.encode("utf-8")
     assert len(captured["input"]) == len(text.encode("utf-8"))
 

@@ -738,6 +738,27 @@ def test_linux_ewmh_verbs_send_the_client_messages(fake_x11) -> None:
     assert messages[6]["data"] == (32, [0, 1, 0, 0, 0])
 
 
+def test_linux_probes_close_their_display(monkeypatch) -> None:
+    """Each probe and verb drops its X connection, including the miss path."""
+    closed: list[str] = []
+    display = types.SimpleNamespace(
+        screen=lambda: types.SimpleNamespace(root=types.SimpleNamespace()),
+        intern_atom=lambda name: name,
+        flush=lambda: None,
+        close=lambda: closed.append("closed"),
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_managed_windows", lambda d: [])
+    assert _linux_system.windows() == []
+    assert _linux_system.window_owner(1) is None
+    assert _linux_system.raise_window(1) is False
+    assert _linux_system.close_window(1) is False
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.activate_app("missing")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert closed == ["closed"] * 5
+
+
 def test_linux_window_verbs_are_unsupported_on_native_wayland(monkeypatch) -> None:
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.delenv("DISPLAY", raising=False)

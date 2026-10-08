@@ -41,6 +41,7 @@ def _has_wm_and_bus() -> tuple[bool, str]:
 
     if not os.environ.get("DISPLAY"):
         return False, "no DISPLAY (not inside an X session)"
+    d = None
     try:
         from Xlib import display as xdisplay
 
@@ -51,6 +52,12 @@ def _has_wm_and_bus() -> tuple[bool, str]:
             return False, "no EWMH window manager on this display (Xvfb without a WM)"
     except Exception as ex:  # noqa: BLE001
         return False, f"cannot open the X display: {ex}"
+    finally:
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
     try:
         from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -309,14 +316,18 @@ def test_clipboard_crlf_non_text_and_invalid_utf8() -> None:
     assert driver.read_clipboard() == "a\r\nb\rc\x00ü"
     subprocess.run(
         ["xclip", "-selection", "clipboard", "-t", "image/png", "-i"],
-        input=b"\x89PNG\r\nnot-really", check=True, timeout=5,
+        input=b"\x89PNG\r\nnot-really",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=True, timeout=5,
     )
     with pytest.raises(ComputerUseError) as exc:
         driver.read_clipboard()
     assert exc.value.detail["reason"] == "clipboard_not_text"
     subprocess.run(
         ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
-        input=b"ok\xff\xfe", check=True, timeout=5,
+        input=b"ok\xff\xfe",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        check=True, timeout=5,
     )
     with pytest.raises(ComputerUseError) as exc:
         driver.read_clipboard()
@@ -337,9 +348,11 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     dpy = display.Display()
     screen = dpy.screen()
+    # No StructureNotify: minimize, move, resize, and close generate those
+    # events, and an unread queue makes the server drop this client.
     win = screen.root.create_window(
         40, 60, 180, 90, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
-        background_pixel=screen.white_pixel, event_mask=X.StructureNotifyMask,
+        background_pixel=screen.white_pixel, event_mask=0,
     )
     win.set_wm_name("a11y-probe")
     win.set_wm_class("a11yprobe", "A11yProbe")
@@ -393,10 +406,10 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
     except ComputerUseError:
         raise
     finally:
-        # close() flushes, and a display the server already dropped raises.
+        # Closing this connection destroys the probe window. destroy() first
+        # raises BadWindow once close has already removed it, and then the
+        # connection itself would leak into the next test.
         try:
-            win.destroy()
-            dpy.flush()
             dpy.close()
         except Exception:
             pass

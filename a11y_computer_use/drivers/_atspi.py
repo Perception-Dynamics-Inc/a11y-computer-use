@@ -577,9 +577,16 @@ def _screen_size() -> tuple[int, int]:
     try:
         from Xlib import display as _xd
 
-        screen = _xd.Display().screen()
-        w = int(screen.width_in_pixels)
-        h = int(screen.height_in_pixels)
+        d = _xd.Display()
+        try:
+            screen = d.screen()
+            w = int(screen.width_in_pixels)
+            h = int(screen.height_in_pixels)
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
         if w > 0 and h > 0:
             return w, h
     except Exception:

@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+from contextlib import contextmanager
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,31 @@ def _display():
     from Xlib import display as _xd
 
     return _xd.Display()
+
+
+def _close_display(d) -> None:
+    """Drop one X connection. A fake display with no ``close`` is left alone.
+
+    Every probe opens its own connection. Leaving them open fills the
+    server's client table; the server then closes sockets and the next
+    flush is ``BrokenPipeError``.
+    """
+    close = getattr(d, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        pass
+
+
+@contextmanager
+def _open_display():
+    d = _display()
+    try:
+        yield d
+    finally:
+        _close_display(d)
 
 
 def _atom(d, name: str):
@@ -172,12 +198,12 @@ def _geometry_on_root(win, d):
 def frontmost_app_id() -> str:
     """comm name of the active window's owner (e.g. "gedit"); "" if undetectable."""
     try:
-        d = _display()
-        active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
-        if not active:
-            return ""
-        win = d.create_resource_object("window", int(active[0]))
-        return _comm_for_pid(_pid_of(win, d)) or ""
+        with _open_display() as d:
+            active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+            if not active:
+                return ""
+            win = d.create_resource_object("window", int(active[0]))
+            return _comm_for_pid(_pid_of(win, d)) or ""
     except Exception:
         return ""
 
@@ -185,14 +211,14 @@ def frontmost_app_id() -> str:
 def app_at_point_id(x: float, y: float) -> str | None:
     """comm name of the topmost window containing a screen point (act-time hit-test)."""
     try:
-        d = _display()
-        for win in reversed(_managed_windows(d)):  # topmost first
-            geom = _geometry_on_root(win, d)
-            if geom is None:
-                continue
-            gx, gy, gw, gh = geom
-            if gx <= x < gx + gw and gy <= y < gy + gh:
-                return _comm_for_pid(_pid_of(win, d))
+        with _open_display() as d:
+            for win in reversed(_managed_windows(d)):  # topmost first
+                geom = _geometry_on_root(win, d)
+                if geom is None:
+                    continue
+                gx, gy, gw, gh = geom
+                if gx <= x < gx + gw and gy <= y < gy + gh:
+                    return _comm_for_pid(_pid_of(win, d))
     except Exception:
         return None
     return None
@@ -231,18 +257,18 @@ def resolve_app(identifier: str) -> str:
     by_alias: str | None = None
     by_title: str | None = None
     try:
-        d = _display()
-        for win in _managed_windows(d):
-            comm = (_app_id(win, d) or "").lower()
-            if needle in comm:
-                return comm  # the app itself beats any window that merely names it
-            if by_alias is None and comm and _launcher_comm(needle, comm):
-                by_alias = comm
-            # A title match is a fallback, never a winner over a comm match:
-            # a Chromium tab "Donations | Krita" stacked above Krita's window
-            # must not turn `krita` into `chrome`.
-            if by_title is None and comm and needle in _win_title(win, d).lower():
-                by_title = comm
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                comm = (_app_id(win, d) or "").lower()
+                if needle in comm:
+                    return comm  # the app itself beats any window that merely names it
+                if by_alias is None and comm and _launcher_comm(needle, comm):
+                    by_alias = comm
+                # A title match is a fallback, never a winner over a comm match:
+                # a Chromium tab "Donations | Krita" stacked above Krita's window
+                # must not turn `krita` into `chrome`.
+                if by_title is None and comm and needle in _win_title(win, d).lower():
+                    by_title = comm
     except Exception:
         pass
     return by_alias or by_title or identifier
@@ -265,14 +291,14 @@ def pids_matching(identifier: str) -> set[int]:
     if not needle:
         return pids
     try:
-        d = _display()
-        for win in _managed_windows(d):
-            pid = _pid_of(win, d)
-            if not pid:
-                continue
-            comm = (_comm_for_pid(pid) or "").lower()
-            if needle in comm or _launcher_comm(needle, comm):
-                pids.add(pid)
+        with _open_display() as d:
+            for win in _managed_windows(d):
+                pid = _pid_of(win, d)
+                if not pid:
+                    continue
+                comm = (_comm_for_pid(pid) or "").lower()
+                if needle in comm or _launcher_comm(needle, comm):
+                    pids.add(pid)
     except Exception:
         pass
     return pids
@@ -282,18 +308,18 @@ def running_apps() -> list[dict]:
     """Distinct apps with managed windows: {name, pid, frontmost}."""
     out: list[dict] = []
     try:
-        d = _display()
-        active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
-        active_id = int(active[0]) if active else 0
-        seen: set[str] = set()
-        for win in _managed_windows(d):
-            pid = _pid_of(win, d)
-            comm = _app_id(win, d)
-            if not comm or comm in seen:
-                continue
-            seen.add(comm)
-            out.append({"bundle_id": comm, "name": comm, "pid": pid,
-                        "frontmost": int(win.id) == active_id})
+        with _open_display() as d:
+            active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+            active_id = int(active[0]) if active else 0
+            seen: set[str] = set()
+            for win in _managed_windows(d):
+                pid = _pid_of(win, d)
+                comm = _app_id(win, d)
+                if not comm or comm in seen:
+                    continue
+                seen.add(comm)
+                out.append({"bundle_id": comm, "name": comm, "pid": pid,
+                            "frontmost": int(win.id) == active_id})
     except Exception:
         return out
     return out
@@ -309,25 +335,31 @@ def windows() -> list[dict]:
     """
     rows: list[dict] = []
     try:
-        d = _display()
-        for win in _managed_windows(d):
-            pid = _pid_of(win, d)
-            hidden = _is_hidden(win, d)
-            geom = None if hidden else _geometry_on_root(win, d)
-            bounds = None
-            if geom is not None:
-                gx, gy, gw, gh = geom
-                bounds = {"display_id": 0, "x": gx, "y": gy, "width": gw, "height": gh}
-            rows.append({
-                "window_id": int(win.id),
-                "app": _app_id(win, d),
-                "title": _win_title(win, d),
-                "pid": pid,
-                "bounds": bounds,
-                "on_screen": not hidden,
-            })
+        with _open_display() as d:
+            rows = _window_rows(d)
     except Exception:
         return rows
+    return rows
+
+
+def _window_rows(d) -> list[dict]:
+    rows: list[dict] = []
+    for win in _managed_windows(d):
+        pid = _pid_of(win, d)
+        hidden = _is_hidden(win, d)
+        geom = None if hidden else _geometry_on_root(win, d)
+        bounds = None
+        if geom is not None:
+            gx, gy, gw, gh = geom
+            bounds = {"display_id": 0, "x": gx, "y": gy, "width": gw, "height": gh}
+        rows.append({
+            "window_id": int(win.id),
+            "app": _app_id(win, d),
+            "title": _win_title(win, d),
+            "pid": pid,
+            "bounds": bounds,
+            "on_screen": not hidden,
+        })
     return rows
 
 
@@ -347,11 +379,11 @@ def window_owner(window_id: int) -> str | None:
     (or X is unreachable).
     """
     try:
-        d = _display()
-        win = _window_by_id(d, window_id)
-        if win is None:
-            return None
-        return _app_id(win, d)
+        with _open_display() as d:
+            win = _window_by_id(d, window_id)
+            if win is None:
+                return None
+            return _app_id(win, d)
     except Exception:
         return None
 
@@ -376,20 +408,26 @@ def _send_active_window(d, win) -> None:
     _client_message(d, win, "_NET_ACTIVE_WINDOW", [1, X.CurrentTime, 0, 0, 0])
 
 
+@contextmanager
 def _with_window(window_id: int):
-    """(display, window) or (display, None) when the id is not managed."""
-    d = _display()
-    return d, _window_by_id(d, window_id)
+    """Yield ``(display, window)``. The window is None when the id is not managed.
+
+    The display is closed when the caller returns, including the missing-window
+    path. The client message is flushed before that close, so the window
+    manager already has the request and the selection of X clients stays bounded.
+    """
+    with _open_display() as d:
+        yield d, _window_by_id(d, window_id)
 
 
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
     Returns False when no managed window has that id."""
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    _send_active_window(d, win)
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        _send_active_window(d, win)
+        return True
 
 
 def focus_window(window_id: int) -> bool:
@@ -408,24 +446,24 @@ def minimize_window(window_id: int) -> bool:
 
     Returns False when no managed window has that id.
     """
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    _client_message(d, win, "WM_CHANGE_STATE", [3, 0, 0, 0, 0])  # IconicState
-    hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
-    _client_message(d, win, "_NET_WM_STATE", [1, hidden, 0, 1, 0])  # _NET_WM_STATE_ADD
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        _client_message(d, win, "WM_CHANGE_STATE", [3, 0, 0, 0, 0])  # IconicState
+        hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
+        _client_message(d, win, "_NET_WM_STATE", [1, hidden, 0, 1, 0])  # _NET_WM_STATE_ADD
+        return True
 
 
 def maximize_window(window_id: int) -> bool:
     """Maximize ``window_id`` vertically and horizontally in one ``_NET_WM_STATE``."""
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
-    horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
-    _client_message(d, win, "_NET_WM_STATE", [1, vert, horz, 1, 0])
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
+        horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
+        _client_message(d, win, "_NET_WM_STATE", [1, vert, horz, 1, 0])
+        return True
 
 
 def move_window(window_id: int, x: int, y: int) -> bool:
@@ -434,31 +472,31 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     Gravity is NorthWest. Only the X and Y flags are set, so the window
     manager keeps the current size. Returns False when the id is not managed.
     """
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-    _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (3 << 8), int(x), int(y), 0, 0])
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
+        _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (3 << 8), int(x), int(y), 0, 0])
+        return True
 
 
 def resize_window(window_id: int, width: int, height: int) -> bool:
     """Resize ``window_id`` via ``_NET_MOVERESIZE_WINDOW`` (width and height flags)."""
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    # Flags Width=4 and Height=8.
-    _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (12 << 8), 0, 0, int(width), int(height)])
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        # Flags Width=4 and Height=8.
+        _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (12 << 8), 0, 0, int(width), int(height)])
+        return True
 
 
 def close_window(window_id: int) -> bool:
     """Ask the window manager to close ``window_id`` (``_NET_CLOSE_WINDOW``)."""
-    d, win = _with_window(window_id)
-    if win is None:
-        return False
-    _client_message(d, win, "_NET_CLOSE_WINDOW", [0, 1, 0, 0, 0])
-    return True
+    with _with_window(window_id) as (d, win):
+        if win is None:
+            return False
+        _client_message(d, win, "_NET_CLOSE_WINDOW", [0, 1, 0, 0, 0])
+        return True
 
 
 def _application_dirs() -> list[str]:
@@ -604,33 +642,24 @@ def activate_app(identifier: str) -> str:
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     needle = (identifier or "").lower()
-    d = _display()
-    resolved = identifier
-    matched = None
-    for win in _managed_windows(d):
-        comm = (_app_id(win, d) or "").lower()
-        title = _win_title(win, d).lower()
-        if needle and (needle in comm or needle in title):
-            resolved = comm or identifier
-            matched = win
-            break
-    if matched is None:
-        raise ComputerUseError(
-            ErrorCode.APP_NOT_FOUND,
-            f"no running application matches {identifier!r}",
-            detail={"app": identifier},
-        )
-    from Xlib import X, protocol
-
-    root = d.screen().root
-    event = protocol.event.ClientMessage(
-        window=matched, client_type=_atom(d, "_NET_ACTIVE_WINDOW"),
-        data=(32, [1, X.CurrentTime, 0, 0, 0]),
-    )
-    mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
-    root.send_event(event, event_mask=mask)
-    d.flush()
-    return resolved
+    with _open_display() as d:
+        resolved = identifier
+        matched = None
+        for win in _managed_windows(d):
+            comm = (_app_id(win, d) or "").lower()
+            title = _win_title(win, d).lower()
+            if needle and (needle in comm or needle in title):
+                resolved = comm or identifier
+                matched = win
+                break
+        if matched is None:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"no running application matches {identifier!r}",
+                detail={"app": identifier},
+            )
+        _send_active_window(d, matched)
+        return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -703,15 +732,27 @@ def _read_cmd(kind: str, target: str) -> list[str]:
 
 
 def _run_clip(cmd: list[str], payload: bytes | None = None, *, capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a clipboard tool. Reads capture bytes. Writes do not.
+    """Run a clipboard tool. Reads capture bytes. Writes discard them.
 
-    ``text`` is never set, so CR and CRLF are not rewritten. A write must not
-    capture stdout: xclip and wl-copy fork a process that keeps the selection,
-    and that child holds the captured pipe open until ``run`` times out.
+    ``text`` is never set, so CR and CRLF are not rewritten. A write passes
+    the bytes on stdin and sends stdout and stderr to ``DEVNULL``. xclip,
+    xsel, and wl-copy fork a child that keeps owning the selection; if that
+    child inherits captured pipes, ``communicate`` never sees EOF and the
+    call times out. ``-quiet`` is not used: it keeps xclip in the foreground,
+    so the call would not return while the selection lived. With the pipes
+    discarded, the parent exits, the child still owns the selection, and a
+    later read returns the same bytes.
     """
     if capture:
         return subprocess.run(cmd, input=payload, capture_output=True, timeout=5, check=False)
-    return subprocess.run(cmd, input=payload, timeout=5, check=False)
+    return subprocess.run(
+        cmd,
+        input=payload,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+        check=False,
+    )
 
 
 def _target_lines(stdout: bytes) -> list[str]:
