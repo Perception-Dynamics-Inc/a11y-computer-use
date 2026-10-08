@@ -790,7 +790,7 @@ def _cmd_run_once(args: argparse.Namespace) -> int:
         print(server.refusal_text(exc.decision), file=sys.stderr)
         return 1
     except (TypeError, ValueError) as exc:
-        print(f"invalid action: {exc}", file=sys.stderr)
+        print(f"invalid_arguments: {tool}: {exc}", file=sys.stderr)
         return 2
     print(result)
     return 0

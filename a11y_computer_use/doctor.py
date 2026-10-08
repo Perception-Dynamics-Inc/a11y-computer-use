@@ -325,13 +325,19 @@ def _check_window_manager() -> CheckResult:
         from Xlib import display as xdisplay
 
         d = xdisplay.Display()
-        root = d.screen().root
-        prop = root.get_full_property(d.intern_atom("_NET_SUPPORTING_WM_CHECK"), 0)
-        if prop is None or not prop.value:
-            raise LookupError("no _NET_SUPPORTING_WM_CHECK on the root window")
-        win = d.create_resource_object("window", int(prop.value[0]))
-        name = win.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
-        wm = name.value.decode("utf-8", "replace") if name is not None and name.value else "unknown"
+        try:
+            root = d.screen().root
+            prop = root.get_full_property(d.intern_atom("_NET_SUPPORTING_WM_CHECK"), 0)
+            if prop is None or not prop.value:
+                raise LookupError("no _NET_SUPPORTING_WM_CHECK on the root window")
+            win = d.create_resource_object("window", int(prop.value[0]))
+            name = win.get_full_property(d.intern_atom("_NET_WM_NAME"), 0)
+            wm = name.value.decode("utf-8", "replace") if name is not None and name.value else "unknown"
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
         return {"check": "window_manager", "ok": True, "detail": f"EWMH window manager: {wm}", "fix": None}
     except Exception as exc:  # noqa: BLE001 — failures are data
         return {
@@ -407,8 +413,14 @@ def _check_coordinate_input() -> CheckResult:
         from Xlib import display as xdisplay
 
         d = xdisplay.Display()
-        if not d.query_extension("XTEST"):
-            raise LookupError("XTEST extension missing on this X server")
+        try:
+            if not d.query_extension("XTEST"):
+                raise LookupError("XTEST extension missing on this X server")
+        finally:
+            try:
+                d.close()
+            except Exception:
+                pass
     except Exception as exc:  # noqa: BLE001
         return {
             "check": "coordinate_input",

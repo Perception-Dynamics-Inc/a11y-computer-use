@@ -205,7 +205,7 @@ def test_run_once_offscreen_exits_cleanly(tmp_path, monkeypatch, capsys) -> None
     monkeypatch.setattr(drivers, "get_driver", lambda *a, **k: driver)
     assert cli.main(["run-once", json.dumps({"tool": "hover", "x": 99999, "y": 5})]) == 2
     err = capsys.readouterr().err
-    assert err.startswith("invalid action:")
+    assert err.startswith("invalid_arguments:")
     assert "outside" in err
     assert "Traceback" not in err
     assert driver.calls["hover"] == []

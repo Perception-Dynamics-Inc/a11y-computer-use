@@ -948,6 +948,79 @@ def _windows_all_spaces(bundle: str, *, with_titles: bool = False) -> list:
     return out
 
 
+_WINDOW_METHODS: dict[WindowVerb, str] = {
+    WindowVerb.RAISE: "raise_window",
+    WindowVerb.FOCUS: "focus_window",
+    WindowVerb.MINIMIZE: "minimize_window",
+    WindowVerb.MAXIMIZE: "maximize_window",
+    WindowVerb.MOVE: "move_window",
+    WindowVerb.RESIZE: "resize_window",
+    WindowVerb.CLOSE: "close_window",
+}
+
+_WINDOW_PAST: dict[WindowVerb, str] = {
+    WindowVerb.RAISE: "raised",
+    WindowVerb.FOCUS: "focused",
+    WindowVerb.MINIMIZE: "minimized",
+    WindowVerb.MAXIMIZE: "maximized",
+    WindowVerb.CLOSE: "closed",
+}
+
+
+def _same_window_app(requested: str, resolved: str) -> bool:
+    """Whether ``resolved`` is the same app ``requested`` named, not a substring.
+
+    Equal ignoring case. A macOS bundle id matches its last component
+    (``TextEdit`` and ``com.apple.TextEdit``). A Linux launcher name matches
+    the comm it drops to (``google-chrome`` and ``chrome``) or a comm cut at
+    15 bytes. ``mouse`` is not ``mousepad``, and an empty name is not anything.
+    """
+    req = requested.strip()
+    res = resolved.strip()
+    if not req or not res:
+        return False
+    if req.lower() == res.lower():
+        return True
+    if "." in res and req.lower() == res.rsplit(".", 1)[-1].lower():
+        return True
+    if req.lower().endswith("-" + res.lower()):
+        return True
+    return len(res) == 15 and len(req) > 15 and req.lower().startswith(res.lower())
+
+
+def _window_app_exact(row: dict, bundle: str) -> bool:
+    """True when the row's app id is ``bundle``, ignoring case.
+
+    An empty app id never matches. A name that only contains the other, or
+    that the other only contains, does not match, except a macOS owner name
+    and the bundle id whose last component is that name.
+    """
+    row_app = str(row.get("bundle") or row.get("app") or "").strip()
+    wanted = str(bundle or "").strip()
+    if not row_app or not wanted:
+        return False
+    if row_app.lower() == wanted.lower():
+        return True
+    if "." in wanted and row_app.lower() == wanted.rsplit(".", 1)[-1].lower():
+        return True
+    if "." in row_app and wanted.lower() == row_app.rsplit(".", 1)[-1].lower():
+        return True
+    return False
+
+
+def _window_row(row: dict) -> dict:
+    """A list row that keeps a driver's ``on_screen`` flag.
+
+    Rows that never set the flag are on the current Space's window list, so
+    they are on screen. A minimized window that already says ``on_screen``
+    false stays false, and its bounds stay whatever the driver reported.
+    """
+    out = dict(row)
+    if "on_screen" not in out:
+        out["on_screen"] = True
+    return out
+
+
 def _window_titles_all_spaces(pid: int) -> list[str] | None:
     """Titles of ``pid``'s ordinary windows on every Space (CGWindowList with
     kCGWindowListOptionAll), or None off macOS. The on-screen list and the
@@ -3318,17 +3391,31 @@ class Runtime:
         return json.dumps(result)
 
     @_serialized
-    def window(self, action: str, window_id: int | None = None, app: str | None = None) -> str:
-        verb = WindowVerb(action)
+    def window(
+        self, action: str, window_id: int | None = None, app: str | None = None,
+        x: int | None = None, y: int | None = None,
+        width: int | None = None, height: int | None = None,
+    ) -> str:
+        try:
+            verb = WindowVerb(str(action))
+        except ValueError:
+            names = ", ".join(item.value for item in WindowVerb)
+            raise ValueError(f"window action must be one of: {names}") from None
         if verb is WindowVerb.LIST:
             if app is not None:
                 # Listing X's windows is an observation of X: gate against X's
-                # read grant and return only its rows.
-                _running, bundle = self._resolve_app(app)
+                # read grant and return only its rows. The match is the app id
+                # exactly, case-insensitive. An empty app name (a window whose
+                # owner could not be read) is not a match for any filter, and a
+                # name that is only a substring of another app is not a match.
+                requested = str(app).strip()
+                _running, resolved = self._resolve_app(app)
+                # A substring hit inside resolve (``mouse`` → ``mousepad``) is
+                # not this filter. Gate and match the caller's name unless it
+                # is the same app (case, bundle-id tail, or launcher alias).
+                bundle = resolved if _same_window_app(requested, resolved) else requested
                 rows = self._run_gated(WindowOp(verb=verb), bundle, self.driver.windows)
-                rows = [{**r, "on_screen": True} for r in rows
-                        if str(r.get("bundle") or r.get("app") or "") == bundle
-                        or str(r.get("bundle") or r.get("app") or "").lower() in bundle.lower()]
+                rows = [_window_row(r) for r in rows if _window_app_exact(r, bundle)]
                 if not rows:  # the app's windows on other Spaces: the snapshot can still read them (#13)
                     rows = [{"window_id": wid, "app": bundle, "title": title, "on_screen": False,
                              "bounds": {"display_id": b.display_id, "x": b.x, "y": b.y,
@@ -3336,36 +3423,81 @@ class Runtime:
                             for wid, b, title in _windows_all_spaces(bundle, with_titles=True)]
                 return json.dumps(rows)
             rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
-            return json.dumps(rows)
-        if verb is not WindowVerb.RAISE:
-            raise ValueError(
-                "window supports 'list' and 'raise' in the MVP (move/resize/minimize land later)"
+            return json.dumps([_window_row(r) for r in rows])
+        platform = str(getattr(self.driver, "name", None) or "this platform")
+        method_name = _WINDOW_METHODS.get(verb)
+        method = getattr(self.driver, method_name, None) if method_name else None
+        if method is None:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"window {verb.value} is not supported on {platform}",
+                detail={"platform": platform, "verb": verb.value},
             )
         if window_id is None:
-            raise ValueError("window raise requires window_id")
-        # Through the driver seam: the owner (the grant key) is resolved first so
-        # the gate checks the right app, then the raise itself runs gated. macOS
-        # activates the owning app (per-window AXRaise needs the private
-        # CGWindowID<->AXUIElement bridge); Linux sends _NET_ACTIVE_WINDOW to the
-        # window; the browser and Windows return a structured `unsupported`.
-        owner = self.driver.window_owner(window_id)
-        op = WindowOp(verb=verb, window_id=window_id)
-        def raise_it() -> None:
-            self._guard_user(owner)
-            self.driver.raise_window(window_id)
+            raise ValueError(f"window {verb.value} requires window_id")
+        if verb is WindowVerb.MOVE and (x is None or y is None):
+            raise ValueError("window move requires x and y")
+        if verb is WindowVerb.RESIZE and (width is None or height is None):
+            raise ValueError("window resize requires width and height")
+        if verb is WindowVerb.RESIZE and (int(width) < 1 or int(height) < 1):
+            raise ValueError("window resize requires a positive width and height")
+        # The owner is the grant key. An empty name is not a grant target:
+        # asking the user to grant "" is the bug this rejects.
+        owner = self.driver.window_owner(int(window_id))
+        owner_name = str(owner or "").strip()
+        if not owner_name:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"window {window_id}: the owning app could not be identified",
+                detail={
+                    "window_id": int(window_id),
+                    "reason": "owner_unknown",
+                    "platform": platform,
+                    "hint": "There is no app name for this window, so there is nothing to grant.",
+                },
+            )
+        position = Point(display_id=0, x=int(x), y=int(y)) if verb is WindowVerb.MOVE else None
+        size = (int(width), int(height)) if verb is WindowVerb.RESIZE else None
+        op = WindowOp(verb=verb, window_id=int(window_id), position=position, size=size)
 
-        self._run_gated(op, owner, raise_it)
-        return f"raised window {window_id} ({owner})"
+        def act() -> None:
+            self._guard_user(owner_name)
+            if verb is WindowVerb.MOVE:
+                method(int(window_id), int(x), int(y))
+            elif verb is WindowVerb.RESIZE:
+                method(int(window_id), int(width), int(height))
+            else:
+                method(int(window_id))
+
+        self._run_gated(op, owner_name, act)
+        if verb is WindowVerb.MOVE:
+            return f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
+        if verb is WindowVerb.RESIZE:
+            return f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
+        past = _WINDOW_PAST[verb]
+        return f"{past} window {window_id} ({owner_name})"
 
     @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
         verb = ClipboardVerb(action)
+        if verb is ClipboardVerb.WRITE:
+            # Before any driver call: a lone surrogate must be invalid_arguments
+            # on the CLI and over MCP, with no traceback and no clipboard tool.
+            if text is None:
+                raise ValueError("clipboard write requires text")
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "clipboard text must be valid Unicode; a lone surrogate cannot be encoded as UTF-8"
+                ) from exc
         app = self._frontmost()
         if verb is ClipboardVerb.READ:
             content = self._run_gated(ClipboardOp(verb=verb), app, self.driver.read_clipboard)
+            # None is a backend that does not expose the clipboard (the browser).
+            # Linux raises a structured error instead of returning None for a
+            # missing tool, non-text data, invalid UTF-8, or no owner.
             return content if content is not None else ""
-        if text is None:
-            raise ValueError("clipboard write requires text")
         self._run_gated(ClipboardOp(verb=verb, text=text), app,
                         lambda: self.driver.write_clipboard(text))
         return f"wrote {len(text)} characters to the clipboard"
@@ -4093,22 +4225,45 @@ def build_server(
         return await run(runtime.app, action, name, activate)
 
     @server.tool(name="window")
-    async def window(action: str, window_id: int | None = None, app: str | None = None) -> str:
-        """Window verbs: action='list' returns on-screen windows as JSON
-        (window_id, app, pid, title, bounds; titles are empty without the
-        Screen Recording grant). With app=X, 'list' returns only X's windows
-        and is gated against X (tier read) instead of the frontmost app. bounds are {display_id, x, y, width, height}
-        in that display's physical pixels — the same space click/scroll/drag
-        take — or null for offscreen windows. 'raise' brings window_id's app
-        frontmost; raise is gated at tier 'click' against the owning app."""
-        return await run(runtime.window, action, window_id, app)
+    async def window(
+        action: str, window_id: int | None = None, app: str | None = None,
+        x: int | None = None, y: int | None = None,
+        width: int | None = None, height: int | None = None,
+    ) -> str:
+        """Window verbs: list, raise, focus, minimize, maximize, move, resize,
+        close. action='list' returns windows as JSON (window_id, app, pid,
+        title, bounds, on_screen). With app=X, 'list' returns only the windows
+        whose app id equals X, case-insensitive, and is gated against X (tier
+        read) instead of the frontmost app. A window with no app id never
+        matches a filter. An app that is not running returns an empty list.
+        A minimized window (iconic or hidden) has on_screen false. bounds are
+        {display_id, x, y, width, height} in that display's physical pixels —
+        the same space click/scroll/drag take — or null when the driver has no
+        rect (a minimized Linux window). raise, focus, minimize, maximize,
+        move, resize, and close are gated at tier 'click' against the owning
+        app, the same grant as raise. move requires x and y; resize requires
+        width and height. On Linux X11 those verbs send EWMH or ICCCM client
+        messages. A backend that cannot perform a verb returns unsupported and
+        names the platform. A window whose owner cannot be identified returns
+        unsupported with reason owner_unknown; that error does not ask for a
+        grant of an empty app name."""
+        return await run(runtime.window, action, window_id, app, x, y, width, height)
 
     @server.tool(name="clipboard")
     async def clipboard(action: str, text: str | None = None) -> str:
         """Clipboard access: action='read' returns the current text (tier
         'read'); action='write' sets it from text (tier 'full' — pasting is a
         typing path). Gated against the frontmost app. The clipboard is
-        cross-app: reads may return content copied from any app."""
+        cross-app: reads may return content copied from any app. On Linux the
+        read is the text target's bytes decoded as UTF-8, so CR and CRLF stay
+        as they were. A text target that exists and holds zero bytes returns
+        "". There is no silent empty string for the other cases: no xclip,
+        xsel, or wl-paste installed (unsupported, reason missing_clipboard_tool,
+        and the same error on write); only non-text data such as an image
+        (clipboard_not_text); text that is not valid UTF-8 (clipboard_invalid_utf8);
+        or no clipboard owner / no text target (clipboard_no_owner). A lone
+        surrogate in write is invalid_arguments. The browser backend does not
+        expose the clipboard and its read is still ""."""
         return await run(runtime.clipboard, action, text)
 
     @server.tool(name="menu")

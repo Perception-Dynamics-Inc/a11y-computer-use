@@ -67,6 +67,15 @@ def fake_ewmh(monkeypatch):
     return display
 
 
+def test_plain_windows_stay_on_screen_when_atoms_are_names(fake_ewmh) -> None:
+    """intern_atom returns the atom name in these fakes. That must not throw
+    out of the window list or mark a normal window minimized."""
+    rows = {row["window_id"]: row for row in _linux_system.windows()}
+    assert rows[0x20]["app"] == "python3"
+    assert rows[0x20]["on_screen"] is True
+    assert rows[0x20]["bounds"] == {"display_id": 0, "x": 158, "y": 50, "width": 400, "height": 200}
+
+
 def test_window_geometry_is_reported_in_root_coordinates(fake_ewmh) -> None:
     app = fake_ewmh.create_resource_object("window", 0x20)
     assert _linux_system._geometry_on_root(app, fake_ewmh) == (158, 50, 400, 200)
@@ -362,3 +371,44 @@ def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
     assert exc.value.detail["app"] == "xfce4-terminal"
     assert "xfce4-terminal" in exc.value.message
     assert "activated" not in exc.value.message
+
+
+def test_pidless_windows_use_wm_class_and_minimized_windows_are_off_screen(monkeypatch) -> None:
+    """No _NET_WM_PID: the app id is the WM_CLASS instance. Iconic or hidden
+    windows report on_screen false and no bounds."""
+
+    class _PropWin(_FakeXWin):
+        def __init__(self, wid, pid, props, x=10, y=20, w=100, h=80):
+            super().__init__(wid, x, y, w, h, pid)
+            self.props = props
+
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_PID":
+                return _NS(value=[self.pid]) if self.pid else None
+            if atom in self.props:
+                return _NS(value=self.props[atom])
+            return None
+
+    mousepad = _PropWin(1, pid=11, props={})
+    xmessage = _PropWin(2, pid=0, props={"WM_CLASS": b"xmessage\x00Xmessage\x00"})
+    nameless = _PropWin(3, pid=0, props={})
+    iconic = _PropWin(4, pid=11, props={"WM_STATE": [3, 0]})
+    hidden = _PropWin(5, pid=11, props={"_NET_WM_STATE": ["_NET_WM_STATE_HIDDEN"]})
+    root = _FakeXRoot([mousepad, xmessage, nameless, iconic, hidden])
+    by_id = {w.id: w for w in (mousepad, xmessage, nameless, iconic, hidden)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "mousepad" if pid == 11 else None)
+    rows = {row["window_id"]: row for row in _linux_system.windows()}
+    assert rows[1]["app"] == "mousepad" and rows[1]["on_screen"] is True
+    assert rows[2]["app"] == "xmessage" and rows[2]["pid"] == 0 and rows[2]["on_screen"] is True
+    assert rows[3]["app"] == "" and rows[3]["on_screen"] is True
+    assert rows[4]["on_screen"] is False and rows[4]["bounds"] is None
+    assert rows[5]["on_screen"] is False and rows[5]["bounds"] is None
+    assert _linux_system.window_owner(2) == "xmessage"
+    assert _linux_system.window_owner(3) == ""
+    assert _linux_system.resolve_app("xmessage") == "xmessage"

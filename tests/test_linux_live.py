@@ -229,14 +229,21 @@ def test_linux_forces_a11y_status() -> None:
 
 def _pointer_xy():
     """Current pointer position from the X server (None if Xlib is unavailable)."""
+    d = None
     try:
         from Xlib import display as _xd
 
-        root = _xd.Display().screen().root
-        q = root.query_pointer()
+        d = _xd.Display()
+        q = d.screen().root.query_pointer()
         return int(q.root_x), int(q.root_y)
     except Exception:  # pragma: no cover - environment guard
         return None
+    finally:
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
 
 
 def test_linux_coordinate_click_lands_with_pointer_away_from_origin(tmp_path) -> None:
