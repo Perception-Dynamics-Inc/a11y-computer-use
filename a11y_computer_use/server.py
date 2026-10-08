@@ -1428,6 +1428,42 @@ class Runtime:
                 return ident
         return None
 
+    def _alt_menu_letter(self, chord: str) -> str | None:
+        """The letter of an ``alt+s`` chord, or None for any other chord."""
+        parts = [part.strip().lower() for part in str(chord).split("+") if part.strip()]
+        if len(parts) == 2 and parts[0] == "alt" and len(parts[1]) == 1 and parts[1].isalpha():
+            return parts[1]
+        return None
+
+    def _open_mnemonic_menu(self, app: str, chord: str) -> bool:
+        """Open the top-level menu ``alt+letter`` names, when one is already open.
+
+        True when that menu was pressed and the chord must not also be sent.
+        A missing menu, or a letter that names the menu already open, is False
+        so the chord is delivered into the open menu.
+        """
+        letter = self._alt_menu_letter(chord)
+        if letter is None or not self._menu_is_open(app):
+            return False
+        finder = getattr(self.driver, "menu_mnemonic", None)
+        if not callable(finder):
+            return False
+        try:
+            title = finder(app, letter)
+            state = self.driver.menu_state(app)
+        except (ComputerUseError, NotImplementedError, OSError, AttributeError):
+            return False
+        if not title:
+            return False
+        current = ""
+        path = state.get("path") if isinstance(state, dict) else None
+        if path:
+            current = str(path[0])
+        if current.lower() == str(title).lower():
+            return False
+        self.driver.menu_press(app, str(title))
+        return True
+
     def _recheck_key_target(self, app: str) -> None:
         """The focus gate for ``key``.
 
@@ -2820,7 +2856,13 @@ class Runtime:
 
         def execute() -> None:
             self._guard_user(target)
-            self.driver.key_chord(chord)
+            # Alt+letter while a menu is open is the menu bar's mnemonic, not
+            # a key for the menu that is already up. Sending it into Edit
+            # leaves Edit open. Pressing the matching top-level menu switches
+            # to it. A letter that is not a different top-level mnemonic is
+            # still delivered as a chord.
+            if not self._open_mnemonic_menu(target, chord):
+                self.driver.key_chord(chord)
 
         self._run_gated(action, target, execute, recheck=self._recheck_key_target)
         return f"pressed {chord}{''.join(note)}"
@@ -3391,17 +3433,24 @@ class Runtime:
         Returns its title (possibly empty without the Screen Recording grant),
         or None when nothing appeared within ``timeout_s`` and this launch has
         no process handle (macOS and Windows). A Linux handle that exits
-        before a window appears is an error immediately, with the exit code,
-        unless it is a launcher (``gtk-launch``, ``xdg-open``, ``gio``) that
-        exited 0: that process is not the app. A handle that stays up and
+        with a non-zero status before a window appears is an error
+        immediately, with that exit code. Exit 0 is the same error when no
+        window of the app exists (``true``). When a window of the app is
+        already up, exit 0 is a hand-off to that instance: the wait continues
+        until a new window appears or an existing one is retitled, and only
+        then, if the deadline passes with neither, is it ``process_exited``.
+        A launcher (``gtk-launch``, ``xdg-open``, ``gio``) that exited 0 is
+        not the app. A handle that stays up and
         never shows a matching window is ``timeout``, not a success. Off
         macOS the app id is the process comm, which only exists once the app
         has a window, so an unresolved id (the identifier echoed back) is
         retried each poll."""
         handle = getattr(self, "_launch_handle", None)
         before = set(getattr(self, "_launch_before", None) or ())
+        before_titles = dict(getattr(self, "_launch_before_titles", None) or {})
         self._launch_handle = None
         self._launch_before = None
+        self._launch_before_titles = None
         deadline = time.monotonic() + timeout_s
         bundle: str | None = None
         _running = None
@@ -3417,14 +3466,26 @@ class Runtime:
                 rows = []
             pid_title = None
             name_title = None
+            changed_title = None
             for row in rows:
                 if not isinstance(handle, dict):
                     if self._app_matches(row, identifier, bundle):
                         return str(row.get("title") or "")
                     continue
+                title = str(row.get("title") or "")
+                wid = row.get("window_id")
+                # A single-instance app hands off to the process that already
+                # owns the window and exits 0. The window id does not change;
+                # the title does (Untitled 1 becomes Untitled 2). That retitle
+                # is the window this launch opened.
+                if (
+                    wid in before
+                    and before_titles.get(wid) != title
+                    and self._launch_window(row, identifier, bundle, handle, set())
+                ):
+                    changed_title = title
                 if not self._launch_window(row, identifier, bundle, handle, before):
                     continue
-                title = str(row.get("title") or "")
                 child = handle.get("pid")
                 row_pid = row.get("pid")
                 try:
@@ -3440,6 +3501,8 @@ class Runtime:
                 return pid_title
             if isinstance(handle, dict) and name_title is not None:
                 return name_title
+            if isinstance(handle, dict) and changed_title is not None:
+                return changed_title
             if bundle and _running is not None and not isinstance(handle, dict):
                 # windows on another Space are not "on screen"
                 pid = int(getattr(_running, "processIdentifier", lambda: 0)() or 0)
@@ -3454,7 +3517,24 @@ class Runtime:
                         code = proc.poll()
                     except Exception:
                         code = None
-                if code is not None and not (handle.get("is_launcher") and code == 0):
+                if code is not None and code != 0:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{identifier} exited with status {code} before a window appeared",
+                        detail={"app": identifier, "reason": "process_exited", "exit_code": code},
+                    )
+                # Exit 0 from gtk-launch is not the app. Exit 0 from the app
+                # itself is a hand-off when a window of that app is already
+                # up: keep waiting for a new window or a retitle. Exit 0 with
+                # no such window (`true`) fails on this look.
+                if (
+                    code == 0
+                    and not handle.get("is_launcher")
+                    and not any(
+                        self._launch_window(row, identifier, bundle, handle, set())
+                        for row in rows
+                    )
+                ):
                     raise ComputerUseError(
                         ErrorCode.UNSUPPORTED,
                         f"{identifier} exited with status {code} before a window appeared",
@@ -3462,6 +3542,19 @@ class Runtime:
                     )
             if time.monotonic() >= deadline:
                 if isinstance(handle, dict):
+                    code = None
+                    proc = handle.get("proc")
+                    if proc is not None and hasattr(proc, "poll"):
+                        try:
+                            code = proc.poll()
+                        except Exception:
+                            code = None
+                    if code == 0 and not handle.get("is_launcher"):
+                        raise ComputerUseError(
+                            ErrorCode.UNSUPPORTED,
+                            f"{identifier} exited with status {code} before a window appeared",
+                            detail={"app": identifier, "reason": "process_exited", "exit_code": code},
+                        )
                     raise ComputerUseError(
                         ErrorCode.TIMEOUT,
                         f"launched {identifier}; no window appeared within {timeout_s:.0f}s",
@@ -3524,11 +3617,19 @@ class Runtime:
 
             def launch() -> str | None:
                 before: list = []
+                before_titles: dict = {}
                 if not self._resolves_apps():
                     try:
-                        before = [row.get("window_id") for row in self.driver.windows()]
+                        rows = list(self.driver.windows() or [])
                     except (ComputerUseError, AttributeError):
-                        before = []
+                        rows = []
+                    before = [
+                        row.get("window_id") for row in rows if isinstance(row, dict)
+                    ]
+                    before_titles = {
+                        row.get("window_id"): str(row.get("title") or "")
+                        for row in rows if isinstance(row, dict)
+                    }
                 if getattr(self.driver, "background_input", False):
                     handle = self.driver.launch_app(name, activate=activate if activate is not None
                                            else FOCUS_MODE != "background")
@@ -3540,6 +3641,7 @@ class Runtime:
                 # second window of an app that was already running distinct.
                 self._launch_handle = handle if isinstance(handle, dict) else None
                 self._launch_before = before
+                self._launch_before_titles = before_titles
                 if self._resolves_apps():
                     return None
                 return self._wait_first_window(name, self.APP_LAUNCH_WAIT_S)
@@ -4429,9 +4531,10 @@ def build_server(
         With app=<bundle id or name> (macOS) the chord is addressed to that
         app's process without activating it (the user's screen stays put);
         without app it goes to the frontmost app. An open menu of that app
-        receives the chord and is not closed first: arrows, Return, and
-        alt+letter navigate and activate the menu, and Return does not reach
-        the document. A different frontmost app is still focus_changed. The
+        receives the chord and is not closed first: arrows and Return
+        navigate and activate the menu, and Return does not reach the
+        document. alt+letter while a different top-level menu is open
+        switches to the menu with that mnemonic. A different frontmost app is still focus_changed. The
         app's own open menu counts as the key target, including when the
         frontmost name is empty. Gated at tier 'full'."""
         return await run(runtime.key, chord, app)
@@ -4582,7 +4685,11 @@ def build_server(
         appears fails immediately with that exit code and does not wait 60 s.
         An absolute path matches the window by pid, by the binary's basename
         or WM_CLASS, or by the desktop file's exec or StartupWMClass, and the
-        result is the window that appeared. Success requires that window. A
+        result is the window that appeared. focus of that same path resolves
+        to the running app the same way. A second launch of an app that is
+        already running waits for the new window, or for the existing window's
+        title to change, instead of treating the hand-off process's exit 0 as
+        a failure. Success requires that window. A
         launcher such as gtk-launch exiting 0 is not the app exiting.
         'quit' sends the quit chord and reports a save-changes dialog (an
         AT-SPI dialog or alert, or a dialog window) instead of "still running".
@@ -4656,9 +4763,10 @@ def build_server(
         ellipsis ignored, unique prefixes accepted). action='list' returns the
         items of the menu at path as JSON (title, enabled, shortcut, submenu,
         checked); omit path to list the top-level menus. action='state' reports
-        whether a menu is open and its path; action='close' dismisses it (an
-        open menu swallows key chords; click/type/key close one automatically
-        and say so). On Linux, close sends Escape and errors if the menu is
+        whether a menu is open and its path; action='close' dismisses it.
+        click and type close an open menu first and say so. key does not:
+        the chord is delivered to the open menu. alt+letter while a menu is
+        open switches to the top-level menu with that mnemonic. On Linux, close sends Escape and errors if the menu is
         still open, and a listed shortcut is the accelerator (a tagged chord
         or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or

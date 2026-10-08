@@ -351,6 +351,52 @@ def _is_open(node: object) -> bool:
     )
 
 
+def _mnemonic_letter(node: object) -> str:
+    """The menu item's mnemonic letter, from the AT-SPI key binding.
+
+    GTK stores ``f;<Alt>f`` on a File menu. The first field is that letter.
+    A binding that does not start with a single letter has no mnemonic here.
+    """
+    raw = _key_binding(node)
+    if not raw:
+        return ""
+    first = str(raw).split(";", 1)[0].strip()
+    if len(first) == 1 and first.isalpha():
+        return first.lower()
+    return ""
+
+
+def menu_mnemonic(app: object, letter: str) -> str | None:
+    """Title of the top-level menu whose mnemonic is ``letter``, or None.
+
+    The key binding wins. When no binding names the letter, a single top-level
+    title that starts with it is used (Search for ``s``). Two titles that
+    share that initial are not a guess.
+    """
+    wanted = (letter or "").strip().lower()
+    if len(wanted) != 1 or not wanted.isalpha():
+        return None
+    try:
+        bar = _require_bar(app)
+    except ComputerUseError:
+        return None
+    bound: list[str] = []
+    firsts: list[str] = []
+    for node in entries_of(bar):
+        title = _name(node).strip()
+        if not title:
+            continue
+        if _mnemonic_letter(node) == wanted:
+            bound.append(title)
+        if title[0].lower() == wanted:
+            firsts.append(title)
+    if len(bound) == 1:
+        return bound[0]
+    if not bound and len(firsts) == 1:
+        return firsts[0]
+    return None
+
+
 def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, object]]:
     """Items of the menu at ``path`` (top-level menus when ``path`` is empty)."""
     settle = settle or _settle

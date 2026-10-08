@@ -60,6 +60,9 @@ class _Node:
     def get_name(self):
         return self.name
 
+    def get_toolkit_name(self):
+        return getattr(self, "toolkit", "")
+
     def get_description(self):
         return ""
 
@@ -535,6 +538,48 @@ def test_runtime_reports_the_spin_value_that_was_held() -> None:
     assert runtime.set_value("e6", "4.6") == "set e6 = '5'"
 
 
+def test_empty_chrome_number_is_typed_and_zero_is_not_a_false_success(monkeypatch) -> None:
+    """An empty bounded number input is not 0 just because Value reads 0.0."""
+    number = _Node(
+        "spin button", "Guests", text="", value=0.0, minimum=0.0, maximum=10.0,
+        attrs={"tag": "input", "text-input-type": "number"},
+    )
+    number.hold_value = True
+    driver = _driver(monkeypatch, number)
+    typed: list[str] = []
+
+    def type_text(text, _node=number):
+        typed.append(text)
+        _node.text = text
+
+    monkeypatch.setattr(_atspi, "_type_string", type_text)
+    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    field = _element("e9", "AXTextField", "Guests", editable=True)
+    assert driver.set_value(field, "0") is True
+    assert number.text == "0"
+    assert typed == ["0"]
+    assert number.value_sets == []
+    assert number.value == 0.0
+
+    number.text = ""
+    assert driver.set_value(field, "7") is True
+    assert number.text == "7"
+    assert typed == ["0", "7"]
+
+    number.text = ""
+
+    def miss(text, _node=number):
+        typed.append("miss:" + text)
+
+    monkeypatch.setattr(_atspi, "_type_string", miss)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(field, "3")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert number.text == ""
+    assert number.value_sets == []
+    assert number.value == 0.0
+
+
 def test_slider_set_value_uses_the_value_interface(monkeypatch) -> None:
     slider = _Node("slider", "Volume", text=None, value=40.0, minimum=0.0, maximum=100.0)
     driver = _driver(monkeypatch, slider)
@@ -637,6 +682,53 @@ def test_chrome_list_click_that_does_not_select_is_not_success(monkeypatch) -> N
         driver.press_element(element)
     assert exc.value.detail["reason"] == "selection_unchanged"
     assert "SELECTED" not in cherry.states
+
+
+def _chrome_list():
+    apple = _Node("list item", "Apple", actions=["select"])
+    banana = _Node("list item", "Banana", states={"SELECTED"}, actions=["select"])
+    cherry = _Node("list item", "Cherry", actions=["select"])
+    box = _Node("list box", "Fruits", children=[apple, banana, cherry])
+    box.toolkit = "Chromium"
+    return box, apple, banana, cherry
+
+
+def test_chrome_list_row_is_selected_by_a_center_click(monkeypatch) -> None:
+    """The option select action is not used. A center click selects the row."""
+    box, _apple, banana, cherry = _chrome_list()
+    driver = _driver(monkeypatch, cherry)
+
+    def click(element, **_kwargs):
+        for child in box.children:
+            child.states.discard("SELECTED")
+        cherry.states.add("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Cherry", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" in cherry.states
+    assert cherry.action_log == []
+    assert banana.action_log == []
+
+
+def test_chrome_list_click_that_misses_restores_the_previous_selection(monkeypatch) -> None:
+    """A click that does not select must not leave the list empty."""
+    box, _apple, banana, cherry = _chrome_list()
+    driver = _driver(monkeypatch, cherry)
+
+    def click(element, **_kwargs):
+        for child in box.children:
+            child.states.discard("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Cherry", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert "SELECTED" in banana.states
+    assert "SELECTED" not in cherry.states
+    assert cherry.action_log == []
+    assert banana.action_log == []
 
 
 def test_chrome_list_option_click_still_selects(monkeypatch) -> None:
