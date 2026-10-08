@@ -3448,7 +3448,11 @@ class Runtime:
                 # exactly, case-insensitive. An empty app name (a window whose
                 # owner could not be read) is not a match for any filter, and a
                 # name that is only a substring of another app is not a match.
+                # An empty filter is a bad call: resolving "" used to ask for a
+                # grant of the empty name.
                 requested = str(app).strip()
+                if not requested:
+                    raise ValueError("window list app must be a non-empty app id")
                 _running, resolved = self._resolve_app(app)
                 # A substring hit inside resolve (``mouse`` → ``mousepad``) is
                 # not this filter. Gate and match the caller's name unless it
@@ -3462,7 +3466,10 @@ class Runtime:
                                         "width": b.width, "height": b.height}}
                             for wid, b, title in _windows_all_spaces(bundle, with_titles=True)]
                 return json.dumps(rows)
-            rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
+            front = self._frontmost()
+            if not str(front or "").strip() or front == "unknown":
+                return self._list_windows_without_focus()
+            rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
             return json.dumps([_window_row(r) for r in rows])
         platform = str(getattr(self.driver, "name", None) or "this platform")
         method_name = _WINDOW_METHODS.get(verb)
@@ -3516,6 +3523,44 @@ class Runtime:
             return f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
         past = _WINDOW_PAST[verb]
         return f"{past} window {window_id} ({owner_name})"
+
+    def _list_windows_without_focus(self) -> str:
+        """Unfiltered ``window list`` when nothing is focused.
+
+        Gating that call on the frontmost name asked for a grant of
+        ``unknown``. Return the windows whose owners already have a read
+        grant. A desktop with no windows is an empty list. Open windows and
+        no such grant is `unsupported` with reason ``no_focused_window``.
+        """
+        raw = [_window_row(row) for row in self.driver.windows()]
+        kept: list[dict] = []
+        audited: set[str] = set()
+        for row in raw:
+            owner = str(row.get("bundle") or row.get("app") or "").strip()
+            if not owner:
+                continue
+            decision = safety.check_action(
+                WindowOp(verb=WindowVerb.LIST), owner, store=self.store,
+            )
+            if not decision.allowed:
+                continue
+            kept.append(row)
+            if owner not in audited:
+                audited.add(owner)
+                self.audit.record_action(
+                    WindowOp(verb=WindowVerb.LIST), app=owner, decision=decision, result="ok",
+                )
+        if kept or not raw:
+            return json.dumps(kept)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no focused window; an unfiltered window list includes only windows "
+            "whose app has a read grant, and none of the open windows do",
+            detail={
+                "reason": "no_focused_window",
+                "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
+            },
+        )
 
     @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
@@ -4101,8 +4146,10 @@ def build_server(
         for long text). With app=<bundle id or name> (macOS) the keystrokes are
         addressed to that app's process: it need not be frontmost, nothing is
         activated, and the user's screen stays where it is; prefer this over
-        `app focus` + type. Without app: the frontmost app. On Linux, text
-        goes in at the caret and replaces a selection; a CRLF is one newline;
+        `app focus` + type.         Without app: the frontmost app. On Linux, text
+        goes in at the caret and replaces a selection, including after a
+        coordinate click that did not remember a ref: the focused editable is
+        looked up and inserted with the same helper. A CRLF is one newline;
         the reported count is the number of characters the field read back,
         and a mismatch is an error rather than success. Gated at tier
         'full' against the target app; refuses with secure_field when a
@@ -4280,19 +4327,26 @@ def build_server(
         close. action='list' returns windows as JSON (window_id, app, pid,
         title, bounds, on_screen). With app=X, 'list' returns only the windows
         whose app id equals X, case-insensitive, and is gated against X (tier
-        read) instead of the frontmost app. A window with no app id never
-        matches a filter. An app that is not running returns an empty list.
-        A minimized window (iconic or hidden) has on_screen false. bounds are
-        {display_id, x, y, width, height} in that display's physical pixels —
-        the same space click/scroll/drag take — or null when the driver has no
-        rect (a minimized Linux window). raise, focus, minimize, maximize,
-        move, resize, and close are gated at tier 'click' against the owning
-        app, the same grant as raise. move requires x and y; resize requires
-        width and height. On Linux X11 those verbs send EWMH or ICCCM client
-        messages. A backend that cannot perform a verb returns unsupported and
-        names the platform. A window whose owner cannot be identified returns
-        unsupported with reason owner_unknown; that error does not ask for a
-        grant of an empty app name."""
+        read) instead of the frontmost app. An empty app is invalid_arguments.
+        A window with no app id never matches a filter. An app that is not
+        running returns an empty list. With no focused window, an unfiltered
+        list returns only windows whose app already has a read grant. When
+        windows are open and none of them are granted, the error is
+        unsupported with reason no_focused_window. It does not ask for a
+        grant of 'unknown'. A minimized window (iconic or hidden) has
+        on_screen false. bounds are {display_id, x, y, width, height} in that
+        display's physical pixels — the same space click/scroll/drag take —
+        or null when the driver has no rect (a minimized Linux window). On
+        Linux, bounds and move's x,y are the client window (inside the frame),
+        not the outer frame. A move to (100, 80) lists the client at
+        (100, 80). raise, focus, minimize, maximize, move, resize, and close
+        are gated at tier 'click' against the owning app, the same grant as
+        raise. move requires x and y; resize requires width and height. On
+        Linux X11 those verbs send EWMH or ICCCM client messages. A backend
+        that cannot perform a verb returns unsupported and names the platform.
+        A window whose owner cannot be identified returns unsupported with
+        reason owner_unknown; that error does not ask for a grant of an empty
+        app name."""
         return await run(runtime.window, action, window_id, app, x, y, width, height)
 
     @server.tool(name="clipboard")

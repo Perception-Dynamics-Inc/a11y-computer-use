@@ -686,13 +686,15 @@ class LinuxDriver:
                   dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
 
-        Primary path: AT-SPI EditableText on the element last focused via
-        press_element, provided its owner is the current frontmost app. Text
-        is inserted at the caret and replaces a selection. The return value
-        is the number of characters the field read back. A mismatch raises
-        instead of reporting success. Falls back to synthetic XTEST keystrokes
-        when no editable was focused through the driver (e.g. the vision path).
-        A CRLF is one newline on both paths.
+        Primary path: AT-SPI EditableText. A ref click remembers the element.
+        A coordinate click does not, so this looks up the focused accessible
+        of the frontmost app and uses the same `insert_text` helper: UTF-8
+        byte length on the GI binding, insert at the caret, replace a
+        selection, and return the character count read back. A mismatch
+        raises instead of reporting success. Falls back to synthetic XTEST
+        keystrokes when that lookup finds no EditableText (Chrome's ATK
+        objects, or a click that focused nothing editable). A CRLF is one
+        newline on both paths.
         """
         if dry_run or not text:
             return None
@@ -716,6 +718,14 @@ class LinuxDriver:
                     "focus the intended field again or use set_value with its ref",
                     detail={"editable_app": owner, "frontmost_app": app_id},
                 )
+        else:
+            app_id, _pid = self.frontmost_app()
+            if app_id:
+                handle = self._run(lambda: _atspi.focused_editable(app_id))
+                if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
+                    raise _secure_focus_error(
+                        "AT-SPI STATE_FOCUSED on a 'password text' node"
+                    )
         if handle is not None:
             inserted = self._run(lambda: _atspi.insert_text(handle, text))
             if isinstance(inserted, int) and not isinstance(inserted, bool):
@@ -922,7 +932,12 @@ class LinuxDriver:
         self._ewmh(window_id, "maximize_window", lambda sys: sys.maximize_window(window_id))
 
     def move_window(self, window_id: int, x: int, y: int) -> None:
-        """``_NET_MOVERESIZE_WINDOW`` with the X and Y flags."""
+        """Place the client window's top-left at (x, y).
+
+        The same origin ``windows`` reports. The outer frame is shifted by
+        ``_NET_FRAME_EXTENTS`` so a decorated window does not list a few
+        pixels down and to the right of the point that was asked for.
+        """
         self._ewmh(window_id, "move_window", lambda sys: sys.move_window(window_id, x, y))
 
     def resize_window(self, window_id: int, width: int, height: int) -> None:

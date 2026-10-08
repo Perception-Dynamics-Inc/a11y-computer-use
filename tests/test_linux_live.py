@@ -27,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
-from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Point, Scope  # noqa: E402
 
 _APP = "cuatestapp"
 
@@ -468,6 +468,32 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
             driver.menu_press(_TYPE_APP, "Edit > Undo")
         assert exc.value.detail["reason"] == "disabled"
         assert driver.menu_state(_TYPE_APP) == {"open": False, "path": []}
+
+        def click_then_type(sample: str) -> str:
+            live = driver.resolve_ref(snap, single.ref)
+            assert driver.set_value(live, "")
+            fresh = next(el for el in driver.snapshot(Scope.WINDOW, _TYPE_APP).elements if el.title == "single")
+            box = fresh.bounds
+            assert box is not None
+            driver.click(Point(box.display_id, box.x + box.width // 2, box.y + max(box.height // 2, 1)))
+            assert driver._focused_editable is None
+            deadline = time.monotonic() + 5
+            focused = False
+            while time.monotonic() < deadline:
+                now = next(
+                    el for el in driver.snapshot(Scope.WINDOW, _TYPE_APP).elements if el.title == "single"
+                )
+                if now.focused:
+                    focused = True
+                    break
+                time.sleep(0.1)
+            assert focused, "the coordinate click did not focus the entry"
+            count = driver.type_text(sample)
+            assert count == len(sample), count
+            return _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single")
+
+        for sample in ("Привет", "中文字", "ok 😀", "ab ✓ ok"):
+            assert click_then_type(sample) == sample
     finally:
         proc.terminate()
         try:

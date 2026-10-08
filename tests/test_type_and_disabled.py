@@ -8,13 +8,14 @@ No display, no bus, no browser.
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 
 import pytest
 
 from a11y_computer_use import safety, server
 from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
 from a11y_computer_use.drivers.linux import LinuxDriver
-from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode, Scope, Snapshot, Display
+from a11y_computer_use.schema import Bounds, ComputerUseError, Element, ErrorCode, Point, Scope, Snapshot, Display
 
 
 class _Text:
@@ -187,6 +188,62 @@ def test_selection_that_cannot_be_deleted_is_not_then_appended(atspi) -> None:
     assert exc.value.detail["reason"] == "selection_not_replaced"
     assert field.text == "keep DROP keep"
     assert field.lengths == []
+
+
+def test_coordinate_click_types_through_the_focused_editable(atspi, monkeypatch) -> None:
+    """No remembered ref: look up the focused field and use insert_text."""
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    field = _ByteField()
+    typed: list[str] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("editor", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: field if app == "editor" else None)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: typed.append(text))
+    monkeypatch.setattr(_linux_input, "held", lambda modifiers: nullcontext())
+    clicks: list[tuple] = []
+    monkeypatch.setattr(_linux_input, "click", lambda *args, **kwargs: clicks.append((args, kwargs)))
+
+    driver._focused_editable = object()
+    driver.click(Point(0, 40, 12))
+    assert driver._focused_editable is None and clicks
+
+    for sample in ("Привет", "中文字", "ok 😀", "ab ✓ ok"):
+        field.text = ""
+        field.caret = 0
+        field.lengths = []
+        assert driver.type_text(sample) == len(sample)
+        assert field.text == sample
+        assert field.lengths == [len(sample.encode("utf-8"))]
+    assert typed == []
+
+    field.text = "world"
+    field.caret = 0
+    assert driver.type_text("hello ") == 6
+    assert field.text == "hello world"
+
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    assert driver.type_text("plain") == 5
+    assert typed == ["plain"]
+    assert field.text == "hello world"
+
+
+def test_focused_password_is_refused_before_insert_or_keys(atspi, monkeypatch) -> None:
+    driver = LinuxDriver()
+    field = _ByteField()
+    typed: list[str] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("editor", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: True)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: field)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: typed.append(text))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("secret")
+    assert exc.value.code is ErrorCode.SECURE_FIELD
+    assert field.text == "" and field.lengths == [] and typed == []
 
 
 def test_linux_type_uses_the_inserted_count_and_keeps_the_key_path(monkeypatch) -> None:

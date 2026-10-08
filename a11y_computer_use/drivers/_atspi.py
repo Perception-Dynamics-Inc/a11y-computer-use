@@ -712,6 +712,53 @@ def _focused_via_collection(root, Atspi, focused_state):
     return True, (hits[0] if hits else None)
 
 
+def _focused_node(app: str, *, max_nodes: int = 400):
+    """(focused accessible or None, truncated).
+
+    truncated is True when the walk stopped before it could tell whether
+    anything is focused. A Collection query that finds no focused node, a
+    missing app, and a full walk that meets no focused node are
+    ``(None, False)``.
+
+    AT-SPI has no global "focused accessible" getter (focus arrives as
+    events). The Collection interface answers in one round-trip where the
+    toolkit exposes it; otherwise the active top-level frame is walked
+    breadth-first, bounded by ``max_nodes``.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return None, False
+    Atspi = _atspi()
+    st = getattr(Atspi, "StateType", None)
+    focused_state = getattr(st, "FOCUSED", None)
+    if focused_state is None:
+        return None, False
+    found, acc = _focused_via_collection(root, Atspi, focused_state)
+    if found:
+        return acc, False
+    queue = [root]
+    seen = 0
+    truncated = False
+    while queue and seen < max_nodes:
+        acc = queue.pop(0)
+        seen += 1
+        sset = _call_first(acc, ("get_state_set",))
+        if sset is not None and _safe(lambda state=sset: state.contains(focused_state), False):
+            return acc, False
+        n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
+        if n > _MAX_CHILDREN_FETCH:
+            truncated = True
+        for j in range(min(n, _MAX_CHILDREN_FETCH)):
+            child = _call_first(acc, ("get_child_at_index",), j)
+            if child is not None:
+                queue.append(child)
+    if queue or truncated:
+        return None, True
+    return None, False
+
+
 def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     """Whether the keyboard-focused node of ``app``'s active window is a
     password field: True / False / None.
@@ -723,43 +770,33 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     (or a node had more than `_MAX_CHILDREN_FETCH` children) and no focused node
     was met, so focus is UNKNOWN; the caller must not type blind on None.
 
-    AT-SPI has no global "focused accessible" getter (focus arrives as events).
-    The Collection interface answers in one round-trip where the toolkit
-    exposes it; otherwise the active top-level frame is walked breadth-first,
-    bounded by ``max_nodes``. This is the check `LinuxDriver.type_text` runs
-    before the XTEST path, which types into whatever holds focus."""
-    from a11y_computer_use.schema import Scope
+    This is the check `LinuxDriver.type_text` runs before the XTEST path,
+    which types into whatever holds focus."""
+    acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    if truncated:
+        return None
+    if acc is None:
+        return False
+    return is_secure(acc)
 
-    root = find_root(app, Scope.WINDOW)
-    if root is None:
-        return False
-    Atspi = _atspi()
-    st = getattr(Atspi, "StateType", None)
-    focused_state = getattr(st, "FOCUSED", None)
-    if focused_state is None:
-        return False
-    found, acc = _focused_via_collection(root, Atspi, focused_state)
-    if found:
-        return is_secure(acc) if acc is not None else False
-    queue = [root]
-    seen = 0
-    truncated = False
-    while queue and seen < max_nodes:
-        acc = queue.pop(0)
-        seen += 1
-        sset = _call_first(acc, ("get_state_set",))
-        if sset is not None and _safe(lambda: sset.contains(focused_state), False):
-            return is_secure(acc)
-        n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
-        if n > _MAX_CHILDREN_FETCH:
-            truncated = True
-        for j in range(min(n, _MAX_CHILDREN_FETCH)):
-            child = _call_first(acc, ("get_child_at_index",), j)
-            if child is not None:
-                queue.append(child)
-    if queue or truncated:
-        return None  # bound exhausted: focus unknown, not "not secure"
-    return False
+
+def focused_editable(app: str, *, max_nodes: int = 400):
+    """The focused node when `type` can insert into it, else None.
+
+    A password field is returned so the caller can refuse it before any
+    write. None means there is no focused editable: nothing is focused, the
+    focused node has no EditableText, or the walk could not find focus. The
+    caller then uses keystrokes. The same node `insert_text` accepts, so a
+    coordinate click and a ref click share that helper.
+    """
+    acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    if truncated or acc is None:
+        return None
+    if is_secure(acc):
+        return acc
+    if _editable_iface(acc) is None:
+        return None
+    return acc
 
 
 def do_press(acc) -> bool:
