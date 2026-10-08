@@ -329,6 +329,100 @@ def test_grant_of_the_chrome_display_name_stores_the_process_comm(home, monkeypa
     assert safety.PermissionStore().get_tier("not-running-yet") is safety.Tier.CLICK
 
 
+def test_grant_list_marks_grants_a_deny_or_allow_list_blocks(home, capsys) -> None:
+    """Blocked grants are still grants. The list must not say none exist."""
+    store = safety.PermissionStore()
+    store.set_tier("mousepad", safety.Tier.FULL)
+    store.set_tier("gedit", safety.Tier.CLICK)
+    store.add_allow("xfce4-terminal")
+    assert cli.main(["grant"]) == 0
+    out = capsys.readouterr().out
+    assert "no apps granted" not in out
+    assert "mousepad\tfull\tblocked: not on the allow list" in out
+    assert "gedit\tclick\tblocked: not on the allow list" in out
+
+    path = home / ".a11y-computer-use" / "permissions.json"
+    data = json.loads(path.read_text())
+    data["deny"] = ["mousepad"]
+    data["allow"] = []
+    path.write_text(json.dumps(data))
+    assert cli.main(["grant"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "mousepad\tfull\tblocked: on the deny list" in lines
+    assert "gedit\tclick" in lines
+    assert all(not line.startswith("gedit\tclick\tblocked") for line in lines)
+
+
+def test_grant_list_on_a_broken_file_is_one_line_and_not_no_apps_granted(home, capsys) -> None:
+    path = home / ".a11y-computer-use" / "permissions.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    assert cli.main(["grant"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no apps granted" not in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1
+    assert "permission configuration is invalid or unreadable" in captured.err
+    assert str(path) in captured.err
+    assert path.read_text() == "{not json"
+
+
+def test_grant_and_revoke_on_a_broken_file_print_one_line_and_fail_closed(home, capsys) -> None:
+    path = home / ".a11y-computer-use" / "permissions.json"
+    path.parent.mkdir(parents=True)
+    broken = "{not json"
+    path.write_text(broken)
+    assert cli.main(["grant", "mousepad", "full"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1
+    assert "permission configuration is invalid or unreadable" in captured.err
+    assert f"repair {path} before changing grants" in captured.err
+    assert path.read_text() == broken
+    assert cli.main(["grant", "--revoke", "mousepad"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "revoked" not in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.err.count("\n") == 1
+    assert f"repair {path} before changing grants" in captured.err
+    assert path.read_text() == broken
+
+
+def test_grant_rejects_an_empty_app_name(home, capsys) -> None:
+    assert cli.main(["grant", "", "read"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "app identifier must be a non-empty string" in captured.err
+    assert "no apps granted" not in captured.err
+    path = home / ".a11y-computer-use" / "permissions.json"
+    assert not path.exists()
+    assert cli.main(["grant", "--revoke", ""]) == 2
+    captured = capsys.readouterr()
+    assert "revoked" not in captured.out
+    assert "revoked" not in captured.err
+    assert "app identifier must be a non-empty string" in captured.err
+
+
+def test_revoke_of_an_app_that_was_never_granted_does_not_say_revoked(home, capsys, monkeypatch) -> None:
+    """The stored id is what --revoke looks up. A live window must not rename it."""
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda ident: ident)
+    safety.PermissionStore().set_tier("mousepad", safety.Tier.READ)
+    assert cli.main(["grant", "--revoke", "never-granted-app"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "never-granted-app wasn't granted" in captured.err
+    assert "revoked" not in captured.err
+    assert safety.PermissionStore().get_tier("mousepad") is safety.Tier.READ
+    assert cli.main(["grant", "--revoke", "mousepad"]) == 0
+    assert capsys.readouterr().out.strip() == "revoked mousepad"
+    assert safety.PermissionStore().get_tier("mousepad") is None
+
+
 def test_keep_awake_runs_caffeinate_on_macos_and_stops_it(monkeypatch) -> None:
     calls: list = []
 

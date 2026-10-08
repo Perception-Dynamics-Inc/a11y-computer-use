@@ -416,14 +416,24 @@ class PermissionStore:
         if changed:
             self._load()
 
-    def policy(self, bundle_id: str) -> tuple[Tier | None, bool, str | None]:
-        """Return grant, denial, and config error from one coherent policy."""
+    def policy(self, bundle_id: str) -> tuple[Tier | None, bool, str | None, str | None]:
+        """Return grant, denial, config error, and list block from one policy.
+
+        The list block is ``"deny"`` when the app is on the deny list and
+        ``"allow"`` when a non-empty allow list does not include it. Deny
+        wins when both apply. A broken file denies every app and reports the
+        config error; the lists from that file are not kept.
+        """
         with self._lock:
             self._refresh()
-            denied = self._load_error is not None or bundle_id in self._deny or (
-                bool(self._allow) and bundle_id not in self._allow
-            )
-            return self._tiers.get(bundle_id), denied, self._load_error
+            if bundle_id in self._deny:
+                block: str | None = "deny"
+            elif self._allow and bundle_id not in self._allow:
+                block = "allow"
+            else:
+                block = None
+            denied = self._load_error is not None or block is not None
+            return self._tiers.get(bundle_id), denied, self._load_error, block
 
     def get_tier(self, bundle_id: str) -> Tier | None:
         """Granted tier for ``bundle_id``; None means ungranted ("ask")."""
@@ -436,6 +446,29 @@ class PermissionStore:
             self._refresh()
             return [app for app in self._tiers if not self.policy(app)[1]]
 
+    def grant_rows(self) -> list[tuple[str, Tier, str | None]]:
+        """Every stored grant, in config order, including ones a list blocks.
+
+        The third item is ``"on the deny list"``, ``"not on the allow list"``,
+        or None. A broken file raises ``ValueError`` naming ``path``; it is
+        not an empty grant list. ``granted_apps`` still returns only apps the
+        lists leave usable.
+        """
+        with self._lock:
+            self._refresh()
+            if self._load_error is not None:
+                raise ValueError(f"{self._load_error}; repair {self.path}")
+            rows: list[tuple[str, Tier, str | None]] = []
+            for app, tier in self._tiers.items():
+                if app in self._deny:
+                    note: str | None = "on the deny list"
+                elif self._allow and app not in self._allow:
+                    note = "not on the allow list"
+                else:
+                    note = None
+                rows.append((app, tier, note))
+            return rows
+
     def set_tier(self, bundle_id: str, tier: Tier) -> None:
         """Record a human-approved grant and persist it."""
         self._validate_app(bundle_id)
@@ -446,14 +479,22 @@ class PermissionStore:
 
         self._mutate(grant)
 
-    def revoke(self, bundle_id: str) -> None:
-        """Remove any grant for ``bundle_id`` (back to the "ask" default)."""
+    def revoke(self, bundle_id: str) -> bool:
+        """Remove a grant for ``bundle_id``. False when it had none.
+
+        A broken configuration raises ``ValueError`` and is left untouched.
+        """
         self._validate_app(bundle_id)
+        removed = False
 
         def remove() -> None:
-            self._tiers.pop(bundle_id, None)
+            nonlocal removed
+            removed = bundle_id in self._tiers
+            if removed:
+                del self._tiers[bundle_id]
 
         self._mutate(remove)
+        return removed
 
     def add_deny(self, bundle_id: str) -> None:
         """Put ``bundle_id`` on the deny list; beats any granted tier."""
@@ -570,17 +611,20 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
         store = PermissionStore()
     required = required_tier(action)
     kind = type(action).__name__.lower()
-    granted, denied, config_error = store.policy(target_app)
+    granted, denied, config_error, block = store.policy(target_app)
     if denied:
+        if config_error:
+            reason = f"{config_error}; repair {store.path} before retrying"
+        elif block == "allow":
+            reason = f"{target_app} is not on the allow list; no actions are permitted"
+        else:
+            reason = f"{target_app} is on the deny list; no actions are permitted"
         return Decision(
             verdict=Verdict.DENY,
             app=target_app,
             required=required,
             granted=granted,
-            reason=(
-                f"{config_error}; repair {store.path} before retrying"
-                if config_error else f"{target_app} is on the deny list; no actions are permitted"
-            ),
+            reason=reason,
         )
     if granted is None:
         return Decision(
