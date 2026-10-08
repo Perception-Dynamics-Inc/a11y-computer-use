@@ -2158,6 +2158,42 @@ class Runtime:
                     detail={"ref": hit.ref, "role": hit.role},
                 )
 
+    def _recheck_enabled_target(self, app: str, *targets: Target) -> None:
+        """Hit-test before input, except when a target is already disabled.
+
+        ``_run_gated`` rechecks before ``execute``. A disabled ref must raise
+        ``element_disabled`` first. On Windows that hit-test otherwise reports
+        ``focus_changed`` for whatever window is under the point.
+        """
+        if any(isinstance(item, Element) and not item.enabled for item in targets):
+            return
+        self._recheck_target(app, targets[0])
+
+    def _refuse_disabled(self, *targets: Target, verb: str) -> None:
+        """Refuse an input verb aimed at a ref the tree marks disabled.
+
+        Runs before any press, pointer move, or keystroke, on every backend
+        that reports ``enabled`` false (not sensitive, or not enabled). A raw
+        point has no such flag. A backend that does not know the state leaves
+        ``enabled`` true, and this check does not invent one.
+
+        Raises:
+            ComputerUseError: `ErrorCode.ELEMENT_DISABLED`.
+        """
+        for target in targets:
+            if isinstance(target, Element) and not target.enabled:
+                label = target.title or target.role
+                raise ComputerUseError(
+                    ErrorCode.ELEMENT_DISABLED,
+                    f"{target.ref} ({target.role} {label!r}) is disabled; {verb} was not sent",
+                    detail={
+                        "ref": target.ref,
+                        "role": target.role,
+                        "reason": "disabled",
+                        "verb": verb,
+                    },
+                )
+
     # -- observation tools (gated at READ + audited like everything else) ------
 
     @_serialized
@@ -2489,6 +2525,7 @@ class Runtime:
         menu_note: list[str] = []
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, target)
@@ -2544,6 +2581,7 @@ class Runtime:
         action = Hover(target=target)
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="hover")
             self._recheck_target(app, target)
             self._guard_user(app)
             self.driver.hover(target)
@@ -2625,21 +2663,31 @@ class Runtime:
         if target is not None:
             bundle, pid = target
 
-            def execute_bg() -> None:
+            def execute_bg() -> int:
                 self._guard_user(bundle, addressed=True)
-                self.driver.type_text(text, pid=self._input_pid(pid))
+                typed = self.driver.type_text(text, pid=self._input_pid(pid))
+                if isinstance(typed, int) and not isinstance(typed, bool):
+                    return typed
+                return len(text)
 
-            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
-            return f"typed {len(text)} characters into {bundle} (addressed to its process; nothing was activated)"
+            typed = self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
+            count = typed if isinstance(typed, int) and not isinstance(typed, bool) else len(text)
+            return (
+                f"typed {count} characters into {bundle} "
+                "(addressed to its process; nothing was activated)"
+            )
         front = self._frontmost()
 
-        def execute() -> None:
+        def execute() -> int:
             self._guard_user(front)
             note.append(self._dismiss_open_menu(front))
-            self.driver.type_text(text)
+            typed = self.driver.type_text(text)
+            if isinstance(typed, int) and not isinstance(typed, bool):
+                return typed
+            return len(text)
 
-        self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
-        return f"typed {len(text)} characters{''.join(note)}"
+        count = self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
+        return f"typed {count} characters{''.join(note)}"
 
     def _validate_chord(self, chord: str) -> None:
         """Reject a chord this driver cannot press, before the permission gate.
@@ -2710,6 +2758,7 @@ class Runtime:
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="scroll")
             # into_view on a ref reveals the element via AX (no cursor
             # movement); everything else is a synthetic wheel scroll, which
             # macOS routes by moving the pointer to the scroll point.
@@ -2725,7 +2774,10 @@ class Runtime:
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
-            action, app, execute, recheck=partial(self._recheck_target, target=target)
+            action,
+            app,
+            execute,
+            recheck=lambda gated, target=target: self._recheck_enabled_target(gated, target),
         )
         if into_view:
             return f"scrolled {self._label(ref, target)} into view"
@@ -2752,6 +2804,7 @@ class Runtime:
         action = Drag(start=start, end=end, path=waypoints)
 
         def execute() -> None:
+            self._refuse_disabled(start, end, *waypoints, verb="drag")
             self._refuse_secure(start, end, *waypoints)  # no point of the stroke may be a secure field
             self._guard_user(start_app)
             self.driver.drag(start, end, path=waypoints)
@@ -2760,7 +2813,9 @@ class Runtime:
             action,
             start_app,
             execute,
-            recheck=partial(self._recheck_target, target=start),
+            recheck=lambda gated, items=(start, end, *waypoints): self._recheck_enabled_target(
+                gated, *items
+            ),
         )
         via = f" via {len(waypoints)} waypoints" if waypoints else ""
         return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
@@ -3008,6 +3063,7 @@ class Runtime:
         action = TypeText(text=value)
 
         def execute() -> None:
+            self._refuse_disabled(live, verb="set_value")
             if self.driver.set_value(live, value):  # an AX write lands on this element only
                 return
             self.driver.press_element(live)  # fallback: focus then synthesize typing
@@ -3408,7 +3464,11 @@ class Runtime:
                 # exactly, case-insensitive. An empty app name (a window whose
                 # owner could not be read) is not a match for any filter, and a
                 # name that is only a substring of another app is not a match.
+                # An empty filter is a bad call: resolving "" used to ask for a
+                # grant of the empty name.
                 requested = str(app).strip()
+                if not requested:
+                    raise ValueError("window list app must be a non-empty app id")
                 _running, resolved = self._resolve_app(app)
                 # A substring hit inside resolve (``mouse`` → ``mousepad``) is
                 # not this filter. Gate and match the caller's name unless it
@@ -3422,7 +3482,10 @@ class Runtime:
                                         "width": b.width, "height": b.height}}
                             for wid, b, title in _windows_all_spaces(bundle, with_titles=True)]
                 return json.dumps(rows)
-            rows = self._run_gated(WindowOp(verb=verb), self._frontmost(), self.driver.windows)
+            front = self._frontmost()
+            if not str(front or "").strip() or front == "unknown":
+                return self._list_windows_without_focus()
+            rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
             return json.dumps([_window_row(r) for r in rows])
         platform = str(getattr(self.driver, "name", None) or "this platform")
         method_name = _WINDOW_METHODS.get(verb)
@@ -3476,6 +3539,44 @@ class Runtime:
             return f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
         past = _WINDOW_PAST[verb]
         return f"{past} window {window_id} ({owner_name})"
+
+    def _list_windows_without_focus(self) -> str:
+        """Unfiltered ``window list`` when nothing is focused.
+
+        Gating that call on the frontmost name asked for a grant of
+        ``unknown``. Return the windows whose owners already have a read
+        grant. A desktop with no windows is an empty list. Open windows and
+        no such grant is `unsupported` with reason ``no_focused_window``.
+        """
+        raw = [_window_row(row) for row in self.driver.windows()]
+        kept: list[dict] = []
+        audited: set[str] = set()
+        for row in raw:
+            owner = str(row.get("bundle") or row.get("app") or "").strip()
+            if not owner:
+                continue
+            decision = safety.check_action(
+                WindowOp(verb=WindowVerb.LIST), owner, store=self.store,
+            )
+            if not decision.allowed:
+                continue
+            kept.append(row)
+            if owner not in audited:
+                audited.add(owner)
+                self.audit.record_action(
+                    WindowOp(verb=WindowVerb.LIST), app=owner, decision=decision, result="ok",
+                )
+        if kept or not raw:
+            return json.dumps(kept)
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no focused window; an unfiltered window list includes only windows "
+            "whose app has a read grant, and none of the open windows do",
+            detail={
+                "reason": "no_focused_window",
+                "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
+            },
+        )
 
     @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
@@ -4021,7 +4122,10 @@ def build_server(
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
-        app moved over the target — re-observe. A plausibly irreversible click
+        app moved over the target — re-observe. A ref the snapshot marks
+        disabled (not sensitive or not enabled) is element_disabled and no
+        press or pointer input is sent, on every backend that reports that
+        state. A plausibly irreversible click
         (Delete, Move to Trash, ...) first asks you to confirm via elicitation;
         confirmation_declined means it was not approved. verify=true appends an
         'effect:' block — the post-click snapshot diff — so you can confirm what
@@ -4058,7 +4162,12 @@ def build_server(
         for long text). With app=<bundle id or name> (macOS) the keystrokes are
         addressed to that app's process: it need not be frontmost, nothing is
         activated, and the user's screen stays where it is; prefer this over
-        `app focus` + type. Without app: the frontmost app. Gated at tier
+        `app focus` + type.         Without app: the frontmost app. On Linux, text
+        goes in at the caret and replaces a selection, including after a
+        coordinate click that did not remember a ref: the focused editable is
+        looked up and inserted with the same helper. A CRLF is one newline;
+        the reported count is the number of characters the field read back,
+        and a mismatch is an error rather than success. Gated at tier
         'full' against the target app; refuses with secure_field when a
         password field has focus — secrets are typed by the human, never by
         this tool."""
@@ -4234,19 +4343,26 @@ def build_server(
         close. action='list' returns windows as JSON (window_id, app, pid,
         title, bounds, on_screen). With app=X, 'list' returns only the windows
         whose app id equals X, case-insensitive, and is gated against X (tier
-        read) instead of the frontmost app. A window with no app id never
-        matches a filter. An app that is not running returns an empty list.
-        A minimized window (iconic or hidden) has on_screen false. bounds are
-        {display_id, x, y, width, height} in that display's physical pixels —
-        the same space click/scroll/drag take — or null when the driver has no
-        rect (a minimized Linux window). raise, focus, minimize, maximize,
-        move, resize, and close are gated at tier 'click' against the owning
-        app, the same grant as raise. move requires x and y; resize requires
-        width and height. On Linux X11 those verbs send EWMH or ICCCM client
-        messages. A backend that cannot perform a verb returns unsupported and
-        names the platform. A window whose owner cannot be identified returns
-        unsupported with reason owner_unknown; that error does not ask for a
-        grant of an empty app name."""
+        read) instead of the frontmost app. An empty app is invalid_arguments.
+        A window with no app id never matches a filter. An app that is not
+        running returns an empty list. With no focused window, an unfiltered
+        list returns only windows whose app already has a read grant. When
+        windows are open and none of them are granted, the error is
+        unsupported with reason no_focused_window. It does not ask for a
+        grant of 'unknown'. A minimized window (iconic or hidden) has
+        on_screen false. bounds are {display_id, x, y, width, height} in that
+        display's physical pixels — the same space click/scroll/drag take —
+        or null when the driver has no rect (a minimized Linux window). On
+        Linux, bounds and move's x,y are the client window (inside the frame),
+        not the outer frame. A move to (100, 80) lists the client at
+        (100, 80). raise, focus, minimize, maximize, move, resize, and close
+        are gated at tier 'click' against the owning app, the same grant as
+        raise. move requires x and y; resize requires width and height. On
+        Linux X11 those verbs send EWMH or ICCCM client messages. A backend
+        that cannot perform a verb returns unsupported and names the platform.
+        A window whose owner cannot be identified returns unsupported with
+        reason owner_unknown; that error does not ask for a grant of an empty
+        app name."""
         return await run(runtime.window, action, window_id, app, x, y, width, height)
 
     @server.tool(name="clipboard")

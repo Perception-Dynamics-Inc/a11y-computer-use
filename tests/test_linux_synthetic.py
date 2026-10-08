@@ -200,6 +200,39 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
     assert raw.size == (0.0, 40.0)
 
 
+def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> None:
+    """Gtk.Entry and Gtk.TextView share the AT-SPI role ``text``. The entry is single-line."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0.0, 0.0), (80.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role: "")
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {})
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    class Acc:
+        def __init__(self, states):
+            self.states = set(states)
+
+        def get_role_name(self):
+            return "text"
+
+        def get_name(self):
+            return "field"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States(self.states)
+
+    entry = _atspi.ATSPIAccessor().read(Acc({"SINGLE_LINE", "EDITABLE"}))
+    area = _atspi.ATSPIAccessor().read(Acc({"MULTI_LINE", "EDITABLE"}))
+    plain = _atspi.ATSPIAccessor().read(Acc(set()))
+    assert entry.role == "AXTextField"
+    assert area.role == "AXTextArea"
+    assert plain.role == "AXTextArea"
+
+
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
     """Live ``section#react-page`` exposes exactly click and showContextMenu.
 
@@ -931,6 +964,25 @@ class _FakeAtspi:
         TOP_EDGE = "TOP_EDGE"
 
     class Text:
+        @staticmethod
+        def get_caret_offset(acc):
+            caret = getattr(acc, "caret", None)
+            if caret is None:
+                return len(getattr(acc, "text", "") or "")
+            return int(caret)
+
+        @staticmethod
+        def get_n_selections(acc):
+            sel = getattr(acc, "selection", None)
+            if not isinstance(sel, tuple) or len(sel) != 2:
+                return 0
+            return 1 if int(sel[1]) > int(sel[0]) else 0
+
+        @staticmethod
+        def get_selection(acc, _selection_num):
+            sel = getattr(acc, "selection", None)
+            return sel if isinstance(sel, tuple) else None
+
         @staticmethod
         def get_character_count(acc):
             if getattr(acc, "text_error", False):

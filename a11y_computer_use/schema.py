@@ -340,6 +340,9 @@ class ErrorCode(str, Enum):
     key injection on native Wayland, which has no XTEST) — the detail hint names
     the supported alternative (usually a ref-based action)."""
 
+    ELEMENT_DISABLED = "element_disabled"
+    """The ref is disabled (not sensitive, or not enabled). No input was sent."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.
@@ -563,7 +566,9 @@ class WindowOp:
         verb: What to do. Every value is a real verb. A backend that cannot
             perform one returns `ErrorCode.UNSUPPORTED` and names the platform.
         window_id: Window id of the target; required for every verb except LIST.
-        position: New top-left corner (display-qualified), MOVE only.
+        position: New top-left of the client window (display-qualified), MOVE
+            only. On Linux this is the same origin ``window list`` reports,
+            inside the frame.
         size: New (width, height) in physical pixels, RESIZE only.
     """
 

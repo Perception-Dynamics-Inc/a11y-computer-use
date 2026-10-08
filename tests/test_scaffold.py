@@ -59,6 +59,7 @@ def test_error_codes_are_wire_stable() -> None:
         "confirmation_declined",
         "unsupported",
         "user_active",
+        "element_disabled",
     }
 
 

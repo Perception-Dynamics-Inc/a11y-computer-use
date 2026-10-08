@@ -429,16 +429,36 @@ def _open_branch(app: object, path: str, settle) -> object:
     return top
 
 
-def menu_press(app: object, path: str, *, settle=None) -> str:
-    """Activate the item at ``path``; returns its title."""
+def menu_press(app: object, path: str, *, settle=None, dismiss=None) -> str:
+    """Activate the item at ``path``; returns its title.
+
+    A refusal after a menu was opened sends Escape. Pressing the bar entry
+    again leaves GTK menu tracking on, so the Edit menu stayed open after a
+    disabled Undo. Escape restores the state from before the press. If the
+    menu is still open, the refusal says so.
+    """
     settle = settle or _settle
+    dismiss = dismiss or _dismiss_menu
     components = menus.parse_path(path)
     container: object = _require_bar(app)
     opened: list[object] = []
 
     def abandon() -> None:
-        if opened:
-            _press(opened[0])
+        if not opened:
+            return
+        dismiss()
+        after = menu_state(app)
+        if after.get("open"):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the menu stayed open after Escape; the previous state was not restored",
+                detail={
+                    "path": path,
+                    "reason": "menu_still_open",
+                    "open": [str(part) for part in (after.get("path") or [])],
+                    "hint": "Pressing the menu-bar entry again does not end GTK menu tracking.",
+                },
+            )
 
     for depth, wanted in enumerate(components):
         try:

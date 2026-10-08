@@ -459,6 +459,9 @@ def linux_x11(monkeypatch):
     monkeypatch.setattr(pkg, "_linux_input", fake_input, raising=False)
     d = linux.LinuxDriver()
     monkeypatch.setattr(d, "frontmost_app", lambda: ("gedit", 42))
+    # These tests cover the XTEST password probe. The focused-editable lookup
+    # must not import gi (absent on macOS and Windows).
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app, **kw: None)
     return d, typed
 
 
@@ -733,9 +736,18 @@ def test_linux_ewmh_verbs_send_the_client_messages(fake_x11) -> None:
     assert messages[3]["data"] == (
         32, [1, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ", 1, 0],
     )
-    assert messages[4]["data"] == (32, [1 | (3 << 8), 30, 40, 0, 0])
+    assert messages[4]["data"] == (32, [1 | (3 << 8), 30, 40, 0, 0])  # no frame: client == request
     assert messages[5]["data"] == (32, [1 | (12 << 8), 0, 0, 200, 100])
     assert messages[6]["data"] == (32, [0, 1, 0, 0, 0])
+
+
+def test_move_places_the_client_inside_the_frame(fake_x11, monkeypatch) -> None:
+    """A 5px border and a 29px title bar used to list (100, 80) as (105, 109)."""
+    _sent, messages = fake_x11
+    monkeypatch.setattr(_linux_system, "_frame_insets", lambda win, d: (5, 29))
+    assert _linux_system.move_window(7, 100, 80) is True
+    assert messages[-1]["data"] == (32, [1 | (3 << 8), 95, 51, 0, 0])
+    assert messages[-1]["client_type"] == "_NET_MOVERESIZE_WINDOW"
 
 
 def test_linux_probes_close_their_display(monkeypatch) -> None:

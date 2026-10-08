@@ -130,12 +130,21 @@ _inited = False
 
 def _atspi():
     """The `Atspi` module, initialized once. Raises ImportError if PyGObject /
-    the AT-SPI2 typelib are absent (the driver turns that into a clear message)."""
-    global _inited
-    import gi
+    the AT-SPI2 typelib are absent (the driver turns that into a clear message).
 
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    The import stays inside this function. A missing ``gi`` module, or a
+    typelib ``require_version`` cannot load, is ImportError either way.
+    """
+    global _inited
+    try:
+        import gi
+    except ImportError as exc:
+        raise ImportError("PyGObject is not installed; the AT-SPI2 binding is unavailable") from exc
+    try:
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+    except (ImportError, ValueError) as exc:
+        raise ImportError("the AT-SPI2 typelib is not available") from exc
 
     if not _inited:
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
@@ -499,6 +508,11 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        # GTK3 gives a single-line Gtk.Entry the same "text" role as a
+        # Gtk.TextView. The entry carries SINGLE_LINE; the view carries
+        # MULTI_LINE. A single-line entry is a text field, not a textarea.
+        if role_str == "text" and _state_has(node, "SINGLE_LINE") and not _state_has(node, "MULTI_LINE"):
+            role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
         role = _refine_web_role(role, attrs)
         override = self._visible_bounds.get(id(node))
@@ -707,6 +721,53 @@ def _focused_via_collection(root, Atspi, focused_state):
     return True, (hits[0] if hits else None)
 
 
+def _focused_node(app: str, *, max_nodes: int = 400):
+    """(focused accessible or None, truncated).
+
+    truncated is True when the walk stopped before it could tell whether
+    anything is focused. A Collection query that finds no focused node, a
+    missing app, and a full walk that meets no focused node are
+    ``(None, False)``.
+
+    AT-SPI has no global "focused accessible" getter (focus arrives as
+    events). The Collection interface answers in one round-trip where the
+    toolkit exposes it; otherwise the active top-level frame is walked
+    breadth-first, bounded by ``max_nodes``.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return None, False
+    Atspi = _atspi()
+    st = getattr(Atspi, "StateType", None)
+    focused_state = getattr(st, "FOCUSED", None)
+    if focused_state is None:
+        return None, False
+    found, acc = _focused_via_collection(root, Atspi, focused_state)
+    if found:
+        return acc, False
+    queue = [root]
+    seen = 0
+    truncated = False
+    while queue and seen < max_nodes:
+        acc = queue.pop(0)
+        seen += 1
+        sset = _call_first(acc, ("get_state_set",))
+        if sset is not None and _safe(lambda state=sset: state.contains(focused_state), False):
+            return acc, False
+        n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
+        if n > _MAX_CHILDREN_FETCH:
+            truncated = True
+        for j in range(min(n, _MAX_CHILDREN_FETCH)):
+            child = _call_first(acc, ("get_child_at_index",), j)
+            if child is not None:
+                queue.append(child)
+    if queue or truncated:
+        return None, True
+    return None, False
+
+
 def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     """Whether the keyboard-focused node of ``app``'s active window is a
     password field: True / False / None.
@@ -718,43 +779,37 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     (or a node had more than `_MAX_CHILDREN_FETCH` children) and no focused node
     was met, so focus is UNKNOWN; the caller must not type blind on None.
 
-    AT-SPI has no global "focused accessible" getter (focus arrives as events).
-    The Collection interface answers in one round-trip where the toolkit
-    exposes it; otherwise the active top-level frame is walked breadth-first,
-    bounded by ``max_nodes``. This is the check `LinuxDriver.type_text` runs
-    before the XTEST path, which types into whatever holds focus."""
-    from a11y_computer_use.schema import Scope
+    This is the check `LinuxDriver.type_text` runs before the XTEST path,
+    which types into whatever holds focus."""
+    acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    if truncated:
+        return None
+    if acc is None:
+        return False
+    return is_secure(acc)
 
-    root = find_root(app, Scope.WINDOW)
-    if root is None:
-        return False
-    Atspi = _atspi()
-    st = getattr(Atspi, "StateType", None)
-    focused_state = getattr(st, "FOCUSED", None)
-    if focused_state is None:
-        return False
-    found, acc = _focused_via_collection(root, Atspi, focused_state)
-    if found:
-        return is_secure(acc) if acc is not None else False
-    queue = [root]
-    seen = 0
-    truncated = False
-    while queue and seen < max_nodes:
-        acc = queue.pop(0)
-        seen += 1
-        sset = _call_first(acc, ("get_state_set",))
-        if sset is not None and _safe(lambda: sset.contains(focused_state), False):
-            return is_secure(acc)
-        n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
-        if n > _MAX_CHILDREN_FETCH:
-            truncated = True
-        for j in range(min(n, _MAX_CHILDREN_FETCH)):
-            child = _call_first(acc, ("get_child_at_index",), j)
-            if child is not None:
-                queue.append(child)
-    if queue or truncated:
-        return None  # bound exhausted: focus unknown, not "not secure"
-    return False
+
+def focused_editable(app: str, *, max_nodes: int = 400):
+    """The focused node when `type` can insert into it, else None.
+
+    A password field is returned so the caller can refuse it before any
+    write. None means there is no focused editable: nothing is focused, the
+    focused node has no EditableText, the walk could not find focus, or
+    PyGObject is not installed. The caller then uses keystrokes. The same
+    node `insert_text` accepts, so a coordinate click and a ref click share
+    that helper.
+    """
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    except ImportError:
+        return None
+    if truncated or acc is None:
+        return None
+    if is_secure(acc):
+        return acc
+    if _editable_iface(acc) is None:
+        return None
+    return acc
 
 
 def do_press(acc) -> bool:
@@ -783,16 +838,164 @@ def _editable_iface(acc):
     return _call_first(acc, ("get_editable_text_iface", "get_editable_text"))
 
 
-def insert_text(acc, text: str) -> bool:
-    """Insert ``text`` at the caret (end of the field) via AT-SPI EditableText —
-    the deterministic, a11y-first text-entry path. Unlike synthetic XTEST keys it
-    needs no X/widget focus (which headless AT-SPI grab_focus does not grant), so
-    it lands reliably. Returns False if the element exposes no EditableText."""
+def _state_has(acc, name: str) -> bool:
+    """Whether the state set contains ``name``.
+
+    A fake state set matches the name string. The GI binding matches
+    ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
+    """
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return False
+    names = getattr(sset, "names", None)
+    if isinstance(names, (set, frozenset, list, tuple)):
+        folded = {str(item) for item in names}
+        return name in folded or name.lower() in {item.lower() for item in folded}
+    if bool(_safe(lambda: sset.contains(name), False)):
+        return True
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return False
+    member = getattr(getattr(Atspi, "StateType", None), name, None)
+    if member is None:
+        return False
+    return bool(_safe(lambda: sset.contains(member), False))
+
+
+def _insert_length(method, text: str) -> int:
+    """The ``length`` argument EditableText.insert_text actually wants.
+
+    libatspi and ``gi.repository.Atspi`` take a UTF-8 byte count. Passing the
+    character count keeps only that many bytes, so ``Привет`` becomes ``При``
+    and a cut code point inserts nothing. A Python double that slices
+    characters has no ``gi.`` module and gets ``len(text)`` unless it sets
+    ``_length_unit`` to ``bytes`` or ``chars``.
+    """
+    unit = getattr(method, "_length_unit", None)
+    if unit == "bytes":
+        return len(text.encode("utf-8"))
+    if unit == "chars":
+        return len(text)
+    func = getattr(method, "__func__", method)
+    module = str(getattr(method, "__module__", None) or getattr(func, "__module__", "") or "")
+    if module.startswith("gi."):
+        return len(text.encode("utf-8"))
+    return len(text)
+
+
+def _selection_bounds(selection) -> tuple[int, int] | None:
+    """(start, end) character offsets from an AT-SPI selection, or None."""
+    if selection is None:
+        return None
+    start = getattr(selection, "start_offset", None)
+    end = getattr(selection, "end_offset", None)
+    if isinstance(start, int) and not isinstance(start, bool) and isinstance(end, int) and not isinstance(end, bool):
+        return int(start), int(end)
+    if isinstance(selection, tuple):
+        nums = [item for item in selection if isinstance(item, int) and not isinstance(item, bool)]
+        if len(nums) >= 2:
+            return nums[-2], nums[-1]
+    return None
+
+
+def _caret_and_selection(acc, nchars: int) -> tuple[int, int, int]:
+    """(caret, selection start, selection end). An empty selection has start == end.
+
+    Offsets are characters, which is what AT-SPI uses. A missing caret is the
+    end of the field.
+    """
+    Atspi = _atspi()
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    if not isinstance(caret, int) or isinstance(caret, bool) or caret < 0 or caret > nchars:
+        caret = nchars
+    start, end = caret, caret
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        bounds = _selection_bounds(_safe(lambda: Atspi.Text.get_selection(acc, 0)))
+        if bounds is not None:
+            start, end = bounds
+            start = max(0, min(int(start), nchars))
+            end = max(0, min(int(end), nchars))
+            if end < start:
+                start, end = end, start
+    return int(caret), start, end
+
+
+def _text_mismatch(reason: str, message: str, **detail):
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    payload = {"platform": "linux", "reason": reason}
+    payload.update(detail)
+    return ComputerUseError(ErrorCode.UNSUPPORTED, message, detail=payload)
+
+
+def _excerpt(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= 80:
+        return value
+    return value[:80] + "…"
+
+
+def insert_text(acc, text: str) -> int | None:
+    """Insert ``text`` at the caret via AT-SPI EditableText.
+
+    A selection is deleted first and the text replaces it. ``None`` means the
+    element has no EditableText, so the caller may use keystrokes. The return
+    value is the number of characters the read-back shows were inserted. A
+    field that does not contain that text raises `ErrorCode.UNSUPPORTED`
+    instead of reporting success. A CRLF is one newline.
+
+    The insert length is the UTF-8 byte count on the GI/C binding and the
+    character count on a binding that slices characters.
+    """
     eti = _editable_iface(acc)
     if eti is None:
-        return False
-    offset = _safe(lambda: _atspi().Text.get_character_count(acc)) or 0
-    return bool(_call_first(eti, ("insert_text",), int(offset), text, len(text), default=False))
+        return None
+    typed = text.replace("\r\n", "\n")
+    current = _full_text(acc)
+    if current is None:
+        raise _text_mismatch(
+            "text_unreadable",
+            "the field text could not be read, so type was not reported as success",
+        )
+    caret, start, end = _caret_and_selection(acc, len(current))
+    if end > start:
+        _call_first(eti, ("delete_text",), start, end, default=False)
+        cleared = _full_text(acc)
+        wanted = current[:start] + current[end:]
+        if cleared != wanted:
+            raise _text_mismatch(
+                "selection_not_replaced",
+                "the selection was not removed, so the text was not inserted",
+                expected=_excerpt(wanted),
+                actual=_excerpt(cleared),
+            )
+        offset = start
+        expected = wanted[:start] + typed + wanted[start:]
+    else:
+        offset = caret
+        expected = current[:caret] + typed + current[caret:]
+    insert = None
+    for name in ("insert_text", "insertText"):
+        insert = getattr(eti, name, None)
+        if insert is not None:
+            break
+    length = _insert_length(insert, typed) if insert is not None else len(typed)
+    wrote = bool(_call_first(eti, ("insert_text", "insertText"), int(offset), typed, int(length), default=False))
+    if _confirm_text(acc, expected):
+        return len(typed)
+    actual = _full_text(acc)
+    if actual == current and not wrote:
+        return None
+    raise _text_mismatch(
+        "text_mismatch",
+        "the field text after type does not match what was inserted",
+        expected=_excerpt(expected),
+        actual=_excerpt(actual),
+        inserted_chars=len(typed),
+    )
 
 
 # After a clear or a write, a web field's text can show up on a later read.
@@ -950,7 +1153,13 @@ def set_text(acc, text: str) -> bool:
     if not _clear_text(acc, eti, current):
         return False
     if not _call_first(eti, ("set_text_contents",), text, default=False):
-        if not _call_first(eti, ("insert_text",), 0, text, len(text), default=False):
+        insert = None
+        for name in ("insert_text", "insertText"):
+            insert = getattr(eti, name, None)
+            if insert is not None:
+                break
+        length = _insert_length(insert, text) if insert is not None else len(text)
+        if not _call_first(eti, ("insert_text", "insertText"), 0, text, length, default=False):
             if _text_is_gone(acc) and _x11_keys_available():
                 _type_string(text)
             else:

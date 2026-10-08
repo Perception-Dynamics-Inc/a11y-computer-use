@@ -171,7 +171,11 @@ def _managed_windows(d):
 
 
 def _geometry_on_root(win, d):
-    """(x, y, w, h) of ``win`` in root (screen) coordinates, or None.
+    """(x, y, w, h) of the client window in root (screen) coordinates, or None.
+
+    This is the X client window, inside the frame. ``window list`` reports
+    this origin, and ``window move`` places this origin. The window manager
+    frame (title bar and borders) is not included.
 
     The window's own origin is translated INTO root coordinates:
     ``root.translate_coords(win, 0, 0)`` (XTranslateCoordinates src=win,
@@ -331,7 +335,8 @@ def windows() -> list[dict]:
     ``app`` is the process comm, or the WM_CLASS instance when the window has
     no pid. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
     ``on_screen`` false and ``bounds`` null, so a caller does not aim at the
-    rect it had before it was iconified.
+    rect it had before it was iconified. ``bounds`` is the client window
+    (inside the frame), the same origin ``move_window`` places.
     """
     rows: list[dict] = []
     try:
@@ -466,17 +471,51 @@ def maximize_window(window_id: int) -> bool:
         return True
 
 
-def move_window(window_id: int, x: int, y: int) -> bool:
-    """Move ``window_id`` to root coordinates (x, y) via ``_NET_MOVERESIZE_WINDOW``.
+def _frame_insets(win, d) -> tuple[int, int]:
+    """(left, top) of the window-manager frame around the client window.
 
-    Gravity is NorthWest. Only the X and Y flags are set, so the window
-    manager keeps the current size. Returns False when the id is not managed.
+    ``_NET_FRAME_EXTENTS`` is left, right, top, bottom. Missing or unreadable
+    extents are (0, 0): every client under Xvfb with no frame, and a window
+    the manager has not decorated yet.
+    """
+    val = _prop(win, d, "_NET_FRAME_EXTENTS")
+    if not val:
+        return 0, 0
+    try:
+        items = list(val)
+    except TypeError:
+        return 0, 0
+    if len(items) < 4:
+        return 0, 0
+    try:
+        left, top = int(items[0]), int(items[2])
+    except (TypeError, ValueError):
+        return 0, 0
+    if left < 0 or top < 0:
+        return 0, 0
+    return left, top
+
+
+def move_window(window_id: int, x: int, y: int) -> bool:
+    """Move the client window of ``window_id`` so its top-left is (x, y).
+
+    ``window list`` reports that client origin. ``_NET_MOVERESIZE_WINDOW``
+    with NorthWest gravity places the outer frame, so the request is shifted
+    back by ``_NET_FRAME_EXTENTS`` (left, top). A move to (100, 80) with a
+    5px border and a 29px title bar sends the frame to (95, 51), and the
+    client then lists at (100, 80). Only the X and Y flags are set, so the
+    window manager keeps the current size. Returns False when the id is not
+    managed.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
+        left, top = _frame_insets(win, d)
         # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-        _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (3 << 8), int(x), int(y), 0, 0])
+        _client_message(
+            d, win, "_NET_MOVERESIZE_WINDOW",
+            [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
+        )
         return True
 
 

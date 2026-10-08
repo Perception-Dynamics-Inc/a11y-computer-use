@@ -1870,8 +1870,14 @@ def test_window_list_for_a_named_app_is_gated_against_it_and_filtered(tmp_path, 
     rt = _granted_runtime(tmp_path, monkeypatch)
     rows = json.loads(rt.window("list", app="org.krita"))
     assert [r["window_id"] for r in rows] == [1]
+    # A real ungranted frontmost app still gates the unfiltered list.
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.owner.terminal")
     with pytest.raises(server.ActionRefused):
         rt.window("list")
+    # Nothing focused: list the granted windows. Do not ask for a grant of "unknown".
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "unknown")
+    listed = json.loads(rt.window("list"))
+    assert [row["window_id"] for row in listed] == [1]
 
 
 def test_auto_ocr_escalation_runs_when_cropped_even_if_not_frontmost(tmp_path, monkeypatch) -> None:

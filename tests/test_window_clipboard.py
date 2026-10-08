@@ -101,6 +101,45 @@ def test_window_list_app_is_an_exact_case_insensitive_match(tmp_path) -> None:
     assert all(str(row.get("app") or "").strip() for row in listed)
 
 
+def test_window_list_empty_app_is_invalid_arguments(tmp_path) -> None:
+    driver = _Windows(_ROWS)
+    rt = _runtime(tmp_path, driver, tier=safety.Tier.READ)
+    for name in ("", "   "):
+        with pytest.raises(ValueError, match="non-empty") as exc:
+            rt.window("list", app=name)
+        assert "needs_permission" not in str(exc.value)
+        assert "permission grant" not in str(exc.value)
+
+
+def test_unfiltered_list_without_a_focused_window_lists_granted_apps(tmp_path) -> None:
+    driver = _Windows(_ROWS)
+    driver.frontmost_app = lambda: (None, None)
+    rt = _runtime(tmp_path, driver, tier=safety.Tier.READ, app="mousepad")
+    rows = json.loads(rt.window("list"))
+    assert [row["window_id"] for row in rows] == [1, 4]
+    assert all(row["app"] == "mousepad" for row in rows)
+
+
+def test_unfiltered_list_without_focus_or_grants_names_the_reason(tmp_path) -> None:
+    driver = _Windows(_ROWS)
+    driver.frontmost_app = lambda: (None, None)
+    rt = _runtime(tmp_path, driver, app=None, tier=None)
+    with pytest.raises(ComputerUseError) as exc:
+        rt.window("list")
+    text = f"{exc.value.code.value}: {exc.value.message} {exc.value.detail}"
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "no_focused_window"
+    assert "unknown has no permission grant" not in text
+    assert "needs_permission" not in text
+
+
+def test_unfiltered_list_with_no_windows_and_no_focus_is_empty(tmp_path) -> None:
+    driver = _Windows([])
+    driver.frontmost_app = lambda: (None, None)
+    rt = _runtime(tmp_path, driver, app=None, tier=None)
+    assert json.loads(rt.window("list")) == []
+
+
 def test_unfiltered_list_keeps_a_minimized_window_off_screen(tmp_path) -> None:
     driver = _Windows(_ROWS)
     rt = _runtime(tmp_path, driver, tier=safety.Tier.READ, app="front")
