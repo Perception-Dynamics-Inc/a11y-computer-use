@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.36] - 2026-10-08
+
+### Fixed
+
+- An `act` key step folds a `modifiers` list into the chord, and a failed batch is an MCP tool error. On 0.4.35, `{"do":"key","chord":"a","modifiers":["ctrl"]}` and `"modifiers":"ctrl"` both returned `pressed a`. The modifier was dropped, a plain `a` was typed, and the audit row was an ordinary key chord. A list is now part of the chord, modifiers first, the same string the standalone `key` tool presses: `["ctrl"]` and `a` press `ctrl+a`, and `["ctrl","shift"]` press `ctrl+shift+a`. A modifier already in the chord is not repeated. A string modifier and an unknown modifier are `invalid_arguments`, the same check a click step uses (`'modifiers' must be a list of modifier names`, `unknown modifiers`). Any other field a step does not accept, on every step type, is `invalid_arguments` naming that field, and no step runs. A printable chord built this way still refuses a focused password field, and the audit stores `chord: "[REDACTED]"` with `chars: 1`. `ctrl+a` built the same way is still sent. When validation fails or any step fails (`secure_field` included), the MCP `act` result has `isError: true` and the body is still the per-step JSON. On 0.4.35 that result had `isError: false`, so a client that only checked the flag treated the batch as a success (#87) (2026-10-08).
+
 ## [0.4.35] - 2026-10-08
 
 ### Fixed
