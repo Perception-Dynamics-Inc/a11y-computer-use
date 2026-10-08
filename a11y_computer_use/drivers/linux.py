@@ -22,11 +22,14 @@ from collections.abc import Callable, Sequence
 from a11y_computer_use.schema import (
     Bounds,
     ComputerUseError,
+    Display,
     Element,
     ErrorCode,
     printable_chord,
     MouseButton,
     Point,
+    clip_region_to_display,
+    unknown_display_message,
     Scope,
     ScrollUnit,
     Snapshot,
@@ -792,6 +795,20 @@ class LinuxDriver:
             else:
                 time.sleep(min(0.1, remaining))
 
+    def displays(self):
+        """The X screen as one display, id 0. Coordinates are root-window pixels."""
+        from a11y_computer_use.drivers import _atspi
+
+        return tuple(geom.display for geom in _atspi.primary_geometry())
+
+    def _require_display(self, display_id: int | None) -> None:
+        if display_id is None:
+            return
+        found = self.displays()
+        if any(item.display_id == display_id for item in found):
+            return
+        raise ValueError(unknown_display_message(display_id, found))
+
     # -- capture (grim on Wayland, PIL X11 grab otherwise) ------------------
     def screenshot(self, display_id: int | None = None) -> object:
         import io
@@ -802,6 +819,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi
         from a11y_computer_use.schema import Display
 
+        self._require_display(display_id)
         png = _grab_png()
         # Derive the real dimensions from the frame itself — on Wayland the
         # Xlib-based primary_geometry() is unavailable, and even on X the frame
@@ -821,8 +839,15 @@ class LinuxDriver:
 
         from PIL import Image
 
+        self._require_display(region.display_id)
         full = Image.open(io.BytesIO(_grab_png()))
-        crop = full.crop((region.x, region.y, region.x + region.width, region.y + region.height))
+        # Clip to the frame. A region past the image used to come back black
+        # and look like a successful capture of a dark UI.
+        frame = Display(region.display_id, full.width, full.height, 1.0, True)
+        clipped = clip_region_to_display(region.x, region.y, region.width, region.height, frame)
+        crop = full.crop((
+            clipped.x, clipped.y, clipped.x + clipped.width, clipped.y + clipped.height,
+        ))
         buf = io.BytesIO()
         crop.save(buf, format="PNG")
         return buf.getvalue()

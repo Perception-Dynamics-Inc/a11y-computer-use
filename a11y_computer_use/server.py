@@ -99,6 +99,9 @@ from a11y_computer_use.schema import (
     WebMcpVerb,
     WindowOp,
     WindowVerb,
+    clip_region_to_display,
+    point_outside_display,
+    unknown_display_message,
 )
 
 if TYPE_CHECKING:
@@ -1178,6 +1181,14 @@ def _describe(target: Target) -> str:
     return f"({target.x}, {target.y}) on display {target.display_id}"
 
 
+def format_zoom(region: Bounds) -> str:
+    """The text that accompanies a zoom image. It names the rectangle returned."""
+    return (
+        f"zoom of display {region.display_id} at ({region.x}, {region.y}) "
+        f"{region.width}x{region.height}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runtime: the transport-free execution core
 # ---------------------------------------------------------------------------
@@ -1523,6 +1534,134 @@ class Runtime:
             if d.display_id == display_id:
                 return d
         return Display(display_id=display_id, width=0, height=0, scale=1.0, is_main=True)
+
+    def _known_displays(self):
+        """Displays this driver can name, or None when this process has no list.
+
+        None is a test double, a Runtime built only to validate act steps, or
+        a macOS driver imported where Quartz is absent. An empty answer is
+        the same: there is nothing to check against. ``ComputerUseError``
+        from a real enumeration (a locked screen) still propagates.
+        """
+        driver = getattr(self, "driver", None)
+        if driver is None:
+            return None
+        fn = getattr(driver, "displays", None)
+        if fn is None:
+            return None
+        try:
+            found = tuple(fn())
+        except (AttributeError, ImportError, OSError):
+            return None
+        return found or None
+
+    def _display_named(self, display_id: int | None):
+        found = self._known_displays()
+        if found is None:
+            return None
+        if display_id is None:
+            display_id = int(self.driver.main_display_id())
+        for display in found:
+            if display.display_id == display_id:
+                return display
+        raise ValueError(unknown_display_message(int(display_id), found))
+
+    def _require_known_display(self, display_id: int | None) -> None:
+        """Reject an explicit id this driver does not have. Omitted means main."""
+        if display_id is None:
+            return
+        self._display_named(display_id)
+
+    def _require_point(self, x: object, y: object, display_id: int | None, *, where: str = "point") -> None:
+        """Reject a coordinate outside the target display before any input."""
+        display = self._display_named(display_id)
+        if display is None:
+            return
+        detail = point_outside_display(x, y, display, where=where)
+        if detail is not None:
+            raise ValueError(detail)
+
+    def _reject_coordinate(
+        self,
+        ref: str | None,
+        x: object,
+        y: object,
+        display_id: int | None,
+        *,
+        where: str = "point",
+    ) -> None:
+        """An explicit unknown display, or a raw point past the display edge.
+
+        A ref is re-resolved later; its coordinates are the element's, not
+        the caller's. A missing coordinate is `_target`'s error. This runs
+        before the gate, so a bad point is not audited and no input is sent.
+        """
+        if ref is not None:
+            self._require_known_display(display_id)
+            return
+        if x is None or y is None:
+            return
+        self._require_point(x, y, display_id, where=where)
+
+    def _reject_drag_points(
+        self,
+        start_ref: str | None,
+        start_x: object,
+        start_y: object,
+        end_ref: str | None,
+        end_x: object,
+        end_y: object,
+        display_id: int | None,
+        path: list | None,
+    ) -> None:
+        """Every coordinate of a drag, including each waypoint, before input."""
+        self._reject_coordinate(start_ref, start_x, start_y, display_id, where="start")
+        self._reject_coordinate(end_ref, end_x, end_y, display_id, where="end")
+        if start_ref is not None and end_ref is not None:
+            self._require_known_display(display_id)
+        for index, pt in enumerate(path or ()):
+            if isinstance(pt, (list, tuple)) and len(pt) == 2:
+                self._require_point(pt[0], pt[1], display_id, where=f"path[{index}]")
+
+    def _clip_zoom(self, display_id: int, x: object, y: object, width: object, height: object) -> Bounds:
+        """The rectangle `zoom` will capture. Fully off-screen is an error."""
+        display = self._display_named(display_id)
+        if display is None:
+            if (
+                not _is_finite_number(x) or not _is_finite_number(y)
+                or not _is_finite_number(width) or not _is_finite_number(height)
+            ):
+                raise ValueError(
+                    f"x, y, width, and height must be finite numbers, "
+                    f"got ({x}, {y}) {width}x{height}"
+                )
+            assert isinstance(width, (int, float)) and isinstance(height, (int, float))
+            assert isinstance(x, (int, float)) and isinstance(y, (int, float))
+            if width <= 0 or height <= 0:
+                raise ValueError(f"width and height must be positive, got {width:g}x{height:g}")
+            return Bounds(int(display_id), int(x), int(y), int(width), int(height))
+        return clip_region_to_display(x, y, width, height, display)
+
+    def _act_bounds_error(self, do: str, step: dict) -> str | None:
+        """A coordinate or display id the step cannot use, before any step runs."""
+        try:
+            if do in ("click", "hover", "scroll"):
+                self._reject_coordinate(
+                    step.get("ref") if isinstance(step.get("ref"), str) else None,
+                    step.get("x"), step.get("y"), step.get("display_id"),
+                )
+            elif do == "drag":
+                self._reject_drag_points(
+                    step.get("start_ref") if isinstance(step.get("start_ref"), str) else None,
+                    step.get("start_x"), step.get("start_y"),
+                    step.get("end_ref") if isinstance(step.get("end_ref"), str) else None,
+                    step.get("end_x"), step.get("end_y"),
+                    step.get("display_id"),
+                    step.get("path") if isinstance(step.get("path"), (list, tuple)) else None,
+                )
+        except ValueError as exc:
+            return str(exc)
+        return None
 
     def _ocr_epoch(
         self,
@@ -2078,19 +2217,23 @@ class Runtime:
                     text += f"; {len(om)} OCR text lines are marked in blue with their o-ref"
             return text, scaled
 
+        self._require_known_display(display_id)
         app = self._frontmost()
         return self._run_gated(ObserveOp(verb=ObserveVerb.SCREENSHOT, app=app), app, execute)
 
     @_serialized
-    def zoom(self, display_id: int, x: int, y: int, width: int, height: int) -> bytes:
+    def zoom(self, display_id: int, x: int, y: int, width: int, height: int) -> tuple[bytes, Bounds]:
+        """Native-resolution crop. A region that misses the display is
+        ``ValueError``. A region that crosses the edge is clipped, and the
+        returned bounds are that clip."""
+        region = self._clip_zoom(display_id, x, y, width, height)
         app = self._frontmost()
-        return self._run_gated(
+        png = self._run_gated(
             ObserveOp(verb=ObserveVerb.ZOOM, app=app),
             app,
-            lambda: self.driver.zoom_region(
-                Bounds(display_id=display_id, x=x, y=y, width=width, height=height)
-            ),
+            lambda: self.driver.zoom_region(region),
         )
+        return png, region
 
     def _browser_feed(self, app: str, method: str, verb: ObserveVerb, what: str) -> str:
         """Read a browser-only observation feed (console/network) through the gate.
@@ -2264,6 +2407,9 @@ class Runtime:
         unknown = sorted(set(mods) - MODIFIER_KEYS)
         if unknown:  # fail fast, before the gate, so no phantom audit entry
             raise ValueError(f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}")
+        # Before the gate and before any input. (W, H) and a negative point
+        # used to be clamped to the edge and reported as the point asked for.
+        self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
 
@@ -2310,8 +2456,11 @@ class Runtime:
 
         Linux only. A tooltip or a menu that opens on hover can be driven
         from here. Click, right-click, double-click, and drag are separate
-        paths and are not used.
+        paths and are not used. A point outside the display is
+        invalid_arguments on every driver, before the Linux-only check, and
+        the pointer is not moved.
         """
+        self._reject_coordinate(ref, x, y, display_id)
         if getattr(self.driver, "name", None) != "linux":
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
@@ -2483,6 +2632,7 @@ class Runtime:
         into_view: bool = False,
     ) -> str:
         parsed_unit = ScrollUnit(unit)
+        self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="scroll")
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
 
@@ -2520,6 +2670,9 @@ class Runtime:
         display_id: int | None = None,
         path: list | None = None,
     ) -> str:
+        self._reject_drag_points(
+            start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path,
+        )
         start, start_app = self._target(start_ref, start_x, start_y, display_id, kind="drag")
         end, _ = self._target(end_ref, end_x, end_y, display_id, kind="drag")
         waypoints = self._drag_path(path, start, display_id)
@@ -2589,7 +2742,8 @@ class Runtime:
                   verify: bool = False) -> str:
         """Execute act steps in ONE call — the transactional path that collapses
         N observe→act round-trips into 1 (agent speed). Each step is gated +
-        audited exactly like its standalone tool.
+        audited exactly like its standalone tool. A point outside the display,
+        and an unknown display_id, are rejected in the argument pre-pass.
 
         Argument errors are rejected before any step runs. A missing or
         wrong-typed field returns ``invalid_arguments`` naming the step index,
@@ -2697,9 +2851,13 @@ class Runtime:
             detail = _drag_step_error(step)
         else:
             detail = _wait_step_error(step)
-        if detail is None:
-            return None
-        return _act_argument_error(do, index, detail)
+        if detail is not None:
+            return _act_argument_error(do, index, detail)
+        # Same pre-pass: a later off-screen step must not run the earlier ones.
+        bounds = self._act_bounds_error(do, step)
+        if bounds is not None:
+            return _act_argument_error(do, index, bounds)
+        return None
 
     def _key_step_error(self, step: dict) -> str | None:
         detail = _required_str_error(step, "chord")
@@ -3262,10 +3420,12 @@ class Runtime:
         invalid_arguments on the first look; a missing path keeps waiting.
         Read tier. Long timeouts are allowed (renders, deploys), up to
         `conditions.MAX_WAIT_UNTIL_S`. Each url_status probe is limited to the
-        time still left, and to 10 seconds, covering DNS, connect, and the
-        read. No probe starts after the deadline. A timeout detail includes
-        the last observation (URL status or connection error; file exists,
-        path, size, and min_bytes)."""
+        time still left, and to 10 seconds. DNS, connect, the TLS handshake,
+        the send, and every read share that one deadline. A response that
+        finishes after the deadline is a timeout, not a success. No probe
+        starts after the deadline. A timeout detail includes the last
+        observation (URL status or connection error; file exists, path, size,
+        and min_bytes)."""
         kind = conditions.kind_of(condition)
         if not math.isfinite(timeout_s) or timeout_s < 0:
             raise ValueError("timeout_s must be finite and nonnegative")
@@ -3297,7 +3457,8 @@ class Runtime:
         tool's keyword arguments (the agent loop's entry point).
 
         Returns what the Runtime method returns: a string for every tool except
-        ``screenshot`` (``(text, ScaledImage)``) and ``zoom`` (PNG bytes).
+        ``screenshot`` (``(text, ScaledImage)``) and ``zoom``
+        (``(PNG bytes, clipped Bounds)``).
         ``confirm`` is the human-confirmation callback threaded into ``click``
         and ``act``; without one, plausibly irreversible actions fail safe.
         Unknown names raise ``ValueError``; the tools themselves raise
@@ -3659,8 +3820,9 @@ def build_server(
         marks=true draws each interactive element from your latest snapshot on
         the image, labeled with its ref (Set-of-Mark) — so you can name a ref
         ('click e7') off the picture instead of guessing pixel coordinates. Take
-        a desktop_snapshot first so there are refs to mark. Tier 'read' against
-        the frontmost app. Needs the Screen Recording permission."""
+        a desktop_snapshot first so there are refs to mark. An unknown
+        display_id is invalid_arguments and names the valid ids. Tier 'read'
+        against the frontmost app. Needs the Screen Recording permission."""
         if format not in ("png", "jpeg"):
             raise ValueError(f"format must be 'png' or 'jpeg', not {format!r}")
         text, scaled = await run(runtime.screenshot, display_id, max_long_edge, marks)
@@ -3674,10 +3836,13 @@ def build_server(
     async def zoom(display_id: int, x: int, y: int, width: int, height: int) -> list:
         """Return a native-resolution PNG crop of one display region
         (display-qualified physical pixels) for reading small text or UI the
-        downscaled screenshot cannot resolve. Tier 'read' against the
-        frontmost app. Needs the Screen Recording permission."""
-        png = await run(runtime.zoom, display_id, x, y, width, height)
-        return [f"zoom of display {display_id} at ({x}, {y}) {width}x{height}", Image(data=png, format="png")]
+        downscaled screenshot cannot resolve. A region that misses the display
+        is invalid_arguments. A region that crosses the edge is clipped to the
+        display, and the text names that clipped rectangle. An unknown
+        display_id is invalid_arguments and names the valid ids. Tier 'read'
+        against the frontmost app. Needs the Screen Recording permission."""
+        png, region = await run(runtime.zoom, display_id, x, y, width, height)
+        return [format_zoom(region), Image(data=png, format="png")]
 
     @server.tool(name="screen_text")
     async def screen_text(
@@ -3716,7 +3881,11 @@ def build_server(
         """Click an element ref from the latest desktop_snapshot (preferred;
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
-        x/y point in physical pixels (display_id defaults to the main display). button:
+        x/y point in physical pixels (display_id defaults to the main display).
+        Valid x is 0..width-1 and valid y is 0..height-1 on that display. A
+        point outside it, including the display's own width and height, is
+        invalid_arguments and sends no input. An unknown display_id is
+        invalid_arguments and names the valid ids. button:
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
@@ -3743,7 +3912,10 @@ def build_server(
         """Move the pointer to an element ref from the latest desktop_snapshot,
         or to an x/y point in physical pixels, and deliver a hover. No button
         is pressed: click, right-click, double-click, and drag are other tools.
-        Linux only. On any other driver the result is unsupported and the
+        A point outside the display (valid x is 0..width-1, y is 0..height-1)
+        is invalid_arguments and the pointer is not moved. An unknown
+        display_id is invalid_arguments and names the valid ids. Linux only.
+        On any other driver a point inside the display is unsupported and the
         pointer is not moved. Gated at tier 'click'. focus_changed means
         another app owns the point; the pointer is not moved."""
         return await run(runtime.hover, x, y, display_id, ref)
@@ -3782,8 +3954,11 @@ def build_server(
         into_view: bool = False,
     ) -> str:
         """Scroll over an element ref (latest snapshot) or an x/y point.
-        Positive dy scrolls content up, positive dx scrolls content left;
-        unit is 'lines' or 'pixels'. Gated at tier 'click'. Pass
+        A point outside the display (valid x is 0..width-1, y is 0..height-1)
+        is invalid_arguments and sends no input. An unknown display_id is
+        invalid_arguments and names the valid ids. Positive dy scrolls
+        content up, positive dx scrolls content left; unit is 'lines' or
+        'pixels'. Gated at tier 'click'. Pass
         into_view=true with a ref to reveal that element via the accessibility
         API WITHOUT moving the pointer (dx/dy ignored); a wheel scroll instead
         moves the cursor to the scroll point."""
@@ -3802,10 +3977,14 @@ def build_server(
     ) -> str:
         """Press at the start target, move, and release at the end target.
         Each target is an element ref from the latest snapshot or an x/y
-        point in physical pixels. `path` is an optional list of [x, y]
-        waypoints (same display as the start) the pointer passes through with
-        the button held: one call paints a whole curve on a canvas or draws a
-        lasso. Gated at tier 'click' against the app under the start target."""
+        point in physical pixels. Every coordinate, including each `path`
+        waypoint, must lie on the display (valid x is 0..width-1, y is
+        0..height-1). A point outside it is invalid_arguments and sends no
+        input. An unknown display_id is invalid_arguments and names the valid
+        ids. `path` waypoints share the start's display. The pointer passes
+        through them with the button held: one call paints a whole curve on a
+        canvas or draws a lasso. Gated at tier 'click' against the app under
+        the start target."""
         return await run(runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path)
 
     @server.tool(name="wait_for")
@@ -3828,8 +4007,11 @@ def build_server(
         too; it is not ignored. A key step's "modifiers" list is folded into the
         chord, modifiers first, the same shape the standalone key tool presses
         (["ctrl"] and "a" press ctrl+a). A string or unknown modifier is rejected
-        the same way a click step rejects it. A failure while a step runs (stale
-        ref, secure field, unsupported) still stops the batch and keeps the
+        the same way a click step rejects it. A click, hover, scroll, or drag
+        coordinate outside the display (valid x is 0..width-1, y is 0..height-1),
+        or an unknown display_id, is invalid_arguments in this same pre-pass, so
+        no earlier step runs and no input is sent. A failure while a step runs
+        (stale ref, secure field, unsupported) still stops the batch and keeps the
         earlier results. If validation fails or any step fails, this tool call
         is an error and the body is still that per-step JSON.
         Supported steps:
@@ -4106,9 +4288,10 @@ def build_server(
         detail adds the last observation: last_status or last_error for a URL,
         and exists, path, last_size, and min_bytes for a file. Each url_status
         probe is limited to the time still left in timeout_s, and to 10
-        seconds, covering DNS, connect, and the read. No probe starts after
-        the deadline, so a slow lookup or a slow server cannot run past
-        timeout_s. Tier 'read'."""
+        seconds. DNS, connect, the TLS handshake, the send, and every read
+        share that one deadline. A response that finishes after the deadline
+        is a timeout, not a success, including a server that trickles headers.
+        No probe starts after the deadline. Tier 'read'."""
         return await run(runtime.wait_until, condition, timeout_s, poll_s)
 
     # Browser-only: a console feed is meaningful only where the backend has one,

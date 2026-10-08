@@ -337,10 +337,18 @@ def _move(x: int, y: int) -> None:
     which is exactly the Xvfb state that hid this on CI; on a real desktop the
     click landed at pointer + (x, y). Verified on a Budgie/Xorg desktop
     (docs/box-testbed.md)."""
+    ix, iy = int(x), int(y)
+    # Xlib packs a motion coordinate as a signed short. An off-screen point
+    # such as 99999 used to raise struct.error inside fake_input.
+    if not -32768 <= ix <= 32767 or not -32768 <= iy <= 32767:
+        raise ValueError(
+            f"point ({ix}, {iy}) is outside the range an X motion event can address "
+            "(-32768..32767)"
+        )
     from Xlib import X
     from Xlib.ext import xtest
 
-    xtest.fake_input(_disp(), X.MotionNotify, 0, x=int(x), y=int(y))
+    xtest.fake_input(_disp(), X.MotionNotify, 0, x=ix, y=iy)
 
 
 def hover(x: int, y: int) -> None:

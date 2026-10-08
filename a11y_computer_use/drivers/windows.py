@@ -230,8 +230,19 @@ class WindowsDriver:
     def screenshot(self, display_id: int | None = None) -> object:
         raise _todo("DXGI Desktop Duplication (BitBlt/PrintWindow fallback)")
 
+    def displays(self):
+        """One Display per monitor. The primary is id 0.
+
+        A monitor left of the primary has a negative virtual-screen origin.
+        Its Display width and height are its own size. Points stay
+        display-local; this does not turn them into global coordinates.
+        """
+        from a11y_computer_use.drivers import _uia
+
+        return _uia.attached_displays()
+
     def main_display_id(self) -> int:
-        # One display, id 0: the primary monitor `_uia.primary_geometry()` reports.
+        # The primary monitor. Other monitors from displays() are 1, 2, ...
         return 0
 
     def zoom_region(self, region: Bounds) -> bytes:

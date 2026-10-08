@@ -2,13 +2,17 @@
 
 A url_status probe used to keep a fixed 10 second request timeout, and DNS
 ignored it. These tests use a resolver that sleeps and a server that accepts
-and never answers. file_exists, file_stable, and settle only wait in the poll
-sleep; a poll_s much larger than timeout_s must not extend them.
+and never answers. A later failure gave each socket operation its own copy of
+the time remaining: a TLS handshake plus a read, or a server that trickles
+one header byte at a time, ran past timeout_s and the trickle came back as
+success. file_exists, file_stable, and settle only wait in the poll sleep; a
+poll_s much larger than timeout_s must not extend them.
 """
 
 from __future__ import annotations
 
 import socket
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -158,3 +162,177 @@ def test_file_and_settle_polls_stay_inside_timeout_s(tmp_path: Path, monkeypatch
     _assert_bounded(started, timeout_s)
     assert settle.value.detail["settle_s"] == 60
     assert settle.value.detail["elapsed_s"] <= timeout_s + _MARGIN_S
+
+
+_CERT = Path(__file__).parent / "fixtures" / "localhost.crt"
+_KEY = Path(__file__).parent / "fixtures" / "localhost.key"
+
+
+def _listen() -> socket.socket:
+    sock = socket.socket()
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    return sock
+
+
+def _server_context() -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(_CERT, _KEY)
+    return ctx
+
+
+def _unverified_context() -> ssl.SSLContext:
+    """The product verifies certificates. This test trusts only its own cert."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _accept_loop(sock: socket.socket, stop: threading.Event, handle) -> None:
+    sock.settimeout(0.2)
+    try:
+        while not stop.is_set():
+            try:
+                conn, _addr = sock.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+    finally:
+        sock.close()
+
+
+def _assert_url_timeout(url: str, timeout_s: float = 2.0) -> None:
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as info:
+        conditions.Checker().wait(
+            {"url_status": url, "status": 200},
+            timeout_s=timeout_s, poll_s=0.05,
+        )
+    _assert_bounded(started, timeout_s)
+    assert info.value.code is ErrorCode.TIMEOUT
+    assert "last_status" not in info.value.detail
+    error = info.value.detail["last_error"]
+    assert "timed out" in error.lower() or "Timeout" in error
+
+
+def test_tls_handshake_delay_stays_inside_timeout_s(monkeypatch) -> None:
+    """TCP accepts and then never starts TLS. The handshake shares the deadline."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    monkeypatch.setattr(conditions, "_https_context", _unverified_context)
+    sock = _listen()
+    stop = threading.Event()
+
+    def hold(conn: socket.socket) -> None:
+        try:
+            stop.wait(30)
+        finally:
+            conn.close()
+
+    threading.Thread(target=_accept_loop, args=(sock, stop, hold), daemon=True).start()
+    try:
+        _assert_url_timeout(f"https://127.0.0.1:{sock.getsockname()[1]}/handshake")
+    finally:
+        stop.set()
+
+
+def test_tls_response_delay_stays_inside_timeout_s(monkeypatch) -> None:
+    """The handshake finishes. The HTTP response does not. The read shares the deadline."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    monkeypatch.setattr(conditions, "_https_context", _unverified_context)
+    ctx = _server_context()
+    sock = _listen()
+    stop = threading.Event()
+
+    def delay(conn: socket.socket) -> None:
+        try:
+            tls = ctx.wrap_socket(conn, server_side=True)
+            tls.settimeout(0.5)
+            try:
+                tls.recv(4096)
+            except OSError:
+                return
+            stop.wait(30)
+        except OSError:
+            return
+        finally:
+            conn.close()
+
+    threading.Thread(target=_accept_loop, args=(sock, stop, delay), daemon=True).start()
+    try:
+        _assert_url_timeout(f"https://127.0.0.1:{sock.getsockname()[1]}/slow")
+    finally:
+        stop.set()
+
+
+def test_trickle_headers_time_out_instead_of_succeeding(monkeypatch) -> None:
+    """One header byte every 0.5s used to complete as HTTP 200 after ~29s."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    body = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 2\r\n"
+        b"Connection: close\r\n"
+        b"\r\n"
+        b"OK"
+    )
+    sock = _listen()
+    stop = threading.Event()
+
+    def trickle(conn: socket.socket) -> None:
+        try:
+            conn.settimeout(0.2)
+            try:
+                conn.recv(4096)
+            except OSError:
+                pass
+            for byte in body:
+                if stop.is_set():
+                    return
+                try:
+                    conn.send(bytes([byte]))
+                except OSError:
+                    return
+                if stop.wait(0.5):
+                    return
+        finally:
+            conn.close()
+
+    threading.Thread(target=_accept_loop, args=(sock, stop, trickle), daemon=True).start()
+    try:
+        _assert_url_timeout(f"http://127.0.0.1:{sock.getsockname()[1]}/trickle")
+    finally:
+        stop.set()
+
+
+def test_local_tls_200_still_matches(monkeypatch) -> None:
+    """A prompt HTTPS response is still a success. The deadline is not a blanket failure."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    monkeypatch.setattr(conditions, "_https_context", _unverified_context)
+    ctx = _server_context()
+    sock = _listen()
+    stop = threading.Event()
+    reply = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+    def answer(conn: socket.socket) -> None:
+        try:
+            tls = ctx.wrap_socket(conn, server_side=True)
+            tls.settimeout(2)
+            tls.recv(4096)
+            tls.sendall(reply)
+        except OSError:
+            return
+        finally:
+            conn.close()
+
+    threading.Thread(target=_accept_loop, args=(sock, stop, answer), daemon=True).start()
+    try:
+        started = time.monotonic()
+        out = conditions.Checker().wait(
+            {"url_status": f"https://127.0.0.1:{sock.getsockname()[1]}/ok"},
+            timeout_s=5, poll_s=0.05,
+        )
+        assert out["matched"].endswith("returned 200")
+        assert time.monotonic() - started < 4
+    finally:
+        stop.set()

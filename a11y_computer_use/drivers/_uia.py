@@ -149,6 +149,85 @@ class UIAAccessor:
         return _safe(lambda: node.GetChildren(), []) or []
 
 
+def displays_from_monitors(
+    monitors: Sequence[tuple[bool, int, int, int, int]],
+) -> tuple[Display, ...]:
+    """One `Display` per monitor, primary first.
+
+    Each tuple is ``(is_primary, left, top, width, height)`` in virtual-screen
+    pixels. ``left`` and ``top`` may be negative when the monitor sits left of
+    or above the primary. The display's width and height are that monitor's
+    own size. Callers address it in display-local pixels, 0..width-1 and
+    0..height-1. The virtual-screen origin is not added here; a driver that
+    posts global input adds it later, the way macOS adds ``CGDisplayBounds``.
+    """
+    ordered = sorted(enumerate(monitors), key=lambda item: (not item[1][0], item[0]))
+    displays: list[Display] = []
+    for display_id, (_index, (is_primary, _left, _top, width, height)) in enumerate(ordered):
+        if width < 1 or height < 1:
+            continue
+        displays.append(Display(
+            display_id=display_id, width=int(width), height=int(height),
+            scale=1.0, is_main=bool(is_primary) or display_id == 0,
+        ))
+    if displays and not any(item.is_main for item in displays):
+        first = displays[0]
+        displays[0] = Display(first.display_id, first.width, first.height, first.scale, True)
+    return tuple(displays)
+
+
+def _enum_monitors() -> list[tuple[bool, int, int, int, int]]:
+    """``(is_primary, left, top, width, height)`` for each attached monitor.
+
+    Raises ``AttributeError`` off Windows, where ``ctypes.windll`` is absent.
+    """
+    import ctypes
+
+    user32 = ctypes.windll.user32
+
+    class _RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long), ("top", ctypes.c_long),
+            ("right", ctypes.c_long), ("bottom", ctypes.c_long),
+        ]
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_ulong),
+            ("rcMonitor", _RECT),
+            ("rcWork", _RECT),
+            ("dwFlags", ctypes.c_ulong),
+        ]
+
+    found: list[tuple[bool, int, int, int, int]] = []
+    prototype = ctypes.WINFUNCTYPE(
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_RECT), ctypes.c_ssize_t,
+    )
+
+    @prototype
+    def callback(hmon, _hdc, _lprc, _data):
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            rect = info.rcMonitor
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
+            if width > 0 and height > 0:
+                found.append((bool(info.dwFlags & 1), int(rect.left), int(rect.top), width, height))
+        return 1
+
+    user32.EnumDisplayMonitors(None, None, callback, 0)
+    return found
+
+
+def attached_displays() -> tuple[Display, ...]:
+    """Every monitor, or the primary geometry when the enumeration is empty."""
+    monitors = _enum_monitors()
+    if not monitors:
+        return tuple(geom.display for geom in primary_geometry())
+    return displays_from_monitors(monitors)
+
+
 def primary_geometry() -> tuple[DisplayGeometry, ...]:
     """The primary monitor as one `DisplayGeometry`. UIA bounds are physical
     pixels, so scale=1.0 makes the engine's point→pixel projection an identity."""

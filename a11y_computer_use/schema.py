@@ -25,6 +25,8 @@ Design invariants (do not weaken without updating every consumer):
 from __future__ import annotations
 
 import dataclasses
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -91,6 +93,75 @@ class Display:
     height: int
     scale: float
     is_main: bool
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def unknown_display_message(display_id: int, displays: Sequence[Display]) -> str:
+    """Name the ids the caller can use. An unknown id is not display 0."""
+    ids = ", ".join(str(item.display_id) for item in displays) or "(none)"
+    return f"unknown display_id {display_id}; valid ids: {ids}"
+
+
+def point_outside_display(x: object, y: object, display: Display, *, where: str = "point") -> str | None:
+    """None when ``(x, y)`` is a pixel of ``display``.
+
+    Valid pixels are 0..width-1 and 0..height-1 in that display's own
+    coordinate space. A monitor whose global origin is negative still uses
+    this range. The driver adds the origin when it posts the event, so a
+    negative global position is not a reason to reject a local ``(0, 0)``.
+    """
+    if not _finite_number(x) or not _finite_number(y):
+        return f"{where} ({x}, {y}) must be finite numbers"
+    assert isinstance(x, (int, float)) and isinstance(y, (int, float))
+    if display.width < 1 or display.height < 1:
+        return (
+            f"{where} ({x:g}, {y:g}) is outside display {display.display_id} "
+            f"({display.width}x{display.height} physical px)"
+        )
+    if 0 <= x <= display.width - 1 and 0 <= y <= display.height - 1:
+        return None
+    return (
+        f"{where} ({x:g}, {y:g}) is outside display {display.display_id} "
+        f"({display.width}x{display.height} physical px; "
+        f"valid x is 0..{display.width - 1}, y is 0..{display.height - 1})"
+    )
+
+
+def clip_region_to_display(x: object, y: object, width: object, height: object, display: Display) -> Bounds:
+    """The part of the rectangle that lies on ``display``.
+
+    A region that misses the display completely is ``ValueError``. A region
+    that crosses the edge is clipped, and the returned rect is the clip.
+    Width and height must be positive.
+    """
+    if not _finite_number(x) or not _finite_number(y):
+        raise ValueError(f"x and y must be finite numbers, got ({x}, {y})")
+    if not _finite_number(width) or not _finite_number(height):
+        raise ValueError(f"width and height must be finite numbers, got {width}x{height}")
+    assert isinstance(x, (int, float)) and isinstance(y, (int, float))
+    assert isinstance(width, (int, float)) and isinstance(height, (int, float))
+    if width <= 0 or height <= 0:
+        raise ValueError(f"width and height must be positive, got {width:g}x{height:g}")
+    left = max(float(x), 0.0)
+    top = max(float(y), 0.0)
+    right = min(float(x) + float(width), float(display.width))
+    bottom = min(float(y) + float(height), float(display.height))
+    if right <= left or bottom <= top:
+        raise ValueError(
+            f"region ({x:g}, {y:g}) {width:g}x{height:g} lies entirely outside "
+            f"display {display.display_id} ({display.width}x{display.height} physical px)"
+        )
+    ix, iy = math.floor(left), math.floor(top)
+    iw, ih = math.ceil(right) - ix, math.ceil(bottom) - iy
+    if iw < 1 or ih < 1:
+        raise ValueError(
+            f"region ({x:g}, {y:g}) {width:g}x{height:g} lies entirely outside "
+            f"display {display.display_id} ({display.width}x{display.height} physical px)"
+        )
+    return Bounds(display.display_id, ix, iy, iw, ih)
 
 
 # ---------------------------------------------------------------------------

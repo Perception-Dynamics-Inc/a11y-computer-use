@@ -40,9 +40,15 @@ adds the last observation: ``last_status`` or ``last_error`` for a URL;
 ``settle``.
 
 No probe starts once the deadline has passed. A ``url_status`` probe is
-capped at the lesser of 10 seconds and the time still left, and that cap
-covers DNS, connect, and the read. ``file_exists``, ``file_stable``, and
-``settle`` only wait in the poll sleep, which is clipped to the time left.
+capped at the lesser of 10 seconds and the time still left. DNS, the TCP
+connect, the TLS handshake, the send, and every read share that one
+deadline. A socket timeout is per operation, so a handshake and a read
+must not each receive a fresh copy of the time remaining, and a server
+that trickles one byte at a time must not stretch the probe by resetting
+it. The exchange runs on a worker thread and is abandoned at the deadline.
+A response that arrives after the deadline is a timeout, not a success.
+``file_exists``, ``file_stable``, and ``settle`` only wait in the poll
+sleep, which is clipped to the time left.
 """
 
 from __future__ import annotations
@@ -261,11 +267,53 @@ def _bounded_resolve(host: str, port: int, timeout_s: float) -> tuple[list | Non
     return None, f"TimeoutError: timed out resolving {host!r}"
 
 
+class _SocketBox:
+    """Sockets the in-flight probe owns, so the caller can abandon them.
+
+    Closing from the waiting thread unblocks a handshake or a read that the
+    stdlib will not interrupt on its own. A per-operation socket timeout is
+    not a deadline: the next ``recv`` would start a fresh one.
+    """
+
+    def __init__(self) -> None:
+        self._socks: list[socket.socket] = []
+        self._lock = threading.Lock()
+
+    def add(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.append(sock)
+
+    def close(self) -> None:
+        with self._lock:
+            socks = list(self._socks)
+        for sock in socks:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+_probe_box = threading.local()
+
+
+def _track_socket(sock: socket.socket) -> None:
+    box = getattr(_probe_box, "box", None)
+    if box is not None:
+        box.add(sock)
+
+
 def _open_resolved(infos: list, port: int, timeout: float, source_address=None):
     """Connect to an address the bounded lookup already returned.
 
     A second ``getaddrinfo`` would ignore the deadline. Each candidate shares
-    one budget, so several addresses cannot each take the full timeout.
+    one budget, so several addresses cannot each take the full timeout. The
+    socket is tracked before ``connect`` so a stuck handshake can be closed
+    from the waiting thread. The timeout set here is still per operation;
+    ``_run_exchange_until`` is what keeps the whole probe on one deadline.
     """
     deadline = time.monotonic() + timeout
     last: OSError | None = None
@@ -274,6 +322,7 @@ def _open_resolved(infos: list, port: int, timeout: float, source_address=None):
         if left <= 0:
             break
         sock = socket.socket(family, socktype, proto)
+        _track_socket(sock)
         try:
             sock.settimeout(left)
             if source_address:
@@ -284,8 +333,6 @@ def _open_resolved(infos: list, port: int, timeout: float, source_address=None):
             else:
                 sa = (ip, port)
             sock.connect(sa)
-            # The connect spent part of the budget. The read must use what's left,
-            # or a slow body runs past the deadline by the connect time.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 sock.close()
@@ -328,6 +375,13 @@ class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
         limit = timeout if isinstance(timeout, (int, float)) else _URL_PROBE_CAP_S
         return _open_resolved(self._resolved, port, limit, source_address)
 
+    def connect(self):
+        super().connect()
+        # wrap_socket replaces the TCP socket. Track the TLS socket too, so a
+        # read that trickles headers can be closed at the deadline.
+        if self.sock is not None:
+            _track_socket(self.sock)
+
 
 class _ResolvedHTTPHandler(urllib.request.HTTPHandler):
     def __init__(self, infos: list) -> None:
@@ -345,8 +399,15 @@ class _ResolvedHTTPSHandler(urllib.request.HTTPSHandler):
 
     def https_open(self, req):
         return self.do_open(
-            _ResolvedHTTPSConnection, req, context=self._context, infos=self._infos,
+            _ResolvedHTTPSConnection, req, context=_https_context(), infos=self._infos,
         )
+
+
+def _https_context():
+    """TLS settings for an https probe. Tests replace this to trust a local cert."""
+    import ssl
+
+    return ssl.create_default_context()
 
 
 def _connection_error_text(exc: urllib.error.URLError) -> str:
@@ -357,13 +418,72 @@ def _connection_error_text(exc: urllib.error.URLError) -> str:
     return f"{type(exc).__name__}: {reason}"
 
 
+def _exchange(target: str, infos: list, timeout_s: float) -> tuple[int | None, str | None]:
+    """One GET. ``HTTPError`` is an answer. Transport failures are ``last_error``."""
+    request = urllib.request.Request(target, method="GET", headers={"User-Agent": "a11y-computer-use"})
+    opener = urllib.request.build_opener(
+        _NoRedirects, _ResolvedHTTPHandler(infos), _ResolvedHTTPSHandler(infos),
+    )
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
+            return int(response.status), None
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), None
+    except urllib.error.URLError as exc:
+        return None, _connection_error_text(exc)
+    except OSError as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _run_exchange_until(target: str, infos: list, deadline: float) -> tuple[int | None, str | None]:
+    """Run the GET until ``deadline``, then stop waiting.
+
+    The stdlib applies ``timeout`` to each socket operation separately. A TLS
+    handshake and the following read can each spend the full remainder, and a
+    server that sends one header byte inside that window never trips it. This
+    waits on one absolute deadline and closes the sockets when it passes. A
+    status written after the deadline is not returned.
+    """
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None, "TimeoutError: timed out"
+    box = _SocketBox()
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        _probe_box.box = box
+        try:
+            outcome["result"] = _exchange(target, infos, left)
+        except Exception as exc:  # noqa: BLE001 - the wait must still end
+            outcome["error"] = exc
+        finally:
+            _probe_box.box = None
+
+    thread = threading.Thread(target=run, name="a11y-url-probe", daemon=True)
+    thread.start()
+    thread.join(left)
+    if thread.is_alive() or time.monotonic() >= deadline:
+        box.close()
+        thread.join(0.2)
+        return None, "TimeoutError: timed out"
+    error = outcome.get("error")
+    if isinstance(error, BaseException):
+        return None, f"{type(error).__name__}: {error}"
+    result = outcome.get("result")
+    if isinstance(result, tuple):
+        return result
+    return None, "TimeoutError: timed out"
+
+
 def _url_observation(url: object, timeout_s: float) -> tuple[int | None, str | None]:
     """``(status, None)`` when the server answered, else ``(None, error text)``.
 
-    ``timeout_s`` bounds DNS, the connect, and the read together. ``HTTPError``
-    is an answer (a 404 is ``last_status``, not a connection error). A refused
-    connection, a DNS failure, or a probe that used up its budget is
-    ``last_error``. The resolved address is checked before anything connects.
+    ``timeout_s`` is one deadline for DNS, the connect, the TLS handshake, the
+    send, and the read. ``HTTPError`` is an answer (a 404 is ``last_status``,
+    not a connection error). A refused connection, a DNS failure, or a probe
+    that used up its budget is ``last_error``. The resolved address is checked
+    before anything connects. A response that completes after the deadline is
+    a timeout, not a success.
     """
     target = str(url)
     if not target.startswith(("http://", "https://")):
@@ -374,28 +494,15 @@ def _url_observation(url: object, timeout_s: float) -> tuple[int | None, str | N
         raise ValueError("url_status needs a host")
     if timeout_s <= 0:
         return None, f"TimeoutError: timed out resolving {host!r}"
-    started = time.monotonic()
+    deadline = time.monotonic() + timeout_s
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    infos, error = _bounded_resolve(host, port, timeout_s)
+    infos, error = _bounded_resolve(host, port, max(0.0, deadline - time.monotonic()))
     if error is not None or not infos:
         return None, error or f"TimeoutError: timed out resolving {host!r}"
     _refuse_nonpublic(host, infos)
-    left = timeout_s - (time.monotonic() - started)
-    if left <= 0:
-        return None, f"TimeoutError: timed out resolving {host!r}"
-    request = urllib.request.Request(target, method="GET", headers={"User-Agent": "a11y-computer-use"})
-    opener = urllib.request.build_opener(
-        _NoRedirects, _ResolvedHTTPHandler(infos), _ResolvedHTTPSHandler(infos),
-    )
-    try:
-        with opener.open(request, timeout=left) as response:
-            return int(response.status), None
-    except urllib.error.HTTPError as exc:
-        return int(exc.code), None
-    except urllib.error.URLError as exc:
-        return None, _connection_error_text(exc)
-    except OSError as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+    if time.monotonic() >= deadline:
+        return None, "TimeoutError: timed out"
+    return _run_exchange_until(target, infos, deadline)
 
 
 def _url_status(url: object, timeout_s: float) -> int | None:

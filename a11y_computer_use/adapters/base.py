@@ -583,7 +583,7 @@ class ComputerAdapter:
             if did is None:
                 raise ValueError("zoom needs a known display id; take a screenshot first")
             w, h = max(1, px1 - px0), max(1, py1 - py0)
-            png = self.runtime.zoom(did, px0, py0, w, h)
+            png, _region = self.runtime.zoom(did, px0, py0, w, h)
             factor = min(self._screen.width / w, self._screen.height / h, 1.0)
             if factor < 1.0:
                 png = capture.downscale(png, max(1, int(max(w, h) * factor))).png
