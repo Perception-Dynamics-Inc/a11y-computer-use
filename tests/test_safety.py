@@ -257,7 +257,9 @@ def test_audit_entry_written_and_shaped(home: Path) -> None:
     entry = json.loads(path.read_text().splitlines()[0])
     assert entry["app"] == APP
     assert entry["action"] == "typetext"
-    assert entry["params"]["text"] == "hello", "non-secure entries stay replayable"
+    assert entry["params"]["text"] == REDACTED
+    assert entry["params"]["chars"] == 5
+    assert "hello" not in path.read_text()
     assert entry["decision"] == decision.to_dict()
     assert entry["result"] == "ok"
     assert isinstance(entry["ts"], float)
@@ -305,6 +307,28 @@ def test_audit_redacts_secure_field_content(home: Path, action, param: str) -> N
     entry = json.loads(raw.splitlines()[-1])
     assert entry["params"][param] == REDACTED
     assert entry["result"] == "secure_field"
+
+
+def test_audit_always_redacts_typed_text_and_keeps_the_count(home: Path) -> None:
+    """``type``, ``set_value``, an ``act`` type step, and addressed typing all
+    record a TypeText. The characters never reach disk. A key chord is still
+    stored when the action is not secure."""
+    store = PermissionStore()
+    store.set_tier(APP, Tier.FULL)
+    typed = TypeText(text="hunter2-secret")
+    decision = check_action(typed, APP, store=store)
+    path = AuditLog().record_action(typed, app=APP, decision=decision, result="ok")
+    raw = path.read_text()
+    assert "hunter2-secret" not in raw
+    entry = json.loads(raw.splitlines()[-1])
+    assert entry["params"]["text"] == REDACTED
+    assert entry["params"]["chars"] == len("hunter2-secret")
+
+    chord = KeyChord(chord="ctrl+a")
+    decision = check_action(chord, APP, store=store)
+    path = AuditLog().record_action(chord, app=APP, decision=decision, result="ok")
+    entry = json.loads(path.read_text().splitlines()[-1])
+    assert entry["params"]["chord"] == "ctrl+a"
 
 
 def test_audit_always_redacts_clipboard_write_text(home: Path) -> None:

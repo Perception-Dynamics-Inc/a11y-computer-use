@@ -52,11 +52,14 @@ from a11y_computer_use.schema import (
     WebMcpVerb,
 )
 
-#: Placeholder written into audit entries in place of secure-field content.
+#: Placeholder written into audit entries in place of typed text, and in place
+#: of other injectable content when an action touches a secure field.
 REDACTED = "[REDACTED]"
 
 #: Param names that carry injectable content and are redacted when an action
 #: touches a secure field (`AuditLog.record_action` with ``secure=True``).
+#: `TypeText.text` is redacted on every call, secure or not; see
+#: `_redact_typed_text`. A key chord is redacted only when ``secure=True``.
 _SENSITIVE_PARAMS: frozenset[str] = frozenset({"text", "chord"})
 
 
@@ -774,6 +777,19 @@ def _redact(params: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _redact_typed_text(params: dict[str, object], text: str) -> dict[str, object]:
+    """Drop `TypeText` characters. The row keeps a placeholder and a count.
+
+    ``type``, ``set_value``, an ``act`` type step, and addressed typing all
+    build a `TypeText`. The count is ``len`` of the string (code points), the
+    same number the tool result reports. The characters are not written.
+    """
+    redacted = dict(params)
+    redacted["text"] = REDACTED
+    redacted["chars"] = len(text)
+    return redacted
+
+
 def _redact_target_values(params: dict[str, object]) -> dict[str, object]:
     """Strip element ``value``s from serialized targets, keeping the anchor.
 
@@ -799,10 +815,13 @@ class AuditLog:
     Existing oversized logs are preserved until that eviction; the 512 MiB
     bound applies after those legacy files have been archived or evicted.
     Oversized records become explicit summaries, never silently broken JSON.
-    Ordinary non-secure entries keep replayable params; secure content is
-    redacted. Local processes sharing this directory serialize rotation and
-    appends through a sidecar lock. Use separate directories per worker/tenant
-    when isolation is required. Network filesystems are not supported.
+    Ordinary non-secure entries keep replayable params, except typed text:
+    every `TypeText` stores ``text`` as ``[REDACTED]`` and ``chars`` as the
+    character count, and never the characters. Key chords stay in the row
+    unless ``secure=True``. Local processes sharing this directory serialize
+    rotation and appends through a sidecar lock. Use separate directories per
+    worker/tenant when isolation is required. Network filesystems are not
+    supported.
     """
 
     def __init__(
@@ -976,14 +995,21 @@ class AuditLog:
         `schema.ErrorCode` value). Callers MUST pass ``secure=True`` whenever
         the target/focused element is a secure field or secure event input is
         active; every injectable-content param is then replaced with
-        `REDACTED` so secrets never reach disk. Two redactions are
-        unconditional: clipboard-write text (the standard staging path for a
-        secret about to be pasted) and element ``value``s inside serialized
-        targets (a clicked field may hold a revealed secret).
+        `REDACTED` so secrets never reach disk. Typed text is redacted on
+        every platform whether or not the field was detected as secure: the
+        row stores ``text: "[REDACTED]"`` and ``chars`` (the character count)
+        for `TypeText`, which is what ``type``, ``set_value``, an ``act`` type
+        step, and addressed typing record. A key chord is redacted only when
+        ``secure`` is true. Two further redactions are unconditional:
+        clipboard-write text (the standard staging path for a secret about to
+        be pasted) and element ``value``s inside serialized targets (a clicked
+        field may hold a revealed secret).
         """
         payload = action_to_dict(action)
         kind = payload.pop("kind")
-        if secure or isinstance(action, ClipboardOp):
+        if isinstance(action, TypeText):
+            payload = _redact_typed_text(payload, action.text)
+        elif secure or isinstance(action, ClipboardOp):
             payload = _redact(payload)
         if isinstance(action, WebMcpOp) and payload.get("arguments") is not None:
             payload["arguments"] = REDACTED  # free-form content handed to the page

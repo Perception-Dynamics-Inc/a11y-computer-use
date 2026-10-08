@@ -43,6 +43,11 @@ def test_role_map_covers_common_atspi_roles() -> None:
     assert r["menu item"] == "AXMenuItem"
     assert r["separator"] == "AXSplitter"  # decorative -> dropped by the engine
     assert r["terminal"] == "AXTextArea"  # VTE: the screen text is its Text iface, else the tab is empty
+    assert r["internal frame"] == "AXGroup"
+    assert _atspi.atspi_web_kind("document web") == "page"
+    assert _atspi.atspi_web_kind("document frame") == "docframe"
+    assert _atspi.atspi_web_kind("internal frame") == "iframe"
+    assert _atspi.atspi_web_kind("section") == ""
 
 
 class _FakeAccessor:
@@ -62,9 +67,12 @@ def _geometry():
 
 
 def _node(role, title="", *, value=None, actions=(), pos=(0.0, 0.0), size=(1200.0, 700.0),
-          children=()):
+          children=(), atspi_web=""):
     return (
-        RawNode(role=role, title=title, value=value, actions=actions, position=pos, size=size),
+        RawNode(
+            role=role, title=title, value=value, actions=actions, position=pos, size=size,
+            atspi_web=atspi_web,
+        ),
         list(children),
     )
 
@@ -103,6 +111,7 @@ def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypa
     monkeypatch.setattr(_atspi, "_component", lambda acc: acc)
     assert _atspi._extents(_Comp(_Rect(-1, -1, -1, -1))) == ((-1.0, -1.0), (-1.0, -1.0))
     assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30))) == (None, None)
+    assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30)), keep_zero=True) == ((5.0, 5.0), (0.0, 30.0))
     assert _atspi._extents(_Comp(_Rect(5, 6, 70, 30))) == ((5.0, 6.0), (70.0, 30.0))
 
 
@@ -142,6 +151,199 @@ def test_hollow_page_tab_keeps_the_document_below_it() -> None:
                                                  pos=(10.0, 10.0), size=(50.0, 20.0))])])
     snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=_geometry())
     assert not [el for el in snap.elements if el.title in ("hidden", "Inside")]
+
+
+def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> None:
+    """The snapshot read keeps a zero box and marks an internal frame.
+    Hit-testing still asks for the default extents, which drop that box."""
+    seen: dict[str, bool] = {}
+
+    def extents(acc, *, keep_zero=False):
+        seen["keep_zero"] = keep_zero
+        return (8.0, 9.0), (0.0, 40.0)
+
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None))
+    monkeypatch.setattr(_atspi, "_extents", extents)
+
+    class Acc:
+        def get_role_name(self):
+            return "internal frame"
+
+        def get_name(self):
+            return "reCAPTCHA"
+
+        def get_description(self):
+            return ""
+
+    raw = _atspi.ATSPIAccessor().read(Acc())
+    assert seen["keep_zero"] is True
+    assert raw.role == "AXGroup"
+    assert raw.title == "reCAPTCHA"
+    assert raw.atspi_web == "iframe"
+    assert raw.size == (0.0, 40.0)
+
+
+def test_chromium_zero_height_section_keeps_the_login_form() -> None:
+    """document web 'Login | Figma' 1279x812 -> section 1279x0 -> section
+    1279x812 -> section -> form -> EMAIL, PASSWORD, the two buttons, a link.
+    The zero-height section used to take the form with it."""
+    email = _node("AXTextField", "EMAIL", pos=(400.0, 300.0), size=(400.0, 40.0))
+    password = _node(
+        "AXSecureTextField", "PASSWORD", value="s3cret",
+        pos=(400.0, 360.0), size=(400.0, 40.0),
+    )
+    google = _node(
+        "AXButton", "Continue with Google", actions=("AXPress",),
+        pos=(400.0, 420.0), size=(400.0, 36.0),
+    )
+    login = _node(
+        "AXButton", "Log in", actions=("AXPress",),
+        pos=(400.0, 470.0), size=(400.0, 36.0),
+    )
+    signup = _node(
+        "AXLink", "Sign up", actions=("AXPress",),
+        pos=(400.0, 520.0), size=(80.0, 16.0),
+    )
+    form = _node(
+        "AXGroup", "", pos=(380.0, 280.0), size=(440.0, 280.0),
+        children=[email, password, google, login, signup],
+    )
+    inner = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 812.0), children=[form])
+    mid = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 812.0), children=[inner])
+    hollow = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 0.0), children=[mid])
+    away = _node(
+        "AXButton", "Away", actions=("AXPress",),
+        pos=(-5000.0, -5000.0), size=(40.0, 20.0),
+    )
+    ghost = _node(
+        "AXButton", "GhostBtn", actions=("AXPress",),
+        pos=(10.0, 10.0), size=(0.0, 20.0),
+    )
+
+    def page(kind: str):
+        doc = _node(
+            "AXGroup", "Login | Figma", pos=(0.0, 0.0), size=(1279.0, 812.0),
+            children=[hollow, away, ghost], atspi_web=kind,
+        )
+        return _node(
+            "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+            children=[doc],
+        )
+
+    snap = build_snapshot(
+        page("page"), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+        geometry=_geometry(),
+    )
+    titles = {el.title for el in snap.elements}
+    assert {"EMAIL", "Continue with Google", "Log in", "Sign up"} <= titles
+    assert "Away" not in titles and "GhostBtn" not in titles
+    secure = [el for el in snap.elements if el.role == "AXSecureTextField"]
+    assert len(secure) == 1
+    assert secure[0].title == "PASSWORD" and secure[0].secure and secure[0].value is None
+    assert "s3cret" not in observe.render_text(snap)
+
+    framed = build_snapshot(
+        page("docframe"), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+        geometry=_geometry(),
+    )
+    assert any(el.title == "EMAIL" for el in framed.elements)
+
+    bare = build_snapshot(
+        page(""), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+        geometry=_geometry(),
+    )
+    assert "EMAIL" not in {el.title for el in bare.elements}
+    assert not any(el.role == "AXSecureTextField" for el in bare.elements)
+
+
+def _captcha_window(*, marked: bool):
+    """internal frame 'reCAPTCHA' -> document web -> the section nesting from
+    the 2captcha page -> checkbox. Buried under enough sibling groups that the
+    iframe's parent is already at MAX_DEPTH."""
+    checkbox = _node(
+        "AXCheckBox", "I'm not a robot", actions=("AXPress",),
+        pos=(367.0, 401.0), size=(29.0, 29.0),
+    )
+
+    def section(children, *, extra: int = 0):
+        kids = list(children)
+        for i in range(extra):
+            kids.append(_node(
+                "AXStaticText", f"pad {i}", pos=(310.0, 360.0), size=(20.0, 10.0),
+            ))
+        return _node("AXGroup", "", pos=(300.0, 350.0), size=(400.0, 80.0), children=kids)
+
+    leaf = section([checkbox])
+    leaf = section([leaf])
+    leaf = section([leaf])
+    leaf = section([leaf], extra=2)  # cc=3
+    leaf = section([leaf], extra=1)  # cc=2
+    inner = _node(
+        "AXGroup", "reCAPTCHA", pos=(300.0, 350.0), size=(304.0, 78.0),
+        children=[
+            leaf,
+            _node("AXStaticText", "privacy", pos=(310.0, 400.0), size=(40.0, 12.0)),
+        ],
+        atspi_web="page" if marked else "",
+    )
+    frame = _node(
+        "AXGroup", "reCAPTCHA", pos=(300.0, 350.0), size=(304.0, 78.0),
+        children=[inner],
+        atspi_web="iframe" if marked else "",
+    )
+    buried = frame
+    for i in range(observe.MAX_DEPTH - 1):
+        buried = _node(
+            "AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 812.0),
+            children=[
+                buried,
+                _node("AXStaticText", f"crumb {i}", pos=(2.0, 2.0), size=(8.0, 8.0)),
+            ],
+        )
+    page = _node(
+        "AXGroup", "Demo", pos=(0.0, 0.0), size=(1279.0, 812.0),
+        children=[buried], atspi_web="page" if marked else "",
+    )
+    window = _node(
+        "AXWindow", "Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0), children=[page],
+    )
+    return window, checkbox
+
+
+class _CountingFake(_FakeAccessor):
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read(self, node):
+        self.reads += 1
+        return super().read(node)
+
+
+def test_nested_iframe_checkbox_survives_depth_and_presses_via_do_action(monkeypatch) -> None:
+    window, checkbox = _captcha_window(marked=True)
+    counter = _CountingFake()
+    snap = build_snapshot(
+        window, counter, scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    assert counter.reads < 500, "the iframe restart must stay bounded"
+    boxes = [el for el in snap.elements if el.title == "I'm not a robot"]
+    assert len(boxes) == 1
+    box = boxes[0]
+    assert box.role == "AXCheckBox" and box.clickable
+    assert [el.ref for el in observe.find_elements(snap, text="I'm not a robot")] == [box.ref]
+    assert box.ref in {el.ref for el in observe.find_elements(snap, role="checkbox")}
+
+    pressed: list[object] = []
+    monkeypatch.setattr(_atspi, "do_press", lambda acc: pressed.append(acc) or True)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    assert LinuxDriver().press_element(box) is True
+    assert pressed == [checkbox]
+
+    bare, _same = _captcha_window(marked=False)
+    hidden = build_snapshot(
+        bare, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    assert not any(el.title == "I'm not a robot" for el in hidden.elements)
 
 
 def test_password_role_is_secure_and_never_leaks_value() -> None:

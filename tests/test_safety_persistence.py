@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from a11y_computer_use import safety
-from a11y_computer_use.schema import TypeText
+from a11y_computer_use.schema import KeyChord, TypeText
 
 
 APP = "test.app"
@@ -343,12 +343,21 @@ def test_audit_summarizes_oversized_records_after_redaction(tmp_path: Path) -> N
     path = audit.record_action(action, app=APP, decision=decision, result="ok", secure=True)
     assert "secret" not in path.read_text()
     assert _rows(tmp_path)[0]["params"]["text"] == safety.REDACTED
+    assert _rows(tmp_path)[0]["params"]["chars"] == 6000
     audit.record_action(action, app=APP, decision=decision, result="ok")
+    plain = _rows(tmp_path)[-1]
+    assert plain["params"]["text"] == safety.REDACTED
+    assert plain["params"]["chars"] == 6000
+    assert "secret" not in path.read_text()
+    # A non-typed payload that is still huge is summarized, not written in full.
+    huge = KeyChord(chord="k" * 5000)
+    audit.record_action(huge, app=APP, decision=decision, result="ok")
     summary = _rows(tmp_path)[-1]
     assert summary["params"]["_truncated"] is True
     assert summary["params"]["_original_bytes"] > 1024
     assert summary["decision"]["verdict"] == "allow"
-    assert summary["action"] == "typetext" and summary["result"] == "ok"
+    assert summary["action"] == "keychord" and summary["result"] == "ok"
+    assert "k" * 100 not in path.read_text()
     assert all(len(line) + 1 <= 1024 for line in path.read_bytes().splitlines())
 
 
