@@ -1598,10 +1598,10 @@ def _combo_landed(acc, entry, value: str) -> bool:
         text = _full_text(entry)
         return text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value
     if _chromium_control(acc):
-        # The same text the snapshot shows. Chrome nests the selected option
-        # under a menu, so the combo's own Selection child can be unlabeled
-        # while that option's name is the value.
-        return _selected_option_text(acc) == value
+        # The same text the snapshot shows: the SELECTED option's name. Chrome
+        # keeps the combobox name as the aria-label and its text as U+FFFC.
+        # The selected menu item is the value, and it can arrive a beat late.
+        return _choice_shows(acc, value)
     return _combo_active_label(acc) == value
 
 
@@ -1631,30 +1631,81 @@ def _click_center(node) -> None:
         return
 
 
+_WEB_OPTION_ACTIONS = frozenset({"select", "click", "press", "activate"})
+
+
+def _choice_shows(combo, label: str, *, wait: bool = True) -> bool:
+    """Whether the selected-option text is ``label``.
+
+    Chrome's option ``select`` action updates the menu item's SELECTED state
+    and the DOM together. A busy renderer can publish that state a beat
+    after the action returns, so a check that follows an action waits. The
+    wait is bounded and stops on the first match. A check before any action
+    does not wait.
+    """
+    attempts = 6 if wait else 1
+    for attempt in range(attempts):
+        if _selected_option_text(combo) == label:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.05)
+    return False
+
+
+def _menu_selection(combo):
+    """Selection interface that can choose an option, and the node that owns it.
+
+    A Chrome ``<select>`` combobox has no Selection interface. The child menu
+    does, and ``select_child`` on that menu does not change the HTML value.
+    The interface is still tried after the option action, for a toolkit that
+    implements it. ``(None, None)`` when neither node has one.
+    """
+    iface = _selection_iface(combo)
+    if iface is not None:
+        return combo, iface
+    count = min(_child_count(combo), 6)
+    for index in range(count):
+        child = _child_at(combo, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu", "popup menu", "list box", "list"}:
+            continue
+        child_iface = _selection_iface(child)
+        if child_iface is not None:
+            return child, child_iface
+    return None, None
+
+
 def _activate_web_option(combo, label: str, node, index: int) -> None:
     """Select a Chrome ``<select>`` option and leave the popup closable.
 
-    ``Selection.select_child`` is tried first. On Chrome that often only
-    expands the popup and leaves the HTML value where it was. The option's
-    own action is next, on the node found after the popup is open (the
-    collapsed child is not always the live item). A click at that item's
-    center is the last try. An option that is already selected is not
-    touched, so the popup is not opened for the current value.
+    The option's own ``select`` action is what changes the HTML value. The
+    combobox has no Selection interface, and ``select_child`` on its menu
+    returns false and leaves the value alone. ``click`` / ``press`` /
+    ``activate`` are accepted for a tree that names the action that way.
+    An option that is already selected is not touched, so the popup is not
+    opened for the current value. A click at the option's center is the last
+    try, after the popup has been opened so the item has a box.
     """
-    if _selected_option_text(combo) == label:
+    if _choice_shows(combo, label, wait=False):
         return
-    iface = _selection_iface(combo)
+    target = _option_named(combo, label) or node
+    _do_action_named(target, _WEB_OPTION_ACTIONS)
+    if _choice_shows(combo, label):
+        return
+    _owner, iface = _menu_selection(combo)
     if iface is not None:
         _call_first(iface, ("select_child", "selectChild"), index, default=False)
-    if _selected_option_text(combo) == label:
+    if _choice_shows(combo, label):
         return
     if not _popup_open(combo):
         _do_action_named(combo, frozenset({"press", "show", "open"}))
-    target = _option_named(combo, label) or node
-    _do_action_named(target, frozenset({"click", "press", "activate"}))
-    if _selected_option_text(combo) == label:
+    target = _option_named(combo, label) or target
+    _do_action_named(target, _WEB_OPTION_ACTIONS)
+    if _choice_shows(combo, label):
         return
     _click_center(target)
+    _choice_shows(combo, label)
 
 
 def _activate_combo_option(combo, options, match) -> None:

@@ -364,27 +364,29 @@ def test_chrome_select_and_number_reject_values_that_cannot_land(monkeypatch) ->
 class _ChromeOption(_Node):
     def __init__(self, name, selected=False):
         super().__init__(
-            "menu item", name, actions=["click"],
+            "menu item", name, actions=["select"],
             states={"SELECTED"} if selected else set(),
         )
 
     def do_action(self, index):
         name = self.actions[index]
         self.action_log.append(name)
-        if name != "click" or self.parent is None:
+        if name != "select" or self.parent is None:
             return True
         for child in self.parent.children:
             child.states.discard("SELECTED")
         self.states.add("SELECTED")
-        owner = self.parent.parent
-        if owner is not None:
-            owner.states.add("EXPANDED")
         return True
 
 
 class _ChromeSelect(_Node):
-    """A Chrome select whose Selection child is unlabeled and whose
-    ``select_child`` only opens the popup. The option click commits."""
+    """A Chrome ``<select>``.
+
+    The combobox has no Selection interface. Its text is U+FFFC and its name
+    stays the aria-label. The child menu holds the options, and the option's
+    ``select`` action is what moves SELECTED and the HTML value. ``press``
+    opens the popup; ``collapse`` closes it.
+    """
 
     def __init__(self, names=("Kazakhstan", "Japan", "Peru"), selected="Kazakhstan"):
         self.items = [_ChromeOption(name, selected=(name == selected)) for name in names]
@@ -400,13 +402,8 @@ class _ChromeSelect(_Node):
     def get_toolkit_name(self):
         return "Chromium"
 
-    def get_selected_child(self, _index):
-        return _Node("menu item", "")
-
-    def select_child(self, index):
-        self.action_log.append(f"select:{index}")
-        self.states.add("EXPANDED")
-        return True
+    def get_selection_iface(self):
+        return None
 
     def do_action(self, index):
         name = self.actions[index]
@@ -428,8 +425,8 @@ def test_chrome_select_sets_a_valid_option_and_closes_the_popup(monkeypatch) -> 
     assert "SELECTED" in select.items[0].states
 
     assert driver.set_value(element, "Peru") is True
-    assert "select:2" in select.action_log
-    assert select.action_log[-1] == "collapse"
+    assert select.items[2].action_log == ["select"]
+    assert select.action_log == []
     assert "EXPANDED" not in select.states
     assert "SELECTED" in select.items[2].states
     assert "SELECTED" not in select.items[0].states

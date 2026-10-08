@@ -1092,18 +1092,28 @@ def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_pat
 
 
 def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path) -> None:
-    """ctrl+q raises a question dialog. Quit names it and does not press Don't Save."""
+    """ctrl+q raises a question dialog. Quit names it and does not press a button.
+
+    After quit the front window is the dialog, so a window snapshot lists
+    Cancel, Don't Save, and Save and not the parent label. A button press is
+    recorded in a file by the dialog's response handler. The file staying
+    ``none`` is the proof nothing was clicked.
+    """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
+    choice = tmp_path / "choice.txt"
+    choice.write_text("none")
     script = tmp_path / "cuaquit.py"
     script.write_text(textwrap.dedent(
         """
         import gi
         gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
         from gi.repository import Gdk, Gtk, GLib
         GLib.set_prgname("cuaquitapp")
+        CHOICE = __CHOICE__
         win = Gtk.Window(title="cuaquitapp")
         label = Gtk.Label(label="choice=none")
         def on_key(_win, event):
@@ -1114,6 +1124,7 @@ def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path)
                 dialog.add_button("Save", Gtk.ResponseType.YES)
                 def responded(dlg, response):
                     label.set_text("choice=%s" % int(response))
+                    open(CHOICE, "w", encoding="utf-8").write("clicked %s" % int(response))
                     dlg.destroy()
                 dialog.connect("response", responded)
                 dialog.show_all()
@@ -1127,7 +1138,7 @@ def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path)
         win.present()
         Gtk.main()
         """
-    ))
+    ).replace("__CHOICE__", repr(str(choice))))
     proc = subprocess.Popen([sys.executable, str(script)])
     try:
         deadline = time.monotonic() + 15
@@ -1152,8 +1163,8 @@ def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path)
         assert proc.poll() is None
         shot = driver.snapshot(Scope.WINDOW, "cuaquitapp")
         titles = {el.title for el in shot.elements}
-        assert "choice=none" in titles, [(el.title, el.value) for el in shot.elements]
-        assert not any(str(el.title).startswith("choice=") and el.title != "choice=none" for el in shot.elements)
+        assert {"Cancel", "Don't Save", "Save"} <= titles, [(el.title, el.value) for el in shot.elements]
+        assert choice.read_text() == "none"
     finally:
         _stop(proc)
 
