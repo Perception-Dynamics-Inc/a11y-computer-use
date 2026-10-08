@@ -194,6 +194,13 @@ class _Atspi:
             return acc.maximum
 
         @staticmethod
+        def get_minimum_increment(acc):
+            step = getattr(acc, "increment", None)
+            if step is None:
+                raise RuntimeError("no increment")
+            return step
+
+        @staticmethod
         def set_current_value(acc, new):
             acc.value_sets.append(float(new))
             if acc.hold_value:
@@ -354,6 +361,100 @@ def test_chrome_select_and_number_reject_values_that_cannot_land(monkeypatch) ->
     assert number.value == 0.0
 
 
+class _ChromeOption(_Node):
+    def __init__(self, name, selected=False):
+        super().__init__(
+            "menu item", name, actions=["select"],
+            states={"SELECTED"} if selected else set(),
+        )
+
+    def do_action(self, index):
+        name = self.actions[index]
+        self.action_log.append(name)
+        if name != "select" or self.parent is None:
+            return True
+        for child in self.parent.children:
+            child.states.discard("SELECTED")
+        self.states.add("SELECTED")
+        return True
+
+
+class _ChromeSelect(_Node):
+    """A Chrome ``<select>``.
+
+    The combobox has no Selection interface. Its text is U+FFFC and its name
+    stays the aria-label. The child menu holds the options, and the option's
+    ``select`` action is what moves SELECTED and the HTML value. ``press``
+    opens the popup; ``collapse`` closes it.
+    """
+
+    def __init__(self, names=("Kazakhstan", "Japan", "Peru"), selected="Kazakhstan"):
+        self.items = [_ChromeOption(name, selected=(name == selected)) for name in names]
+        menu = _Node("menu", "", children=self.items)
+        super().__init__(
+            "combo box", "Country", text="\ufffc", children=[menu],
+            actions=["press", "collapse"], states={"EXPANDABLE", "ENABLED"},
+        )
+
+    def get_application(self):
+        return self
+
+    def get_toolkit_name(self):
+        return "Chromium"
+
+    def get_selection_iface(self):
+        return None
+
+    def do_action(self, index):
+        name = self.actions[index]
+        self.action_log.append(name)
+        if name == "press":
+            self.states.add("EXPANDED")
+        if name == "collapse":
+            self.states.discard("EXPANDED")
+        return True
+
+
+def test_chrome_select_sets_a_valid_option_and_closes_the_popup(monkeypatch) -> None:
+    select = _ChromeSelect()
+    driver = _driver(monkeypatch, select)
+    element = _element("e4", "AXComboBox", "Country", editable=True, clickable=True)
+    assert driver.set_value(element, "Kazakhstan") is True
+    assert select.action_log == []
+    assert "EXPANDED" not in select.states
+    assert "SELECTED" in select.items[0].states
+
+    assert driver.set_value(element, "Peru") is True
+    assert select.items[2].action_log == ["select"]
+    assert select.action_log == []
+    assert "EXPANDED" not in select.states
+    assert "SELECTED" in select.items[2].states
+    assert "SELECTED" not in select.items[0].states
+    assert ATSPIAccessor().read(select).value == "Peru"
+
+    fresh = _ChromeSelect()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: fresh)
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Mars")
+    assert "Kazakhstan" in str(exc.value) and "Peru" in str(exc.value)
+    assert fresh.action_log == []
+    assert "EXPANDED" not in fresh.states
+
+
+def test_chrome_select_closes_the_popup_when_the_option_does_not_land(monkeypatch) -> None:
+    select = _ChromeSelect()
+    for item in select.items:
+        item.do_action = lambda index, item=item: item.action_log.append(item.actions[index]) or True
+    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    driver = _driver(monkeypatch, select)
+    element = _element("e4", "AXComboBox", "Country", editable=True, clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(element, "Peru")
+    assert exc.value.detail["reason"] in {"text_mismatch", "popup_open"}
+    assert "EXPANDED" not in select.states
+    assert "collapse" in select.action_log
+
+
 def test_spin_button_uses_the_value_interface_and_rejects_out_of_range(monkeypatch) -> None:
     spin = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
     driver = _driver(monkeypatch, spin)
@@ -378,6 +479,60 @@ def test_spin_button_uses_the_value_interface_and_rejects_out_of_range(monkeypat
         driver.set_value(element, "7")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert stuck.value == 3.0
+
+
+def test_spin_button_rounds_off_step_values_and_reports_what_it_holds(monkeypatch) -> None:
+    spin = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
+    spin.increment = 1
+    driver = _driver(monkeypatch, spin)
+    element = _element("e6", "AXTextField", "Quantity", editable=True)
+    assert driver.set_value(element, "4.6") == "5"
+    assert spin.value == 5.0
+    assert spin.value_sets == [5.0]
+
+    shown = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: shown)
+    assert driver.set_value(element, "4.6") == "5"
+    assert shown.value == 5.0
+
+    number = _Entry("3", "Seats")
+    number.role = "spin button"
+    number.value = 3.0
+    number.minimum = 0.0
+    number.maximum = 100.0
+    number.increment = 1
+    number.attrs = {"tag": "input", "text-input-type": "number"}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: number)
+    field = _element("e5", "AXTextField", "Seats", editable=True)
+    assert driver.set_value(field, "4.6") is True
+    assert number.value == 4.6
+    assert driver.set_value(field, "") is True
+    assert number.text == ""
+    assert number.value_sets == [4.6]
+
+    gtk = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: gtk)
+    with pytest.raises(ValueError):
+        driver.set_value(element, "")
+    assert gtk.value == 3.0
+
+
+def test_runtime_reports_the_spin_value_that_was_held() -> None:
+    from a11y_computer_use import server
+
+    element = _element("e6", "AXTextField", "Quantity", editable=True)
+    snap = type("S", (), {"app": "gtk"})()
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime._resolve = lambda ref, kind: (snap, element)
+    runtime._run_gated = lambda action, app, execute, **_kwargs: execute()
+    runtime._refuse_disabled = lambda target, verb="": None
+
+    class _Driver:
+        def set_value(self, _element, _value):
+            return "5"
+
+    runtime.driver = _Driver()
+    assert runtime.set_value("e6", "4.6") == "set e6 = '5'"
 
 
 def test_slider_set_value_uses_the_value_interface(monkeypatch) -> None:
@@ -451,6 +606,39 @@ def test_tree_row_click_errors_when_the_selection_stays_put(monkeypatch) -> None
     assert "SELECTED" not in target.states
 
 
+def test_chrome_list_click_that_does_not_select_is_not_success(monkeypatch) -> None:
+    cherry = _Node("list item", "Cherry", actions=["click"])
+
+    def noop(index, _node=cherry):
+        cherry.action_log.append(cherry.actions[index])
+        return True
+
+    cherry.do_action = noop
+    box = _Node("list box", "Fruits", children=[
+        _Node("list item", "Apple"),
+        _Node("list item", "Banana", states={"SELECTED"}),
+        cherry,
+    ])
+    box.select_fails = True
+    driver = _driver(monkeypatch, cherry)
+
+    def click(element, **_kwargs):
+        cherry.states.add("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Cherry", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" in cherry.states
+    assert cherry.action_log == ["click"]
+
+    cherry.states.discard("SELECTED")
+    driver.click = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert "SELECTED" not in cherry.states
+
+
 def test_chrome_list_option_click_still_selects(monkeypatch) -> None:
     cherry = _Node("list item", "Cherry", actions=["click"])
     box = _Node("list box", "Fruits", children=[
@@ -510,6 +698,14 @@ def test_chrome_snapshot_reports_selected_text_pressed_and_empty_number(monkeypa
     accessor = ATSPIAccessor()
     assert accessor.read(country).value == "Kazakhstan"
     assert accessor.read(fruits).value == "Banana"
+    fruits.children[1].states.add("SELECTED")
+    fruits.children[3].states.add("SELECTED")
+
+    def only_the_first(index, _banana=fruits.children[1]):
+        return _banana if index == 0 else None
+
+    fruits.get_selected_child = only_the_first
+    assert accessor.read(fruits).value == "Banana, Date"
     assert accessor.read(label).value == "Country"
     assert "\ufffc" not in str(accessor.read(label).value)
     assert accessor.read(toggle).checked is True

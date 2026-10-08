@@ -358,7 +358,10 @@ def test_app_launch_of_a_missing_program_does_not_wait_for_a_window(tmp_path, mo
     assert time.monotonic() - started < 2
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
     assert "not on PATH" in exc.value.message
-    assert calls == [] and waited == []
+    # One list, taken before the spawn, so a second window can be told from
+    # one that was already open. The missing program is not spawned and the
+    # call does not poll until the launch timeout.
+    assert calls == [] and waited == ["windows"]
 
 
 def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
@@ -412,3 +415,182 @@ def test_pidless_windows_use_wm_class_and_minimized_windows_are_off_screen(monke
     assert _linux_system.window_owner(2) == "xmessage"
     assert _linux_system.window_owner(3) == ""
     assert _linux_system.resolve_app("xmessage") == "xmessage"
+
+
+class _Proc:
+    def __init__(self, code):
+        self.code = code
+        self.polls = 0
+
+    def poll(self):
+        self.polls += 1
+        return self.code
+
+
+def _launch_runtime(tmp_path, monkeypatch, name, handle, windows):
+    from a11y_computer_use import safety, server
+
+    listed = {"n": 0}
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident):
+            assert ident == name
+            return handle
+
+        def windows(self):
+            listed["n"] += 1
+            if callable(windows):
+                return windows(listed["n"])
+            return windows
+
+    monkeypatch.setattr(
+        server, "_running_app",
+        lambda ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: None)
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier(name, safety.Tier.CLICK)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    return runtime
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_launch_of_an_exited_process_fails_immediately(tmp_path, monkeypatch, code) -> None:
+    import time
+
+    proc = _Proc(code)
+    handle = {"pid": 50, "proc": proc, "identifier": "true", "names": ["true"], "is_launcher": False}
+    runtime = _launch_runtime(tmp_path, monkeypatch, "true", handle, [])
+    runtime.APP_LAUNCH_WAIT_S = 30
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "true")
+    assert time.monotonic() - started < 2
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "process_exited"
+    assert exc.value.detail["exit_code"] == code
+    assert f"status {code}" in exc.value.message
+    assert proc.polls >= 1
+
+
+def test_absolute_path_launch_reports_the_window_the_process_opened(tmp_path, monkeypatch) -> None:
+    handle = {
+        "pid": 4242, "proc": _Proc(None), "identifier": "/usr/bin/mousepad",
+        "names": ["/usr/bin/mousepad", "mousepad"], "is_launcher": False,
+    }
+    row = {
+        "window_id": 7, "app": "mousepad", "title": "*Untitled 1 - Mousepad",
+        "pid": 4242, "wm_class": "mousepad",
+    }
+    runtime = _launch_runtime(tmp_path, monkeypatch, "/usr/bin/mousepad", handle, [row])
+    assert runtime.app("launch", "/usr/bin/mousepad") == (
+        "launched /usr/bin/mousepad; first window: '*Untitled 1 - Mousepad'"
+    )
+
+
+def test_launch_reports_the_new_window_not_one_already_open(tmp_path, monkeypatch) -> None:
+    handle = {
+        "pid": 222, "proc": _Proc(None), "identifier": "mousepad",
+        "names": ["mousepad"], "is_launcher": False,
+    }
+    old = {"window_id": 1, "app": "mousepad", "title": "*Untitled 1", "pid": 111}
+    new = {"window_id": 2, "app": "mousepad", "title": "Untitled 2", "pid": 222}
+
+    def rows(n):
+        return [old] if n == 1 else [old, new]
+
+    runtime = _launch_runtime(tmp_path, monkeypatch, "mousepad", handle, rows)
+    assert runtime.app("launch", "mousepad") == "launched mousepad; first window: 'Untitled 2'"
+
+
+def test_gtk_launch_exit_zero_waits_for_the_desktop_apps_window(tmp_path, monkeypatch) -> None:
+    import time
+
+    handle = {
+        "pid": 50, "proc": _Proc(0), "identifier": "org.example.App",
+        "names": ["org.example.App", "real-app"], "is_launcher": True,
+    }
+
+    def rows(n):
+        if n < 3:
+            return []
+        return [{
+            "window_id": 9, "app": "real-app", "title": "Real", "pid": 77, "wm_class": "real-app",
+        }]
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    runtime = _launch_runtime(tmp_path, monkeypatch, "org.example.App", handle, rows)
+    runtime.APP_LAUNCH_WAIT_S = 5
+    assert runtime.app("launch", "org.example.App") == "launched org.example.App; first window: 'Real'"
+
+
+def test_gtk_launch_nonzero_exit_fails_immediately(tmp_path, monkeypatch) -> None:
+    import time
+
+    proc = _Proc(1)
+    handle = {
+        "pid": 50, "proc": proc, "identifier": "org.example.App",
+        "names": ["org.example.App", "real-app"], "is_launcher": True,
+    }
+    runtime = _launch_runtime(tmp_path, monkeypatch, "org.example.App", handle, [])
+    runtime.APP_LAUNCH_WAIT_S = 30
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "org.example.App")
+    assert time.monotonic() - started < 2
+    assert exc.value.detail["reason"] == "process_exited"
+    assert exc.value.detail["exit_code"] == 1
+    assert proc.polls >= 1
+
+
+def test_a_running_launch_with_no_window_is_a_timeout(tmp_path, monkeypatch) -> None:
+    import time
+
+    handle = {
+        "pid": 9, "proc": _Proc(None), "identifier": "mousepad",
+        "names": ["mousepad"], "is_launcher": False,
+    }
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    runtime = _launch_runtime(tmp_path, monkeypatch, "mousepad", handle, [])
+    runtime.APP_LAUNCH_WAIT_S = 1
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "mousepad")
+    assert exc.value.code is ErrorCode.TIMEOUT
+    assert exc.value.detail["reason"] == "no_window"
+    assert "no window appeared" in exc.value.message
+
+
+def test_gtk_launch_handle_names_the_desktop_app(tmp_path, monkeypatch) -> None:
+    _isolate_desktop_dirs(tmp_path, monkeypatch)
+    apps = tmp_path / "xdg-home" / "applications"
+    apps.mkdir()
+    (apps / "org.example.App.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nExec=real-app %F\nStartupWMClass=RealApp\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _linux_system.shutil, "which",
+        lambda name: "/usr/bin/gtk-launch" if name == "gtk-launch" else None,
+    )
+    _record_spawns(monkeypatch)
+    handle = _linux_system.launch_app("org.example.App")
+    assert handle["is_launcher"] is True
+    assert "real-app" in handle["names"]
+    assert "RealApp" in handle["names"]
+    assert "gtk-launch" not in handle["names"]

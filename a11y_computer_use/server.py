@@ -641,6 +641,18 @@ def _list_apps() -> list[dict[str, object]]:
     return apps
 
 
+def _launcher_comm_names(identifier: str, comm: str) -> bool:
+    """Basename and vendor-prefix match used when a launch handle is present."""
+    if not identifier or not comm or identifier == comm:
+        return False
+    base = os.path.basename(identifier)
+    if base and (base == comm or _launched_as(comm, base)):
+        return True
+    if identifier.endswith("-" + comm):
+        return True
+    return len(comm) == 15 and len(identifier) > 15 and identifier.startswith(comm)
+
+
 def _launched_as(app_id: str, command: str) -> bool:
     """Whether a window owned by ``app_id`` plausibly belongs to the app
     launched as ``command`` off macOS, where the id is a process comm name:
@@ -1378,6 +1390,74 @@ class Runtime:
     def _recheck_frontmost_app(self, app: str) -> None:
         front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
         _recheck_frontmost(app, front or "unknown")
+
+    def _menu_is_open(self, app: str) -> bool:
+        """Whether ``app`` currently has a menu open. A blank name is not an app."""
+        if not app or app == "unknown":
+            return False
+        state_fn = getattr(self.driver, "menu_state", None)
+        if not callable(state_fn):
+            return False
+        try:
+            state = state_fn(app)
+        except (ComputerUseError, NotImplementedError, OSError, AttributeError):
+            return False
+        return bool(state and state.get("open"))
+
+    def _open_menu_app(self, front: str) -> str | None:
+        """The app whose open menu should receive ``key``, or None.
+
+        The frontmost app wins when its own menu is open. An override-redirect
+        popup often clears the frontmost name; the running app that still has
+        the menu open is the target then. A different named app in front is
+        not substituted here, so the focus gate can still refuse it.
+        """
+        if self._menu_is_open(front):
+            return front
+        if front not in ("", "unknown"):
+            return None
+        try:
+            rows = self.driver.running_apps()
+        except (ComputerUseError, AttributeError, OSError):
+            return None
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            ident = str(row.get("bundle_id") or row.get("id") or row.get("app") or row.get("name") or "")
+            if ident and ident != front and self._menu_is_open(ident):
+                return ident
+        return None
+
+    def _recheck_key_target(self, app: str) -> None:
+        """The focus gate for ``key``.
+
+        A different app in front is still ``focus_changed``. The gated app's
+        own open menu is a valid target: an override-redirect popup often
+        leaves the frontmost name empty or ``unknown``, and that must not
+        abort the chord or be treated as a foreign app.
+        """
+        front = self.driver.frontmost_app()[0] if self._resolves_apps() else _frontmost_bundle()
+        front = front or "unknown"
+        if front == app:
+            return
+        state_fn = getattr(self.driver, "menu_state", None)
+        open_menu = False
+        if state_fn is not None:
+            try:
+                state = state_fn(app)
+                open_menu = bool(state and state.get("open"))
+            except (ComputerUseError, NotImplementedError, OSError):
+                open_menu = False
+        if open_menu and front in ("", "unknown", app):
+            return
+        same = getattr(self.driver, "same_app", None)
+        if open_menu and callable(same):
+            try:
+                if same(app, front):
+                    return
+            except (ComputerUseError, OSError):
+                pass
+        _recheck_frontmost(app, front)
 
     def _recheck_target(self, app: str, target: Target) -> None:
         # A bound CDP tab does not slide under the pointer the way an OS window
@@ -2730,14 +2810,19 @@ class Runtime:
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
             return f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)"
-        front = self._frontmost()
+        front = self._frontmost() or "unknown"
+        # An open menu is the key target, including when the popup leaves the
+        # frontmost name empty. A named foreign app stays the gate key so the
+        # recheck still raises focus_changed. Closing the menu first (Escape)
+        # is what made Down leave the menu and Return insert a newline. type
+        # and click still dismiss, so typed text does not fall into the menu.
+        target = self._open_menu_app(front) or front
 
         def execute() -> None:
-            self._guard_user(front)
-            note.append(self._dismiss_open_menu(front))
+            self._guard_user(target)
             self.driver.key_chord(chord)
 
-        self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
+        self._run_gated(action, target, execute, recheck=self._recheck_key_target)
         return f"pressed {chord}{''.join(note)}"
 
     @_serialized
@@ -3061,10 +3146,13 @@ class Runtime:
                 detail={"ref": ref, "role": live.role},
             )
         action = TypeText(text=value)
+        landed: list[str] = []
 
         def execute() -> None:
             self._refuse_disabled(live, verb="set_value")
-            if self.driver.set_value(live, value):  # an AX write lands on this element only
+            result = self.driver.set_value(live, value)  # an AX write lands on this element only
+            if result:
+                landed.append(result if isinstance(result, str) else value)
                 return
             # A combo, popup, or slider that the driver could not set must not
             # be focused and typed into. That types the text into whatever
@@ -3084,7 +3172,8 @@ class Runtime:
             self.driver.type_text(value)
 
         self._run_gated(action, app, execute)
-        return f"set {ref} = {value!r}"
+        shown = landed[-1] if landed else value
+        return f"set {ref} = {shown!r}"
 
     @_serialized
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
@@ -3223,13 +3312,96 @@ class Runtime:
                 return True
         return False
 
+    def _pid_descends(self, pid: int, ancestor: int) -> bool:
+        """True when ``pid`` is ``ancestor`` or a child of it, a few levels down."""
+        current = int(pid)
+        target = int(ancestor)
+        for _ in range(5):
+            if current == target:
+                return True
+            try:
+                text = open(f"/proc/{current}/status", encoding="utf-8", errors="replace").read()
+            except OSError:
+                return False
+            parent = 0
+            for line in text.splitlines():
+                if line.startswith("PPid:"):
+                    try:
+                        parent = int(line.split()[1])
+                    except (IndexError, ValueError):
+                        parent = 0
+                    break
+            if not parent or parent == current:
+                return False
+            current = parent
+        return current == target
+
+    def _launch_window(self, row: dict, identifier: str, bundle: str | None, handle, before: set) -> bool:
+        """Whether ``row`` is a window of this launch.
+
+        Without a process handle the historical name match is used, including
+        a window that was already open. With a handle, the new process's pid
+        (or a descendant) wins. Otherwise the window must be new, and its app
+        id or WM_CLASS must be the binary's basename, the class, or a desktop
+        file's exec or StartupWMClass. A window that was already there is not
+        reported as the one this launch opened.
+        """
+        if not isinstance(handle, dict):
+            return self._app_matches(row, identifier, bundle)
+        child = handle.get("pid")
+        row_pid = row.get("pid")
+        try:
+            row_pid_i = int(row_pid) if row_pid else 0
+        except (TypeError, ValueError):
+            row_pid_i = 0
+        if child and row_pid_i and (row_pid_i == int(child) or self._pid_descends(row_pid_i, int(child))):
+            return True
+        wid = row.get("window_id")
+        if wid in before:
+            return False
+        names: set[str] = set()
+        for raw in [identifier, *(handle.get("names") or [])]:
+            if not raw:
+                continue
+            text = str(raw).lower()
+            names.add(text)
+            base = os.path.basename(text)
+            if base:
+                names.add(base)
+        fields = [
+            str(row.get("app") or ""),
+            str(row.get("wm_class") or ""),
+            str(row.get("wm_class_class") or ""),
+            str(row.get("name") or ""),
+        ]
+        for field in fields:
+            folded = field.lower()
+            if not folded:
+                continue
+            if folded in names:
+                return True
+            for name in names:
+                if _launched_as(folded, name) or _launcher_comm_names(name, folded):
+                    return True
+        return False
+
     def _wait_first_window(self, identifier: str, timeout_s: float) -> str | None:
         """Poll the driver's window list until ``identifier`` owns a window.
 
         Returns its title (possibly empty without the Screen Recording grant),
-        or None when nothing appeared within ``timeout_s``. Off macOS the app
-        id is the process comm, which only exists once the app has a window,
-        so an unresolved id (the identifier echoed back) is retried each poll."""
+        or None when nothing appeared within ``timeout_s`` and this launch has
+        no process handle (macOS and Windows). A Linux handle that exits
+        before a window appears is an error immediately, with the exit code,
+        unless it is a launcher (``gtk-launch``, ``xdg-open``, ``gio``) that
+        exited 0: that process is not the app. A handle that stays up and
+        never shows a matching window is ``timeout``, not a success. Off
+        macOS the app id is the process comm, which only exists once the app
+        has a window, so an unresolved id (the identifier echoed back) is
+        retried each poll."""
+        handle = getattr(self, "_launch_handle", None)
+        before = set(getattr(self, "_launch_before", None) or ())
+        self._launch_handle = None
+        self._launch_before = None
         deadline = time.monotonic() + timeout_s
         bundle: str | None = None
         _running = None
@@ -3243,15 +3415,58 @@ class Runtime:
                 rows = self.driver.windows()
             except ComputerUseError:
                 rows = []
+            pid_title = None
+            name_title = None
             for row in rows:
-                if self._app_matches(row, identifier, bundle):
-                    return str(row.get("title") or "")
-            if bundle and _running is not None:  # windows on another Space are not "on screen"
+                if not isinstance(handle, dict):
+                    if self._app_matches(row, identifier, bundle):
+                        return str(row.get("title") or "")
+                    continue
+                if not self._launch_window(row, identifier, bundle, handle, before):
+                    continue
+                title = str(row.get("title") or "")
+                child = handle.get("pid")
+                row_pid = row.get("pid")
+                try:
+                    same_pid = bool(child) and int(row_pid or 0) == int(child)
+                except (TypeError, ValueError):
+                    same_pid = False
+                if same_pid or (child and row.get("pid") and self._pid_descends(int(row.get("pid") or 0), int(child))):
+                    pid_title = title
+                    break
+                if name_title is None:
+                    name_title = title
+            if isinstance(handle, dict) and pid_title is not None:
+                return pid_title
+            if isinstance(handle, dict) and name_title is not None:
+                return name_title
+            if bundle and _running is not None and not isinstance(handle, dict):
+                # windows on another Space are not "on screen"
                 pid = int(getattr(_running, "processIdentifier", lambda: 0)() or 0)
                 titles = _window_titles_all_spaces(pid) if pid else None
                 if titles:
                     return titles[0]
+            code = None
+            if isinstance(handle, dict):
+                proc = handle.get("proc")
+                if proc is not None and hasattr(proc, "poll"):
+                    try:
+                        code = proc.poll()
+                    except Exception:
+                        code = None
+                if code is not None and not (handle.get("is_launcher") and code == 0):
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{identifier} exited with status {code} before a window appeared",
+                        detail={"app": identifier, "reason": "process_exited", "exit_code": code},
+                    )
             if time.monotonic() >= deadline:
+                if isinstance(handle, dict):
+                    raise ComputerUseError(
+                        ErrorCode.TIMEOUT,
+                        f"launched {identifier}; no window appeared within {timeout_s:.0f}s",
+                        detail={"app": identifier, "reason": "no_window", "timeout_s": timeout_s},
+                    )
                 return None
             time.sleep(0.25)
 
@@ -3308,11 +3523,23 @@ class Runtime:
                     gate_key = _installed_bundle_id(name) or name
 
             def launch() -> str | None:
+                before: list = []
+                if not self._resolves_apps():
+                    try:
+                        before = [row.get("window_id") for row in self.driver.windows()]
+                    except (ComputerUseError, AttributeError):
+                        before = []
                 if getattr(self.driver, "background_input", False):
-                    self.driver.launch_app(name, activate=activate if activate is not None
+                    handle = self.driver.launch_app(name, activate=activate if activate is not None
                                            else FOCUS_MODE != "background")
                 else:
-                    self.driver.launch_app(name)
+                    handle = self.driver.launch_app(name)
+                # A Linux launch returns a process handle. macOS and Windows
+                # return None, and the wait keeps its previous success string
+                # when no window appears. The ids from before the spawn keep a
+                # second window of an app that was already running distinct.
+                self._launch_handle = handle if isinstance(handle, dict) else None
+                self._launch_before = before
                 if self._resolves_apps():
                     return None
                 return self._wait_first_window(name, self.APP_LAUNCH_WAIT_S)
@@ -3349,6 +3576,18 @@ class Runtime:
                     sheet = any(el.role in ("AXSheet", "AXDialog") for el in snap.elements)
                 except ComputerUseError:
                     sheet = False
+                if not sheet:
+                    # Linux save prompts are AT-SPI alerts. They are also
+                    # _NET_WM_WINDOW_TYPE_DIALOG or transient-for a parent.
+                    # Either one is the unsaved-changes result. Nothing is clicked.
+                    try:
+                        rows = self.driver.windows()
+                    except ComputerUseError:
+                        rows = []
+                    sheet = any(
+                        row.get("dialog") and self._app_matches(row, name, bundle)
+                        for row in rows
+                    )
                 if sheet:
                     return (f"sent quit to {bundle}; it is showing a dialog (likely unsaved "
                             "changes) and needs a human decision")
@@ -4189,7 +4428,12 @@ def build_server(
         An unknown key is invalid_arguments and is rejected before any input.
         With app=<bundle id or name> (macOS) the chord is addressed to that
         app's process without activating it (the user's screen stays put);
-        without app it goes to the frontmost app. Gated at tier 'full'."""
+        without app it goes to the frontmost app. An open menu of that app
+        receives the chord and is not closed first: arrows, Return, and
+        alt+letter navigate and activate the menu, and Return does not reach
+        the document. A different frontmost app is still focus_changed. The
+        app's own open menu counts as the key target, including when the
+        frontmost name is empty. Gated at tier 'full'."""
         return await run(runtime.key, chord, app)
 
     @server.tool(name="scroll")
@@ -4334,7 +4578,15 @@ def build_server(
         (bundle_id, name, pid, frontmost). 'launch' starts name and waits up to
         60 s for its first window (returns the title). On Linux, a name that is
         not an executable on PATH and not a desktop file fails immediately with
-        app_not_found and does not wait. activate=false starts it
+        app_not_found and does not wait. A program that exits before a window
+        appears fails immediately with that exit code and does not wait 60 s.
+        An absolute path matches the window by pid, by the binary's basename
+        or WM_CLASS, or by the desktop file's exec or StartupWMClass, and the
+        result is the window that appeared. Success requires that window. A
+        launcher such as gtk-launch exiting 0 is not the app exiting.
+        'quit' sends the quit chord and reports a save-changes dialog (an
+        AT-SPI dialog or alert, or a dialog window) instead of "still running".
+        It does not click Discard. activate=false starts it
         behind the current app so the user's screen and Space stay put (the
         default in background focus mode); refs, set_value, menus, and
         type/key with app=... all work without focus. 'focus' brings it to the

@@ -817,6 +817,83 @@ def test_mapped_text_does_not_flood_input_method(xtest_recorder, monkeypatch) ->
     assert display.remapped == []
 
 
+class _LockDisplay(_GermanLayoutDisplay):
+    """A keymap that can report Caps Lock and Num Lock, plus keypad keysyms.
+
+    Keycode 90 is KP_Insert on level 0 and KP_0 on level 1, the usual
+    Num Lock pair. Num_Lock itself sits on modifier 4 (mask 16).
+    """
+
+    def __init__(self, *, caps: bool = False, num: bool = False) -> None:
+        super().__init__()
+        self.keymap[10] = [0x31, 0x21, 0x31, 0x21, 0, 0]
+        self.keymap[38] = [ord("b"), ord("B"), ord("b"), ord("B"), 0, 0]
+        self.keymap[54] = [ord("c"), ord("C"), ord("c"), ord("C"), 0, 0]
+        self.keymap[77] = [0xFF7F, 0, 0, 0, 0, 0]
+        self.keymap[90] = [0xFF9E, 0xFFB0, 0, 0, 0, 0]
+        self._mask = (2 if caps else 0) | (16 if num else 0)
+
+    def screen(self):
+        return _NS(root=_NS(query_pointer=lambda: _NS(mask=self._mask)))
+
+    def get_modifier_mapping(self):
+        mapping = [[] for _ in range(8)]
+        mapping[4] = [77]
+        return mapping
+
+
+def _keys(events) -> list[tuple[int, int]]:
+    return [(event, detail) for event, detail, _x, _y in events]
+
+
+def test_caps_lock_does_not_invert_typed_letters(xtest_recorder, monkeypatch) -> None:
+    """Letters are sent so the requested case lands while Caps Lock stays down.
+
+    Caps Lock XOR Shift is what the server applies. A requested lowercase is
+    Shift plus the key; a requested uppercase is the key alone. Digits are
+    not letters and are not inverted. No Caps_Lock key event is delivered.
+    """
+    import time
+
+    events, _ = xtest_recorder
+    display = _LockDisplay(caps=True)
+    monkeypatch.setattr(_linux_input, "_display", display)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    _linux_input.type_string("qQ1")
+    assert _keys(events) == [
+        (2, 50), (2, 24), (3, 24), (3, 50),  # q, Shift because Caps is down
+        (2, 24), (3, 24),                    # Q, no Shift
+        (2, 10), (3, 10),                    # 1, not a letter
+    ]
+
+
+def test_caps_lock_letter_chords_keep_the_requested_case(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    display = _LockDisplay(caps=True)
+    monkeypatch.setattr(_linux_input, "_display", display)
+    _linux_input.press_chord("b")
+    assert _keys(events) == [(2, 50), (2, 38), (3, 38), (3, 50)]
+    events.clear()
+    _linux_input.press_chord("shift+c")
+    assert _keys(events) == [(2, 54), (3, 54)]
+
+
+def test_keypad_digit_follows_num_lock_and_not_shift(xtest_recorder, monkeypatch) -> None:
+    events, _ = xtest_recorder
+    display = _LockDisplay(num=False)
+    monkeypatch.setattr(_linux_input, "_display", display)
+    _linux_input.press_chord("kp_0")
+    assert _keys(events) == [(2, 77), (3, 77), (2, 90), (3, 90), (2, 77), (3, 77)]
+    assert (2, 50) not in _keys(events)
+    events.clear()
+    display._mask |= 16
+    _linux_input.press_chord("kp_0")
+    assert _keys(events) == [(2, 90), (3, 90)]
+    events.clear()
+    _linux_input.press_chord("kp_insert")
+    assert _keys(events) == [(2, 77), (3, 77), (2, 90), (3, 90), (2, 77), (3, 77)]
+
+
 def test_binding_failure_restores_keymap_without_partial_text(xtest_recorder, monkeypatch) -> None:
     """A server error midway through preparation must not leave a remapped key."""
     import time

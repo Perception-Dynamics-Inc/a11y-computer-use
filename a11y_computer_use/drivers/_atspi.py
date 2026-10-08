@@ -61,8 +61,8 @@ _ROLE = {
     "icon": "AXImage",
     "frame": "AXWindow",
     "window": "AXWindow",
-    "dialog": "AXWindow",
-    "alert": "AXWindow",
+    "dialog": "AXDialog",
+    "alert": "AXDialog",
     "file chooser": "AXWindow",
     "color chooser": "AXWindow",
     "menu item": "AXMenuItem",
@@ -326,20 +326,44 @@ def _option_label(node) -> str:
     return ""
 
 
-def _selected_option_text(acc) -> str | None:
-    """The combo or list's active option, not a highlighted popup row.
+def _iface_selected_labels(acc) -> list[str] | None:
+    """Labels from the Selection interface, or None when it names nothing.
 
-    ``Selection.get_selected_child`` is the active item (GTK's combo uses it
-    for ``gtk_combo_box_get_active``). A popup menu can mark a row SELECTED
-    when that row is only highlighted, which leaves the combo unchanged.
+    Every selected child is included. Index 0 alone is what a multi-select
+    listbox used to show, hiding the rest. A child with no label is skipped
+    so the state walk can still see the option.
     """
     iface = _selection_iface(acc)
-    if iface is not None:
-        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
-        if child is not None:
+    if iface is None:
+        return None
+    labels: list[str] = []
+    count = _call_first(iface, ("get_n_selected_children", "getNSelectedChildren"))
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        for index in range(min(int(count), 64)):
+            child = _call_first(iface, ("get_selected_child", "getSelectedChild"), index)
+            if child is None:
+                continue
             label = _option_label(child)
-            if label:
-                return label
+            if label and label not in labels:
+                labels.append(label)
+        if len(labels) > 1:
+            return labels
+    child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+    if child is None:
+        return labels or None
+    label = _option_label(child)
+    if label and label not in labels:
+        labels.append(label)
+    return labels or None
+
+
+def _state_selected_labels(acc, *, skip_menus: bool) -> list[str]:
+    """SELECTED option labels in tree order.
+
+    ``skip_menus`` leaves a popup menu alone. GTK marks the highlighted row
+    SELECTED there without changing the combo. A listbox's own items are not
+    in a menu, so a multi-select still reports every selected option.
+    """
     labels: list[str] = []
 
     def walk(node, depth: int) -> None:
@@ -350,18 +374,43 @@ def _selected_option_text(acc) -> str | None:
             child = _child_at(node, index)
             if child is None:
                 continue
+            role = _role_name(child)
+            if skip_menus and role in {"menu", "popup menu"}:
+                continue
             if _state_has(child, "SELECTED"):
                 label = _option_label(child)
                 if label and label not in labels:
                     labels.append(label)
                 continue
-            if _role_name(child) in _OPTION_CONTAINER_NAMES:
+            if role in _OPTION_CONTAINER_NAMES:
                 walk(child, depth + 1)
 
     walk(acc, 0)
-    if not labels:
+    return labels
+
+
+def _selected_option_text(acc) -> str | None:
+    """The combo or list's selected option text, every one of them.
+
+    ``Selection.get_selected_child`` is the active item (GTK's combo uses it
+    for ``gtk_combo_box_get_active``). A popup menu can mark a row SELECTED
+    when that row is only highlighted, which leaves the combo unchanged, so
+    that menu is not merged in. A multi-select listbox has several selected
+    children; all of their names are shown, in tree order, separated by
+    ", ". One selected option is that option's text alone.
+    """
+    iface_labels = _iface_selected_labels(acc)
+    if iface_labels is not None and len(iface_labels) > 1:
+        return ", ".join(iface_labels)
+    outside_menus = _state_selected_labels(acc, skip_menus=True)
+    if outside_menus and (not iface_labels or len(outside_menus) > len(iface_labels)):
+        return ", ".join(outside_menus)
+    if iface_labels:
+        return ", ".join(iface_labels)
+    nested = _state_selected_labels(acc, skip_menus=False)
+    if not nested:
         return None
-    return ", ".join(labels)
+    return ", ".join(nested)
 
 
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
@@ -904,6 +953,43 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     return is_secure(acc)
 
 
+def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
+    """Text of the focused node, or None when that text cannot be read.
+
+    A terminal and a canvas that expose Text are readable even when they
+    have no EditableText. None means a keystroke type has nothing to compare
+    against and the caller may report the count it sent. An unreachable bus
+    is None, not an error.
+    """
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    try:
+        return _full_text(acc)
+    except Exception:
+        return None
+
+
+def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
+    """Whether ``text`` showed up in the focused text.
+
+    A readable field that still shows the pre-type text, or that shows the
+    case-inverted string, does not count. A suffix or an insertion does.
+    """
+    if after is None or text not in after:
+        return False
+    if before is None:
+        return True
+    if after == before:
+        return False
+    if after.endswith(text) or after == before + text:
+        return True
+    return before in after or len(after) > len(before)
+
+
 def focused_editable(app: str, *, max_nodes: int = 400):
     """The focused node when `type` can insert into it, else None.
 
@@ -1426,15 +1512,59 @@ def _do_action_named(acc, names: frozenset[str]) -> bool:
     return False
 
 
-def _close_combo_popup(acc) -> None:
-    """Close a popup this call opened. A combo that is not expanded is left alone."""
-    if not _state_has(acc, "EXPANDED"):
-        return
-    _do_action_named(acc, frozenset({"collapse", "close", "hide"}))
-    if _state_has(acc, "EXPANDED") and _x11_keys_available():
-        from a11y_computer_use.drivers import _linux_input
+def _chromium_control(acc) -> bool:
+    """True when this node belongs to Chromium. A fake without a toolkit is not."""
+    try:
+        return _chromium_app(acc)
+    except Exception:
+        return False
 
-        _linux_input.press_chord("Escape")
+
+def _popup_open(acc) -> bool:
+    """Whether the choice popup is up.
+
+    Chrome's select sets EXPANDED, sometimes a beat after the call that
+    opened it. A child menu that is SHOWING or EXPANDED counts too, so a
+    popup that does not flip the combo's own state is still closed.
+    """
+    if _state_has(acc, "EXPANDED"):
+        return True
+    count = min(_child_count(acc), 12)
+    for index in range(count):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu", "popup menu", "list box", "list"}:
+            continue
+        if _state_has(child, "EXPANDED") or _state_has(child, "SHOWING") or _state_has(child, "VISIBLE"):
+            return True
+    return False
+
+
+def _close_combo_popup(acc) -> None:
+    """Close a popup this call opened. A combo that is not expanded is left alone.
+
+    The close is repeated briefly. Chrome can mark the select EXPANDED after
+    ``select_child`` returns, and one Escape is not always enough. Collapse
+    is tried before Escape so a toolkit that has the action does not also
+    receive a key.
+    """
+    for attempt in range(4):
+        if not _popup_open(acc):
+            # Chrome can set EXPANDED after select_child has already returned.
+            # One beat covers that. A GTK combo that is not expanded stays put.
+            if attempt > 0 or not _chromium_control(acc):
+                return
+            time.sleep(0.05)
+            continue
+        _do_action_named(acc, frozenset({"collapse", "close", "hide"}))
+        if _popup_open(acc) and _x11_keys_available():
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.press_chord("Escape")
+        if not _popup_open(acc):
+            return
+        time.sleep(0.04)
 
 
 def _combo_active_label(acc) -> str | None:
@@ -1467,17 +1597,133 @@ def _combo_landed(acc, entry, value: str) -> bool:
     if entry is not None:
         text = _full_text(entry)
         return text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value
+    if _chromium_control(acc):
+        # The same text the snapshot shows: the SELECTED option's name. Chrome
+        # keeps the combobox name as the aria-label and its text as U+FFFC.
+        # The selected menu item is the value, and it can arrive a beat late.
+        return _choice_shows(acc, value)
     return _combo_active_label(acc) == value
+
+
+def _option_named(acc, label: str):
+    """The option node named ``label`` after a popup has been opened, or None."""
+    for item_label, node, _parent, _index in _collect_options(acc):
+        if item_label == label:
+            return node
+    return None
+
+
+def _click_center(node) -> None:
+    """One left click at the node's screen center, when it has a box."""
+    if not _x11_keys_available():
+        return
+    pos, size = _extents(node)
+    if pos is None or size is None:
+        return
+    width, height = size
+    if width <= 0 or height <= 0:
+        return
+    try:
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.click(int(pos[0] + width / 2), int(pos[1] + height / 2))
+    except Exception:
+        return
+
+
+_WEB_OPTION_ACTIONS = frozenset({"select", "click", "press", "activate"})
+
+
+def _choice_shows(combo, label: str, *, wait: bool = True) -> bool:
+    """Whether the selected-option text is ``label``.
+
+    Chrome's option ``select`` action updates the menu item's SELECTED state
+    and the DOM together. A busy renderer can publish that state a beat
+    after the action returns, so a check that follows an action waits. The
+    wait is bounded and stops on the first match. A check before any action
+    does not wait.
+    """
+    attempts = 6 if wait else 1
+    for attempt in range(attempts):
+        if _selected_option_text(combo) == label:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.05)
+    return False
+
+
+def _menu_selection(combo):
+    """Selection interface that can choose an option, and the node that owns it.
+
+    A Chrome ``<select>`` combobox has no Selection interface. The child menu
+    does, and ``select_child`` on that menu does not change the HTML value.
+    The interface is still tried after the option action, for a toolkit that
+    implements it. ``(None, None)`` when neither node has one.
+    """
+    iface = _selection_iface(combo)
+    if iface is not None:
+        return combo, iface
+    count = min(_child_count(combo), 6)
+    for index in range(count):
+        child = _child_at(combo, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu", "popup menu", "list box", "list"}:
+            continue
+        child_iface = _selection_iface(child)
+        if child_iface is not None:
+            return child, child_iface
+    return None, None
+
+
+def _activate_web_option(combo, label: str, node, index: int) -> None:
+    """Select a Chrome ``<select>`` option and leave the popup closable.
+
+    The option's own ``select`` action is what changes the HTML value. The
+    combobox has no Selection interface, and ``select_child`` on its menu
+    returns false and leaves the value alone. ``click`` / ``press`` /
+    ``activate`` are accepted for a tree that names the action that way.
+    An option that is already selected is not touched, so the popup is not
+    opened for the current value. A click at the option's center is the last
+    try, after the popup has been opened so the item has a box.
+    """
+    if _choice_shows(combo, label, wait=False):
+        return
+    target = _option_named(combo, label) or node
+    _do_action_named(target, _WEB_OPTION_ACTIONS)
+    if _choice_shows(combo, label):
+        return
+    _owner, iface = _menu_selection(combo)
+    if iface is not None:
+        _call_first(iface, ("select_child", "selectChild"), index, default=False)
+    if _choice_shows(combo, label):
+        return
+    if not _popup_open(combo):
+        _do_action_named(combo, frozenset({"press", "show", "open"}))
+    target = _option_named(combo, label) or target
+    _do_action_named(target, _WEB_OPTION_ACTIONS)
+    if _choice_shows(combo, label):
+        return
+    _click_center(target)
+    _choice_shows(combo, label)
 
 
 def _activate_combo_option(combo, options, match) -> None:
     """Choose ``match`` on the combo, not on its popup menu.
 
-    ``Selection.select_child`` on the combo is the model index and calls
+    ``Selection.select_child`` on a GTK combo is the model index and calls
     ``gtk_combo_box_set_active``. The same call on the popup only highlights
-    the row. A click on the item is the fallback that activates it.
+    the row. A click on the item is the fallback that activates it. Chrome's
+    select uses its own path: the snapshot's selected-option text is the
+    read-back, and the popup is not opened when that text is already the value.
     """
-    label, node, _parent, _index = match
+    label, node, _parent, index = match
+    if _chromium_control(combo):
+        model_index = next((i for i, item in enumerate(options) if item[1] is node), index)
+        _activate_web_option(combo, label, node, model_index)
+        return
+    if _combo_active_label(combo) == label:
+        return
     model_index = next(i for i, item in enumerate(options) if item[1] is node)
     iface = _selection_iface(combo)
     if iface is not None:
@@ -1536,14 +1782,58 @@ def set_combo_value(acc, value: str) -> None:
         )
 
 
-def set_numeric_value(acc, value: str) -> bool:
+def _minimum_increment(acc) -> float | None:
+    """The Value interface's step, or None when it is missing or not positive."""
+    Atspi = _atspi()
+    got = _safe(lambda: Atspi.Value.get_minimum_increment(acc))
+    if isinstance(got, bool) or not isinstance(got, (int, float)):
+        return None
+    step = float(got)
+    if not math.isfinite(step) or step <= 0:
+        return None
+    return step
+
+
+def _snap_spin(acc, number: float, low: float) -> float:
+    """Round a GTK spin button onto its step.
+
+    Setting 4.6 on an integer spin leaves the adjustment at 4.6 while the
+    text shows 5. The value written is the nearest step, so the adjustment
+    and the text agree. A Chrome number input is not a spin adjustment and
+    keeps the number it was given. A spin whose step is missing and whose
+    text is an integer uses a step of 1.
+    """
+    if _role_name(acc) != "spin button" or _number_input(acc):
+        return number
+    step = _minimum_increment(acc)
+    if step is None:
+        shown = _full_text(acc)
+        if not isinstance(shown, str) or not shown.strip().lstrip("+-").isdigit():
+            return number
+        step = 1.0
+    snapped = low + round((number - low) / step) * step
+    return float(format(snapped, ".10g"))
+
+
+def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
     A non-number or a number outside minimum..maximum raises ValueError before
     the write. The message includes the minimum and maximum. The current value
     is read back and must match. False means ``value`` is a finite number and
     this control has no Value interface, so the caller may use ``set_text``.
+    An empty string on an ``<input type=number>`` clears the field. A GTK spin
+    button is snapped to its step; the return value is that step's text when
+    it differs from what was asked, so the caller reports the value held.
     """
+    if value == "" and _number_input(acc):
+        if set_text(acc, ""):
+            return True
+        raise _text_mismatch(
+            "text_mismatch",
+            "the number field could not be cleared",
+            expected="",
+        )
     span = _value_range(acc)
     low = high = None
     if span is not None:
@@ -1563,13 +1853,20 @@ def set_numeric_value(acc, value: str) -> bool:
         raise ValueError(
             f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
         )
+    number = _snap_spin(acc, number, low)
+    if number < low or number > high:
+        raise ValueError(
+            f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
+        )
     Atspi = _atspi()
     _safe(lambda: Atspi.Value.set_current_value(acc, number), False)
     got = None
     for attempt in range(_TEXT_CONFIRM_POLLS):
         got = _safe(lambda: Atspi.Value.get_current_value(acc))
         if isinstance(got, (int, float)) and not isinstance(got, bool) and _numbers_match(float(got), number):
-            return True
+            if _numbers_match(float(got), _parse_number(value)):
+                return True
+            return _format_bound(float(got))
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
     raise _text_mismatch(
@@ -1595,16 +1892,58 @@ def _child_index(parent, child) -> int | None:
     return None
 
 
+def _node_contains(node, target, depth: int = 0) -> bool:
+    if depth > 6:
+        return False
+    count = min(_child_count(node), 64)
+    for index in range(count):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        if child is target or child == target:
+            return True
+        if _node_contains(child, target, depth + 1):
+            return True
+    return False
+
+
+def _index_of_containing_child(parent, target) -> int | None:
+    """Index of the direct child of ``parent`` that is or contains ``target``."""
+    count = min(_child_count(parent), 500)
+    for index in range(count):
+        kid = _child_at(parent, index)
+        if kid is None:
+            continue
+        if kid is target or kid == target or _node_contains(kid, target):
+            return index
+    return None
+
+
 def _selection_parent(acc):
-    """(parent, child index, row node) when ``acc`` sits in a Selection container."""
+    """(parent, child index, row node) when ``acc`` sits in a Selection container.
+
+    A scroll pane or filler between the row and the list still counts. The
+    index is that row's index under the selection parent. A menu is not a
+    selection target: menu items are activated, not selected as list rows.
+    """
+    origin = _role_name(acc)
+    if origin not in _ROW_ROLE_NAMES and origin not in _OPTION_ROLE_NAMES:
+        return None, None, None
     node = acc
     for _ in range(8):
-        role = _role_name(node)
         parent = _parent_of(node)
         if parent is None:
             return None, None, None
-        if role in _ROW_ROLE_NAMES and _selection_iface(parent) is not None:
-            return parent, _child_index(parent, node), node
+        parent_role = _role_name(parent)
+        if parent_role in {"menu", "popup menu", "menu bar"}:
+            return None, None, None
+        if _selection_iface(parent) is not None and parent_role in (
+            _LIST_ROLES | {"tree", "tree table", "table"}
+        ):
+            index = _child_index(parent, acc)
+            if index is None:
+                index = _index_of_containing_child(parent, acc)
+            return parent, index, acc
         node = parent
     return None, None, None
 
@@ -1625,39 +1964,53 @@ def _row_selected(node) -> bool:
     return _state_has(node, "SELECTED")
 
 
+def _row_settled(node) -> bool:
+    """True when ``node`` is selected and still selected after a short beat.
+
+    Chrome's listbox click action can report success and set SELECTED for one
+    read, then leave the HTML selection unchanged. A success has to outlast
+    that beat. Hermetic fakes patch ``time.sleep`` so the second read is
+    immediate.
+    """
+    if not _row_selected(node):
+        return False
+    time.sleep(0.04)
+    return _row_selected(node)
+
+
 def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 
     None means this node is not such a row, so the caller uses ``do_press``.
-    True means the row is selected. False means it is a selection row and it
-    is still not selected: the caller clicks the on-screen center, then checks
-    again. A GTK cell's expand/edit/activate action is not used. A Chrome
-    option's click is, and the selection is checked afterwards.
+    True means the row is selected and stayed selected. False means it is a
+    selection row and it is still not selected: the caller clicks the
+    on-screen center, then checks again. A GTK cell's expand/edit/activate
+    action is not used. A Chrome option's click is, and the selection is
+    checked afterwards. A click action that returns without leaving the row
+    selected is not success.
     """
-    if _role_name(acc) not in _ROW_ROLE_NAMES:
-        return None
     parent, index, target = _selection_parent(acc)
     if parent is None or target is None:
         return None
     action = _first_press_action(acc)
-    if action in _SELECTING_ACTION_NAMES and do_press(acc) and _row_selected(target):
-        return True
+    if action in _SELECTING_ACTION_NAMES:
+        do_press(acc)
+        if _row_settled(target):
+            return True
     iface = _selection_iface(parent)
-    if iface is not None and index is not None and _call_first(
-        iface, ("select_child", "selectChild"), index, default=False
-    ) and _row_selected(target):
-        return True
+    if iface is not None and index is not None:
+        _call_first(iface, ("select_child", "selectChild"), index, default=False)
+        if _row_settled(target):
+            return True
     return False
 
 
 def row_is_selected(acc) -> bool:
     """Whether the selection row under ``acc`` is selected. False for other nodes."""
-    if _role_name(acc) not in _ROW_ROLE_NAMES:
-        return False
     _parent, _index, target = _selection_parent(acc)
     if target is None:
         return False
-    return _row_selected(target)
+    return _row_settled(target)
 
 
 def set_text(acc, text: str) -> bool:

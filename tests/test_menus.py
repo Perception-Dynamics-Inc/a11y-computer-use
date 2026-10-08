@@ -288,6 +288,10 @@ class FakeDriver:
             els.append(Element(ref="e2", role="AXSheet", title="Save?", value=None,
                                bounds=Bounds(1, 0, 0, 50, 50), snapshot_id="s", parent="e1",
                                path=("AXWindow", "AXSheet")))
+        if getattr(self, "alert", False):
+            els.append(Element(ref="e3", role="AXDialog", title="Question", value=None,
+                               bounds=Bounds(1, 0, 0, 50, 50), snapshot_id="s", parent="e1",
+                               path=("AXWindow", "AXDialog")))
         return Snapshot(snapshot_id="s", scope=scope, app=app, pid=1, created_at=0.0,
                         displays=(Display(1, 100, 100, 1.0, True),), elements=tuple(els))
 
@@ -424,3 +428,48 @@ def test_menu_and_file_dialog_are_dispatchable_by_name(tmp_path) -> None:
     rt, _, _ = make_runtime(tmp_path)
     assert rt.call_tool("menu", {"app": APP, "path": "File > New"}).startswith("pressed")
     assert json.loads(rt.dispatch("file_dialog", {"action": "open", "path": "/tmp/a"}))["action"] == "open"
+
+
+def test_alert_and_dialog_roles_are_dialogs() -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    assert _atspi._ROLE["dialog"] == "AXDialog"
+    assert _atspi._ROLE["alert"] == "AXDialog"
+    assert _atspi._ROLE["file chooser"] == "AXWindow"
+    assert _atspi._ROLE["color chooser"] == "AXWindow"
+
+
+def test_app_quit_reports_an_alert_and_does_not_click_discard(tmp_path) -> None:
+    rt, driver, _store = make_runtime(tmp_path, safety.Tier.FULL)
+    rt.QUIT_SETTLE_S = 0.0
+    driver.quit_chord = "ctrl+q"
+    driver.apps = [{"app": APP, "name": "TextEdit"}]
+    driver.alert = True
+    result = rt.app("quit", APP)
+    assert result == (
+        f"sent quit to {APP}; it is showing a dialog (likely unsaved changes) "
+        "and needs a human decision"
+    )
+    assert driver.calls == [("activate", APP), ("key", "ctrl+q")]
+
+
+def test_app_quit_reports_a_dialog_window_when_the_snapshot_role_is_a_window(tmp_path) -> None:
+    rt, driver, _store = make_runtime(tmp_path, safety.Tier.FULL)
+    rt.QUIT_SETTLE_S = 0.0
+    driver.quit_chord = "ctrl+q"
+    driver.apps = [{"app": APP, "name": "mousepad"}]
+    driver.window_rows = [{
+        "window_id": 4, "app": APP, "title": "Question", "dialog": True,
+    }]
+    result = rt.app("quit", APP)
+    assert "showing a dialog" in result
+    assert "still running" not in result
+    assert driver.calls == [("activate", APP), ("key", "ctrl+q")]
+
+
+def test_app_quit_a_plain_window_is_still_running(tmp_path) -> None:
+    rt, driver, _store = make_runtime(tmp_path, safety.Tier.FULL)
+    rt.QUIT_SETTLE_S = 0.0
+    driver.apps = [{"app": APP, "name": "TextEdit"}]
+    driver.window_rows = [{"window_id": 4, "app": APP, "title": "Untitled", "dialog": False}]
+    assert rt.app("quit", APP) == f"sent quit to {APP}; it is still running"

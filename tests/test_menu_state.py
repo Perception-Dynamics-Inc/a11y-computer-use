@@ -1,10 +1,10 @@
 """Open-menu detection and dismissal: hermetic on every OS.
 
-A menu left open in an app swallows key chords (the live trials lost cmd+n,
-cmd+w and cmd+q to a stray Format > Font menu). The Runtime now asks the
-driver whether a menu is open before `type`, `key`, and `click`, closes it,
-and says so in the result; `desktop_snapshot` prints the open menu in its
-header; `menu(action="state"|"close")` expose the same to the planner.
+A menu left open in an app swallows typed text and clicks. The Runtime asks
+the driver whether a menu is open before `type` and `click`, closes it, and
+says so in the result. `key` does not: the open menu is the key target, so
+arrows, Return, and alt+letter reach it. `desktop_snapshot` prints the open
+menu in its header; `menu(action="state"|"close")` expose the same to the planner.
 """
 from __future__ import annotations
 
@@ -132,12 +132,47 @@ def _order(calls, *names):
     return [c[0] for c in calls if c[0] in names]
 
 
-def test_key_closes_an_open_menu_first_and_says_so(tmp_path) -> None:
+def test_key_reaches_an_open_menu_without_closing_it(tmp_path) -> None:
     rt, driver = make_runtime(tmp_path)
-    driver.open = ["File", "Font"]
-    assert rt.key("cmd+n") == "pressed cmd+n (closed open menu File > Font first)"
-    assert _order(driver.calls, "menu_close", "key") == ["menu_close", "key"]
-    assert driver.open == []
+    driver.open = ["Edit"]
+    assert rt.key("down") == "pressed down"
+    assert rt.key("return") == "pressed return"
+    assert rt.key("alt+e") == "pressed alt+e"
+    assert ("menu_close", APP) not in driver.calls
+    assert driver.open == ["Edit"]
+    assert [c for c in driver.calls if c[0] == "key"] == [("key", "down"), ("key", "return"), ("key", "alt+e")]
+
+
+def test_key_still_refuses_a_different_frontmost_app(tmp_path) -> None:
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["Edit"]
+    seen = {"n": 0}
+    owned = driver.frontmost_app
+
+    def frontmost():
+        # The gate sees the app that owns the menu. By the recheck a different
+        # named app is in front, and the chord must not be sent.
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return owned()
+        return ("firefox", 2)
+
+    driver.frontmost_app = frontmost
+    with pytest.raises(ComputerUseError) as exc:
+        rt.key("down")
+    assert exc.value.code is ErrorCode.FOCUS_CHANGED
+    assert ("key", "down") not in driver.calls
+    assert driver.open == ["Edit"]
+
+
+def test_key_accepts_an_unnamed_frontmost_while_the_menu_is_open(tmp_path) -> None:
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["Edit"]
+    driver.frontmost_app = lambda: ("", 0)
+    assert rt.key("down") == "pressed down"
+    assert driver.open == ["Edit"]
+    driver.frontmost_app = lambda: ("unknown", 0)
+    assert rt.key("return") == "pressed return"
 
 
 def test_type_and_click_close_an_open_menu_first(tmp_path) -> None:

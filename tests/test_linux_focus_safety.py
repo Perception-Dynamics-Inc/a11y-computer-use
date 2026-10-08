@@ -35,6 +35,7 @@ def focus_driver(monkeypatch):
     monkeypatch.setattr(_atspi, "insert_text", lambda acc, text: inserted.append((acc, text)) or True)
     monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
     monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: None)
     fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.held = lambda modifiers: nullcontext()
     fake_input.click = lambda *args, **kwargs: None
@@ -264,3 +265,47 @@ def test_dry_run_keeps_the_existing_focus_target(focus_driver) -> None:
     driver.click(Point(0, 1, 1), dry_run=True)
     driver.key_chord("tab", dry_run=True)
     assert driver._focused_editable is handle
+
+
+def test_xtest_type_rejects_a_readback_that_does_not_contain_the_text(focus_driver) -> None:
+    """A terminal that shows the case-inverted string is not a successful type."""
+    import sys
+
+    driver, _, _, _, _, typed = focus_driver
+    state = {"text": "echo "}
+    fake = sys.modules["a11y_computer_use.drivers._linux_input"]
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        state["text"] = "ECHO hELLO"
+
+    fake.type_string = type_string
+    monkey_focused = _atspi.focused_text
+    _atspi.focused_text = lambda app: state["text"]
+    _atspi.focused_editable = lambda app: None
+    try:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.type_text("Hello")
+    finally:
+        _atspi.focused_text = monkey_focused
+        _atspi.focused_editable = lambda app: None
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert typed == ["Hello"]
+
+
+def test_xtest_type_returns_the_count_when_the_readback_matches(focus_driver) -> None:
+    import sys
+
+    driver, _, _, _, _, typed = focus_driver
+    state = {"text": ""}
+    fake = sys.modules["a11y_computer_use.drivers._linux_input"]
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        state["text"] = text
+
+    fake.type_string = type_string
+    _atspi.focused_text = lambda app: state["text"]
+    _atspi.focused_editable = lambda app: None
+    assert driver.type_text("Hello") == 5
