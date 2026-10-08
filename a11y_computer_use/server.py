@@ -2158,6 +2158,17 @@ class Runtime:
                     detail={"ref": hit.ref, "role": hit.role},
                 )
 
+    def _recheck_enabled_target(self, app: str, *targets: Target) -> None:
+        """Hit-test before input, except when a target is already disabled.
+
+        ``_run_gated`` rechecks before ``execute``. A disabled ref must raise
+        ``element_disabled`` first. On Windows that hit-test otherwise reports
+        ``focus_changed`` for whatever window is under the point.
+        """
+        if any(isinstance(item, Element) and not item.enabled for item in targets):
+            return
+        self._recheck_target(app, targets[0])
+
     def _refuse_disabled(self, *targets: Target, verb: str) -> None:
         """Refuse an input verb aimed at a ref the tree marks disabled.
 
@@ -2763,7 +2774,10 @@ class Runtime:
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
 
         self._run_gated(
-            action, app, execute, recheck=partial(self._recheck_target, target=target)
+            action,
+            app,
+            execute,
+            recheck=lambda gated, target=target: self._recheck_enabled_target(gated, target),
         )
         if into_view:
             return f"scrolled {self._label(ref, target)} into view"
@@ -2799,7 +2813,9 @@ class Runtime:
             action,
             start_app,
             execute,
-            recheck=partial(self._recheck_target, target=start),
+            recheck=lambda gated, items=(start, end, *waypoints): self._recheck_enabled_target(
+                gated, *items
+            ),
         )
         via = f" via {len(waypoints)} waypoints" if waypoints else ""
         return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"

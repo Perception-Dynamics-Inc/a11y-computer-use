@@ -446,7 +446,14 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
         assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "hello world"
 
         assert driver.set_value(driver.resolve_ref(snap, single.ref), "keep DROP keep")
-        assert Atspi.Text.set_selection(driver._focused_editable, 0, 5, 9)
+        handle = driver._focused_editable
+        from a11y_computer_use.drivers import _atspi
+
+        _atspi.grab_focus(handle)
+        selected = bool(Atspi.Text.set_selection(handle, 0, 5, 9)) or bool(
+            Atspi.Text.add_selection(handle, 5, 9)
+        )
+        assert selected, "the entry did not accept a selection on DROP"
         assert driver.type_text("NEW") == 3
         assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep NEW keep"
 
