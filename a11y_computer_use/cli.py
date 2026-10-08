@@ -694,24 +694,41 @@ def _cmd_grant(args: argparse.Namespace) -> int:
     from a11y_computer_use import safety
 
     store = safety.PermissionStore()
-    if not args.app:
-        apps = store.granted_apps()
-        if not apps:
+    if args.app is None:
+        try:
+            rows = store.grant_rows()
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if not rows:
             print("no apps granted; grant one with: a11y-computer-use grant <app> <read|click|full>")
-        for app in apps:
-            print(f"{app}\t{store.get_tier(app).value}")
+            return 0
+        for app, tier, block in rows:
+            if block:
+                print(f"{app}\t{tier.value}\tblocked: {block}")
+            else:
+                print(f"{app}\t{tier.value}")
         return 0
+    if not args.app.strip():
+        print("app identifier must be a non-empty string", file=sys.stderr)
+        return 2
     from a11y_computer_use.server import _permission_app_id
 
     bundle = _permission_app_id(args.app)
-    if args.revoke:
-        store.revoke(bundle)
-        print(f"revoked {bundle}")
-        return 0
-    if not args.tier:
-        print("tier required: read, click, or full", file=sys.stderr)
-        return 2
-    store.set_tier(bundle, safety.Tier(args.tier))
+    try:
+        if args.revoke:
+            if not store.revoke(bundle):
+                print(f"{bundle} wasn't granted", file=sys.stderr)
+                return 1
+            print(f"revoked {bundle}")
+            return 0
+        if not args.tier:
+            print("tier required: read, click, or full", file=sys.stderr)
+            return 2
+        store.set_tier(bundle, safety.Tier(args.tier))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     print(f"granted {bundle} at tier '{args.tier}' ({store.path})")
     return 0
 

@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.40] - 2026-10-08
+
+### Fixed
+
+- An app left out of a non-empty allow list is refused as not on the allow list, and `grant` reports the grants a list blocks. On 0.4.39, Mousepad granted `full` with `"allow": ["xfce4-terminal"]` was refused `deny: mousepad is on the deny list; no actions are permitted`, and the audit row stored that same reason, though the deny list was empty. The refusal and the audit row now say the app is not on the allow list. An app that is on the deny list still says so, and that reason wins when both lists would block it. `a11y-computer-use grant` with no app printed `no apps granted` when grants existed but a deny or allow list blocked them, and printed the same line for a `permissions.json` that was not valid JSON, then exited 0. It now lists every grant and marks a blocked one `blocked: on the deny list` or `blocked: not on the allow list`. A broken file prints one line, `permission configuration is invalid or unreadable; repair <path>`, and exits 1. `grant <app> <tier>` and `grant --revoke <app>` on that file used to exit 1 with a traceback ending in `ValueError: permission configuration is invalid or unreadable; repair <path> before changing grants`. They print that one line and exit 1, and the file is left as it was. `grant '' read` used to fall through to the list. An empty app name is rejected. `grant --revoke` of an app that was never granted printed `revoked <app>` and exited 0; it now says the app wasn't granted and does not print `revoked`. A broken configuration still fails closed: no grant is revived from it (#95) (2026-10-08).
+
 ## [0.4.39] - 2026-10-08
 
 ### Fixed

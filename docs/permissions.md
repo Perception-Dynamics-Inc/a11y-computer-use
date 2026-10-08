@@ -43,7 +43,9 @@ now carries the two ways to fix it:
   Don't Allow. Only when no dialog at all can be shown does the tool hand
   back the command below; nothing is recorded without a human's yes.
 - `a11y-computer-use grant <app> <read|click|full>` for the user at a shell
-  (`grant` alone lists the grants; `--revoke` removes one).
+  (`grant` alone lists every grant, and marks one a deny list or a non-empty
+  allow list blocks; `--revoke` removes one). An empty app name is rejected.
+  A broken `permissions.json` prints one line naming the file and changes nothing.
 
 No tool can grant itself access: `grant_app` records only what the host's
 own dialog returned as accepted, and the file stays the user's to edit.

@@ -166,7 +166,8 @@ def test_denylist_beats_granted_tier(home: Path) -> None:
     assert store.is_denied(APP)
     decision = check_action(OBSERVE, APP, store=store)
     assert decision.verdict is Verdict.DENY
-    assert "deny list" in decision.reason
+    assert "on the deny list" in decision.reason
+    assert "not on the allow list" not in decision.reason
 
 
 def test_nonempty_allowlist_is_a_whitelist(home: Path) -> None:
@@ -175,7 +176,35 @@ def test_nonempty_allowlist_is_a_whitelist(home: Path) -> None:
     store.set_tier("com.other.app", Tier.FULL)
     assert not store.is_denied(APP)
     assert store.is_denied("com.other.app")
-    assert check_action(CLICK, "com.other.app", store=store).verdict is Verdict.DENY
+    decision = check_action(CLICK, "com.other.app", store=store)
+    assert decision.verdict is Verdict.DENY
+    assert "not on the allow list" in decision.reason
+    assert "deny list" not in decision.reason
+
+
+def test_allow_list_exclusion_is_audited_with_the_same_reason(home: Path) -> None:
+    """A missing allow-list entry is not recorded as a deny-list hit."""
+    store = PermissionStore()
+    store.set_tier(APP, Tier.FULL)
+    store.add_allow("com.kept.app")
+    decision = check_action(OBSERVE, APP, store=store)
+    assert decision.verdict is Verdict.DENY
+    assert decision.reason == f"{APP} is not on the allow list; no actions are permitted"
+    path = AuditLog().record_action(
+        OBSERVE, app=APP, decision=decision, result=decision.verdict.value
+    )
+    entry = json.loads(path.read_text().splitlines()[-1])
+    assert entry["decision"]["reason"] == decision.reason
+    assert entry["decision"]["verdict"] == "deny"
+
+    store.add_deny(APP)
+    both = check_action(OBSERVE, APP, store=store)
+    assert both.reason == f"{APP} is on the deny list; no actions are permitted"
+    audited = AuditLog().record_action(
+        OBSERVE, app=APP, decision=both, result=both.verdict.value
+    )
+    row = json.loads(audited.read_text().splitlines()[-1])
+    assert row["decision"]["reason"] == both.reason
 
 
 def test_check_action_default_store_reads_home_config(home: Path) -> None:
