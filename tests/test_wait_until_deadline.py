@@ -336,3 +336,134 @@ def test_local_tls_200_still_matches(monkeypatch) -> None:
         assert time.monotonic() - started < 4
     finally:
         stop.set()
+
+
+def test_status_noted_before_a_socket_error_is_the_observation(monkeypatch) -> None:
+    """Windows often resets the socket after the status line of a short 404.
+
+    The reset used to become last_error and the 404 was gone. The status line
+    is the observation.
+    """
+    def exchange(_target, _infos, _timeout_s, note_status=None):
+        if note_status is not None:
+            note_status(404)
+        return None, (
+            "ConnectionAbortedError: [WinError 10053] An established connection "
+            "was aborted by the software in your host machine"
+        )
+
+    monkeypatch.setattr(conditions, "_exchange", exchange)
+    status, error = conditions._run_exchange_until(
+        "http://127.0.0.1/missing", [], time.monotonic() + 1,
+    )
+    assert status == 404
+    assert error is None
+
+
+def test_status_stored_after_the_probe_is_abandoned_is_a_timeout(monkeypatch) -> None:
+    """A 200 that shows up only after the deadline must not become a success."""
+    def exchange(_target, _infos, timeout_s, note_status=None):
+        time.sleep(timeout_s + 0.3)
+        if note_status is not None:
+            note_status(200)
+        return 200, None
+
+    monkeypatch.setattr(conditions, "_exchange", exchange)
+    status, error = conditions._run_exchange_until(
+        "http://127.0.0.1/late", [], time.monotonic() + 0.15,
+    )
+    assert status is None
+    assert error is not None
+    assert "timed out" in error.lower()
+
+
+def test_later_poll_error_keeps_an_earlier_http_status(monkeypatch) -> None:
+    """The mission 404 case: one poll saw 404, a later poll only hit the deadline.
+
+    On Windows that later poll is often a socket abort from closing the probe,
+    or a timeout because the budget left was too small to finish another GET.
+    last_status stays 404, and last_error is not added beside it.
+    """
+    calls = {"n": 0}
+
+    def observe(_url, timeout_s):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 404, None
+        time.sleep(min(float(timeout_s), 0.2))
+        return None, (
+            "ConnectionAbortedError: [WinError 10053] An established connection "
+            "was aborted by the software in your host machine"
+        )
+
+    monkeypatch.setattr(conditions, "_url_observation", observe)
+    with pytest.raises(ComputerUseError) as info:
+        conditions.Checker().wait(
+            {"url_status": "http://127.0.0.1/missing", "status": 200},
+            timeout_s=0.3, poll_s=0.05,
+        )
+    assert info.value.code is ErrorCode.TIMEOUT
+    assert info.value.detail["last_status"] == 404
+    assert "last_error" not in info.value.detail
+    assert calls["n"] >= 2
+
+
+def test_a_newer_status_still_replaces_an_older_one(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def observe(_url, timeout_s):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return 503, None
+        return 200, None
+
+    monkeypatch.setattr(conditions, "_url_observation", observe)
+    out = conditions.Checker().wait(
+        {"url_status": "http://127.0.0.1/ready", "status": 200},
+        timeout_s=1, poll_s=0.01,
+    )
+    assert out["matched"].endswith("returned 200")
+    assert calls["n"] == 3
+
+
+def test_status_line_is_kept_when_the_header_read_is_abandoned(monkeypatch) -> None:
+    """The status line is in. The rest of the headers never arrive.
+
+    The probe used to abandon that read and report only ``last_error``. The
+    code already read is the last observation, on every platform. A full 200
+    that trickles in after the deadline is still a timeout: this server sends
+    the status line immediately and then stops.
+    """
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    sock = _listen()
+    stop = threading.Event()
+
+    def hold_after_status(conn: socket.socket) -> None:
+        try:
+            conn.settimeout(0.5)
+            try:
+                conn.recv(4096)
+            except OSError:
+                return
+            try:
+                conn.sendall(b"HTTP/1.0 404 Missing\r\nServer: test\r\n")
+            except OSError:
+                return
+            stop.wait(30)
+        finally:
+            conn.close()
+
+    threading.Thread(target=_accept_loop, args=(sock, stop, hold_after_status), daemon=True).start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(ComputerUseError) as info:
+            conditions.Checker().wait(
+                {"url_status": f"http://127.0.0.1:{sock.getsockname()[1]}/missing", "status": 200},
+                timeout_s=0.4, poll_s=0.05,
+            )
+        _assert_bounded(started, 0.4)
+        assert info.value.code is ErrorCode.TIMEOUT
+        assert info.value.detail["last_status"] == 404
+        assert "last_error" not in info.value.detail
+    finally:
+        stop.set()
