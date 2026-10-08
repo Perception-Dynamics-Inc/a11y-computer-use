@@ -143,6 +143,31 @@ def test_key_reaches_an_open_menu_without_closing_it(tmp_path) -> None:
     assert [c for c in driver.calls if c[0] == "key"] == [("key", "down"), ("key", "return"), ("key", "alt+e")]
 
 
+def test_alt_letter_switches_to_the_matching_top_level_menu(tmp_path) -> None:
+    """Alt+S while Edit is open opens Search. It is not typed into Edit."""
+    rt, driver = make_runtime(tmp_path)
+    driver.open = ["Edit"]
+
+    def mnemonic(_app, letter):
+        return {"s": "Search", "e": "Edit"}.get(letter)
+
+    def press(app, path):
+        driver.calls.append(("menu_press", app, path))
+        driver.open = [path]
+        return path
+
+    driver.menu_mnemonic = mnemonic
+    driver.menu_press = press
+    assert rt.key("alt+s") == "pressed alt+s"
+    assert ("key", "alt+s") not in driver.calls
+    assert ("menu_press", APP, "Search") in driver.calls
+    assert driver.open == ["Search"]
+    driver.open = ["Edit"]
+    assert rt.key("alt+e") == "pressed alt+e"
+    assert ("key", "alt+e") in driver.calls
+    assert driver.open == ["Edit"]
+
+
 def test_key_still_refuses_a_different_frontmost_app(tmp_path) -> None:
     rt, driver = make_runtime(tmp_path)
     driver.open = ["Edit"]

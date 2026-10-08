@@ -304,6 +304,28 @@ class LinuxDriver:
         # the selection where it was. Select through the parent's Selection
         # interface, or click the row's on-screen center, and require the
         # selection to actually move onto this row.
+        # A Chrome listbox option's ``select`` action toggles, and calling
+        # Selection.select_child while that action is in flight cancels it
+        # and can clear the selection that was already there. A click at the
+        # row's center is what selects the row. Nothing is changed on the
+        # accessibility tree before that click. If the click does not select
+        # the row, the previous selection is put back.
+        if self._run(lambda: _atspi.chromium_list_row(handle)):
+            before = self._run(lambda: _atspi.selected_option_names(handle))
+            bounds = element.bounds
+            if bounds is not None and bounds.width > 0 and bounds.height > 0:
+                try:
+                    self.click(element)
+                except ComputerUseError:
+                    pass
+                if self._run(lambda: _atspi.row_becomes_selected(handle)):
+                    return True
+            self._run(lambda: _atspi.restore_selection(handle, before))
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the selection",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
             return self._run(lambda: _atspi.do_press(handle))
@@ -1056,6 +1078,21 @@ class LinuxDriver:
 
         root = self._menu_root(app)
         return self._run(lambda: _linux_menus.menu_press(root, path))
+
+    def menu_mnemonic(self, app: str, letter: str) -> str | None:
+        """Top-level menu whose Alt mnemonic is ``letter``, or None."""
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            root = self._menu_root(app)
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.APP_NOT_FOUND:
+                raise
+            return None
+        try:
+            return self._run(lambda: _linux_menus.menu_mnemonic(root, letter))
+        except ComputerUseError:
+            return None
 
     def menu_state(self, app: str) -> dict:
         """Open menu path, or closed when the bus is unavailable.

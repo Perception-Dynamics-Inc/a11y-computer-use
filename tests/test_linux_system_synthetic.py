@@ -364,6 +364,54 @@ def test_app_launch_of_a_missing_program_does_not_wait_for_a_window(tmp_path, mo
     assert calls == [] and waited == ["windows"]
 
 
+def test_absolute_path_resolves_and_activates_the_basename(monkeypatch) -> None:
+    """``/usr/bin/mousepad`` is the running ``mousepad`` window, not a missing app."""
+    window = _FakeXWin(7, 10, 20, 200, 100, pid=11)
+    root = _FakeXRoot([window])
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: window,
+    )
+    activated: list[int] = []
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "mousepad" if pid == 11 else None)
+    monkeypatch.setattr(_linux_system, "_send_active_window", lambda _d, win: activated.append(int(win.id)))
+    assert _linux_system.resolve_app("/usr/bin/mousepad") == "mousepad"
+    assert _linux_system.activate_app("/usr/bin/mousepad") == "mousepad"
+    assert activated == [7]
+    assert 11 in _linux_system.pids_matching("/usr/bin/mousepad")
+
+
+def test_absolute_path_matches_wm_class_when_the_comm_is_the_interpreter(monkeypatch) -> None:
+    """A script path matches WM_CLASS, then focus returns the interpreter comm."""
+
+    class _ClassWin(_FakeXWin):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_PID":
+                return _NS(value=[self.pid])
+            if atom == "WM_CLASS":
+                return _NS(value=b"cuahandoff\x00Cuahandoff\x00")
+            return None
+
+    window = _ClassWin(9, 10, 20, 200, 100, pid=31)
+    root = _FakeXRoot([window])
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: window,
+    )
+    activated: list[int] = []
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "python3" if pid == 31 else None)
+    monkeypatch.setattr(_linux_system, "_send_active_window", lambda _d, win: activated.append(int(win.id)))
+    path = "/tmp/cuahandoff"
+    assert _linux_system.resolve_app(path) == "python3"
+    assert _linux_system.activate_app(path) == "python3"
+    assert activated == [9]
+    assert _linux_system.pids_matching(path) == set()
+
+
 def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
     """A granted name with no window is not activated. Synthetic window list."""
     monkeypatch.setattr(_linux_system, "_display", lambda: object())
@@ -513,6 +561,56 @@ def test_launch_reports_the_new_window_not_one_already_open(tmp_path, monkeypatc
 
     runtime = _launch_runtime(tmp_path, monkeypatch, "mousepad", handle, rows)
     assert runtime.app("launch", "mousepad") == "launched mousepad; first window: 'Untitled 2'"
+
+
+def test_second_launch_waits_for_the_running_apps_new_title(tmp_path, monkeypatch) -> None:
+    """A hand-off that exits 0 still opened Untitled 2 in the existing window."""
+    proc = _Proc(0)
+    handle = {
+        "pid": 222, "proc": proc, "identifier": "mousepad",
+        "names": ["mousepad"], "is_launcher": False,
+    }
+    old = {
+        "window_id": 1, "app": "mousepad", "title": "Untitled 1 - Mousepad",
+        "pid": 111, "wm_class": "mousepad",
+    }
+
+    def rows(n):
+        if n < 3:
+            return [dict(old)]
+        return [{**old, "title": "Untitled 2 - Mousepad"}]
+
+    runtime = _launch_runtime(tmp_path, monkeypatch, "mousepad", handle, rows)
+    runtime.APP_LAUNCH_WAIT_S = 5
+    assert runtime.app("launch", "mousepad") == (
+        "launched mousepad; first window: 'Untitled 2 - Mousepad'"
+    )
+    assert proc.polls >= 1
+
+
+def test_exit_zero_with_no_new_window_is_still_process_exited(tmp_path, monkeypatch) -> None:
+    """An existing window whose title never changes is not a successful launch."""
+    import time
+
+    proc = _Proc(0)
+    handle = {
+        "pid": 222, "proc": proc, "identifier": "mousepad",
+        "names": ["mousepad"], "is_launcher": False,
+    }
+    old = {
+        "window_id": 1, "app": "mousepad", "title": "Untitled 1 - Mousepad",
+        "pid": 111, "wm_class": "mousepad",
+    }
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(time, "sleep", lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    runtime = _launch_runtime(tmp_path, monkeypatch, "mousepad", handle, [old])
+    runtime.APP_LAUNCH_WAIT_S = 1
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "mousepad")
+    assert exc.value.detail["reason"] == "process_exited"
+    assert exc.value.detail["exit_code"] == 0
+    assert "Untitled 1" not in exc.value.message
 
 
 def test_gtk_launch_exit_zero_waits_for_the_desktop_apps_window(tmp_path, monkeypatch) -> None:

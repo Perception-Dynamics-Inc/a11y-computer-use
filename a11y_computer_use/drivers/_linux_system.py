@@ -282,6 +282,52 @@ def _launcher_comm(identifier: str, comm: str) -> bool:
     return len(comm) == 15 and len(identifier) > 15 and identifier.startswith(comm)
 
 
+def _identity_needles(identifier: str) -> list[str]:
+    """Names a window may use for ``identifier``.
+
+    An absolute path is also the binary's basename. ``/usr/bin/mousepad``
+    matches a window whose comm or WM_CLASS is ``mousepad``, the same names
+    ``launch_app`` records on the process handle.
+    """
+    text = (identifier or "").strip()
+    if not text:
+        return []
+    folded = text.lower()
+    names = [folded]
+    if "/" in text:
+        base = os.path.basename(folded)
+        if base and base not in names:
+            names.append(base)
+    return names
+
+
+def _comm_matches_identifier(identifier: str, comm: str) -> bool:
+    """True when ``comm`` is the process ``identifier`` names.
+
+    A comm substring matches, and so does a launcher alias. A path matches
+    by its basename as well as the full string.
+    """
+    folded = (comm or "").lower()
+    if not folded:
+        return False
+    for needle in _identity_needles(identifier):
+        if needle in folded or _launcher_comm(needle, folded):
+            return True
+    return False
+
+
+def _class_matches_identifier(identifier: str, instance: str, klass: str) -> bool:
+    """True when WM_CLASS instance or class is one of ``identifier``'s names."""
+    inst = (instance or "").lower()
+    cls = (klass or "").lower()
+    for needle in _identity_needles(identifier):
+        if not needle:
+            continue
+        if needle == inst or needle == cls or _launcher_comm(needle, inst):
+            return True
+    return False
+
+
 def resolve_app(identifier: str) -> str:
     """Resolve a window title / comm substring to the owning comm name (the
     permission-keying id), or the identifier itself if unmatched.
@@ -295,24 +341,28 @@ def resolve_app(identifier: str) -> str:
     needle = (identifier or "").lower()
     if not needle:
         return identifier
-    by_alias: str | None = None
+    by_class: str | None = None
     by_title: str | None = None
     try:
         with _open_display() as d:
             for win in _managed_windows(d):
                 comm = (_app_id(win, d) or "").lower()
-                if needle in comm:
+                if comm and _comm_matches_identifier(identifier, comm):
                     return comm  # the app itself beats any window that merely names it
-                if by_alias is None and comm and _launcher_comm(needle, comm):
-                    by_alias = comm
+                instance, klass = _wm_class_strings(win, d)
+                if by_class is None and _class_matches_identifier(identifier, instance, klass):
+                    by_class = comm or instance
                 # A title match is a fallback, never a winner over a comm match:
                 # a Chromium tab "Donations | Krita" stacked above Krita's window
-                # must not turn `krita` into `chrome`.
-                if by_title is None and comm and needle in _win_title(win, d).lower():
-                    by_title = comm
+                # must not turn `krita` into `chrome`. A path matches its
+                # basename in the title the same way the bare name does.
+                if by_title is None and comm:
+                    title = _win_title(win, d).lower()
+                    if any(name and name in title for name in _identity_needles(identifier)):
+                        by_title = comm
     except Exception:
         pass
-    return by_alias or by_title or identifier
+    return by_class or by_title or identifier
 
 
 def pids_matching(identifier: str) -> set[int]:
@@ -338,7 +388,7 @@ def pids_matching(identifier: str) -> set[int]:
                 if not pid:
                     continue
                 comm = (_comm_for_pid(pid) or "").lower()
-                if needle in comm or _launcher_comm(needle, comm):
+                if _comm_matches_identifier(identifier, comm):
                     pids.add(pid)
     except Exception:
         pass
@@ -799,15 +849,20 @@ def activate_app(identifier: str) -> str:
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
-    needle = (identifier or "").lower()
     with _open_display() as d:
         resolved = identifier
         matched = None
         for win in _managed_windows(d):
-            comm = (_app_id(win, d) or "").lower()
-            title = _win_title(win, d).lower()
-            if needle and (needle in comm or needle in title):
-                resolved = comm or identifier
+            comm = (_app_id(win, d) or "")
+            instance, klass = _wm_class_strings(win, d)
+            title = _win_title(win, d)
+            named = _comm_matches_identifier(identifier, comm) or _class_matches_identifier(
+                identifier, instance, klass
+            )
+            if not named and title:
+                named = any(name and name in title.lower() for name in _identity_needles(identifier))
+            if named:
+                resolved = comm or instance or identifier
                 matched = win
                 break
         if matched is None:

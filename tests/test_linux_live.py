@@ -760,6 +760,15 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         "this.setAttribute('aria-pressed', on ? 'false' : 'true');});</script>"
         "<label>Seats <input id=seats type=number aria-label=Seats value=3></label>"
         "<label>Empty <input id=empty type=number aria-label=Empty></label>"
+        "<label>Guests <input id=guests type=number aria-label=Guests min=0 max=12></label>"
+        "<div id=gstat role=status aria-label=gstat=>gstat=</div>"
+        "<script>document.getElementById('guests').addEventListener('input', function () {"
+        "var text = 'gstat=' + this.value;"
+        "var node = document.getElementById('gstat');"
+        "node.textContent = text; node.setAttribute('aria-label', text);});</script>"
+        "<select id=colors aria-label=Colors size=4>"
+        "<option>Red</option><option>Green</option><option>Blue</option><option>Gray</option>"
+        "</select>"
         "<input id=volume type=range aria-label=Volume min=0 max=100 value=40>"
     )
     profile = tmp_path / "chrome-profile"
@@ -785,7 +794,11 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
                 shot = None
             else:
                 rendered = observe.render_text(shot)
-                if "Kazakhstan" in rendered and "Italic toggle" in rendered and "Seats" in rendered:
+                if (
+                    "Kazakhstan" in rendered and "Italic toggle" in rendered
+                    and "Seats" in rendered and "Guests" in rendered and "Colors" in rendered
+                    and "gstat=" in rendered
+                ):
                     snap = shot
                     break
             time.sleep(0.5)
@@ -853,29 +866,38 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         _set_country("Kazakhstan")
         _set_country("Peru")
         _set_country("Japan")
-        listed = driver.snapshot(Scope.WINDOW, "chrome")
-        cherry = next(
-            el for el in listed.elements if el.title == "Cherry" and el.role == "AXRow" and el.clickable
-        )
-        runtime._current = listed
-        clicked = runtime.click(cherry.ref)
-        assert "clicked" in clicked, clicked
-        deadline = time.monotonic() + 4
-        cherry_selected = False
-        while time.monotonic() < deadline:
-            listed = driver.snapshot(Scope.WINDOW, "chrome")
+        def _click_row(title: str, box_title: str) -> None:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
             row = next(
-                (el for el in listed.elements if el.title == "Cherry" and el.role == "AXRow"),
-                None,
+                el for el in shot.elements
+                if el.title == title and el.role == "AXRow" and el.clickable
             )
-            fruits = next((el for el in listed.elements if el.title == "Fruits"), None)
-            cherry_selected = bool(row and row.selected) or bool(
-                fruits and fruits.value and "Cherry" in str(fruits.value)
-            )
-            if cherry_selected:
-                break
-            time.sleep(0.25)
-        assert cherry_selected, observe.render_text(listed)
+            runtime._current = shot
+            clicked = runtime.click(row.ref)
+            assert "clicked" in clicked, clicked
+            deadline = time.monotonic() + 4
+            selected = False
+            last = shot
+            while time.monotonic() < deadline:
+                last = driver.snapshot(Scope.WINDOW, "chrome")
+                row = next(
+                    (el for el in last.elements if el.title == title and el.role == "AXRow"),
+                    None,
+                )
+                box = next((el for el in last.elements if el.title == box_title), None)
+                selected = bool(row and row.selected) or bool(
+                    box and box.value and title in str(box.value)
+                )
+                if selected:
+                    return
+                time.sleep(0.25)
+            assert selected, observe.render_text(last)
+
+        for name in ("Apple", "Banana", "Cherry", "Date"):
+            _click_row(name, "Fruits")
+        for name in ("Red", "Green", "Blue", "Gray"):
+            _click_row(name, "Colors")
+        listed = driver.snapshot(Scope.WINDOW, "chrome")
         runtime._current = listed
         seats = next(el for el in listed.elements if el.title == "Seats")
         runtime.set_value(seats.ref, "")
@@ -889,6 +911,57 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
                 break
             time.sleep(0.25)
         assert cleared in (None, ""), cleared
+
+        def _guest_status(rendered: str) -> str | None:
+            marker = "gstat="
+            for line in rendered.splitlines():
+                at = line.find(marker)
+                if at < 0:
+                    continue
+                rest = line[at + len(marker):]
+                digits: list[str] = []
+                for ch in rest:
+                    if ch.isdigit() or ch == ".":
+                        digits.append(ch)
+                    else:
+                        break
+                return "".join(digits)
+            return None
+
+        def _refill_guests(value: str) -> None:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            guests = next(el for el in shot.elements if el.title == "Guests")
+            runtime._current = shot
+            runtime.set_value(guests.ref, "")
+            deadline = time.monotonic() + 4
+            emptied = None
+            while time.monotonic() < deadline:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+                guests = next(el for el in shot.elements if el.title == "Guests")
+                emptied = guests.value
+                if emptied in (None, ""):
+                    break
+                time.sleep(0.25)
+            assert emptied in (None, ""), emptied
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            guests = next(el for el in shot.elements if el.title == "Guests")
+            runtime._current = shot
+            result = runtime.set_value(guests.ref, value)
+            assert result.startswith("set "), result
+            deadline = time.monotonic() + 4
+            shown = None
+            last = shot
+            while time.monotonic() < deadline:
+                last = driver.snapshot(Scope.WINDOW, "chrome")
+                shown = _guest_status(observe.render_text(last))
+                if shown == value:
+                    return
+                time.sleep(0.25)
+            assert shown == value, observe.render_text(last)
+
+        for number in ("0", "3", "7"):
+            _refill_guests(number)
+        listed = driver.snapshot(Scope.WINDOW, "chrome")
         volume = next((el for el in listed.elements if el.title == "Volume"), None)
         if volume is not None and volume.role == "AXSlider":
             runtime._current = listed
@@ -935,6 +1008,12 @@ _GTK_MENU_APP = textwrap.dedent(
     mark.connect("activate", lambda *_a: probe.set_text("mark=1"))
     menu.append(mark)
     bar.append(file_item)
+    search_menu = Gtk.Menu()
+    find_item = Gtk.MenuItem.new_with_mnemonic("_Find")
+    search_menu.append(find_item)
+    search_item = Gtk.MenuItem.new_with_mnemonic("_Search")
+    search_item.set_submenu(search_menu)
+    bar.append(search_item)
     buf = Gtk.TextBuffer()
     buf.set_text("line one\\nline two\\nline three")
     lines = Gtk.Label(label="lines=3")
@@ -1002,7 +1081,10 @@ def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
                 shot = None
             else:
                 titles = {el.title for el in shot.elements}
-                if "File" in titles and "Document" in titles and "mark=0" in titles and "lines=3" in titles:
+                if (
+                    "File" in titles and "Search" in titles and "Document" in titles
+                    and "mark=0" in titles and "lines=3" in titles
+                ):
                     snap = shot
                     break
             time.sleep(0.4)
@@ -1032,6 +1114,31 @@ def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
                 break
             time.sleep(0.2)
         assert marked, [(el.role, el.title, el.value) for el in shot.elements]
+        shot = driver.snapshot(Scope.WINDOW, _MENU_APP)
+        runtime._current = shot
+        file_item = next(el for el in shot.elements if el.title == "File" and el.clickable)
+        runtime.click(file_item.ref)
+        opened = False
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            state = driver.menu_state(_MENU_APP)
+            if state.get("open") and "File" in (state.get("path") or []):
+                opened = True
+                break
+            time.sleep(0.2)
+        assert opened, driver.menu_state(_MENU_APP)
+        runtime.key("alt+s")
+        switched = False
+        deadline = time.monotonic() + 4
+        state = {"open": False, "path": []}
+        while time.monotonic() < deadline:
+            state = driver.menu_state(_MENU_APP)
+            path = state.get("path") or []
+            if state.get("open") and path and path[0] == "Search":
+                switched = True
+                break
+            time.sleep(0.2)
+        assert switched, state
     finally:
         _stop(proc)
 
@@ -1057,15 +1164,17 @@ def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_pat
     assert time.monotonic() - started < 5
     assert exc.value.detail.get("exit_code") == 1
 
-    script = tmp_path / "cualaunch.py"
+    script = tmp_path / "cualaunch"
     script.write_text(
         "#!/usr/bin/env python3\n"
         + textwrap.dedent(
             """
             import gi
             gi.require_version("Gtk", "3.0")
-            from gi.repository import Gtk, GLib
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk, Gtk, GLib
             GLib.set_prgname("cualaunch")
+            Gdk.set_program_class("cualaunch")
             win = Gtk.Window(title="cualaunchwin")
             win.set_default_size(200, 80)
             win.connect("destroy", Gtk.main_quit)
@@ -1082,6 +1191,10 @@ def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_pat
     runtime.store.set_tier("cualaunch", safety.Tier.CLICK)
     result = runtime.app("launch", str(script))
     assert "first window:" in result and "cualaunchwin" in result, result
+    runtime.store.set_tier("python3", safety.Tier.CLICK)
+    focused = runtime.app("focus", str(script))
+    assert focused.startswith("focused "), focused
+    assert "app_not_found" not in focused
     child = None
     for row in driver.windows():
         if row.get("title") == "cualaunchwin" and row.get("pid"):
@@ -1089,6 +1202,71 @@ def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_pat
             break
     if child:
         os.kill(child, 15)
+
+
+def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_path) -> None:
+    """A second launch exits 0 and the running window's new title is the result.
+
+    The second process writes a bump file and exits. The first process changes
+    its title. ``activate: false`` still names that title. Focus of the same
+    absolute path resolves the running app.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    lock = tmp_path / "lock"
+    bump = tmp_path / "bump"
+    script = tmp_path / "cuahandoff"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            """
+            import os
+            import gi
+            gi.require_version("Gtk", "3.0")
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk, GLib, Gtk
+            GLib.set_prgname("cuahandoff")
+            Gdk.set_program_class("cuahandoff")
+            LOCK = __LOCK__
+            BUMP = __BUMP__
+            if os.path.exists(LOCK):
+                open(BUMP, "w", encoding="utf-8").write("1")
+                raise SystemExit(0)
+            open(LOCK, "w", encoding="utf-8").write("1")
+            win = Gtk.Window(title="handoff=1")
+            win.set_default_size(220, 80)
+            def poll():
+                if os.path.exists(BUMP):
+                    win.set_title("handoff=2")
+                    return False
+                return True
+            GLib.timeout_add(100, poll)
+            win.connect("destroy", Gtk.main_quit)
+            win.show_all()
+            win.present()
+            Gtk.main()
+            """
+        ).replace("__LOCK__", repr(str(lock))).replace("__BUMP__", repr(str(bump)))
+    )
+    script.chmod(0o755)
+    runtime = _runtime_for(tmp_path, driver, "cuahandoff", "python3", str(script))
+    runtime.APP_LAUNCH_WAIT_S = 20
+    first = runtime.app("launch", str(script))
+    assert "first window:" in first and "handoff=1" in first, first
+    second = runtime.app("launch", str(script), activate=False)
+    assert "first window:" in second and "handoff=2" in second, second
+    focused = runtime.app("focus", str(script))
+    assert focused.startswith("focused "), focused
+    assert "app_not_found" not in focused
+    for row in driver.windows():
+        title = str(row.get("title") or "")
+        if title.startswith("handoff=") and row.get("pid"):
+            try:
+                os.kill(int(row["pid"]), 15)
+            except OSError:
+                pass
 
 
 def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path) -> None:

@@ -1815,6 +1815,62 @@ def _snap_spin(acc, number: float, low: float) -> float:
     return float(format(snapped, ".10g"))
 
 
+def _number_text(acc) -> str | None:
+    """The number field's text, stripped. None when the read failed.
+
+    An empty Chrome number input is ``""``. Its Value interface still reports
+    the minimum (0.0 when min is 0). That 0.0 is not a value the field holds.
+    """
+    raw = _full_text(acc)
+    if raw is None:
+        return None
+    return raw.strip()
+
+
+def _number_field_is_empty(acc) -> bool:
+    """True for an ``<input type=number>`` whose text is empty or unreadable."""
+    if not _number_input(acc):
+        return False
+    return _number_text(acc) in ("", None)
+
+
+def _number_text_matches(acc, value: str) -> bool:
+    """True when the field's text parses as ``value`` and is not empty.
+
+    An empty field does not match ``0``, even when the Value interface reads
+    0.0. The poll is bounded and stops on the first match.
+    """
+    wanted = _parse_number(value)
+    for attempt in range(8):
+        shown = _number_text(acc)
+        if shown:
+            try:
+                if _numbers_match(_parse_number(shown), wanted):
+                    return True
+            except ValueError:
+                if shown == str(value).strip():
+                    return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def _fill_empty_number(acc, value: str) -> bool:
+    """Type ``value`` into an empty Chrome number input.
+
+    ``Value.set_current_value`` does not change an empty input that has a
+    minimum and a maximum: the DOM stays ``""`` and the Value interface stays
+    at the minimum. A click that focuses the field, then the digits, is what
+    fills it. Success is the text, not the Value interface.
+    """
+    grab_focus(acc)
+    _click_center(acc)
+    if not _x11_keys_available():
+        return False
+    _type_string(value)
+    return _number_text_matches(acc, value)
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -1825,6 +1881,8 @@ def set_numeric_value(acc, value: str) -> bool | str:
     An empty string on an ``<input type=number>`` clears the field. A GTK spin
     button is snapped to its step; the return value is that step's text when
     it differs from what was asked, so the caller reports the value held.
+    An empty Chrome number input is filled by typing. A read-back of 0.0 from
+    the Value interface is not success while the text is still empty.
     """
     if value == "" and _number_input(acc):
         if set_text(acc, ""):
@@ -1858,12 +1916,25 @@ def set_numeric_value(acc, value: str) -> bool | str:
         raise ValueError(
             f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
         )
+    if _number_field_is_empty(acc):
+        if _fill_empty_number(acc, value):
+            return True
+        shown = _number_text(acc)
+        raise _text_mismatch(
+            "text_mismatch",
+            f"the value read back {shown!r} does not match {value!r}",
+            expected=value,
+            actual=shown if shown is not None else "",
+        )
     Atspi = _atspi()
     _safe(lambda: Atspi.Value.set_current_value(acc, number), False)
     got = None
     for attempt in range(_TEXT_CONFIRM_POLLS):
         got = _safe(lambda: Atspi.Value.get_current_value(acc))
         if isinstance(got, (int, float)) and not isinstance(got, bool) and _numbers_match(float(got), number):
+            # An empty number field reports the minimum. That is not the text.
+            if _number_input(acc) and _number_text(acc) in ("", None):
+                break
             if _numbers_match(float(got), _parse_number(value)):
                 return True
             return _format_bound(float(got))
@@ -1873,7 +1944,7 @@ def set_numeric_value(acc, value: str) -> bool | str:
         "text_mismatch",
         f"the value read back {got!r} does not match {value!r}",
         expected=value,
-        actual=got,
+        actual="" if _number_input(acc) and _number_text(acc) in ("", None) else got,
     )
 
 
@@ -1962,6 +2033,98 @@ def _first_press_action(acc) -> str:
 
 def _row_selected(node) -> bool:
     return _state_has(node, "SELECTED")
+
+
+def chromium_list_row(acc) -> bool:
+    """True when ``acc`` is an option in a Chromium list or list box.
+
+    The option's ``select`` action toggles, and ``Selection.select_child``
+    issued while that action is still landing cancels it. A plain click at
+    the row center is the path that selects the row. GTK tables are not
+    Chromium lists and stay on Selection.
+    """
+    parent, _index, target = _selection_parent(acc)
+    if parent is None or target is None:
+        return False
+    if _role_name(parent) not in {"list box", "list"}:
+        return False
+    try:
+        return bool(_chromium_app(parent))
+    except Exception:
+        return False
+
+
+def selected_option_names(acc) -> list[str]:
+    """Names of the selected options in ``acc``'s list, in child order."""
+    parent, _index, _target = _selection_parent(acc)
+    if parent is None:
+        return []
+    names: list[str] = []
+    count = min(_child_count(parent), 50)
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None or not _row_selected(child):
+            continue
+        label = _node_name(child)
+        if label:
+            names.append(label)
+    return names
+
+
+def restore_selection(acc, names: list[str]) -> None:
+    """Select each name in ``names`` that a failed click deselected.
+
+    ``select_child`` adds on a Chrome list box. It is not preceded by the
+    option's ``select`` action, which would toggle the row back off. Names
+    that are still selected are left alone. A list that has no Selection
+    interface is unchanged.
+    """
+    wanted = [name for name in names if name]
+    if not wanted:
+        return
+    parent, _index, _target = _selection_parent(acc)
+    if parent is None:
+        return
+    iface = _selection_iface(parent)
+    if iface is None:
+        return
+    for _attempt in range(6):
+        pending = set(wanted)
+        count = min(_child_count(parent), 50)
+        for index in range(count):
+            child = _child_at(parent, index)
+            if child is None:
+                continue
+            label = _node_name(child)
+            if label not in pending:
+                continue
+            if _row_selected(child):
+                pending.discard(label)
+                continue
+            _call_first(iface, ("select_child", "selectChild"), index, default=False)
+            if _row_selected(child):
+                pending.discard(label)
+        if not pending:
+            return
+        time.sleep(0.05)
+
+
+def row_becomes_selected(acc) -> bool:
+    """True when the row is selected and still selected after a short beat.
+
+    A coordinate click's SELECTED state can trail the button release. The
+    wait is a handful of reads and stops on the first stable selection.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    node = target or acc
+    for attempt in range(8):
+        if _row_selected(node):
+            time.sleep(0.04)
+            if _row_selected(node):
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
 
 
 def _row_settled(node) -> bool:
