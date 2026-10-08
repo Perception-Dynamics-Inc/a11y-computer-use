@@ -267,14 +267,23 @@ def test_oversized_batch_fails_before_executing_first_step(runtime) -> None:
     assert runtime.driver.calls == []
 
 
-def test_malformed_batch_step_retains_receipts_for_completed_steps(runtime) -> None:
+def test_invalid_later_step_runs_nothing(runtime) -> None:
+    """Argument checks are a pre-pass. On 0.4.34 this click TypeError'd inside
+    tuple(modifiers) after "first" had already been typed. A later invalid
+    step now runs nothing. A failure while a step is running still keeps the
+    earlier results (see the deadline test below)."""
     result = json.loads(runtime.act_batch([
         {"do": "type", "text": "first"},
-        {"do": "click", "modifiers": 42},
+        {"do": "click", "ref": "e1", "modifiers": 42},
         {"do": "type", "text": "never"},
     ]))
-    assert [step["ok"] for step in result] == [True, False]
-    assert runtime.driver.calls == ["first"]
+    assert result == [{
+        "i": 1,
+        "do": "click",
+        "ok": False,
+        "error": "invalid_arguments: click: step 1: 'modifiers' must be a list of modifier names",
+    }]
+    assert runtime.driver.calls == []
 
 
 def test_batch_stops_at_deadline_without_executing_more_input(runtime, monkeypatch) -> None:
