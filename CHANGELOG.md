@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.35] - 2026-10-08
+
+### Fixed
+
+- An `act` step with a missing or wrong-typed field returns `invalid_arguments` and runs nothing. On 0.4.34, `{"do":"key"}`, `{"do":"type"}`, `{"do":"wait_for"}`, and `{"do":"key","keys":"b"}` failed with the bare KeyError text `'chord'`, `'text'`, or `'ref'`. A non-string `chord`, a non-list `modifiers`, a non-number scroll delta, a non-list drag `path`, and a non-number `timeout_s` failed the same way, with `TypeError` text, and only after earlier steps in the batch had already run. Every step is checked before the first action. `click`, `hover`, and `scroll` still require a ref or both coordinates (`target an element ref, or both x and y coordinates`). `drag` names `start_ref` or `start_x`/`start_y`, and `end_ref` or `end_x`/`end_y`. `type`, `key`, and `wait_for` name the missing `text`, `chord`, or `ref`. A wrong type names that field (`'chord' must be a string`, `'modifiers' must be a list of modifier names`, `timeout_s must be finite and nonnegative`). The step error is `invalid_arguments: {step type}: step {index}: ...`, the same prefix a standalone tool uses (`invalid_arguments: key: empty chord ''`). A later invalid step does not leave earlier steps done. A failure while a step is running (stale ref, secure field, unsupported hover, the batch time budget) still stops the batch and keeps the earlier results (#83) (2026-10-08).
+
 ## [0.4.34] - 2026-10-08
 
 ### Fixed

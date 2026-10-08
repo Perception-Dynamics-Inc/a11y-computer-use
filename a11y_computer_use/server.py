@@ -118,6 +118,152 @@ MAX_BATCH_STEPS = 100
 MAX_BATCH_DURATION_S = 60.0
 MAX_SCROLLS = 100
 
+_ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
+_ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
+_TARGET_REQUIRED = "target an element ref, or both x and y coordinates"
+
+
+def _act_argument_error(step_type: str, index: int, message: str) -> str:
+    """Same shape as a standalone tool: ``invalid_arguments: {tool}: {detail}``.
+
+    The detail names the step index and the field, which a batch step has
+    and a one-argument tool call does not.
+    """
+    return f"invalid_arguments: {step_type}: step {index}: {message}"
+
+
+def _is_finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _required_str_error(step: dict, field: str) -> str | None:
+    if field not in step or step[field] is None:
+        return f"needs a {field!r}"
+    if not isinstance(step[field], str):
+        return f"{field!r} must be a string"
+    return None
+
+
+def _display_id_error(step: dict) -> str | None:
+    if "display_id" not in step or step["display_id"] is None:
+        return None
+    value = step["display_id"]
+    if isinstance(value, bool) or not isinstance(value, int):
+        return "'display_id' must be an integer"
+    return None
+
+
+def _ref_or_point_error(step: dict, ref_key: str, x_key: str, y_key: str, missing: str) -> str | None:
+    """A ref, or both coordinates. Same rule `_target` enforces at act time."""
+    if ref_key in step and step[ref_key] is not None:
+        if not isinstance(step[ref_key], str):
+            return f"{ref_key!r} must be a string"
+        return None
+    if x_key not in step or y_key not in step or step.get(x_key) is None or step.get(y_key) is None:
+        return missing
+    for key in (x_key, y_key):
+        if not _is_finite_number(step[key]):
+            return f"{key!r} must be a finite number"
+    return _display_id_error(step)
+
+
+def _click_step_error(step: dict) -> str | None:
+    detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
+    if detail is not None:
+        return detail
+    if "button" in step:
+        try:
+            MouseButton(step["button"])
+        except ValueError as exc:
+            return str(exc)
+    if "count" in step and step["count"] not in (1, 2, 3):
+        return f"count must be 1, 2 or 3, got {step['count']}"
+    modifiers = step.get("modifiers")
+    if modifiers is None:
+        return None
+    if isinstance(modifiers, str) or not isinstance(modifiers, (list, tuple)):
+        return "'modifiers' must be a list of modifier names"
+    try:
+        unknown = sorted(set(modifiers) - MODIFIER_KEYS)
+    except TypeError:
+        return "'modifiers' must be a list of modifier names"
+    if unknown:
+        return f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}"
+    return None
+
+
+def _scroll_step_error(step: dict) -> str | None:
+    detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
+    if detail is not None:
+        return detail
+    for key in ("dx", "dy"):
+        if key in step and not _is_finite_number(step[key]):
+            return f"{key!r} must be a finite number"
+    if "unit" in step:
+        try:
+            ScrollUnit(step["unit"])
+        except ValueError as exc:
+            return str(exc)
+    if "into_view" in step and not isinstance(step["into_view"], bool):
+        return "'into_view' must be a bool"
+    return None
+
+
+def _path_error(path: object) -> str | None:
+    if isinstance(path, str) or not isinstance(path, (list, tuple)):
+        return "'path' must be a list of [x, y] pairs"
+    if len(path) > 256:
+        return "path holds at most 256 waypoints"
+    for i, pt in enumerate(path):
+        if not (isinstance(pt, (list, tuple)) and len(pt) == 2):
+            return f"path[{i}] must be an [x, y] pair"
+        x, y = pt
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
+            return f"path[{i}] must hold finite numbers"
+    return None
+
+
+def _drag_step_error(step: dict) -> str | None:
+    detail = _ref_or_point_error(
+        step, "start_ref", "start_x", "start_y",
+        "target a 'start_ref', or both 'start_x' and 'start_y'",
+    )
+    if detail is not None:
+        return detail
+    detail = _ref_or_point_error(
+        step, "end_ref", "end_x", "end_y",
+        "target an 'end_ref', or both 'end_x' and 'end_y'",
+    )
+    if detail is not None:
+        return detail
+    if "path" not in step or step["path"] is None:
+        return None
+    if _display_id_error(step) is not None:
+        return _display_id_error(step)
+    return _path_error(step["path"])
+
+
+def _wait_step_error(step: dict) -> str | None:
+    detail = _required_str_error(step, "ref")
+    if detail is not None:
+        return detail
+    if "condition" in step:
+        try:
+            WaitCondition(step["condition"])
+        except ValueError as exc:
+            return str(exc)
+    if "timeout_s" not in step:
+        return None
+    timeout_s = step["timeout_s"]
+    try:
+        ok = math.isfinite(timeout_s) and timeout_s >= 0
+    except TypeError:
+        ok = False
+    if not ok:
+        return "timeout_s must be finite and nonnegative"
+    return None
+
+
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
@@ -2359,8 +2505,18 @@ class Runtime:
                   verify: bool = False) -> str:
         """Execute act steps in ONE call — the transactional path that collapses
         N observe→act round-trips into 1 (agent speed). Each step is gated +
-        audited exactly like its standalone tool; the batch STOPS at the first
-        failure. Returns JSON: a list of per-step {i, do, ok, result | error}.
+        audited exactly like its standalone tool.
+
+        Argument errors are rejected before any step runs. A missing or
+        wrong-typed field returns ``invalid_arguments`` naming the step index,
+        the step type, and the field, and leaves every earlier step
+        unexecuted. A failure while a step is running (stale ref, secure
+        field, unsupported, the batch time budget) still stops the batch and
+        keeps the results of the steps that finished.
+
+        Returns JSON: a list of per-step {i, do, ok, result | error}. With
+        verify, a batch rejected up front has an empty effect and does not
+        re-snapshot.
 
         Step shapes (key ``do`` selects the action):
           {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
@@ -2375,13 +2531,17 @@ class Runtime:
             raise ValueError("steps must be a non-empty list of step objects")
         if len(steps) > MAX_BATCH_STEPS:
             raise ValueError(f"steps must contain at most {MAX_BATCH_STEPS} actions")
+        # Required fields and types, before the first action. On 0.4.34 a later
+        # bad step ran the earlier ones and then stringified a KeyError.
+        rejected = self._rejected_act_step(steps)
+        if rejected is not None:
+            if verify:
+                return json.dumps({"steps": rejected, "effect": ""})
+            return json.dumps(rejected)
         pre = self._current if verify else None
         deadline = time.monotonic() + MAX_BATCH_DURATION_S
         out: list[dict] = []
         for i, step in enumerate(steps):
-            if not isinstance(step, dict) or "do" not in step:
-                out.append({"i": i, "ok": False, "error": "each step needs a 'do' field"})
-                break
             do = step["do"]
             try:
                 remaining = deadline - time.monotonic()
@@ -2400,11 +2560,80 @@ class Runtime:
                 out.append({"i": i, "do": do, "ok": False, "error": error_text(exc)})
                 break
             except (KeyError, TypeError, ValueError) as exc:
-                out.append({"i": i, "do": do, "ok": False, "error": str(exc)})
+                # The pre-pass should have caught argument mistakes. Keep the
+                # standalone invalid_arguments shape if one still surfaces.
+                out.append({"i": i, "do": do, "ok": False,
+                            "error": _act_argument_error(do, i, str(exc))})
                 break
         if verify:  # Effect Receipt: one post-batch diff of what changed
             return json.dumps({"steps": out, "effect": self._effect_after(pre)})
         return json.dumps(out)
+
+    def _rejected_act_step(self, steps: list) -> list[dict] | None:
+        """The first step whose arguments cannot run, or None when all can.
+
+        Nothing in the batch has run yet. The row matches a mid-batch failure
+        (``i``, ``do`` when the step has one, ``ok`` false, ``error``) so a
+        caller stops on the same shape it already handles.
+        """
+        for i, step in enumerate(steps):
+            message = self._act_step_argument_error(i, step)
+            if message is None:
+                continue
+            row: dict = {"i": i, "ok": False, "error": message}
+            if isinstance(step, dict) and isinstance(step.get("do"), str):
+                row = {"i": i, "do": step["do"], "ok": False, "error": message}
+            return [row]
+        return None
+
+    def _act_step_argument_error(self, index: int, step: object) -> str | None:
+        if not isinstance(step, dict) or "do" not in step:
+            return _act_argument_error("act", index, "each step needs a 'do' field")
+        do = step["do"]
+        if not isinstance(do, str):
+            return _act_argument_error("act", index, "'do' must be a string")
+        if do not in _ACT_STEP_TYPES:
+            return _act_argument_error(
+                do, index, f"unknown step '{do}' — use {_ACT_STEP_LIST}",
+            )
+        if do == "click":
+            detail = _click_step_error(step)
+        elif do == "hover":
+            detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
+        elif do == "type":
+            detail = _required_str_error(step, "text")
+        elif do == "key":
+            detail = self._key_step_error(step)
+        elif do == "scroll":
+            detail = _scroll_step_error(step)
+        elif do == "drag":
+            detail = _drag_step_error(step)
+        else:
+            detail = _wait_step_error(step)
+        if detail is None:
+            return None
+        return _act_argument_error(do, index, detail)
+
+    def _key_step_error(self, step: dict) -> str | None:
+        detail = _required_str_error(step, "chord")
+        if detail is not None:
+            return detail
+        return self._chord_argument_message(step["chord"])
+
+    def _chord_argument_message(self, chord: str) -> str | None:
+        """The driver's own chord error, before any step runs.
+
+        A driver this process does not recognize validates inside ``key_chord``.
+        An empty chord is invalid on every backend, so it is rejected here too.
+        """
+        if getattr(self, "driver", None) is not None:
+            try:
+                self._validate_chord(chord)
+            except ValueError as exc:
+                return str(exc)
+        if not chord.strip():
+            return f"empty chord {chord!r}"
+        return None
 
     def _dispatch_step(self, do: str, step: dict, confirm, remaining_s: float = MAX_BATCH_DURATION_S):
         if do == "click":
@@ -3489,8 +3718,12 @@ def build_server(
     async def act(steps: list[dict], verify: bool = False) -> str:
         """Run a SEQUENCE of actions in ONE call (batched/transactional) — the
         fast path that collapses many observe→act round-trips into one. steps is
-        a list of {"do": ...} objects executed in order; the batch STOPS at the
-        first failure and reports it. Supported steps:
+        a list of {"do": ...} objects executed in order. A missing or wrong-typed
+        field is invalid_arguments (the step index, the step type, and the field)
+        and is rejected before any step runs, so a later bad step does not leave
+        earlier steps done. A failure while a step runs (stale ref, secure field,
+        unsupported) still stops the batch and keeps the earlier results.
+        Supported steps:
           {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
           {"do":"hover","ref":"e5"}  (or "x"/"y"; no button)
           {"do":"type","text":"..."}

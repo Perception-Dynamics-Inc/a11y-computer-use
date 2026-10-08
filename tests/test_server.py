@@ -813,10 +813,236 @@ def test_act_batch_dispatch_stop_and_errors() -> None:
     assert "stale_ref" in out2[0]["error"]
 
     out3 = _json.loads(rt.act_batch([{"do": "frobnicate"}]))
-    assert out3[0]["ok"] is False and "unknown step" in out3[0]["error"]
+    assert out3 == [{
+        "i": 0,
+        "do": "frobnicate",
+        "ok": False,
+        "error": "invalid_arguments: frobnicate: step 0: unknown step 'frobnicate' "
+                 "— use click/hover/type/key/scroll/drag/wait_for",
+    }]
 
     with pytest.raises(ValueError):
         rt.act_batch([])
+
+
+def _act_argument_runtime():
+    """Bare Runtime. Dispatch methods record calls and do no input."""
+    from a11y_computer_use import server
+
+    rt = server.Runtime.__new__(server.Runtime)
+    calls: list[str] = []
+
+    def record(name):
+        def fn(*_args, **_kwargs):
+            calls.append(name)
+            return name
+        return fn
+
+    rt.click = record("click")
+    rt.hover = record("hover")
+    rt.type_text = record("type")
+    rt.key = record("key")
+    rt.scroll = record("scroll")
+    rt.drag = record("drag")
+    rt.wait_for = record("wait_for")
+    return rt, calls
+
+
+def _assert_rejected(rt, calls, steps, error: str) -> None:
+    import json as _json
+
+    assert _json.loads(rt.act_batch(steps)) == [{
+        "i": len(steps) - 1,
+        "do": steps[-1]["do"],
+        "ok": False,
+        "error": error,
+    }]
+    assert calls == []
+
+
+def test_act_click_step_rejects_a_missing_target_and_a_bad_type() -> None:
+    """click needs a ref or both coordinates. modifiers=42 used to TypeError
+    inside tuple() after earlier steps had already run."""
+    rt, calls = _act_argument_runtime()
+    missing = "invalid_arguments: click: step 1: target an element ref, or both x and y coordinates"
+    _assert_rejected(rt, calls, [{"do": "type", "text": "earlier"}, {"do": "click"}], missing)
+    wrong = "invalid_arguments: click: step 1: 'modifiers' must be a list of modifier names"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "click", "ref": "e1", "modifiers": 42}],
+        wrong,
+    )
+    counted = "invalid_arguments: click: step 0: count must be 1, 2 or 3, got two"
+    _assert_rejected(rt, calls, [{"do": "click", "x": 1, "y": 2, "count": "two"}], counted)
+    button = "invalid_arguments: click: step 0: 5 is not a valid MouseButton"
+    _assert_rejected(rt, calls, [{"do": "click", "ref": "e1", "button": 5}], button)
+
+
+def test_act_hover_step_rejects_a_missing_target_and_a_bad_type() -> None:
+    rt, calls = _act_argument_runtime()
+    missing = "invalid_arguments: hover: step 1: target an element ref, or both x and y coordinates"
+    _assert_rejected(rt, calls, [{"do": "type", "text": "earlier"}, {"do": "hover"}], missing)
+    wrong = "invalid_arguments: hover: step 1: 'x' must be a finite number"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "hover", "x": "10", "y": 20}],
+        wrong,
+    )
+
+
+def test_act_type_step_rejects_a_missing_text_and_a_bad_type() -> None:
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    assert _json.loads(rt.act_batch([{"do": "type"}])) == [{
+        "i": 0, "do": "type", "ok": False,
+        "error": "invalid_arguments: type: step 0: needs a 'text'",
+    }]
+    assert calls == []
+    missing = "invalid_arguments: type: step 1: needs a 'text'"
+    _assert_rejected(rt, calls, [{"do": "key", "chord": "enter"}, {"do": "type"}], missing)
+    wrong = "invalid_arguments: type: step 1: 'text' must be a string"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "key", "chord": "enter"}, {"do": "type", "text": 1}],
+        wrong,
+    )
+
+
+def test_act_key_step_rejects_a_missing_chord_and_a_bad_type() -> None:
+    """The 0.4.34 failure was the bare KeyError text ``'chord'``."""
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    for steps in ([{"do": "key"}], [{"do": "key", "keys": "b"}]):
+        assert _json.loads(rt.act_batch(steps)) == [{
+            "i": 0, "do": "key", "ok": False,
+            "error": "invalid_arguments: key: step 0: needs a 'chord'",
+        }]
+        assert calls == []
+    wrong = "invalid_arguments: key: step 1: 'chord' must be a string"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "key", "chord": 1}],
+        wrong,
+    )
+    empty = "invalid_arguments: key: step 0: empty chord ''"
+    _assert_rejected(rt, calls, [{"do": "key", "chord": ""}], empty)
+    rt.driver = type("_D", (), {"name": "linux"})()
+    unknown = _json.loads(rt.act_batch([
+        {"do": "type", "text": "earlier"},
+        {"do": "key", "chord": "not-a-key"},
+    ]))
+    assert calls == []
+    assert unknown == [{
+        "i": 1, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 1: unknown key 'not-a-key' in 'not-a-key'",
+    }]
+
+
+def test_act_scroll_step_rejects_a_missing_target_and_a_bad_type() -> None:
+    rt, calls = _act_argument_runtime()
+    missing = "invalid_arguments: scroll: step 1: target an element ref, or both x and y coordinates"
+    _assert_rejected(rt, calls, [{"do": "type", "text": "earlier"}, {"do": "scroll"}], missing)
+    wrong = "invalid_arguments: scroll: step 1: 'dy' must be a finite number"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "scroll", "ref": "e3", "dy": "down"}],
+        wrong,
+    )
+    unit = "invalid_arguments: scroll: step 0: 5 is not a valid ScrollUnit"
+    _assert_rejected(rt, calls, [{"do": "scroll", "ref": "e3", "unit": 5}], unit)
+
+
+def test_act_drag_step_rejects_a_missing_end_and_a_bad_type() -> None:
+    rt, calls = _act_argument_runtime()
+    missing = (
+        "invalid_arguments: drag: step 1: "
+        "target a 'start_ref', or both 'start_x' and 'start_y'"
+    )
+    _assert_rejected(rt, calls, [{"do": "type", "text": "earlier"}, {"do": "drag"}], missing)
+    end = (
+        "invalid_arguments: drag: step 0: "
+        "target an 'end_ref', or both 'end_x' and 'end_y'"
+    )
+    _assert_rejected(rt, calls, [{"do": "drag", "start_ref": "e1"}], end)
+    wrong = "invalid_arguments: drag: step 1: 'path' must be a list of [x, y] pairs"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"},
+         {"do": "drag", "start_ref": "e1", "end_ref": "e2", "path": 5}],
+        wrong,
+    )
+    text_path = "invalid_arguments: drag: step 0: 'path' must be a list of [x, y] pairs"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "drag", "start_x": 0, "start_y": 0, "end_x": 1, "end_y": 1, "path": "nope"}],
+        text_path,
+    )
+
+
+def test_act_wait_for_step_rejects_a_missing_ref_and_a_bad_type() -> None:
+    """The 0.4.34 failure was the bare KeyError text ``'ref'``. A string
+    timeout used to TypeError inside math.isfinite."""
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    assert _json.loads(rt.act_batch([{"do": "wait_for"}])) == [{
+        "i": 0, "do": "wait_for", "ok": False,
+        "error": "invalid_arguments: wait_for: step 0: needs a 'ref'",
+    }]
+    assert calls == []
+    missing = "invalid_arguments: wait_for: step 1: needs a 'ref'"
+    _assert_rejected(rt, calls, [{"do": "type", "text": "earlier"}, {"do": "wait_for"}], missing)
+    wrong = "invalid_arguments: wait_for: step 1: 'ref' must be a string"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "wait_for", "ref": 1}],
+        wrong,
+    )
+    timeout = "invalid_arguments: wait_for: step 1: timeout_s must be finite and nonnegative"
+    _assert_rejected(
+        rt, calls,
+        [{"do": "type", "text": "earlier"}, {"do": "wait_for", "ref": "e7", "timeout_s": "soon"}],
+        timeout,
+    )
+
+
+def test_act_argument_errors_run_no_step_and_skip_the_effect_snapshot() -> None:
+    """A step that is not an object is rejected with the earlier steps unrun.
+    verify does not re-snapshot when the batch never started."""
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    out = _json.loads(rt.act_batch([{"do": "type", "text": "earlier"}, "nope"], verify=True))
+    assert out == {
+        "steps": [{
+            "i": 1,
+            "ok": False,
+            "error": "invalid_arguments: act: step 1: each step needs a 'do' field",
+        }],
+        "effect": "",
+    }
+    assert calls == []
+
+
+def test_act_batch_still_runs_a_valid_step_of_each_type() -> None:
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    rt.driver = type("_D", (), {"name": "linux"})()
+    steps = [
+        {"do": "click", "ref": "e1"},
+        {"do": "hover", "x": 1, "y": 2},
+        {"do": "type", "text": "hi"},
+        {"do": "key", "chord": "enter"},
+        {"do": "scroll", "ref": "e1", "dy": 3, "into_view": False},
+        {"do": "drag", "start_ref": "e1", "end_ref": "e2", "path": [[1, 2], [3, 4]]},
+        {"do": "wait_for", "ref": "e1", "condition": "exists", "timeout_s": 1},
+    ]
+    out = _json.loads(rt.act_batch(steps))
+    assert [step["ok"] for step in out] == [True] * len(steps)
+    assert calls == ["click", "hover", "type", "key", "scroll", "drag", "wait_for"]
 
 
 def test_effect_receipt_appends_post_action_diff() -> None:
