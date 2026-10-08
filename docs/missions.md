@@ -70,14 +70,16 @@ the phase passes only when every check holds. They accept the same shapes as
 
 | Check | Holds when |
 |---|---|
-| `file_exists = path`, optional `min_bytes` | a file matches the path (globs allowed, `~` expanded) and is at least `min_bytes` |
-| `file_stable = path`, `seconds`, optional `min_bytes` | the newest match kept the same size for `seconds` (a finished download or render) |
+| `file_exists = path`, optional `min_bytes` | a regular file matches the path (globs allowed, `~` expanded; newest match wins) and is at least `min_bytes` (default 1). A path that exists and is not a regular file, or a glob whose matches are all non-files, fails immediately: the path exists but is not a regular file. A missing path keeps waiting. Directories never count |
+| `file_stable = path`, `seconds`, optional `min_bytes` | the newest regular file kept the same size for `seconds` (a finished download or render). Same file-only rule as `file_exists`: a directory fails immediately, and `min_bytes` applies only to regular files |
 | `url_status = url`, optional `status` | a GET returns that status (default 200) |
 | `snapshot_text = text`, optional `app` | the text appears in a fresh accessibility snapshot of the app |
 | `screen_text = text` | the text appears in on-device OCR of the screen; `unsupported` where OCR is missing |
 | `notes_contain = text` | the agent recorded a note containing the text |
 
 File paths are limited to the user's home unless `A11Y_COMPUTER_USE_ALLOW_ANY_PATH=1`.
+
+A check that times out reports the last observation along with the condition, the time waited, and the poll count: `last_status` or `last_error` (the connection error's class and message) for `url_status`; `exists`, `path`, `last_size`, and `min_bytes` for `file_exists` and `file_stable` (`stable_for_s` while a candidate is watched); `found` for `snapshot_text` and `screen_text`; `elapsed_s` and `settle_s` for `settle`.
 
 The planner also sees the checks: each phase task ends with "This phase is
 complete only when ..." so the agent knows what evidence to produce.
@@ -125,6 +127,8 @@ there until they are.
 
 Hermetic tests cover the notes store and its injection into planner turns,
 every `wait_until` kind including timeouts and the home-directory rule,
+a directory (and a glob that only matches a directory) failing immediately,
+the last observation on a timeout for each condition kind,
 deterministic compaction, the deadline stop, mission validation, and a
 two-phase run with a retry, grant restoration, and the artifact set. No mission
 has been run against real apps on a granted machine yet; the example file is a

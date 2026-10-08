@@ -152,6 +152,163 @@ def test_wait_until_snapshot_text_and_unsupported_screen_text(tmp_path) -> None:
     assert info.value.code is ErrorCode.UNSUPPORTED
 
 
+def test_wait_until_directory_and_directory_glob_fail_immediately(tmp_path, monkeypatch) -> None:
+    """A directory is not a file. file_exists must not poll until timeout_s."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    rt = make_runtime(tmp_path)
+    folder = tmp_path / "some-existing-folder"
+    folder.mkdir()
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="exists but is not a regular file") as info:
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": str(folder)}, "timeout_s": 30, "poll_s": 5,
+        })
+    assert time.monotonic() - started < 2
+    assert "file_exists only matches regular files" in str(info.value)
+
+    (folder / "subdir").mkdir()
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="not a regular file") as glob_info:
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": str(folder / "su*")}, "timeout_s": 30, "poll_s": 5,
+        })
+    assert time.monotonic() - started < 2
+    assert "subdir" in str(glob_info.value)
+    assert "file_exists only matches regular files" in str(glob_info.value)
+
+    # min_bytes and file_stable stay file-only: a directory is not "too small".
+    with pytest.raises(ValueError, match="file_stable only matches regular files"):
+        rt.call_tool("wait_until", {
+            "condition": {"file_stable": str(folder), "seconds": 1, "min_bytes": 1},
+            "timeout_s": 30, "poll_s": 5,
+        })
+
+    # A regular file among the matches still wins; the directory is not an error.
+    (folder / "note.txt").write_bytes(b"hello")
+    out = json.loads(rt.call_tool("wait_until", {
+        "condition": {"file_exists": str(folder / "*")}, "timeout_s": 2, "poll_s": 0.05,
+    }))
+    assert "note.txt" in out["matched"] and out["polls"] == 1
+
+
+def test_wait_until_timeout_reports_the_last_observation(tmp_path, monkeypatch) -> None:
+    """A timeout names what the last poll saw, for every condition kind."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", "1")
+    rt = make_runtime(tmp_path)
+
+    missing = tmp_path / "missing.txt"
+    with pytest.raises(ComputerUseError) as absent:
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": str(missing), "min_bytes": 1000},
+            "timeout_s": 0.2, "poll_s": 0.05,
+        })
+    assert absent.value.code is ErrorCode.TIMEOUT
+    assert absent.value.detail["exists"] is False
+    assert absent.value.detail["path"] is None
+    assert absent.value.detail["last_size"] is None
+    assert absent.value.detail["min_bytes"] == 1000
+    assert absent.value.detail["polls"] >= 1
+    assert absent.value.detail["waited_s"] >= 0
+
+    small = tmp_path / "a.txt"
+    small.write_bytes(b"x" * 10)
+    with pytest.raises(ComputerUseError) as short:
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": str(small), "min_bytes": 1000},
+            "timeout_s": 0.2, "poll_s": 0.05,
+        })
+    assert short.value.detail["exists"] is True
+    assert short.value.detail["last_size"] == 10
+    assert short.value.detail["min_bytes"] == 1000
+    assert short.value.detail["path"] == str(small)
+
+    # A glob that also hits a directory still reports the regular file's size.
+    mixed_dir = tmp_path / "mixed"
+    mixed_dir.mkdir()
+    (mixed_dir / "onlydir").mkdir()
+    (mixed_dir / "a.txt").write_bytes(b"x" * 10)
+    with pytest.raises(ComputerUseError) as mixed:
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": str(mixed_dir / "*"), "min_bytes": 1000},
+            "timeout_s": 0.15, "poll_s": 0.05,
+        })
+    assert mixed.value.detail["exists"] is True
+    assert mixed.value.detail["last_size"] == 10
+    assert mixed.value.code is ErrorCode.TIMEOUT
+
+    with pytest.raises(ComputerUseError) as stable:
+        rt.call_tool("wait_until", {
+            "condition": {"file_stable": str(small), "seconds": 30, "min_bytes": 1},
+            "timeout_s": 0.25, "poll_s": 0.05,
+        })
+    assert stable.value.detail["exists"] is True
+    assert stable.value.detail["last_size"] == 10
+    assert stable.value.detail["min_bytes"] == 1
+    assert stable.value.detail["path"] == str(small)
+    assert "stable_for_s" in stable.value.detail
+    assert stable.value.detail["stable_for_s"] < 30
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_a):
+            return None
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_port}/missing.html"
+        with pytest.raises(ComputerUseError) as missing_page:
+            rt.call_tool("wait_until", {
+                "condition": {"url_status": url, "status": 200},
+                "timeout_s": 0.3, "poll_s": 0.05,
+            })
+        assert missing_page.value.detail["last_status"] == 404
+        assert "last_error" not in missing_page.value.detail
+    finally:
+        httpd.shutdown()
+
+    with pytest.raises(ComputerUseError) as closed:
+        rt.call_tool("wait_until", {
+            "condition": {"url_status": "http://127.0.0.1:9/", "status": 200},
+            "timeout_s": 0.4, "poll_s": 0.05,
+        })
+    assert closed.value.code is ErrorCode.TIMEOUT
+    assert "last_status" not in closed.value.detail
+    error = closed.value.detail["last_error"]
+    assert "ConnectionRefusedError" in error or "refused" in error.lower() or "10061" in error
+
+    with pytest.raises(ComputerUseError) as snap:
+        rt.call_tool("wait_until", {
+            "condition": {"snapshot_text": "NOT-IN-SNAPSHOT", "app": APP},
+            "timeout_s": 0.15, "poll_s": 0.05,
+        })
+    assert snap.value.detail["found"] is False
+    assert snap.value.detail["snapshot_chars"] > 0
+
+    screen = conditions.Checker(screen_text=lambda: "hello screen")
+    with pytest.raises(ComputerUseError) as ocr:
+        screen.wait({"screen_text": "absent"}, timeout_s=0.15, poll_s=0.05)
+    assert ocr.value.detail["found"] is False
+    assert ocr.value.detail["screen_chars"] == len("hello screen")
+
+    # Private addresses and paths outside home are still refused before a wait.
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS", raising=False)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", raising=False)
+    with pytest.raises(ValueError, match="non-public"):
+        rt.call_tool("wait_until", {
+            "condition": {"url_status": "http://127.0.0.1:9/"}, "timeout_s": 5, "poll_s": 1,
+        })
+    outside = "/etc/hosts" if os.name != "nt" else r"C:\Windows\win.ini"
+    with pytest.raises(ValueError, match="outside the home directory"):
+        rt.call_tool("wait_until", {
+            "condition": {"file_exists": outside}, "timeout_s": 30, "poll_s": 5,
+        })
+
+
 def test_wait_until_rejects_paths_outside_home_and_bad_conditions(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", raising=False)
     rt = make_runtime(tmp_path)
