@@ -38,15 +38,22 @@ adds the last observation: ``last_status`` or ``last_error`` for a URL;
 ``stable_for_s`` while a ``file_stable`` candidate is being watched);
 ``found`` for snapshot and screen text; ``elapsed_s`` and ``settle_s`` for
 ``settle``.
+
+No probe starts once the deadline has passed. A ``url_status`` probe is
+capped at the lesser of 10 seconds and the time still left, and that cap
+covers DNS, connect, and the read. ``file_exists``, ``file_stable``, and
+``settle`` only wait in the poll sleep, which is clipped to the time left.
 """
 
 from __future__ import annotations
 
 import glob
+import http.client
 import ipaddress
 import json
 import os
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -62,6 +69,10 @@ KINDS = ("file_exists", "file_stable", "url_status", "snapshot_text", "screen_te
 #: Ceiling for a single wait (seconds). Renders and deploys take minutes;
 #: nothing an agent waits for should take longer than half an hour.
 MAX_WAIT_UNTIL_S = 1800.0
+
+#: One ``url_status`` probe never asks for more than this, and never more
+#: than the time still left on the wait.
+_URL_PROBE_CAP_S = 10.0
 
 
 def kind_of(condition: object) -> str:
@@ -181,24 +192,26 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _public_host(url: str) -> None:
-    """Refuse URLs whose host resolves to a non-public address.
+def _getaddrinfo(host: str, port: int):
+    """The lookup ``url_status`` bounds. Tests replace this with a slow resolver."""
+    return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
 
-    ``wait_until`` runs on the planner's request, and a planner can be steered
-    by page content, so probing loopback, link-local (cloud metadata), private
-    or multicast addresses would turn it into a reachability oracle for services
-    on this machine and network. ``A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1`` opts
-    out for local development servers.
+
+def _local_urls_allowed() -> bool:
+    return os.environ.get("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS") == "1"
+
+
+def _refuse_nonpublic(host: str, infos: list) -> None:
+    """Refuse a resolved address that is not public.
+
+    The check uses the address ``getaddrinfo`` returned, not the hostname
+    text. ``A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1`` opts out for a development
+    server on this machine. A planner can be steered by page content, so
+    probing loopback, link-local (cloud metadata), private, or multicast
+    addresses would turn the check into a reachability oracle.
     """
-    if os.environ.get("A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS") == "1":
+    if _local_urls_allowed():
         return
-    host = urllib.parse.urlsplit(url).hostname
-    if not host:
-        raise ValueError("url_status needs a host")
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError as exc:
-        raise ValueError(f"url_status could not resolve {host!r}") from exc
     for info in infos:
         addr = ipaddress.ip_address(info[4][0])
         if (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast
@@ -207,6 +220,133 @@ def _public_host(url: str) -> None:
                 f"url_status refuses non-public address {addr} for {host!r} "
                 "(set A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1 for local servers)"
             )
+
+
+def _bounded_resolve(host: str, port: int, timeout_s: float) -> tuple[list | None, str | None]:
+    """Resolve ``host`` within ``timeout_s``.
+
+    ``socket.getaddrinfo`` ignores the socket timeout, so the lookup runs on
+    a daemon thread and this waits at most ``timeout_s``. The thread may
+    outlive the wait; the caller does not. A finished lookup that failed is
+    ``(None, error text)`` when local URLs are allowed, and ``ValueError``
+    when they are not (the address was never verified). A lookup that does
+    not finish is ``(None, "TimeoutError: ...")`` either way, and nothing is
+    connected.
+    """
+    if timeout_s <= 0:
+        return None, f"TimeoutError: timed out resolving {host!r}"
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["infos"] = _getaddrinfo(host, port)
+        except OSError as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=run, name="a11y-url-resolve", daemon=True)
+    thread.start()
+    thread.join(timeout_s)
+    # A result written before the thread exits is in budget. An empty outcome
+    # means the lookup is still running; the thread is a daemon and is left behind.
+    error = outcome.get("error")
+    if isinstance(error, OSError):
+        if not _local_urls_allowed():
+            raise ValueError(f"url_status could not resolve {host!r}") from error
+        return None, f"{type(error).__name__}: {error}"
+    infos = outcome.get("infos")
+    if infos:
+        return list(infos), None  # type: ignore[arg-type]
+    if not thread.is_alive() and not _local_urls_allowed():
+        raise ValueError(f"url_status could not resolve {host!r}")
+    return None, f"TimeoutError: timed out resolving {host!r}"
+
+
+def _open_resolved(infos: list, port: int, timeout: float, source_address=None):
+    """Connect to an address the bounded lookup already returned.
+
+    A second ``getaddrinfo`` would ignore the deadline. Each candidate shares
+    one budget, so several addresses cannot each take the full timeout.
+    """
+    deadline = time.monotonic() + timeout
+    last: OSError | None = None
+    for family, socktype, proto, _canon, sockaddr in infos:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        sock = socket.socket(family, socktype, proto)
+        try:
+            sock.settimeout(left)
+            if source_address:
+                sock.bind(source_address)
+            ip = sockaddr[0]
+            if len(sockaddr) >= 4:
+                sa = (ip, port, sockaddr[2], sockaddr[3])
+            else:
+                sa = (ip, port)
+            sock.connect(sa)
+            # The connect spent part of the budget. The read must use what's left,
+            # or a slow body runs past the deadline by the connect time.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                sock.close()
+                raise TimeoutError("timed out")
+            sock.settimeout(remaining)
+            return sock
+        except OSError as exc:
+            last = exc
+            sock.close()
+    if last is not None:
+        raise last
+    raise TimeoutError("timed out")
+
+
+class _ResolvedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host, port=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+                 source_address=None, blocksize=8192, *, infos):
+        super().__init__(host, port, timeout, source_address, blocksize)
+        self._resolved = infos
+        self._create_connection = self._connect_resolved
+
+    def _connect_resolved(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **_kwargs):
+        port = address[1]
+        limit = timeout if isinstance(timeout, (int, float)) else _URL_PROBE_CAP_S
+        return _open_resolved(self._resolved, port, limit, source_address)
+
+
+class _ResolvedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, port=None, *, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+                 source_address=None, context=None, blocksize=8192, infos):
+        super().__init__(
+            host, port, timeout=timeout, source_address=source_address,
+            context=context, blocksize=blocksize,
+        )
+        self._resolved = infos
+        self._create_connection = self._connect_resolved
+
+    def _connect_resolved(self, address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **_kwargs):
+        port = address[1]
+        limit = timeout if isinstance(timeout, (int, float)) else _URL_PROBE_CAP_S
+        return _open_resolved(self._resolved, port, limit, source_address)
+
+
+class _ResolvedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, infos: list) -> None:
+        super().__init__()
+        self._infos = infos
+
+    def http_open(self, req):
+        return self.do_open(_ResolvedHTTPConnection, req, infos=self._infos)
+
+
+class _ResolvedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, infos: list) -> None:
+        super().__init__()
+        self._infos = infos
+
+    def https_open(self, req):
+        return self.do_open(
+            _ResolvedHTTPSConnection, req, context=self._context, infos=self._infos,
+        )
 
 
 def _connection_error_text(exc: urllib.error.URLError) -> str:
@@ -220,17 +360,35 @@ def _connection_error_text(exc: urllib.error.URLError) -> str:
 def _url_observation(url: object, timeout_s: float) -> tuple[int | None, str | None]:
     """``(status, None)`` when the server answered, else ``(None, error text)``.
 
-    ``HTTPError`` is an answer (a 404 is ``last_status``, not a connection
-    error). A refused or dropped connection is ``last_error``.
+    ``timeout_s`` bounds DNS, the connect, and the read together. ``HTTPError``
+    is an answer (a 404 is ``last_status``, not a connection error). A refused
+    connection, a DNS failure, or a probe that used up its budget is
+    ``last_error``. The resolved address is checked before anything connects.
     """
     target = str(url)
     if not target.startswith(("http://", "https://")):
         raise ValueError("url_status needs an http:// or https:// URL")
-    _public_host(target)
+    parsed = urllib.parse.urlsplit(target)
+    host = parsed.hostname
+    if not host:
+        raise ValueError("url_status needs a host")
+    if timeout_s <= 0:
+        return None, f"TimeoutError: timed out resolving {host!r}"
+    started = time.monotonic()
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    infos, error = _bounded_resolve(host, port, timeout_s)
+    if error is not None or not infos:
+        return None, error or f"TimeoutError: timed out resolving {host!r}"
+    _refuse_nonpublic(host, infos)
+    left = timeout_s - (time.monotonic() - started)
+    if left <= 0:
+        return None, f"TimeoutError: timed out resolving {host!r}"
     request = urllib.request.Request(target, method="GET", headers={"User-Agent": "a11y-computer-use"})
-    opener = urllib.request.build_opener(_NoRedirects)
+    opener = urllib.request.build_opener(
+        _NoRedirects, _ResolvedHTTPHandler(infos), _ResolvedHTTPSHandler(infos),
+    )
     try:
-        with opener.open(request, timeout=timeout_s) as response:
+        with opener.open(request, timeout=left) as response:
             return int(response.status), None
     except urllib.error.HTTPError as exc:
         return int(exc.code), None
@@ -306,10 +464,17 @@ class Checker:
             return None
         if kind == "url_status":
             wanted = int(condition.get("status", 200))
-            status, error = _url_observation(
-                condition["url_status"],
-                timeout_s=min(10.0, float(condition.get("request_timeout_s", 10.0))),
+            deadline = state.get("deadline")
+            remaining = _URL_PROBE_CAP_S if deadline is None else deadline - time.monotonic()
+            if remaining <= 0:
+                state["last"] = {"last_error": "TimeoutError: deadline passed before the request"}
+                return None
+            budget = min(
+                _URL_PROBE_CAP_S,
+                float(condition.get("request_timeout_s", _URL_PROBE_CAP_S)),
+                remaining,
             )
+            status, error = _url_observation(condition["url_status"], timeout_s=budget)
             if error is not None:
                 state["last"] = {"last_error": error}
             else:
@@ -348,9 +513,14 @@ class Checker:
             raise ValueError("poll_s must be positive")
         started = time.monotonic()
         deadline = started + timeout_s
-        state: dict = {}
+        state: dict = {"deadline": deadline}
         polls = 0
         while True:
+            # A probe that starts after the deadline can run past timeout_s.
+            # file_exists, file_stable, and settle only block in the sleep
+            # below, which is clipped to the time still left.
+            if time.monotonic() >= deadline:
+                self._raise_timeout(condition, started, polls, state, timeout_s)
             polls += 1
             matched = self.probe(condition, state)
             if matched is not None:
@@ -361,18 +531,21 @@ class Checker:
                 }
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                detail: dict[str, object] = {
-                    "condition": condition,
-                    "waited_s": round(time.monotonic() - started, 2),
-                    "polls": polls,
-                }
-                detail.update(state.get("last") or {})
-                raise ComputerUseError(
-                    ErrorCode.TIMEOUT,
-                    f"condition not met within {timeout_s:g}s: {json.dumps(condition)}",
-                    detail=detail,
-                )
+                self._raise_timeout(condition, started, polls, state, timeout_s)
             time.sleep(min(poll_s, remaining))
+
+    def _raise_timeout(self, condition: dict, started: float, polls: int, state: dict, timeout_s: float) -> None:
+        detail: dict[str, object] = {
+            "condition": condition,
+            "waited_s": round(time.monotonic() - started, 2),
+            "polls": polls,
+        }
+        detail.update(state.get("last") or {})
+        raise ComputerUseError(
+            ErrorCode.TIMEOUT,
+            f"condition not met within {timeout_s:g}s: {json.dumps(condition)}",
+            detail=detail,
+        )
 
 
 __all__ = ["Checker", "KINDS", "MAX_WAIT_UNTIL_S", "kind_of"]

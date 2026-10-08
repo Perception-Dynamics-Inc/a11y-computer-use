@@ -129,6 +129,7 @@ Hermetic tests cover the notes store and its injection into planner turns,
 every `wait_until` kind including timeouts and the home-directory rule,
 a directory (and a glob that only matches a directory) failing immediately,
 the last observation on a timeout for each condition kind,
+a slow resolver and a slow server staying inside `timeout_s`,
 deterministic compaction, the deadline stop, mission validation, and a
 two-phase run with a retry, grant restoration, and the artifact set. No mission
 has been run against real apps on a granted machine yet; the example file is a
@@ -136,4 +137,4 @@ plan, not a recorded result.
 
 ## URL checks and local servers
 
-`url_status` refuses hosts that resolve to loopback, private, link-local, multicast, or reserved addresses, and it does not follow redirects. A planner can be steered by page content, so probing internal addresses would turn the check into a reachability oracle. Set `A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1` when a mission checks a development server on this machine.
+`url_status` refuses hosts that resolve to loopback, private, link-local, multicast, or reserved addresses, and it does not follow redirects. The refusal uses the address the lookup returned. A planner can be steered by page content, so probing internal addresses would turn the check into a reachability oracle. Set `A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1` when a mission checks a development server on this machine. Each probe is limited to the time still left in the check, and to 10 seconds, covering DNS, connect, and the read. No probe starts after the deadline.

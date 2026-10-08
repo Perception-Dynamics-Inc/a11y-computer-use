@@ -28,8 +28,11 @@ def test_settle_longer_than_the_timeout_is_a_timeout(monkeypatch) -> None:
         conditions.Checker().wait({"settle": 30}, timeout_s=5, poll_s=1)
     assert info.value.code is ErrorCode.TIMEOUT
     assert info.value.detail["settle_s"] == 30
-    assert info.value.detail["elapsed_s"] == pytest.approx(5.0)
-    assert info.value.detail["polls"] >= 1 and "condition" in info.value.detail
+    # The probe at t=4 records elapsed 4, then the sleep reaches the deadline
+    # and no further probe starts.
+    assert info.value.detail["elapsed_s"] == pytest.approx(4.0)
+    assert info.value.detail["waited_s"] == pytest.approx(5.0)
+    assert info.value.detail["polls"] == 5 and "condition" in info.value.detail
 
 
 def test_settle_rejects_negative_or_absurd_seconds() -> None:

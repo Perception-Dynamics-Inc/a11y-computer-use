@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.38] - 2026-10-08
+
+### Fixed
+
+- `wait_until` `url_status` returns within `timeout_s`. On 0.4.37 each probe used a fixed 10 second request timeout, and `socket.getaddrinfo` ignores that timeout, so a probe that started near the deadline kept running. `http://nonexistent.invalid/` with `timeout_s` 5 returned after 10.0 seconds, and a slow endpoint returned after 7.1 seconds. Each probe is now limited to the lesser of 10 seconds and the time still left. That budget covers DNS, the connect, and the read. DNS runs on a daemon thread and the wait joins it for at most the budget, because the HTTP client cannot interrupt a lookup. The connection uses the addresses that lookup returned, so it does not resolve the name again. No probe starts once the deadline has passed. `file_exists`, `file_stable`, and `settle` have no request timeout of their own; their only wait is the poll sleep, which was already clipped to the time left, and they now also skip a poll after the deadline. A timeout detail still includes `last_status` or `last_error` (a DNS timeout, a connection error, or a read timeout) and the file observations from 0.4.37. A resolved loopback, private, link-local, multicast, or reserved address is still refused before anything connects. `A11Y_COMPUTER_USE_ALLOW_LOCAL_URLS=1` still opts out of that refusal (#91) (2026-10-08).
+
 ## [0.4.37] - 2026-10-08
 
 ### Fixed
