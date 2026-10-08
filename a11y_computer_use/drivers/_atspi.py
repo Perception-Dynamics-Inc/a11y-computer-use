@@ -316,8 +316,30 @@ def _strip_objects(text: str) -> str:
     return text.replace(_OBJECT_REPLACEMENT, "").strip()
 
 
+def _option_label(node) -> str:
+    label = _node_name(node)
+    if label:
+        return label
+    raw = _safe(lambda n=node: _atspi().Text.get_text(n, 0, -1))
+    if isinstance(raw, str):
+        return _strip_objects(raw)
+    return ""
+
+
 def _selected_option_text(acc) -> str | None:
-    """Names of selected descendants, for a combo or list whose own text is U+FFFC."""
+    """The combo or list's active option, not a highlighted popup row.
+
+    ``Selection.get_selected_child`` is the active item (GTK's combo uses it
+    for ``gtk_combo_box_get_active``). A popup menu can mark a row SELECTED
+    when that row is only highlighted, which leaves the combo unchanged.
+    """
+    iface = _selection_iface(acc)
+    if iface is not None:
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+        if child is not None:
+            label = _option_label(child)
+            if label:
+                return label
     labels: list[str] = []
 
     def walk(node, depth: int) -> None:
@@ -329,10 +351,7 @@ def _selected_option_text(acc) -> str | None:
             if child is None:
                 continue
             if _state_has(child, "SELECTED"):
-                label = _node_name(child)
-                if not label:
-                    raw = _safe(lambda c=child: _atspi().Text.get_text(c, 0, -1))
-                    label = _strip_objects(raw) if isinstance(raw, str) else ""
+                label = _option_label(child)
                 if label and label not in labels:
                     labels.append(label)
                 continue
@@ -377,8 +396,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
                     return cleaned
             else:
                 return got
-        if role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES:
-            return _selected_option_text(acc)
+        handled, choice = _choice_value(acc, role, role_name)
+        if handled:
+            return choice
         if role_name == "spin button" or (role_name in {"entry", "text"} and _number_input(acc)):
             return None
     elif count == 0 and (
@@ -388,11 +408,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         # not a number the user entered. A slider has no text interface
         # (count is None) and still falls through to Value.
         return None
-    if role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES:
-        selected = _selected_option_text(acc)
-        if selected:
-            return selected
-        return None
+    handled, choice = _choice_value(acc, role, role_name)
+    if handled:
+        return choice
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is not None:
         return cur
@@ -1341,6 +1359,61 @@ def _combo_entry(acc):
     return None
 
 
+def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
+    """(handled, value) for a combo or list.
+
+    An editable combo's value is its own entry's text, including when that
+    text is empty. A non-editable combo uses the active option. Neither falls
+    through to the Value interface.
+    """
+    if role not in _CHOICE_ROLES and role_name not in _CHOICE_ROLE_NAMES:
+        return False, None
+    entry = _combo_entry(acc)
+    if entry is not None:
+        text = _full_text(entry)
+        if isinstance(text, str):
+            return True, (_strip_objects(text) or None)
+        return True, None
+    return True, _selected_option_text(acc)
+
+
+def _set_entry_contents(entry, value: str) -> bool:
+    """Replace ``entry`` via EditableText. No focus change and no keystrokes.
+
+    Keystrokes would land in whichever widget is focused, which is how a combo
+    write changed a different field. ``set_text_contents`` writes this entry.
+    """
+    eti = _editable_iface(entry)
+    if eti is None:
+        return False
+    if _full_text(entry) == value:
+        return True
+    _call_first(eti, ("set_text_contents",), value, default=False)
+    if _confirm_text(entry, value):
+        return True
+    current = _full_text(entry)
+    if current:
+        _select_range(entry, len(current))
+        _call_first(eti, ("delete_text",), 0, len(current), default=False)
+        if _full_text(entry) not in ("", None):
+            return False
+    _call_first(eti, ("set_text_contents",), value, default=False)
+    if _confirm_text(entry, value):
+        return True
+    if _full_text(entry) not in ("", None):
+        return False
+    length = None
+    for name in ("insert_text", "insertText"):
+        method = getattr(eti, name, None)
+        if method is not None:
+            length = _insert_length(method, value)
+            break
+    if length is None:
+        return False
+    _call_first(eti, ("insert_text", "insertText"), 0, value, length, default=False)
+    return _confirm_text(entry, value)
+
+
 def _do_action_named(acc, names: frozenset[str]) -> bool:
     action = _action_iface(acc)
     if action is None:
@@ -1364,67 +1437,89 @@ def _close_combo_popup(acc) -> None:
         _linux_input.press_chord("Escape")
 
 
+def _combo_active_label(acc) -> str | None:
+    """The combo's active item, not a popup row that is only highlighted.
+
+    GTK's combo Selection child is ``gtk_combo_box_get_active``. A menu's
+    own Selection can mark a different row SELECTED without changing that.
+    When the toolkit has no ``get_selected_child``, a SELECTED child of the
+    combo itself is the active item. A SELECTED row nested in the popup is not.
+    """
+    iface = _selection_iface(acc)
+    if iface is not None:
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+        if child is not None:
+            label = _option_label(child)
+            if label:
+                return label
+    for label, node, parent, _index in _collect_options(acc):
+        if parent is acc and label and _state_has(node, "SELECTED"):
+            return label
+    shown = _full_text(acc)
+    if isinstance(shown, str):
+        cleaned = _strip_objects(shown)
+        if cleaned:
+            return cleaned
+    return None
+
+
 def _combo_landed(acc, entry, value: str) -> bool:
     if entry is not None:
         text = _full_text(entry)
-        if text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value:
-            return True
-    for label, node, _parent, _index in _collect_options(acc):
-        if label == value and _state_has(node, "SELECTED"):
-            return True
-    shown = _full_text(acc)
-    if shown is not None and _strip_objects(shown) == value:
-        return True
-    return False
+        return text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value
+    return _combo_active_label(acc) == value
 
 
-def _select_option(combo, parent, index: int, node) -> bool:
-    iface_parent = _selection_iface(parent)
-    if iface_parent is not None and _call_first(
-        iface_parent, ("select_child", "selectChild"), index, default=False
-    ):
-        if _state_has(node, "SELECTED"):
-            return True
-    iface_combo = _selection_iface(combo)
-    if iface_combo is not None and parent is not combo and _call_first(
-        iface_combo, ("select_child", "selectChild"), index, default=False
-    ):
-        if _state_has(node, "SELECTED"):
-            return True
-    if _do_action_named(node, frozenset({"select", "pick", "click", "press", "activate"})):
-        return _state_has(node, "SELECTED")
-    return _state_has(node, "SELECTED")
+def _activate_combo_option(combo, options, match) -> None:
+    """Choose ``match`` on the combo, not on its popup menu.
+
+    ``Selection.select_child`` on the combo is the model index and calls
+    ``gtk_combo_box_set_active``. The same call on the popup only highlights
+    the row. A click on the item is the fallback that activates it.
+    """
+    label, node, _parent, _index = match
+    model_index = next(i for i, item in enumerate(options) if item[1] is node)
+    iface = _selection_iface(combo)
+    if iface is not None:
+        _call_first(iface, ("select_child", "selectChild"), model_index, default=False)
+    if _combo_active_label(combo) == label:
+        return
+    if not _state_has(combo, "EXPANDED"):
+        _do_action_named(combo, frozenset({"press", "show", "open"}))
+    _do_action_named(node, frozenset({"click", "press", "activate"}))
 
 
 def set_combo_value(acc, value: str) -> None:
     """Choose ``value`` on this combo or list, or write its own entry.
 
-    An unknown option raises ValueError before any selection or keystroke, and
-    the message lists the options. A popup this call opened is closed. The
-    call raises when the read-back is not ``value``.
+    An editable combo is written with ``set_text_contents`` on its own entry.
+    That sends no keystrokes, so a different focused field is left untouched.
+    A non-editable combo is set through its own Selection. An unknown option
+    raises ValueError before any selection, and the message lists the options.
+    A popup this call opened is closed. The call raises when the read-back is
+    not ``value``. A highlighted popup row is not a successful read-back.
     """
-    options = _collect_options(acc)
     entry = _combo_entry(acc)
-    if not options and entry is None:
+    options = _collect_options(acc)
+    if entry is None and not options:
         _do_action_named(acc, frozenset({"press", "show", "open"}))
         options = _collect_options(acc)
         entry = _combo_entry(acc)
-    match = next((item for item in options if item[0] == value), None)
     try:
-        if match is None:
-            labels = [label for label, *_rest in options if label]
-            if entry is None:
-                listed = ", ".join(labels)
-                raise ValueError(f"value {value!r} is not one of: {listed}")
-            if not set_text(entry, value):
+        if entry is not None:
+            if not _set_entry_contents(entry, value):
                 raise _text_mismatch(
                     "text_mismatch",
                     f"the combo entry read back does not match {value!r}",
                     expected=value,
                 )
         else:
-            label, node, parent, index = match
-            _select_option(acc, parent, index, node)
+            match = next((item for item in options if item[0] == value), None)
+            if match is None:
+                labels = [label for label, *_rest in options if label]
+                listed = ", ".join(labels)
+                raise ValueError(f"value {value!r} is not one of: {listed}")
+            _activate_combo_option(acc, options, match)
     finally:
         _close_combo_popup(acc)
     if _state_has(acc, "EXPANDED"):

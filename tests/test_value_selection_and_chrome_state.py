@@ -263,14 +263,66 @@ def test_unknown_combo_option_is_invalid_before_any_input(monkeypatch) -> None:
 
 
 def test_editable_combo_writes_its_own_entry(monkeypatch) -> None:
+    notes = _Entry("Paris", "Notes")
     paris = _Node("menu item", "Paris", states={"SELECTED"})
-    entry = _Entry("Blue")
-    combo = _Node("combo box", "City", text="", children=[entry, paris], states={"EXPANDABLE"})
+    entry = _Entry("Blue", "CityEntry")
+    menu = _Node("menu", "", children=[paris])
+    combo = _Node("combo box", "City", text="", children=[menu, entry], states={"EXPANDABLE"})
+    typed: list[str] = []
+    monkeypatch.setattr(_atspi, "_type_string", lambda text: typed.append(text))
     driver = _driver(monkeypatch, combo)
     element = _element("e3", "AXComboBox", "City", editable=True)
     assert driver.set_value(element, "Lima") is True
     assert entry.text == "Lima"
     assert entry.text != "BlueLima"
+    assert notes.text == "Paris"
+    assert typed == []
+    assert ATSPIAccessor().read(combo).value == "Lima"
+
+
+def test_gtk_combo_selects_through_the_combo_not_the_popup_highlight(monkeypatch) -> None:
+    """A popup menu's Selection only highlights a row. The combo's Selection sets it."""
+    notes = _Entry("Paris", "Notes")
+    red = _Node("menu item", "Red", states={"SELECTED"})
+    green = _Node("menu item", "Green")
+    blue = _Node("menu item", "Blue")
+    menu = _Node("menu", "", children=[red, green, blue])
+
+    def menu_select(index):
+        menu.action_log.append(f"menu-select:{index}")
+        for child in menu.children:
+            child.states.discard("SELECTED")
+        menu.children[index].states.add("SELECTED")
+        return True
+
+    menu.get_selection_iface = lambda: menu
+    menu.select_child = menu_select
+    combo = _Node(
+        "combo box", "Color", text="", children=[menu],
+        actions=["press", "collapse"], states={"EXPANDABLE", "ENABLED"},
+    )
+    combo.active = 0
+
+    def model_select(index):
+        combo.active = index
+        combo.action_log.append(f"model-select:{index}")
+        return True
+
+    def selected_child(index):
+        if index != 0 or not 0 <= combo.active < len(menu.children):
+            return None
+        return menu.children[combo.active]
+
+    combo.select_child = model_select
+    combo.get_selected_child = selected_child
+    driver = _driver(monkeypatch, combo)
+    element = _element("e2", "AXComboBox", "Color", editable=True, clickable=True)
+    assert driver.set_value(element, "Green") is True
+    assert combo.active == 1
+    assert combo.action_log == ["model-select:1"]
+    assert menu.action_log == []
+    assert notes.text == "Paris"
+    assert ATSPIAccessor().read(combo).value == "Green"
 
 
 def test_chrome_select_and_number_reject_values_that_cannot_land(monkeypatch) -> None:

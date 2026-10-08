@@ -668,6 +668,8 @@ def test_linux_combo_spin_slider_and_tree_selection(tmp_path) -> None:
         runtime.set_value(city.ref, "Lima")
         shot = current()
         assert _by_title(shot, "CityEntry").value == "Lima"
+        assert _by_title(shot, "Notes").value == "Paris"
+        assert _by_title(shot, "City", "AXComboBox").value == "Lima"
 
         quantity = _by_title(shot, "Quantity")
         with pytest.raises(ValueError) as exc:
