@@ -241,6 +241,13 @@ async def test_click_without_grant_returns_needs_permission(
     mcp_server, mocked_driver, audit_dir, monkeypatch
 ) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    # display_id 1 is the synthetic id these tests use. On a Mac it is not a
+    # CGDirectDisplayID, so the bounds check needs this list or the call is
+    # rejected as an unknown display before the permission gate.
+    monkeypatch.setattr(
+        capture, "displays",
+        lambda: (Display(display_id=1, width=2880, height=1800, scale=2.0, is_main=True),),
+    )
     result = await call_tool(mcp_server, "click", {"x": 10, "y": 20, "display_id": 1})
     assert result.isError
     text = result.content[0].text
@@ -520,6 +527,10 @@ async def test_zoom_round_trip_returns_text_and_image(
 ) -> None:
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
     monkeypatch.setattr(capture, "zoom_region", lambda region: tiny_png())
+    monkeypatch.setattr(
+        capture, "displays",
+        lambda: (Display(display_id=1, width=2880, height=1800, scale=2.0, is_main=True),),
+    )
     store.set_tier("com.test.front", safety.Tier.READ)
 
     result = await call_tool(

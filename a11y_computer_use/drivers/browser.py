@@ -644,6 +644,10 @@ class BrowserDriver:
         data = sess.call("Page.captureScreenshot", params)["data"]
         return Screenshot(png=base64.b64decode(data), display=display)
 
+    def displays(self):
+        """The bound document as display 0, in CSS pixels. Not the viewport."""
+        return (self._metrics_geometry()[0].display,)
+
     def main_display_id(self) -> int:
         # One display, id 0: the bound tab's document, see `_display()`.
         return 0
