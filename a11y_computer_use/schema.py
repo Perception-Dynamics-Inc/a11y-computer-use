@@ -340,6 +340,9 @@ class ErrorCode(str, Enum):
     key injection on native Wayland, which has no XTEST) — the detail hint names
     the supported alternative (usually a ref-based action)."""
 
+    ELEMENT_DISABLED = "element_disabled"
+    """The ref is disabled (not sensitive, or not enabled). No input was sent."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.

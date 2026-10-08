@@ -171,22 +171,58 @@ def test_press_opens_each_level_then_the_leaf() -> None:
 
 
 def test_press_of_a_disabled_item_does_not_activate_it() -> None:
+    """Escape closes the menu that was opened. A second click does not."""
     app, file_menu = mousepad()
+    sent: list[str] = []
+
+    class _Open(_Action):
+        def do_action(self, index):
+            self.node.pressed.append(self.node.actions[index])
+            self.node.states.add("selected")
+            return True
+
+    file_menu.get_action_iface = lambda: _Open(file_menu)  # type: ignore[method-assign]
+
+    def dismiss() -> None:
+        sent.append("escape")
+        file_menu.states.discard("selected")
+
     with pytest.raises(ComputerUseError) as exc:
-        _linux_menus.menu_press(app, "File > Save", settle=lambda _s: None)
+        _linux_menus.menu_press(app, "File > Save", settle=lambda _s: None, dismiss=dismiss)
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "disabled"
+    assert "menu_still_open" not in exc.value.detail.get("reason", "")
     save = next(child for child in file_menu.children if child.name == "Save")
     assert save.pressed == []
-    assert file_menu.pressed == ["click", "click"]  # open, then close
+    assert file_menu.pressed == ["click"]
+    assert sent == ["escape"]
+    assert _linux_menus.menu_state(app) == {"open": False, "path": []}
+
+
+def test_press_of_a_disabled_item_reports_a_menu_that_stays_open() -> None:
+    app, file_menu = mousepad()
+    file_menu.states.add("selected")
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "File > Save", settle=lambda _s: None, dismiss=lambda: None,
+        )
+    assert exc.value.detail["reason"] == "menu_still_open"
+    assert exc.value.detail["open"] == ["File"]
+    save = next(child for child in file_menu.children if child.name == "Save")
+    assert save.pressed == []
 
 
 def test_unknown_item_names_what_is_available() -> None:
-    app, _file_menu = mousepad()
+    app, file_menu = mousepad()
+    sent: list[str] = []
     with pytest.raises(ComputerUseError) as exc:
-        _linux_menus.menu_press(app, "File > Print", settle=lambda _s: None)
+        _linux_menus.menu_press(
+            app, "File > Print", settle=lambda _s: None, dismiss=lambda: sent.append("escape"),
+        )
     assert exc.value.code is ErrorCode.APP_NOT_FOUND
     assert "Save" in exc.value.detail["available"]
+    assert file_menu.pressed == ["click"]
+    assert sent == ["escape"]
 
 
 def test_no_menu_bar_is_unsupported() -> None:

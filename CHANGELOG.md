@@ -7,6 +7,13 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.42] - 2026-10-08
+
+### Fixed
+
+- Linux `type` into a GTK editable inserts the whole string at the caret. On 0.4.41 the AT-SPI `insert_text` length was the character count, and the GI binding wants the UTF-8 byte count, so `Привет` landed as `При`, `中文字` as `中`, and `ok 😀` inserted nothing, while the tool still said `typed N characters`. A binding that takes a character count still gets that count. The text is inserted at the caret. A selection is deleted first and the text replaces it, so a caret at the start of `world` plus `hello ` is `hello world`, and a selected `DROP` in `keep DROP keep` becomes `keep NEW keep`. A CRLF is one newline. The reported count is the number of characters the field read back. When that read does not match, the result is `unsupported` with reason `text_mismatch` (or `selection_not_replaced` when the selection is still there) and it is not a success. The keystroke path, which is what Chrome uses when the field has no EditableText, still types the text and now collapses a CRLF to one newline as well. A GTK single-line entry (AT-SPI role `text` with `SINGLE_LINE`) is `AXTextField`. A multi-line view stays `AXTextArea` (#100) (2026-10-08).
+- `click`, `hover`, `scroll`, `drag`, `set_value`, and an `act` step on a ref the tree marks disabled return `element_disabled` and send no press, pointer input, or value write. This applies on every backend that reports the enabled state (not sensitive, or not enabled). A raw point has no such flag. On Linux, `menu press` of a disabled item still returns `unsupported` with reason `disabled`, and the menu that was opened to reach the item is closed with Escape. Pressing the menu-bar entry again does not leave GTK menu tracking, which is why Edit stayed open after a disabled Undo. If Escape leaves the menu open, the error reason is `menu_still_open` (#101) (2026-10-08).
+
 ## [0.4.41] - 2026-10-08
 
 ### Fixed

@@ -327,3 +327,150 @@ def test_linux_runtime_click_without_display_id(tmp_path) -> None:
         assert _pointer_xy() == (cx, cy)
     finally:
         proc.terminate()
+
+
+_TYPE_APP = "cuatypeapp"
+
+_GTK_TYPE_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuatypeapp")
+    win = Gtk.Window(title="cuatypeapp")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    bar = Gtk.MenuBar()
+    edit = Gtk.MenuItem(label="Edit")
+    menu = Gtk.Menu()
+    undo = Gtk.MenuItem(label="Undo")
+    undo.set_sensitive(False)
+    menu.append(undo)
+    edit.set_submenu(menu)
+    bar.append(edit)
+    box.pack_start(bar, False, False, 0)
+    entry = Gtk.Entry()
+    entry.get_accessible().set_name("single")
+    view = Gtk.TextView()
+    view.get_accessible().set_name("multi")
+    view.set_size_request(200, 80)
+    disabled = Gtk.Button(label="Save")
+    disabled.set_sensitive(False)
+    box.pack_start(entry, False, False, 0)
+    box.pack_start(view, True, True, 0)
+    box.pack_start(disabled, False, False, 0)
+    win.add(box)
+    win.set_default_size(420, 280)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_type_app(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cuatypeapp.py"
+    script.write_text(_GTK_TYPE_APP)
+    return subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_named(driver, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, _TYPE_APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            titles = {el.title for el in last.elements}
+            if {"single", "multi", "Save"} <= titles:
+                return last
+        time.sleep(0.5)
+    return last
+
+
+def _value_of(snap, title: str):
+    return next(el.value for el in snap.elements if el.title == title)
+
+
+def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
+    """Live AT-SPI: byte-exact insert, caret, selection, CRLF, entry role, disabled click and menu."""
+    import json
+
+    import gi
+
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_type_app(tmp_path)
+    try:
+        snap = _wait_named(driver)
+        assert snap is not None, "the GTK type window never exposed single, multi, and Save"
+        single = next(el for el in snap.elements if el.title == "single")
+        multi = next(el for el in snap.elements if el.title == "multi")
+        save = next(el for el in snap.elements if el.title == "Save")
+        assert single.role == "AXTextField", single.role
+        assert multi.role == "AXTextArea", multi.role
+        assert save.enabled is False and save.clickable
+
+        if driver.frontmost_app()[0] is None:
+            pytest.skip("no active window: caret typing and the disabled click need a window manager")
+
+        def retype(text: str, *, into: str = "") -> str:
+            live = driver.resolve_ref(snap, single.ref)
+            assert driver.set_value(live, into)
+            count = driver.type_text(text)
+            assert count == len(text.replace("\r\n", "\n")), count
+            got = _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single")
+            return got
+
+        for sample in ("Привет", "中文字", "ok 😀", "naïve café"):
+            assert retype(sample) == sample
+
+        assert retype("a\r\nb") == "a\nb"
+
+        live = driver.resolve_ref(snap, single.ref)
+        assert driver.set_value(live, "world")
+        assert Atspi.Text.set_caret_offset(driver._focused_editable, 0)
+        assert driver.type_text("hello ") == 6
+        assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "hello world"
+
+        assert driver.set_value(driver.resolve_ref(snap, single.ref), "keep DROP keep")
+        assert Atspi.Text.set_selection(driver._focused_editable, 0, 5, 9)
+        assert driver.type_text("NEW") == 3
+        assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep NEW keep"
+
+        front = driver.frontmost_app()[0]
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        store.set_tier(front, safety.Tier.FULL)
+        rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+        current = driver.snapshot(Scope.WINDOW, _TYPE_APP)
+        rt._current = current
+        save_now = next(el for el in current.elements if el.title == "Save")
+        with pytest.raises(ComputerUseError) as exc:
+            rt.click(save_now.ref)
+        assert exc.value.code is ErrorCode.ELEMENT_DISABLED
+        batch = json.loads(rt.act_batch([{"do": "click", "ref": save_now.ref}]))
+        assert batch[0]["ok"] is False and batch[0]["error"].startswith("element_disabled:")
+        assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep NEW keep"
+
+        with pytest.raises(ComputerUseError) as exc:
+            driver.menu_press(_TYPE_APP, "Edit > Undo")
+        assert exc.value.detail["reason"] == "disabled"
+        assert driver.menu_state(_TYPE_APP) == {"open": False, "path": []}
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()

@@ -2158,6 +2158,31 @@ class Runtime:
                     detail={"ref": hit.ref, "role": hit.role},
                 )
 
+    def _refuse_disabled(self, *targets: Target, verb: str) -> None:
+        """Refuse an input verb aimed at a ref the tree marks disabled.
+
+        Runs before any press, pointer move, or keystroke, on every backend
+        that reports ``enabled`` false (not sensitive, or not enabled). A raw
+        point has no such flag. A backend that does not know the state leaves
+        ``enabled`` true, and this check does not invent one.
+
+        Raises:
+            ComputerUseError: `ErrorCode.ELEMENT_DISABLED`.
+        """
+        for target in targets:
+            if isinstance(target, Element) and not target.enabled:
+                label = target.title or target.role
+                raise ComputerUseError(
+                    ErrorCode.ELEMENT_DISABLED,
+                    f"{target.ref} ({target.role} {label!r}) is disabled; {verb} was not sent",
+                    detail={
+                        "ref": target.ref,
+                        "role": target.role,
+                        "reason": "disabled",
+                        "verb": verb,
+                    },
+                )
+
     # -- observation tools (gated at READ + audited like everything else) ------
 
     @_serialized
@@ -2489,6 +2514,7 @@ class Runtime:
         menu_note: list[str] = []
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, target)
@@ -2544,6 +2570,7 @@ class Runtime:
         action = Hover(target=target)
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="hover")
             self._recheck_target(app, target)
             self._guard_user(app)
             self.driver.hover(target)
@@ -2625,21 +2652,31 @@ class Runtime:
         if target is not None:
             bundle, pid = target
 
-            def execute_bg() -> None:
+            def execute_bg() -> int:
                 self._guard_user(bundle, addressed=True)
-                self.driver.type_text(text, pid=self._input_pid(pid))
+                typed = self.driver.type_text(text, pid=self._input_pid(pid))
+                if isinstance(typed, int) and not isinstance(typed, bool):
+                    return typed
+                return len(text)
 
-            self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
-            return f"typed {len(text)} characters into {bundle} (addressed to its process; nothing was activated)"
+            typed = self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
+            count = typed if isinstance(typed, int) and not isinstance(typed, bool) else len(text)
+            return (
+                f"typed {count} characters into {bundle} "
+                "(addressed to its process; nothing was activated)"
+            )
         front = self._frontmost()
 
-        def execute() -> None:
+        def execute() -> int:
             self._guard_user(front)
             note.append(self._dismiss_open_menu(front))
-            self.driver.type_text(text)
+            typed = self.driver.type_text(text)
+            if isinstance(typed, int) and not isinstance(typed, bool):
+                return typed
+            return len(text)
 
-        self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
-        return f"typed {len(text)} characters{''.join(note)}"
+        count = self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
+        return f"typed {count} characters{''.join(note)}"
 
     def _validate_chord(self, chord: str) -> None:
         """Reject a chord this driver cannot press, before the permission gate.
@@ -2710,6 +2747,7 @@ class Runtime:
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
 
         def execute() -> None:
+            self._refuse_disabled(target, verb="scroll")
             # into_view on a ref reveals the element via AX (no cursor
             # movement); everything else is a synthetic wheel scroll, which
             # macOS routes by moving the pointer to the scroll point.
@@ -2752,6 +2790,7 @@ class Runtime:
         action = Drag(start=start, end=end, path=waypoints)
 
         def execute() -> None:
+            self._refuse_disabled(start, end, *waypoints, verb="drag")
             self._refuse_secure(start, end, *waypoints)  # no point of the stroke may be a secure field
             self._guard_user(start_app)
             self.driver.drag(start, end, path=waypoints)
@@ -3008,6 +3047,7 @@ class Runtime:
         action = TypeText(text=value)
 
         def execute() -> None:
+            self._refuse_disabled(live, verb="set_value")
             if self.driver.set_value(live, value):  # an AX write lands on this element only
                 return
             self.driver.press_element(live)  # fallback: focus then synthesize typing
@@ -4021,7 +4061,10 @@ def build_server(
         left|right|middle; count: 1-3; modifiers: cmd|ctrl|alt|shift|fn.
         Gated at tier 'click' for the target app; a needs_permission result
         means the user must grant that app first; focus_changed means another
-        app moved over the target — re-observe. A plausibly irreversible click
+        app moved over the target — re-observe. A ref the snapshot marks
+        disabled (not sensitive or not enabled) is element_disabled and no
+        press or pointer input is sent, on every backend that reports that
+        state. A plausibly irreversible click
         (Delete, Move to Trash, ...) first asks you to confirm via elicitation;
         confirmation_declined means it was not approved. verify=true appends an
         'effect:' block — the post-click snapshot diff — so you can confirm what
@@ -4058,7 +4101,10 @@ def build_server(
         for long text). With app=<bundle id or name> (macOS) the keystrokes are
         addressed to that app's process: it need not be frontmost, nothing is
         activated, and the user's screen stays where it is; prefer this over
-        `app focus` + type. Without app: the frontmost app. Gated at tier
+        `app focus` + type. Without app: the frontmost app. On Linux, text
+        goes in at the caret and replaces a selection; a CRLF is one newline;
+        the reported count is the number of characters the field read back,
+        and a mismatch is an error rather than success. Gated at tier
         'full' against the target app; refuses with secure_field when a
         password field has focus — secrets are typed by the human, never by
         this tool."""

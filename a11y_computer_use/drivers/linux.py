@@ -687,12 +687,16 @@ class LinuxDriver:
         """Enter ``text`` into the focused editable.
 
         Primary path: AT-SPI EditableText on the element last focused via
-        press_element, provided its owner is the current frontmost app. This
-        needs no widget focus, but does require a detectable application owner.
-        Falls back to synthetic XTEST keystrokes
-        when no editable was focused through the driver (e.g. the vision path)."""
+        press_element, provided its owner is the current frontmost app. Text
+        is inserted at the caret and replaces a selection. The return value
+        is the number of characters the field read back. A mismatch raises
+        instead of reporting success. Falls back to synthetic XTEST keystrokes
+        when no editable was focused through the driver (e.g. the vision path).
+        A CRLF is one newline on both paths.
+        """
         if dry_run or not text:
             return None
+        text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
         handle = self._focused_editable
@@ -712,8 +716,12 @@ class LinuxDriver:
                     "focus the intended field again or use set_value with its ref",
                     detail={"editable_app": owner, "frontmost_app": app_id},
                 )
-        if handle is not None and self._run(lambda: _atspi.insert_text(handle, text)):
-            return None
+        if handle is not None:
+            inserted = self._run(lambda: _atspi.insert_text(handle, text))
+            if isinstance(inserted, int) and not isinstance(inserted, bool):
+                return inserted
+            if inserted:
+                return len(text)
         if _on_wayland():  # a11y path unavailable and XTEST can't reach Wayland apps
             raise _wayland_input_error("type_text (no focused editable for the a11y path)")
         # The XTEST path types into whatever holds keyboard focus, so probe the
@@ -723,7 +731,7 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
-        return None
+        return len(text)
 
     def _refuse_xtest_password_focus(self) -> None:
         """The focused-password probe `type_text` uses before XTEST keystrokes.
