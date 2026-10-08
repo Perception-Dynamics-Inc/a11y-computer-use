@@ -354,7 +354,10 @@ class LinuxDriver:
             if kind == "value":
                 wrote = self._run(lambda: _atspi.set_numeric_value(handle, value))
                 if wrote:
-                    return True
+                    # A snapped spin button returns the text of the value held
+                    # ("5" for a request of "4.6") so the result is not the
+                    # number the adjustment rejected.
+                    return wrote if isinstance(wrote, str) else True
                 if not _accepts_text(element):
                     raise ComputerUseError(
                         ErrorCode.UNSUPPORTED,
@@ -787,7 +790,19 @@ class LinuxDriver:
         self._refuse_xtest_password_focus()
         from a11y_computer_use.drivers import _linux_input
 
+        app_id, _pid = self.frontmost_app()
+        before = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
+        after = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        # No readable text means the read-back is not possible. A terminal
+        # screen that shows the inverted string is a mismatch, not a success.
+        if after is not None and not _atspi._typed_visible(before, after, text):
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the text read back does not contain {text!r}",
+                expected=text,
+                actual=after,
+            )
         return len(text)
 
     def _refuse_xtest_password_focus(self) -> None:
@@ -934,11 +949,11 @@ class LinuxDriver:
 
         return _linux_system.running_apps()
 
-    def launch_app(self, identifier: str) -> None:
+    def launch_app(self, identifier: str) -> dict:
         from a11y_computer_use.drivers import _linux_system
 
         self._focused_editable = None
-        _linux_system.launch_app(identifier)
+        return _linux_system.launch_app(identifier)
 
     def activate_app(self, identifier: str) -> str:
         from a11y_computer_use.drivers import _linux_system

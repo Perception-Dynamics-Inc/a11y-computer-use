@@ -684,6 +684,12 @@ def test_linux_combo_spin_slider_and_tree_selection(tmp_path) -> None:
         shot = current()
         assert any(el.title == "qty=7.0" for el in shot.elements), \
             [el.title for el in shot.elements]
+        quantity = _by_title(shot, "Quantity")
+        held = runtime.set_value(quantity.ref, "4.6")
+        assert "4.6" not in held and "'5'" in held, held
+        shot = current()
+        assert any(el.title == "qty=5.0" for el in shot.elements), \
+            [el.title for el in shot.elements]
 
         volume = _by_title(shot, "Volume", "AXSlider")
         runtime.set_value(volume.ref, "55")
@@ -747,7 +753,7 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         "</select></label>"
         "<select id=fruits aria-label=Fruits multiple size=4>"
         "<option>Apple</option><option selected>Banana</option>"
-        "<option>Cherry</option><option>Date</option></select>"
+        "<option>Cherry</option><option selected>Date</option></select>"
         "<button id=italic aria-pressed=false>Italic toggle</button>"
         "<script>document.getElementById('italic').addEventListener('click', function () {"
         "var on = this.getAttribute('aria-pressed') === 'true';"
@@ -788,6 +794,8 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         assert "\ufffc" not in rendered, rendered
         assert "Kazakhstan" in rendered
         assert "Banana" in rendered
+        fruits = next(el for el in snap.elements if el.title == "Fruits")
+        assert fruits.value and "Banana" in str(fruits.value) and "Date" in str(fruits.value), rendered
         empty = next(el for el in snap.elements if el.title == "Empty")
         assert empty.value in (None, ""), rendered
         seats = next(el for el in snap.elements if el.title == "Seats")
@@ -817,12 +825,77 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         still = driver.snapshot(Scope.WINDOW, "chrome")
         seats = next(el for el in still.elements if el.title == "Seats")
         assert seats.value is not None and "3" in str(seats.value)
-        volume = next((el for el in still.elements if el.title == "Volume"), None)
+
+        def _choice(shot, title):
+            return next(
+                el for el in shot.elements
+                if el.title == title and el.role in {"AXComboBox", "AXPopUpButton", "AXList"}
+            )
+
+        def _set_country(value: str) -> None:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            country = _choice(shot, "Country")
+            runtime._current = shot
+            result = runtime.set_value(country.ref, value)
+            assert result.startswith("set "), result
+            deadline = time.monotonic() + 4
+            shown = expanded = None
+            last = shot
+            while time.monotonic() < deadline:
+                last = driver.snapshot(Scope.WINDOW, "chrome")
+                country = _choice(last, "Country")
+                shown, expanded = country.value, country.expanded
+                if shown == value and expanded is not True:
+                    return
+                time.sleep(0.25)
+            assert shown == value and expanded is not True, observe.render_text(last)
+
+        _set_country("Kazakhstan")
+        _set_country("Peru")
+        _set_country("Japan")
+        listed = driver.snapshot(Scope.WINDOW, "chrome")
+        cherry = next(
+            el for el in listed.elements if el.title == "Cherry" and el.role == "AXRow" and el.clickable
+        )
+        runtime._current = listed
+        clicked = runtime.click(cherry.ref)
+        assert "clicked" in clicked, clicked
+        deadline = time.monotonic() + 4
+        cherry_selected = False
+        while time.monotonic() < deadline:
+            listed = driver.snapshot(Scope.WINDOW, "chrome")
+            row = next(
+                (el for el in listed.elements if el.title == "Cherry" and el.role == "AXRow"),
+                None,
+            )
+            fruits = next((el for el in listed.elements if el.title == "Fruits"), None)
+            cherry_selected = bool(row and row.selected) or bool(
+                fruits and fruits.value and "Cherry" in str(fruits.value)
+            )
+            if cherry_selected:
+                break
+            time.sleep(0.25)
+        assert cherry_selected, observe.render_text(listed)
+        runtime._current = listed
+        seats = next(el for el in listed.elements if el.title == "Seats")
+        runtime.set_value(seats.ref, "")
+        deadline = time.monotonic() + 4
+        cleared = None
+        while time.monotonic() < deadline:
+            listed = driver.snapshot(Scope.WINDOW, "chrome")
+            seats = next(el for el in listed.elements if el.title == "Seats")
+            cleared = seats.value
+            if cleared in (None, ""):
+                break
+            time.sleep(0.25)
+        assert cleared in (None, ""), cleared
+        volume = next((el for el in listed.elements if el.title == "Volume"), None)
         if volume is not None and volume.role == "AXSlider":
-            runtime._current = still
+            runtime._current = listed
             runtime.set_value(volume.ref, "55")
-        toggle = next(el for el in still.elements if el.title == "Italic toggle")
-        runtime._current = still
+            listed = driver.snapshot(Scope.WINDOW, "chrome")
+        toggle = next(el for el in listed.elements if el.title == "Italic toggle")
+        runtime._current = listed
         runtime.click(toggle.ref)
         pressed = None
         deadline = time.monotonic() + 4
@@ -841,3 +914,327 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+_MENU_APP = "cuamenuapp"
+
+_GTK_MENU_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuamenuapp")
+    win = Gtk.Window(title="cuamenuapp")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    bar = Gtk.MenuBar()
+    menu = Gtk.Menu()
+    file_item = Gtk.MenuItem.new_with_mnemonic("_File")
+    file_item.set_submenu(menu)
+    mark = Gtk.MenuItem.new_with_mnemonic("_Mark")
+    probe = Gtk.Label(label="mark=0")
+    mark.connect("activate", lambda *_a: probe.set_text("mark=1"))
+    menu.append(mark)
+    bar.append(file_item)
+    buf = Gtk.TextBuffer()
+    buf.set_text("line one\\nline two\\nline three")
+    lines = Gtk.Label(label="lines=3")
+    def on_changed(buffer):
+        text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
+        lines.set_text("lines=%d" % (text.count("\\n") + 1))
+    buf.connect("changed", on_changed)
+    view = Gtk.TextView(buffer=buf)
+    view.get_accessible().set_name("Document")
+    box.pack_start(bar, False, False, 0)
+    box.pack_start(probe, False, False, 0)
+    box.pack_start(lines, False, False, 0)
+    box.pack_start(view, True, True, 0)
+    win.add(box)
+    win.set_default_size(420, 240)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    view.grab_focus()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _runtime_for(tmp_path, driver, *apps: str):
+    from a11y_computer_use import safety, server
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    for app in apps:
+        store.set_tier(app, safety.Tier.FULL)
+    front = driver.frontmost_app()[0]
+    if front and front not in apps:
+        store.set_tier(front, safety.Tier.FULL)
+    return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+
+def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
+    """Down and Return stay in the open File menu. The document is not edited."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuamenuapp.py"
+    script.write_text(_GTK_MENU_APP)
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, _MENU_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                if "File" in titles and "Document" in titles and "mark=0" in titles and "lines=3" in titles:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "the GTK menu window never appeared"
+        runtime = _runtime_for(tmp_path, driver, _MENU_APP)
+        runtime._current = snap
+        file_item = next(el for el in snap.elements if el.title == "File" and el.clickable)
+        runtime.click(file_item.ref)
+        opened = False
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            state = driver.menu_state(_MENU_APP)
+            if state.get("open") and "File" in (state.get("path") or []):
+                opened = True
+                break
+            time.sleep(0.2)
+        assert opened, driver.menu_state(_MENU_APP)
+        runtime.key("down")
+        runtime.key("return")
+        deadline = time.monotonic() + 4
+        marked = False
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, _MENU_APP)
+            titles = {el.title for el in shot.elements}
+            marked = "mark=1" in titles and "lines=3" in titles and "lines=4" not in titles
+            if marked:
+                break
+            time.sleep(0.2)
+        assert marked, [(el.role, el.title, el.value) for el in shot.elements]
+    finally:
+        _stop(proc)
+
+
+def test_linux_launch_fails_fast_and_an_absolute_path_window_is_reported(tmp_path) -> None:
+    """`true` exits before a window. An absolute-path GTK script's window is the result."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, "true", "false")
+    runtime.APP_LAUNCH_WAIT_S = 30
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "true")
+    assert time.monotonic() - started < 5
+    assert exc.value.detail.get("reason") == "process_exited"
+    assert exc.value.detail.get("exit_code") == 0
+    assert "status 0" in exc.value.message
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.app("launch", "false")
+    assert time.monotonic() - started < 5
+    assert exc.value.detail.get("exit_code") == 1
+
+    script = tmp_path / "cualaunch.py"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        + textwrap.dedent(
+            """
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import Gtk, GLib
+            GLib.set_prgname("cualaunch")
+            win = Gtk.Window(title="cualaunchwin")
+            win.set_default_size(200, 80)
+            win.connect("destroy", Gtk.main_quit)
+            win.show_all()
+            win.present()
+            Gtk.main()
+            """
+        )
+    )
+    script.chmod(0o755)
+    from a11y_computer_use import safety
+
+    runtime.store.set_tier(str(script), safety.Tier.CLICK)
+    runtime.store.set_tier("cualaunch", safety.Tier.CLICK)
+    result = runtime.app("launch", str(script))
+    assert "first window:" in result and "cualaunchwin" in result, result
+    child = None
+    for row in driver.windows():
+        if row.get("title") == "cualaunchwin" and row.get("pid"):
+            child = int(row["pid"])
+            break
+    if child:
+        os.kill(child, 15)
+
+
+def test_linux_quit_reports_an_unsaved_dialog_without_clicking_discard(tmp_path) -> None:
+    """ctrl+q raises a question dialog. Quit names it and does not press Don't Save."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuaquit.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gdk, Gtk, GLib
+        GLib.set_prgname("cuaquitapp")
+        win = Gtk.Window(title="cuaquitapp")
+        label = Gtk.Label(label="choice=none")
+        def on_key(_win, event):
+            if event.keyval == Gdk.KEY_q and event.state & Gdk.ModifierType.CONTROL_MASK:
+                dialog = Gtk.MessageDialog(parent=win, modal=True, text="Save changes?")
+                dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+                dialog.add_button("Don't Save", Gtk.ResponseType.NO)
+                dialog.add_button("Save", Gtk.ResponseType.YES)
+                def responded(dlg, response):
+                    label.set_text("choice=%s" % int(response))
+                    dlg.destroy()
+                dialog.connect("response", responded)
+                dialog.show_all()
+                return True
+            return False
+        win.connect("key-press-event", on_key)
+        win.add(label)
+        win.set_default_size(280, 120)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        seen = False
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuaquitapp")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if any(el.title == "choice=none" for el in shot.elements):
+                    seen = True
+                    break
+            time.sleep(0.4)
+        assert seen, "the quit dialog app never appeared"
+        runtime = _runtime_for(tmp_path, driver, "cuaquitapp")
+        runtime.QUIT_SETTLE_S = 1.2
+        result = runtime.app("quit", "cuaquitapp")
+        assert "showing a dialog" in result, result
+        assert "unsaved changes" in result
+        assert proc.poll() is None
+        shot = driver.snapshot(Scope.WINDOW, "cuaquitapp")
+        titles = {el.title for el in shot.elements}
+        assert "choice=none" in titles, [(el.title, el.value) for el in shot.elements]
+        assert not any(str(el.title).startswith("choice=") and el.title != "choice=none" for el in shot.elements)
+    finally:
+        _stop(proc)
+
+
+def test_linux_caps_lock_does_not_invert_keystroke_typing(tmp_path) -> None:
+    """XTEST typing into a widget with no EditableText keeps the requested case."""
+    import shutil
+
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    if shutil.which("xdotool") is None and not os.environ.get("DISPLAY"):
+        pytest.skip("no DISPLAY for the Caps Lock keystroke test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuacaps.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuacapsapp")
+        win = Gtk.Window(title="cuacapsapp")
+        label = Gtk.Label(label="typed=")
+        def on_key(_win, event):
+            if event.string:
+                label.set_text(label.get_text() + event.string)
+            return True
+        win.connect("key-press-event", on_key)
+        win.add(label)
+        win.set_default_size(240, 80)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        win.grab_focus()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    turned_on = False
+    try:
+        deadline = time.monotonic() + 15
+        seen = False
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuacapsapp")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                if any(el.title == "typed=" for el in shot.elements):
+                    seen = True
+                    break
+            time.sleep(0.4)
+        assert seen, "the caps-lock window never appeared"
+        caps, _num = _linux_input._lock_mask()
+        if not caps:
+            _linux_input.press_chord("capslock")
+            turned_on = True
+            time.sleep(0.1)
+        runtime = _runtime_for(tmp_path, driver, "cuacapsapp")
+        driver.activate_app("cuacapsapp")
+        time.sleep(0.3)
+        runtime.type_text("Ab")
+        runtime.key("b")
+        runtime.key("shift+c")
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "cuacapsapp")
+            titles = {el.title for el in shot.elements}
+            if "typed=AbbC" in titles:
+                shown = "typed=AbbC"
+                break
+            shown = " ".join(sorted(titles))
+            time.sleep(0.2)
+        assert shown == "typed=AbbC", [(el.role, el.title, el.value) for el in shot.elements]
+    finally:
+        if turned_on:
+            try:
+                _linux_input.press_chord("capslock")
+            except Exception:
+                pass
+        _stop(proc)

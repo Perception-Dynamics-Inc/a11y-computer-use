@@ -93,22 +93,59 @@ def _pid_of(win, d) -> int:
     return int(val[0]) if val else 0
 
 
+def _wm_class_strings(win, d) -> tuple[str, str]:
+    """(instance, class) from WM_CLASS. Missing or unreadable parts are ""."""
+    val = _prop(win, d, "WM_CLASS")
+    if not val:
+        return "", ""
+    if isinstance(val, str):
+        parts = val.split("\x00")
+    else:
+        try:
+            raw = bytes(val)
+        except Exception:
+            return "", ""
+        parts = raw.split(b"\x00")
+        parts = [part.decode("utf-8", "replace") for part in parts]
+    instance = parts[0].strip() if parts else ""
+    klass = parts[1].strip() if len(parts) > 1 else ""
+    return instance, klass
+
+
 def _wm_class_instance(win, d) -> str:
     """WM_CLASS instance (the first of the two NUL-terminated strings).
 
     A window with no ``_NET_WM_PID`` still has this name when the client set
     it. xmessage's instance is ``xmessage``. An unreadable property is "".
     """
-    val = _prop(win, d, "WM_CLASS")
-    if not val:
-        return ""
-    if isinstance(val, str):
-        return val.split("\x00", 1)[0].strip()
+    return _wm_class_strings(win, d)[0]
+
+
+def _is_dialog_window(win, d) -> bool:
+    """True for ``_NET_WM_WINDOW_TYPE_DIALOG`` or a window transient for a parent.
+
+    A save prompt is often an AT-SPI alert and also a dialog window. Either
+    signal is enough for ``app quit`` to report unsaved changes. A normal
+    top-level window is neither.
+    """
+    types = _prop(win, d, "_NET_WM_WINDOW_TYPE")
+    if types:
+        try:
+            dialog = _atom(d, "_NET_WM_WINDOW_TYPE_DIALOG")
+        except Exception:
+            dialog = "_NET_WM_WINDOW_TYPE_DIALOG"
+        try:
+            if any(_atom_is(item, dialog) for item in types):
+                return True
+        except Exception:
+            pass
+    transient = _prop(win, d, "WM_TRANSIENT_FOR")
+    if not transient:
+        return False
     try:
-        raw = bytes(val)
-    except Exception:
-        return ""
-    return raw.split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+        return int(transient[0]) != 0
+    except (TypeError, ValueError, IndexError):
+        return True
 
 
 def _app_id(win, d) -> str:
@@ -357,6 +394,7 @@ def _window_rows(d) -> list[dict]:
         if geom is not None:
             gx, gy, gw, gh = geom
             bounds = {"display_id": 0, "x": gx, "y": gy, "width": gw, "height": gh}
+        instance, klass = _wm_class_strings(win, d)
         rows.append({
             "window_id": int(win.id),
             "app": _app_id(win, d),
@@ -364,6 +402,9 @@ def _window_rows(d) -> list[dict]:
             "pid": pid,
             "bounds": bounds,
             "on_screen": not hidden,
+            "wm_class": instance,
+            "wm_class_class": klass,
+            "dialog": _is_dialog_window(win, d),
         })
     return rows
 
@@ -624,11 +665,19 @@ def _desktop_exec(path: str) -> list[str] | None:
     return [program, *argv[1:]]
 
 
-def _spawn(argv: list[str], identifier: str) -> None:
+_LAUNCHER_BASENAMES = frozenset({"gtk-launch", "xdg-open", "gio"})
+
+
+def _spawn(argv: list[str], identifier: str):
+    """Start ``argv`` and return the process. The caller reaps it with ``poll``.
+
+    A recorder that returns an object with no ``pid`` still works: the handle
+    simply has no pid. ``OSError`` is ``app_not_found`` and starts nothing.
+    """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     try:
-        subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError as exc:
         raise ComputerUseError(
             ErrorCode.APP_NOT_FOUND,
@@ -637,31 +686,101 @@ def _spawn(argv: list[str], identifier: str) -> None:
         ) from exc
 
 
-def launch_app(identifier: str) -> None:
+def _launch_handle(proc, identifier: str, names: list[str], *, is_launcher: bool) -> dict:
+    pid = getattr(proc, "pid", None)
+    try:
+        pid = int(pid) if pid else None
+    except (TypeError, ValueError):
+        pid = None
+    cleaned: list[str] = []
+    for name in names:
+        if name and name not in cleaned:
+            cleaned.append(str(name))
+    return {
+        "pid": pid,
+        "proc": proc,
+        "identifier": identifier,
+        "names": cleaned,
+        "is_launcher": bool(is_launcher),
+    }
+
+
+def _desktop_match_names(identifier: str, path: str) -> list[str]:
+    """Names a window of this desktop file may be matched by.
+
+    The desktop id, the file stem, ``StartupWMClass``, and the ``Exec``
+    program's basename. ``gtk-launch`` itself is not one of them: it exits
+    before the real window exists.
+    """
+    names = [identifier]
+    stem = os.path.basename(path)
+    if stem.endswith(".desktop"):
+        stem = stem[: -len(".desktop")]
+    names.append(stem)
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return names
+    in_entry = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_entry = stripped == "[Desktop Entry]"
+            continue
+        if not in_entry:
+            continue
+        if stripped.startswith("StartupWMClass="):
+            names.append(stripped.split("=", 1)[1].strip())
+        elif stripped.startswith("Exec="):
+            try:
+                parts = shlex.split(stripped.split("=", 1)[1].strip(), posix=True)
+            except ValueError:
+                parts = []
+            program = next((part for part in parts if part and not _DESKTOP_FIELD_CODE.match(part)), "")
+            if program:
+                names.append(os.path.basename(program))
+    return names
+
+
+def launch_app(identifier: str) -> dict:
     """Launch ``identifier`` or raise `ErrorCode.APP_NOT_FOUND` immediately.
 
     An executable on PATH is started directly. Otherwise a matching desktop
     file is started with ``gtk-launch``, or with its ``Exec`` line when
     ``gtk-launch`` is not installed. A name that is neither is not handed to
     ``xdg-open`` and does not wait for a window.
+
+    The return value is a handle: pid, the process (so a caller can see it
+    exit), the names a window of this launch may use, and whether the process
+    is a launcher that exits before the real window. ``gtk-launch`` exiting 0
+    is not the app exiting.
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     executable = shutil.which(identifier) if identifier else None
     if executable:
-        _spawn([executable], identifier)
-        return
+        base = os.path.basename(executable)
+        proc = _spawn([executable], identifier)
+        return _launch_handle(
+            proc, identifier, [identifier, base, executable],
+            is_launcher=base in _LAUNCHER_BASENAMES,
+        )
     found = _desktop_entry(identifier) if identifier else None
     if found is not None:
         desktop_id, path = found
+        names = _desktop_match_names(identifier, path)
         opener = shutil.which("gtk-launch")
         if opener:
-            _spawn([opener, desktop_id], identifier)
-            return
+            proc = _spawn([opener, desktop_id], identifier)
+            return _launch_handle(proc, identifier, names, is_launcher=True)
         argv = _desktop_exec(path)
         if argv:
-            _spawn(argv, identifier)
-            return
+            base = os.path.basename(argv[0])
+            proc = _spawn(argv, identifier)
+            return _launch_handle(
+                proc, identifier, [*names, base, argv[0]],
+                is_launcher=base in _LAUNCHER_BASENAMES,
+            )
     raise ComputerUseError(
         ErrorCode.APP_NOT_FOUND,
         f"could not launch {identifier!r}: not on PATH",

@@ -70,6 +70,12 @@ _KEYSYM_KEYS.update({
     "insert": 0xFF63,
 })
 _KEYSYM_KEYS.update({f"f{i}": 0xFFBD + i for i in range(1, 25)})  # F1=0xFFBE .. F24=0xFFD5
+# Keypad digits. Num Lock selects these; Shift does not.
+_KEYSYM_KEYS.update({f"kp_{i}": 0xFFB0 + i for i in range(10)})
+_KEYSYM_KEYS.update({
+    "kp_decimal": 0xFFAE, "kp_insert": 0xFF9E, "kp_home": 0xFF95, "kp_end": 0xFF9C,
+    "kp_left": 0xFF96, "kp_up": 0xFF97, "kp_right": 0xFF98, "kp_down": 0xFF99,
+})
 # Named punctuation (so "ctrl+plus" / "ctrl+minus" work — "+" is the chord
 # separator) and the remaining keyboard keys a user can press.
 _KEYSYM_KEYS.update({
@@ -94,6 +100,97 @@ def _char_keysym(ch: str) -> int:
         return _CONTROL_CHARS[ch]
     cp = ord(ch)
     return cp if cp < 0x100 else (0x01000000 | cp)
+
+
+def _lock_mask() -> tuple[bool, bool]:
+    """(caps lock, num lock) from the pointer modifier mask.
+
+    A display that cannot be queried (the hermetic fake has no screen) is
+    both locks off, so a caps-off key sequence stays exactly what it was.
+    Num Lock's mask is whichever modifier the Num_Lock keysym is bound to,
+    not a hardcoded Mod2.
+    """
+    try:
+        display = _disp()
+        mask = int(display.screen().root.query_pointer().mask)
+    except Exception:
+        return False, False
+    caps = bool(mask & 2)  # LockMask
+    num = False
+    try:
+        keycode = display.keysym_to_keycode(0xFF7F)
+        mapping = display.get_modifier_mapping()
+        bit = 0
+        for index, keycodes in enumerate(mapping):
+            if any(int(item) == int(keycode) for item in keycodes if item):
+                bit = 1 << index
+                break
+        if bit:
+            num = bool(mask & bit)
+    except Exception:
+        num = False
+    return caps, num
+
+
+def _is_letter_key(keycode: int) -> bool:
+    """True when both the base and Shift levels of ``keycode`` are letters.
+
+    Caps Lock inverts those keys and no others. Digits and punctuation are
+    left on the shift level the keymap already chose.
+    """
+    try:
+        display = _disp()
+        base = int(display.keycode_to_keysym(keycode, 0) or 0)
+        shifted = int(display.keycode_to_keysym(keycode, 1) or 0)
+    except Exception:
+        return False
+
+    def letter(sym: int) -> bool:
+        if sym <= 0 or sym > 0x10FFFF:
+            return False
+        character = chr(sym)
+        return len(character) == 1 and character.isalpha()
+
+    return letter(base) and letter(shifted)
+
+
+def _shift_for_lock(keycode: int | None, shift_held: bool, caps: bool) -> bool:
+    """Shift that produces the requested letter while Caps Lock is independent.
+
+    Caps Lock XOR Shift is what the X server applies to letters. Holding
+    Shift while Caps Lock is down yields the lowercase letter, so a requested
+    lowercase is sent with Shift, and a requested uppercase is sent without it.
+    """
+    if keycode and caps and _is_letter_key(keycode):
+        return not shift_held
+    return shift_held
+
+
+def _keypad_numlock(keysym: int) -> bool | None:
+    """Whether Num Lock must be on for ``keysym``.
+
+    None means this is not a keypad keysym and Num Lock is left alone. Digits
+    and the keypad punctuation Num Lock turns on need it down. The navigation
+    twins (KP_Insert and the arrows) need it up. Shift is not used for either.
+    """
+    if not 0xFF80 <= keysym <= 0xFFBD:
+        return None
+    if 0xFFB0 <= keysym <= 0xFFB9 or keysym in {0xFFAA, 0xFFAB, 0xFFAD, 0xFFAE, 0xFFAF, 0xFFBD}:
+        return True
+    if 0xFF95 <= keysym <= 0xFF9F:
+        return False
+    return None
+
+
+def _tap_keysym_raw(keysym: int) -> None:
+    """Press and release ``keysym`` with no Shift. Missing keys are skipped."""
+    from Xlib import X
+
+    keycode = _disp().keysym_to_keycode(keysym)
+    if not keycode:
+        return
+    _fake(X.KeyPress, keycode)
+    _fake(X.KeyRelease, keycode)
 
 
 def _keycode_and_shift(keysym: int) -> tuple[int | None, bool]:
@@ -229,12 +326,19 @@ def type_string(text: str) -> None:
     keys = {sym: _keycode_and_shift(sym) for sym in dict.fromkeys(keysyms)}
     missing = [sym for sym, (kc, _shift) in keys.items() if kc is None]
     pool = _TempKeymap() if missing else None
+    caps, _num = _lock_mask()
     try:
         if pool is not None:
             keys.update({sym: (kc, False) for sym, kc in pool.bind_all(missing).items()})
         for sym in keysyms:
             keycode, needs_shift = keys[sym]
             assert keycode is not None  # all characters were resolved before input
+            # Letters are inverted by Caps Lock. The requested character is
+            # what is sent, and the lock is left as the user had it.
+            if _keypad_numlock(sym) is None:
+                needs_shift = _shift_for_lock(keycode, needs_shift, caps)
+            else:
+                needs_shift = False
             _tap_keycode(keycode, needs_shift)
             _flush()
             time.sleep(0.012)  # let the client/input method dispatch this character
@@ -274,7 +378,13 @@ def validate_chord(chord: str) -> None:
 
 
 def press_chord(chord: str) -> None:
-    """Press a chord like 'ctrl+a' / 'ctrl+shift+t' / 'escape' via XTEST keysyms."""
+    """Press a chord like 'ctrl+a' / 'ctrl+shift+t' / 'escape' via XTEST keysyms.
+
+    Letter chords mean the same character with Caps Lock on or off: the Shift
+    bit is inverted while the lock is down, and Caps Lock itself is not
+    pressed, so the lock stays where the user left it. Keypad digits follow
+    Num Lock the same way and are never sent with Shift.
+    """
     from Xlib import X
 
     msyms, ksym = _parse_chord(chord)
@@ -286,21 +396,37 @@ def press_chord(chord: str) -> None:
         key_kc = pool.bind(ksym)
         if key_kc is None:
             raise ValueError(f"key in {chord!r} is not on the current keymap and no spare keycode is free")
-    if needs_shift and _KEYSYM_MODS["shift"] not in msyms:
-        # The key lives on the shifted level (e.g. "ctrl+_" or "ctrl+:"): hold
-        # Shift too, otherwise the base-level character is sent instead.
-        mod_kcs.append(_disp().keysym_to_keycode(_KEYSYM_MODS["shift"]))
-    for kc in mod_kcs:
-        if kc:
-            _fake(X.KeyPress, kc)
-    _fake(X.KeyPress, key_kc)
-    _fake(X.KeyRelease, key_kc)
-    for kc in reversed(mod_kcs):
-        if kc:
-            _fake(X.KeyRelease, kc)
-    _flush()
-    if pool is not None:
-        pool.restore()
+    shift_kc = _disp().keysym_to_keycode(_KEYSYM_MODS["shift"])
+    caps, num = _lock_mask()
+    keypad = _keypad_numlock(ksym)
+    if keypad is None:
+        wanted_shift = needs_shift or (bool(shift_kc) and shift_kc in mod_kcs)
+        wanted_shift = _shift_for_lock(key_kc, wanted_shift, caps)
+        if wanted_shift and shift_kc and shift_kc not in mod_kcs:
+            mod_kcs.append(shift_kc)
+        if not wanted_shift and shift_kc:
+            mod_kcs = [kc for kc in mod_kcs if kc != shift_kc]
+    else:
+        # Num Lock selects the keypad level. Shift would pick the other one.
+        mod_kcs = [kc for kc in mod_kcs if kc != shift_kc]
+        if keypad != num:
+            _tap_keysym_raw(0xFF7F)
+    try:
+        for kc in mod_kcs:
+            if kc:
+                _fake(X.KeyPress, kc)
+        _fake(X.KeyPress, key_kc)
+        _fake(X.KeyRelease, key_kc)
+        for kc in reversed(mod_kcs):
+            if kc:
+                _fake(X.KeyRelease, kc)
+        _flush()
+    finally:
+        if keypad is not None and keypad != num:
+            _tap_keysym_raw(0xFF7F)
+            _flush()
+        if pool is not None:
+            pool.restore()
 
 
 @contextmanager
