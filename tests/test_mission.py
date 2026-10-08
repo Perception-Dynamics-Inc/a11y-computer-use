@@ -278,8 +278,18 @@ def test_wait_until_timeout_reports_the_last_observation(tmp_path, monkeypatch) 
         })
     assert closed.value.code is ErrorCode.TIMEOUT
     assert "last_status" not in closed.value.detail
+    # The probe budget is the time left (0.4s here). Linux usually reports
+    # connection refused inside that. Windows often does not finish the RST
+    # before the budget expires, so the last observation is a timeout.
     error = closed.value.detail["last_error"]
-    assert "ConnectionRefusedError" in error or "refused" in error.lower() or "10061" in error
+    assert (
+        "ConnectionRefusedError" in error
+        or "refused" in error.lower()
+        or "10061" in error
+        or "TimeoutError" in error
+        or "timed out" in error.lower()
+    )
+    assert closed.value.detail["waited_s"] <= 0.4 + 0.75
 
     with pytest.raises(ComputerUseError) as snap:
         rt.call_tool("wait_until", {

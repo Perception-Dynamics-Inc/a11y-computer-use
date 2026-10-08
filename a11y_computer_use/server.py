@@ -3261,9 +3261,11 @@ class Runtime:
         snapshot or on screen. A path that exists and is not a regular file is
         invalid_arguments on the first look; a missing path keeps waiting.
         Read tier. Long timeouts are allowed (renders, deploys), up to
-        `conditions.MAX_WAIT_UNTIL_S`. A timeout detail includes the last
-        observation (URL status or connection error; file exists, path, size,
-        and min_bytes)."""
+        `conditions.MAX_WAIT_UNTIL_S`. Each url_status probe is limited to the
+        time still left, and to 10 seconds, covering DNS, connect, and the
+        read. No probe starts after the deadline. A timeout detail includes
+        the last observation (URL status or connection error; file exists,
+        path, size, and min_bytes)."""
         kind = conditions.kind_of(condition)
         if not math.isfinite(timeout_s) or timeout_s < 0:
             raise ValueError("timeout_s must be finite and nonnegative")
@@ -4102,7 +4104,11 @@ def build_server(
         yet keeps waiting. Returns JSON {matched, waited_s, polls}. A timeout
         names the condition, the time waited, and the poll count, and its
         detail adds the last observation: last_status or last_error for a URL,
-        and exists, path, last_size, and min_bytes for a file. Tier 'read'."""
+        and exists, path, last_size, and min_bytes for a file. Each url_status
+        probe is limited to the time still left in timeout_s, and to 10
+        seconds, covering DNS, connect, and the read. No probe starts after
+        the deadline, so a slow lookup or a slow server cannot run past
+        timeout_s. Tier 'read'."""
         return await run(runtime.wait_until, condition, timeout_s, poll_s)
 
     # Browser-only: a console feed is meaningful only where the backend has one,
