@@ -301,19 +301,19 @@ class BrowserDriver:
         dom = sess.call("DOMSnapshot.captureSnapshot", {"computedStyles": []})
         # Two-pass geometry: frame-local first (to read each iframe's owner box),
         # then offset each frame's boxes into the top document's space.
-        raw_geom, secure_ids = _cdp_ax.parse_dom_snapshot(dom)
+        raw_geom, secure_ids, empty_numbers = _cdp_ax.parse_dom_snapshot(dom)
         offsets = _cdp_ax.build_frame_offsets(raw_geom, frames)
         # Single-frame pages (the common case) offset to (0,0) everywhere, so the
         # second parse would be identity — reuse the first instead of re-walking
         # the whole DOMSnapshot (and re-scanning every node for password fields).
         if any(off != (0.0, 0.0) for off in offsets.values()):
-            geometry, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
+            geometry, _, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
         else:
             geometry = raw_geom
         stitched = _cdp_ax.stitch_frames(
             [{"nodes": f["nodes"], "owner_backend": f["owner_backend"]} for f in frames]
         )
-        accessor = _cdp_ax.CDPAccessor(stitched, geometry, secure_ids)
+        accessor = _cdp_ax.CDPAccessor(stitched, geometry, secure_ids, empty_numbers)
         return observe.build_snapshot(
             accessor.root(), accessor, scope=scope, app=self._target_id, pid=None,
             geometry=self._page_geometry(dom),
@@ -409,7 +409,7 @@ class BrowserDriver:
             return None
         return obj.get("objectId")
 
-    def _call_on(self, backend_id: int, fn: str, args: list | None = None) -> bool:
+    def _call_on(self, backend_id: int, fn: str, args: list | None = None, *, return_value: bool = False):
         object_id = self._object_id(backend_id)
         if object_id is None:
             return False
@@ -427,6 +427,8 @@ class BrowserDriver:
                     detail={"backend_id": backend_id,
                             "error": result["exceptionDetails"].get("text", "JavaScript exception")},
                 )
+            if return_value:
+                return result.get("result", {}).get("value")
             return True
         finally:
             # CDP keeps every resolved node alive until explicitly released.
@@ -464,8 +466,14 @@ class BrowserDriver:
             return False
         # Native value setter + input/change events, so React/Vue controlled
         # inputs see the change (a plain ``this.value=`` would not fire their
-        # listeners). One deterministic op, no keystrokes.
-        return self._call_on(backend, _SET_VALUE_FN, [value])
+        # listeners). One deterministic op, no keystrokes. A select whose
+        # option does not exist, or a number/range outside its type, raises
+        # ValueError before the setter runs. The JS result is the read-back.
+        result = self._call_on(backend, _SET_VALUE_FN, [value], return_value=True)
+        if result is False:
+            return False
+        _raise_for_set_result(result, value)
+        return True
 
     def _focused_is_password(self) -> bool:
         """Whether the page's focused element is ``<input type=password>``.
@@ -1071,10 +1079,72 @@ def _code_for_char(ch: str) -> str:
 
 _SET_VALUE_FN = (
     "function(v){"
-    "const p=Object.getOwnPropertyDescriptor(this.constructor.prototype,'value');"
-    "if(p&&p.set){p.set.call(this,v);}else{this.value=v;}"
-    "this.dispatchEvent(new Event('input',{bubbles:true}));"
-    "this.dispatchEvent(new Event('change',{bubbles:true}));}"
+    "const el=this;"
+    "const tag=String(el.tagName||'').toUpperCase();"
+    "const type=String(el.type||'').toLowerCase();"
+    "const fire=()=>{"
+    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+    "el.dispatchEvent(new Event('change',{bubbles:true}));};"
+    "const setProp=(node,next)=>{"
+    "const proto=node.constructor&&node.constructor.prototype;"
+    "const p=proto&&Object.getOwnPropertyDescriptor(proto,'value');"
+    "if(p&&p.set){p.set.call(node,next);}else{node.value=next;}};"
+    "if(tag==='SELECT'){"
+    "const opts=Array.from(el.options||[]);"
+    "const labels=opts.map((o)=>String(o.label||o.text||o.value));"
+    "const hit=opts.find((o)=>o.value===v||String(o.label||o.text)===v);"
+    "if(!hit){return {ok:false,code:'invalid_option',options:labels};}"
+    "setProp(el,hit.value);fire();"
+    "const chosen=el.selectedIndex>=0?el.options[el.selectedIndex]:null;"
+    "const shown=chosen?String(chosen.label||chosen.text||chosen.value):'';"
+    "if(el.value!==hit.value){return {ok:false,code:'mismatch',actual:shown||String(el.value)};}"
+    "return {ok:true,actual:shown||String(el.value)};}"
+    "if(tag==='INPUT'&&(type==='number'||type==='range')){"
+    "const min=(el.min===''||el.min==null)?null:Number(el.min);"
+    "const max=(el.max===''||el.max==null)?null:Number(el.max);"
+    "const text=String(v);"
+    "const n=Number(text);"
+    "if(text.trim()===''||!Number.isFinite(n)){"
+    "return {ok:false,code:'invalid_number',min:min,max:max};}"
+    "if((min!==null&&Number.isFinite(min)&&n<min)||(max!==null&&Number.isFinite(max)&&n>max)){"
+    "return {ok:false,code:'out_of_range',min:min,max:max};}"
+    "setProp(el,text);fire();"
+    "const got=String(el.value);"
+    "if(got===''||!Number.isFinite(Number(got))||Number(got)!==n){"
+    "return {ok:false,code:'mismatch',actual:got};}"
+    "return {ok:true,actual:got};}"
+    "setProp(el,v);fire();"
+    "if('value' in el&&String(el.value)!==String(v)){"
+    "return {ok:false,code:'mismatch',actual:String(el.value)};}"
+    "return {ok:true,actual:('value' in el)?String(el.value):String(v)};}"
 )
+
+
+def _raise_for_set_result(result: object, value: str) -> None:
+    """Turn a set_value JS result into ValueError or a read-back error.
+
+    A missing result is the scripted transport, which does not run the
+    function. A real page returns ``{ok: true}`` or a refusal.
+    """
+    if not isinstance(result, dict):
+        return
+    if result.get("ok") is True:
+        return
+    code = result.get("code")
+    if code == "invalid_option":
+        options = result.get("options") or []
+        listed = ", ".join(str(item) for item in options)
+        raise ValueError(f"value {value!r} is not one of: {listed}")
+    if code in {"invalid_number", "out_of_range"}:
+        low, high = result.get("min"), result.get("max")
+        if code == "out_of_range":
+            raise ValueError(f"value {value!r} is outside {low}..{high}")
+        raise ValueError(f"value {value!r} is not a number; valid range is {low}..{high}")
+    actual = result.get("actual")
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"the value read back {actual!r} does not match {value!r}",
+        detail={"reason": "text_mismatch", "expected": value, "actual": actual},
+    )
 
 __all__ = ["BrowserDriver"]

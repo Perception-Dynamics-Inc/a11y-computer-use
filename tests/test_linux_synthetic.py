@@ -204,7 +204,7 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
     """Gtk.Entry and Gtk.TextView share the AT-SPI role ``text``. The entry is single-line."""
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0.0, 0.0), (80.0, 24.0)))
-    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role: "")
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: "")
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
     monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {})
     monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)

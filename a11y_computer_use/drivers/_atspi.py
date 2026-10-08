@@ -20,6 +20,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from collections.abc import Sequence
@@ -287,7 +288,83 @@ _NO_VALUE_ROLES = frozenset({
 })
 
 
-def _value_text(acc, role: str) -> object | None:
+# Chromium embeds each list option in the parent's text as U+FFFC (object
+# replacement). That character is not the selected option.
+_OBJECT_REPLACEMENT = "\ufffc"
+_CHOICE_ROLES = frozenset({"AXComboBox", "AXList", "AXPopUpButton"})
+_CHOICE_ROLE_NAMES = frozenset({"combo box", "list box", "list"})
+_OPTION_ROLE_NAMES = frozenset({
+    "menu item", "check menu item", "radio menu item", "list item", "list box item",
+})
+_OPTION_CONTAINER_NAMES = frozenset({
+    "menu", "popup menu", "list", "list box", "panel", "filler", "scroll pane", "combo box",
+})
+_ROW_ROLE_NAMES = frozenset({
+    "table cell", "tree item", "list item", "table row", "row", "list box item",
+})
+# A flat GTK tree cell's first action is expand or edit. Performing it returns
+# success and does not move the selection. A Chrome list option's click does.
+_SELECTING_ACTION_NAMES = frozenset({
+    "click", "press", "select", "pick", "jump", "toggle", "do default",
+})
+_TEXT_ROLE_NAMES = frozenset({
+    "entry", "text", "password text", "terminal", "document text", "paragraph",
+})
+
+
+def _strip_objects(text: str) -> str:
+    return text.replace(_OBJECT_REPLACEMENT, "").strip()
+
+
+def _option_label(node) -> str:
+    label = _node_name(node)
+    if label:
+        return label
+    raw = _safe(lambda n=node: _atspi().Text.get_text(n, 0, -1))
+    if isinstance(raw, str):
+        return _strip_objects(raw)
+    return ""
+
+
+def _selected_option_text(acc) -> str | None:
+    """The combo or list's active option, not a highlighted popup row.
+
+    ``Selection.get_selected_child`` is the active item (GTK's combo uses it
+    for ``gtk_combo_box_get_active``). A popup menu can mark a row SELECTED
+    when that row is only highlighted, which leaves the combo unchanged.
+    """
+    iface = _selection_iface(acc)
+    if iface is not None:
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+        if child is not None:
+            label = _option_label(child)
+            if label:
+                return label
+    labels: list[str] = []
+
+    def walk(node, depth: int) -> None:
+        if depth > 4:
+            return
+        count = min(_child_count(node), 64)
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                continue
+            if _state_has(child, "SELECTED"):
+                label = _option_label(child)
+                if label and label not in labels:
+                    labels.append(label)
+                continue
+            if _role_name(child) in _OPTION_CONTAINER_NAMES:
+                walk(child, depth + 1)
+
+    walk(acc, 0)
+    if not labels:
+        return None
+    return ", ".join(labels)
+
+
+def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
     engine also blanks AXSecureTextField values).
@@ -297,15 +374,43 @@ def _value_text(acc, role: str) -> object | None:
     to ``Atspi.Accessible.get_text`` (a 1-arg method) on this binding and raises
     TypeError — which, swallowed defensively, silently blanked every field value.
     Calling the interface method with the accessible as the first argument avoids
-    the name collision. Non-Text accessibles make the call raise → None."""
+    the name collision. Non-Text accessibles make the call raise → None.
+
+    Chromium's select and listbox text is U+FFFC once per option. The value is
+    the selected option's name instead. An empty number field exposes Value 0.0
+    with no text; that default is not shown. A slider has no text interface and
+    still reports its Value.
+    """
     if role == "AXSecureTextField":
         return None
     Atspi = _atspi()
+    if role_name is None:
+        role_name = _role_name(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
-    if count:
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
-        if got:
-            return got
+        if isinstance(got, str) and got:
+            if _OBJECT_REPLACEMENT in got:
+                cleaned = _strip_objects(got)
+                if cleaned:
+                    return cleaned
+            else:
+                return got
+        handled, choice = _choice_value(acc, role, role_name)
+        if handled:
+            return choice
+        if role_name == "spin button" or (role_name in {"entry", "text"} and _number_input(acc)):
+            return None
+    elif count == 0 and (
+        role_name == "spin button" or (role_name in {"entry", "text"} and _number_input(acc))
+    ):
+        # Text is present and empty. Value 0.0 is the number field's default,
+        # not a number the user entered. A slider has no text interface
+        # (count is None) and still falls through to Value.
+        return None
+    handled, choice = _choice_value(acc, role, role_name)
+    if handled:
+        return choice
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is not None:
         return cur
@@ -330,6 +435,10 @@ def _state_flags(acc):
     enabled = has("ENABLED") or has("SENSITIVE")
     focused = has("FOCUSED")
     checked = has("CHECKED") if (has("CHECKABLE") or has("CHECKED")) else None
+    # aria-pressed is AT-SPI PRESSED, not CHECKED. A GTK toggle already uses
+    # CHECKED. A pressed Chrome button is shown the same way.
+    if checked is None and has("PRESSED"):
+        checked = True
     selected = has("SELECTED")
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
     focusable = has("FOCUSABLE")
@@ -525,6 +634,12 @@ class ATSPIAccessor:
         enabled, focused, checked, selected, expanded, focusable = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
+        if _OBJECT_REPLACEMENT in str(name):
+            name = _strip_objects(str(name))
+        if checked is None and role == "AXButton":
+            flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
+            if flag in {"true", "false"}:
+                checked = flag == "true"
         return RawNode(
             role=role,
             subrole=None,
@@ -537,7 +652,7 @@ class ATSPIAccessor:
             size=size,
             actions=_action_names(node),
             # skip the value probe (2 D-Bus calls) on roles that never have one
-            value=None if role in _NO_VALUE_ROLES else _value_text(node, role),
+            value=None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str),
             checked=checked,
             selected=selected,
             expanded=expanded,
@@ -1123,6 +1238,426 @@ def _confirm_text(acc, text: str) -> bool:
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
     return False
+
+
+def _number_input(acc) -> bool:
+    """True when object attributes say this is ``<input type=number>``."""
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    kind = str(
+        attrs.get("text-input-type")
+        or attrs.get("html-input-type")
+        or attrs.get("input-type")
+        or attrs.get("type")
+        or ""
+    ).lower()
+    return tag in {"", "input"} and kind == "number" and (
+        tag == "input" or "text-input-type" in attrs or "html-input-type" in attrs
+    )
+
+
+def _value_range(acc) -> tuple[float, float] | None:
+    """(minimum, maximum) from the Value interface, or None when it has none."""
+    Atspi = _atspi()
+    minimum = _safe(lambda: Atspi.Value.get_minimum_value(acc))
+    maximum = _safe(lambda: Atspi.Value.get_maximum_value(acc))
+    if isinstance(minimum, bool) or not isinstance(minimum, (int, float)):
+        return None
+    if isinstance(maximum, bool) or not isinstance(maximum, (int, float)):
+        return None
+    low, high = float(minimum), float(maximum)
+    if not math.isfinite(low) or not math.isfinite(high):
+        return None
+    return low, high
+
+
+def _parse_number(value: str) -> float:
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}:
+        raise ValueError(text)
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(text)
+    return number
+
+
+def _numbers_match(got: float, wanted: float) -> bool:
+    return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
+
+
+def _format_bound(number: float) -> str:
+    return format(number, "g")
+
+
+def control_kind(acc) -> str | None:
+    """``combo``, ``value``, or None when ``set_text`` is the writer.
+
+    A combo is set through its own items or its own entry. A spin button,
+    slider, or other Value-interface control is set through current value.
+    A plain text role stays on ``set_text``. A scroll bar's Value drives
+    pixel scroll and is not a ``set_value`` target.
+    """
+    role = _role_name(acc)
+    if role == "combo box":
+        return "combo"
+    if role in {"list box", "list"} and _collect_options(acc):
+        return "combo"
+    # A missing role is a fake or a node we cannot classify. Do not probe
+    # Value: that import is gi, and a plain text write must stay on set_text.
+    if role == "scroll bar" or role == "":
+        return None
+    if role in {"spin button", "slider"} or _number_input(acc):
+        return "value"
+    if role in _TEXT_ROLE_NAMES:
+        return None
+    if _value_range(acc) is not None:
+        return "value"
+    return None
+
+
+def _collect_options(acc) -> list[tuple[str, object, object, int]]:
+    """(label, node, parent, index) for each choice under ``acc``."""
+    found: list[tuple[str, object, object, int]] = []
+
+    def walk(node, depth: int) -> None:
+        if depth > 5:
+            return
+        count = min(_child_count(node), 64)
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                continue
+            role = _role_name(child)
+            if role in _OPTION_ROLE_NAMES:
+                label = _node_name(child)
+                if not label:
+                    raw = _safe(lambda c=child: _atspi().Text.get_text(c, 0, -1))
+                    label = _strip_objects(raw) if isinstance(raw, str) else ""
+                found.append((label, child, node, index))
+                continue
+            if role in _TEXT_ROLE_NAMES or role in {"label", "static", "push button"}:
+                continue
+            if depth == 0 or role in _OPTION_CONTAINER_NAMES:
+                walk(child, depth + 1)
+
+    walk(acc, 0)
+    return found
+
+
+def _combo_entry(acc):
+    """The editable entry that belongs to this combo, not some other focused field."""
+    count = min(_child_count(acc), 12)
+    for index in range(count):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if role not in {"entry", "text"}:
+            continue
+        if _editable_iface(child) is not None or role in {"entry", "text"}:
+            return child
+    return None
+
+
+def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
+    """(handled, value) for a combo or list.
+
+    An editable combo's value is its own entry's text, including when that
+    text is empty. A non-editable combo uses the active option. Neither falls
+    through to the Value interface.
+    """
+    if role not in _CHOICE_ROLES and role_name not in _CHOICE_ROLE_NAMES:
+        return False, None
+    entry = _combo_entry(acc)
+    if entry is not None:
+        text = _full_text(entry)
+        if isinstance(text, str):
+            return True, (_strip_objects(text) or None)
+        return True, None
+    return True, _selected_option_text(acc)
+
+
+def _set_entry_contents(entry, value: str) -> bool:
+    """Replace ``entry`` via EditableText. No focus change and no keystrokes.
+
+    Keystrokes would land in whichever widget is focused, which is how a combo
+    write changed a different field. ``set_text_contents`` writes this entry.
+    """
+    eti = _editable_iface(entry)
+    if eti is None:
+        return False
+    if _full_text(entry) == value:
+        return True
+    _call_first(eti, ("set_text_contents",), value, default=False)
+    if _confirm_text(entry, value):
+        return True
+    current = _full_text(entry)
+    if current:
+        _select_range(entry, len(current))
+        _call_first(eti, ("delete_text",), 0, len(current), default=False)
+        if _full_text(entry) not in ("", None):
+            return False
+    _call_first(eti, ("set_text_contents",), value, default=False)
+    if _confirm_text(entry, value):
+        return True
+    if _full_text(entry) not in ("", None):
+        return False
+    length = None
+    for name in ("insert_text", "insertText"):
+        method = getattr(eti, name, None)
+        if method is not None:
+            length = _insert_length(method, value)
+            break
+    if length is None:
+        return False
+    _call_first(eti, ("insert_text", "insertText"), 0, value, length, default=False)
+    return _confirm_text(entry, value)
+
+
+def _do_action_named(acc, names: frozenset[str]) -> bool:
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw in names and _call_first(action, ("do_action", "doAction"), index, default=False):
+            return True
+    return False
+
+
+def _close_combo_popup(acc) -> None:
+    """Close a popup this call opened. A combo that is not expanded is left alone."""
+    if not _state_has(acc, "EXPANDED"):
+        return
+    _do_action_named(acc, frozenset({"collapse", "close", "hide"}))
+    if _state_has(acc, "EXPANDED") and _x11_keys_available():
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.press_chord("Escape")
+
+
+def _combo_active_label(acc) -> str | None:
+    """The combo's active item, not a popup row that is only highlighted.
+
+    GTK's combo Selection child is ``gtk_combo_box_get_active``. A menu's
+    own Selection can mark a different row SELECTED without changing that.
+    When the toolkit has no ``get_selected_child``, a SELECTED child of the
+    combo itself is the active item. A SELECTED row nested in the popup is not.
+    """
+    iface = _selection_iface(acc)
+    if iface is not None:
+        child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+        if child is not None:
+            label = _option_label(child)
+            if label:
+                return label
+    for label, node, parent, _index in _collect_options(acc):
+        if parent is acc and label and _state_has(node, "SELECTED"):
+            return label
+    shown = _full_text(acc)
+    if isinstance(shown, str):
+        cleaned = _strip_objects(shown)
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _combo_landed(acc, entry, value: str) -> bool:
+    if entry is not None:
+        text = _full_text(entry)
+        return text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value
+    return _combo_active_label(acc) == value
+
+
+def _activate_combo_option(combo, options, match) -> None:
+    """Choose ``match`` on the combo, not on its popup menu.
+
+    ``Selection.select_child`` on the combo is the model index and calls
+    ``gtk_combo_box_set_active``. The same call on the popup only highlights
+    the row. A click on the item is the fallback that activates it.
+    """
+    label, node, _parent, _index = match
+    model_index = next(i for i, item in enumerate(options) if item[1] is node)
+    iface = _selection_iface(combo)
+    if iface is not None:
+        _call_first(iface, ("select_child", "selectChild"), model_index, default=False)
+    if _combo_active_label(combo) == label:
+        return
+    if not _state_has(combo, "EXPANDED"):
+        _do_action_named(combo, frozenset({"press", "show", "open"}))
+    _do_action_named(node, frozenset({"click", "press", "activate"}))
+
+
+def set_combo_value(acc, value: str) -> None:
+    """Choose ``value`` on this combo or list, or write its own entry.
+
+    An editable combo is written with ``set_text_contents`` on its own entry.
+    That sends no keystrokes, so a different focused field is left untouched.
+    A non-editable combo is set through its own Selection. An unknown option
+    raises ValueError before any selection, and the message lists the options.
+    A popup this call opened is closed. The call raises when the read-back is
+    not ``value``. A highlighted popup row is not a successful read-back.
+    """
+    entry = _combo_entry(acc)
+    options = _collect_options(acc)
+    if entry is None and not options:
+        _do_action_named(acc, frozenset({"press", "show", "open"}))
+        options = _collect_options(acc)
+        entry = _combo_entry(acc)
+    try:
+        if entry is not None:
+            if not _set_entry_contents(entry, value):
+                raise _text_mismatch(
+                    "text_mismatch",
+                    f"the combo entry read back does not match {value!r}",
+                    expected=value,
+                )
+        else:
+            match = next((item for item in options if item[0] == value), None)
+            if match is None:
+                labels = [label for label, *_rest in options if label]
+                listed = ", ".join(labels)
+                raise ValueError(f"value {value!r} is not one of: {listed}")
+            _activate_combo_option(acc, options, match)
+    finally:
+        _close_combo_popup(acc)
+    if _state_has(acc, "EXPANDED"):
+        raise _text_mismatch(
+            "popup_open",
+            "the combo popup is still open",
+            expected=value,
+        )
+    if not _combo_landed(acc, entry, value):
+        raise _text_mismatch(
+            "text_mismatch",
+            f"the value read back does not match {value!r}",
+            expected=value,
+        )
+
+
+def set_numeric_value(acc, value: str) -> bool:
+    """Set the Value interface's current value.
+
+    A non-number or a number outside minimum..maximum raises ValueError before
+    the write. The message includes the minimum and maximum. The current value
+    is read back and must match. False means ``value`` is a finite number and
+    this control has no Value interface, so the caller may use ``set_text``.
+    """
+    span = _value_range(acc)
+    low = high = None
+    if span is not None:
+        low, high = span
+    try:
+        number = _parse_number(value)
+    except ValueError:
+        if low is None or high is None:
+            raise ValueError(f"value {value!r} is not a number") from None
+        raise ValueError(
+            f"value {value!r} is not a number; valid range is {_format_bound(low)}..{_format_bound(high)}"
+        ) from None
+    if span is None:
+        return False
+    low, high = span
+    if number < low or number > high:
+        raise ValueError(
+            f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
+        )
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, number), False)
+    got = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _safe(lambda: Atspi.Value.get_current_value(acc))
+        if isinstance(got, (int, float)) and not isinstance(got, bool) and _numbers_match(float(got), number):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {got!r} does not match {value!r}",
+        expected=value,
+        actual=got,
+    )
+
+
+def _selection_iface(acc):
+    return _call_first(acc, ("get_selection_iface", "get_selection"))
+
+
+def _child_index(parent, child) -> int | None:
+    count = min(_child_count(parent), 500)
+    for index in range(count):
+        kid = _child_at(parent, index)
+        if kid is None:
+            continue
+        if kid is child or kid == child:
+            return index
+    return None
+
+
+def _selection_parent(acc):
+    """(parent, child index, row node) when ``acc`` sits in a Selection container."""
+    node = acc
+    for _ in range(8):
+        role = _role_name(node)
+        parent = _parent_of(node)
+        if parent is None:
+            return None, None, None
+        if role in _ROW_ROLE_NAMES and _selection_iface(parent) is not None:
+            return parent, _child_index(parent, node), node
+        node = parent
+    return None, None, None
+
+
+def _first_press_action(acc) -> str:
+    action = _action_iface(acc)
+    if action is None:
+        return ""
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+            return raw
+    return ""
+
+
+def _row_selected(node) -> bool:
+    return _state_has(node, "SELECTED")
+
+
+def select_contained_row(acc) -> bool | None:
+    """Select a row or cell inside a Selection container.
+
+    None means this node is not such a row, so the caller uses ``do_press``.
+    True means the row is selected. False means it is a selection row and it
+    is still not selected: the caller clicks the on-screen center, then checks
+    again. A GTK cell's expand/edit/activate action is not used. A Chrome
+    option's click is, and the selection is checked afterwards.
+    """
+    if _role_name(acc) not in _ROW_ROLE_NAMES:
+        return None
+    parent, index, target = _selection_parent(acc)
+    if parent is None or target is None:
+        return None
+    action = _first_press_action(acc)
+    if action in _SELECTING_ACTION_NAMES and do_press(acc) and _row_selected(target):
+        return True
+    iface = _selection_iface(parent)
+    if iface is not None and index is not None and _call_first(
+        iface, ("select_child", "selectChild"), index, default=False
+    ) and _row_selected(target):
+        return True
+    return False
+
+
+def row_is_selected(acc) -> bool:
+    """Whether the selection row under ``acc`` is selected. False for other nodes."""
+    if _role_name(acc) not in _ROW_ROLE_NAMES:
+        return False
+    _parent, _index, target = _selection_parent(acc)
+    if target is None:
+        return False
+    return _row_selected(target)
 
 
 def set_text(acc, text: str) -> bool:

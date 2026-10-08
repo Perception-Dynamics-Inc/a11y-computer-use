@@ -209,17 +209,18 @@ def test_cdp_session_skips_events_and_raises_on_error() -> None:
 # DOMSnapshot join
 # --------------------------------------------------------------------------- #
 def test_parse_dom_snapshot_geometry_and_secure() -> None:
-    geometry, secure = _cdp_ax.parse_dom_snapshot(_DOM_SNAPSHOT)
+    geometry, secure, empty_numbers = _cdp_ax.parse_dom_snapshot(_DOM_SNAPSHOT)
     assert geometry[101] == (8, 8, 80, 30)  # button box, document CSS px
     assert geometry[100] == (0, 0, 800, 600)
     assert secure == frozenset({103})  # only the type=password input
+    assert empty_numbers == frozenset()
 
 
 # --------------------------------------------------------------------------- #
 # accessor role/flag mapping
 # --------------------------------------------------------------------------- #
 def test_cdp_accessor_roles_flags_and_stable_id() -> None:
-    geometry, secure = _cdp_ax.parse_dom_snapshot(_DOM_SNAPSHOT)
+    geometry, secure, _empty = _cdp_ax.parse_dom_snapshot(_DOM_SNAPSHOT)
     acc = _cdp_ax.CDPAccessor(_AX_NODES, geometry, secure)
     by_backend = {acc.read(n).stable_id: acc.read(n) for n in _AX_NODES}
 
@@ -350,6 +351,136 @@ def test_browser_type_and_set_value_emit_expected_cdp() -> None:
     call = next(p for m, p in t.sent if m == "Runtime.callFunctionOn")
     assert call["arguments"] == [{"value": "Alice"}]
     assert "dispatchEvent" in call["functionDeclaration"]  # fires input/change
+
+
+def test_browser_set_value_rejects_a_missing_option_and_a_bad_number() -> None:
+    """The page function returns a refusal. The driver raises before reporting success."""
+    answers = {
+        "invalid_option": {
+            "ok": False, "code": "invalid_option",
+            "options": ["Kazakhstan", "Japan", "Peru"],
+        },
+        "invalid_number": {"ok": False, "code": "invalid_number", "min": 0, "max": 10},
+        "out_of_range": {"ok": False, "code": "out_of_range", "min": 0, "max": 10},
+        "mismatch": {"ok": False, "code": "mismatch", "actual": ""},
+        "ok": {"ok": True, "actual": "Peru"},
+    }
+
+    def responder(method, params):
+        if method == "Runtime.callFunctionOn":
+            arg = params["arguments"][0]["value"]
+            return {"result": {"type": "object", "value": answers[arg]}}
+        return _fixture_responder(method, params)
+
+    d, t = _driver_on(responder)
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    field = next(e for e in snap.elements if e.title == "Name")
+    with pytest.raises(ValueError) as exc:
+        d.set_value(field, "invalid_option")
+    assert "Kazakhstan" in str(exc.value) and "Peru" in str(exc.value)
+    with pytest.raises(ValueError) as exc:
+        d.set_value(field, "invalid_number")
+    assert "not a number" in str(exc.value) and "0" in str(exc.value) and "10" in str(exc.value)
+    with pytest.raises(ValueError) as exc:
+        d.set_value(field, "out_of_range")
+    assert "outside" in str(exc.value) and "0" in str(exc.value) and "10" in str(exc.value)
+    with pytest.raises(ComputerUseError) as exc:
+        d.set_value(field, "mismatch")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert d.set_value(field, "ok") is True
+    declaration = next(p["functionDeclaration"] for m, p in t.sent if m == "Runtime.callFunctionOn")
+    assert "SELECT" in declaration and "invalid_option" in declaration
+    assert "number" in declaration and "range" in declaration
+
+
+def test_set_value_javascript_rejects_before_writing(monkeypatch) -> None:
+    """The real page function, run by node against stand-in elements. Not a browser."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = """
+const fn = %s;
+function run(el, value) {
+  const before = el.value;
+  const result = fn.call(el, value);
+  return {result, value: el.value, before};
+}
+const select = {
+  tagName: 'SELECT', type: '', value: 'Kazakhstan', selectedIndex: 0,
+  options: [
+    {value: 'Kazakhstan', text: 'Kazakhstan', label: ''},
+    {value: 'Japan', text: 'Japan', label: ''},
+    {value: 'Peru', text: 'Peru', label: ''},
+  ],
+  dispatchEvent() {},
+};
+const number = {
+  tagName: 'INPUT', type: 'number', value: '3', min: '0', max: '10',
+  dispatchEvent() {},
+};
+const range = {
+  tagName: 'INPUT', type: 'range', value: '40', min: '0', max: '100',
+  dispatchEvent() {},
+};
+const text = {tagName: 'INPUT', type: 'text', value: 'Paris', dispatchEvent() {}};
+const out = {
+  mars: run(select, 'Mars'),
+  peru: run(select, 'Peru'),
+  abc: run(number, 'abc'),
+  fifteen: run(number, '15'),
+  seven: run(number, '7'),
+  high: run(range, '150'),
+  mid: run(range, '55'),
+  lima: run(text, 'Lima'),
+};
+process.stdout.write(JSON.stringify(out));
+""" % browser._SET_VALUE_FN
+    completed = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+    got = json.loads(completed.stdout)
+    assert got["mars"]["result"]["code"] == "invalid_option"
+    assert "Japan" in got["mars"]["result"]["options"]
+    assert got["mars"]["value"] == "Kazakhstan"
+    assert got["peru"]["result"]["ok"] is True and got["peru"]["value"] == "Peru"
+    assert got["abc"]["result"]["code"] == "invalid_number" and got["abc"]["value"] == "3"
+    assert got["fifteen"]["result"]["code"] == "out_of_range" and got["fifteen"]["value"] == "3"
+    assert got["seven"]["result"]["ok"] is True and got["seven"]["value"] == "7"
+    assert got["high"]["result"]["code"] == "out_of_range" and got["high"]["value"] == "40"
+    assert got["mid"]["result"]["ok"] is True and got["mid"]["value"] == "55"
+    assert got["lima"]["result"]["ok"] is True and got["lima"]["value"] == "Lima"
+
+
+def test_cdp_snapshot_shows_selected_text_pressed_and_blank_number() -> None:
+    nodes = [
+        _ax("1", "RootWebArea", "page", backend=1, children=["2", "3", "4", "5", "6"]),
+        _ax("2", "combobox", "Country", backend=2, parent="1", children=["21", "22"]),
+        _ax("21", "option", "Kazakhstan", backend=21, parent="2", props={"selected": True}),
+        _ax("22", "option", "Japan", backend=22, parent="2"),
+        _ax("3", "listbox", "Fruits", backend=3, parent="1", children=["31"]),
+        _ax("31", "option", "Banana", backend=31, parent="3", props={"selected": True}),
+        _ax("4", "button", "Italic toggle", backend=4, parent="1", props={"pressed": True}),
+        _ax("5", "spinbutton", "Empty", backend=5, parent="1"),
+        _ax("6", "spinbutton", "Seats", backend=6, parent="1"),
+    ]
+    nodes[1]["value"] = {"value": "\ufffc"}
+    nodes[4]["value"] = {"value": "\ufffc\ufffc\ufffc\ufffc"}
+    nodes[7]["value"] = {"value": 0.0}
+    nodes[8]["value"] = {"value": "3"}
+    label = _ax("7", "StaticText", "Country \ufffc", backend=7)
+    nodes.append(label)
+    nodes[0]["childIds"].append("7")
+    acc = _cdp_ax.CDPAccessor(nodes, {}, frozenset(), frozenset({5}))
+    by_id = {node["nodeId"]: acc.read(node) for node in nodes}
+    assert by_id["2"].value == "Kazakhstan"
+    assert by_id["3"].value == "Banana"
+    assert by_id["4"].checked is True
+    assert by_id["5"].value is None
+    assert by_id["6"].value == "3"
+    assert by_id["7"].title == "Country"
+    assert "\ufffc" not in by_id["7"].title
 
 
 def test_browser_type_dry_run_and_empty_are_noops() -> None:

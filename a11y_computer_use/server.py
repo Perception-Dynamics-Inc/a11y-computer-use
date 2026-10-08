@@ -3066,6 +3066,15 @@ class Runtime:
             self._refuse_disabled(live, verb="set_value")
             if self.driver.set_value(live, value):  # an AX write lands on this element only
                 return
+            # A combo, popup, or slider that the driver could not set must not
+            # be focused and typed into. That types the text into whatever
+            # already has focus and the line below would still say it was set.
+            if live.role in {"AXComboBox", "AXPopUpButton", "AXSlider"}:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"the value {value!r} did not land on {ref}",
+                    detail={"ref": ref, "role": live.role, "reason": "text_mismatch"},
+                )
             self.driver.press_element(live)  # fallback: focus then synthesize typing
             pid = observe.element_pid(live) if getattr(self.driver, "background_input", False) else None
             if pid:
@@ -4282,9 +4291,13 @@ def build_server(
         an editable element from the latest desktop_snapshot/find. Falls back to
         focus+type when the app exposes no settable value. On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. An editable
-        Linux field succeeds when AT-SPI Text.get_text(0, -1) equals the new
-        string. Gated at tier 'full';
+        and that call sends no keystrokes, clicks, or focus changes. A combo or
+        list is set through its own item (or its own entry, when it has one);
+        a value that is not one of the options is invalid_arguments and lists
+        them. A spin button, slider, or other Value control is set through that
+        interface; a number outside the minimum and maximum is invalid_arguments
+        and includes both. An editable Linux field succeeds when the value read
+        back matches. A mismatch is an error, not a success. Gated at tier 'full';
         refuses secure/password fields (secrets are entered by the human, never
         this tool). Ideal for filling forms fast."""
         return await run(runtime.set_value, ref, value)

@@ -144,7 +144,9 @@ def test_failed_set_value_does_not_leave_a_typing_target(focus_driver, monkeypat
     driver, _, field, _, _, _ = focus_driver
     driver.press_element(field)
     monkeypatch.setattr(_atspi, "set_text", lambda acc, text: False)
-    assert driver.set_value(field, "failed") is False
+    with pytest.raises(ComputerUseError) as error:
+        driver.set_value(field, "failed")
+    assert error.value.detail["reason"] == "text_mismatch"
     assert driver._focused_editable is None
 
 

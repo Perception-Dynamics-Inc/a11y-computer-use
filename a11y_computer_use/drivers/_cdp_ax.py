@@ -94,10 +94,11 @@ class CDPAccessor:
     """
 
     def __init__(self, nodes: Sequence[dict], geometry: dict[int, tuple[float, float, float, float]],
-                 secure_ids: frozenset[int]) -> None:
+                 secure_ids: frozenset[int], empty_number_ids: frozenset[int] = frozenset()) -> None:
         self._by_id = {n["nodeId"]: n for n in nodes}
         self._geometry = geometry
         self._secure_ids = secure_ids
+        self._empty_number_ids = empty_number_ids
 
     # -- TreeAccessor -------------------------------------------------------
     def read(self, node: dict) -> RawNode:
@@ -121,10 +122,29 @@ class CDPAccessor:
         size = (box[2], box[3]) if box else None
 
         checked = _checked(props.get("checked"))
+        # aria-pressed is a separate AX property from checked. A pressed toggle
+        # shows as checked, the same as a switch. False stays unchecked.
+        if checked is None and "pressed" in props:
+            checked = _checked(props.get("pressed"))
         name = node.get("name", {}).get("value") or ""
+        if isinstance(name, str) and "\ufffc" in name:
+            name = name.replace("\ufffc", "").strip()
         value = node.get("value", {}).get("value")
+        if isinstance(value, str) and "\ufffc" in value:
+            value = value.replace("\ufffc", "").strip() or None
+        if value in (None, "") and raw_role in {"combobox", "listbox", "ListBox"}:
+            selected = self._selected_option_text(node)
+            if selected:
+                value = selected
         if value is None and editable_prop and not name:
             value = ""  # a focused-but-empty editable still reads as a field
+        if (
+            backend in self._empty_number_ids
+            and value in (0, 0.0, "0", "0.0", "0.00")
+        ):
+            # An empty <input type=number> has no DOM value. Chrome's AX value
+            # is the spin button's numeric default, not a value the user set.
+            value = None
 
         return RawNode(
             role=role,
@@ -144,6 +164,29 @@ class CDPAccessor:
 
     def children(self, node: dict) -> Sequence[dict]:
         return [self._by_id[cid] for cid in node.get("childIds", ()) if cid in self._by_id]
+
+    def _selected_option_text(self, node: dict) -> str | None:
+        labels: list[str] = []
+
+        def walk(current: dict, depth: int) -> None:
+            if depth > 4:
+                return
+            for child_id in current.get("childIds", ()):
+                child = self._by_id.get(child_id)
+                if child is None:
+                    continue
+                props = _prop(child)
+                if props.get("selected") is True:
+                    label = str(child.get("name", {}).get("value") or "")
+                    if label and label not in labels:
+                        labels.append(label)
+                    continue
+                walk(child, depth + 1)
+
+        walk(node, 0)
+        if not labels:
+            return None
+        return ", ".join(labels)
 
     # -- roots --------------------------------------------------------------
     def root(self) -> dict | None:
@@ -170,15 +213,17 @@ def _tristate(v: object) -> bool | None:
 def parse_dom_snapshot(
     snapshot: dict,
     frame_offsets: dict[str, tuple[float, float]] | None = None,
-) -> tuple[dict[int, tuple[float, float, float, float]], frozenset[int]]:
+) -> tuple[dict[int, tuple[float, float, float, float]], frozenset[int], frozenset[int]]:
     """Join `DOMSnapshot.captureSnapshot` into geometry + password-field ids.
 
-    Returns ``(geometry, secure_ids)`` where ``geometry`` maps each laid-out
-    node's ``backendNodeId`` to its ``(x, y, w, h)`` box, and ``secure_ids`` is
-    the set of backend ids for ``<input type=password>`` (so BrowserDriver never
-    types into a secret). Layout/DOM come as parallel index arrays with a shared
-    ``strings`` table; only rendered nodes appear in ``layout``, so nodes absent
-    from ``geometry`` are correctly pruned as off-layout.
+    Returns ``(geometry, secure_ids, empty_number_ids)`` where ``geometry`` maps
+    each laid-out node's ``backendNodeId`` to its ``(x, y, w, h)`` box,
+    ``secure_ids`` is the set of backend ids for ``<input type=password>`` (so
+    BrowserDriver never types into a secret), and ``empty_number_ids`` is the
+    set of ``<input type=number>`` nodes whose value attribute is empty.
+    Layout/DOM come as parallel index arrays with a shared ``strings`` table;
+    only rendered nodes appear in ``layout``, so nodes absent from ``geometry``
+    are correctly pruned as off-layout.
 
     One ``document`` is returned per frame; ``frame_offsets`` (frame id ->
     ``(dx, dy)``, from `build_frame_offsets`) shifts each frame's boxes into the
@@ -189,6 +234,7 @@ def parse_dom_snapshot(
     offsets = frame_offsets or {}
     geometry: dict[int, tuple[float, float, float, float]] = {}
     secure: set[int] = set()
+    empty_numbers: set[int] = set()
 
     def s(idx: object) -> str:
         return strings[idx] if isinstance(idx, int) and 0 <= idx < len(strings) else ""
@@ -215,11 +261,15 @@ def parse_dom_snapshot(
                 continue
             if s(node_names[dom_idx]).upper() != "INPUT":
                 continue
+            fields: dict[str, str] = {}
             for j in range(0, len(attrs) - 1, 2):
-                if s(attrs[j]).lower() == "type" and s(attrs[j + 1]).lower() == "password":
-                    secure.add(backend_ids[dom_idx])
+                fields[s(attrs[j]).lower()] = s(attrs[j + 1])
+            if fields.get("type", "").lower() == "password":
+                secure.add(backend_ids[dom_idx])
+            if fields.get("type", "").lower() == "number" and fields.get("value", "") == "":
+                empty_numbers.add(backend_ids[dom_idx])
 
-    return geometry, frozenset(secure)
+    return geometry, frozenset(secure), frozenset(empty_numbers)
 
 
 def build_frame_offsets(
