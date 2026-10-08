@@ -300,7 +300,30 @@ class LinuxDriver:
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
             return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
-        return self._run(lambda: _atspi.do_press(handle))
+        # A GTK tree cell's activate/expand action reports success and leaves
+        # the selection where it was. Select through the parent's Selection
+        # interface, or click the row's on-screen center, and require the
+        # selection to actually move onto this row.
+        selected = self._run(lambda: _atspi.select_contained_row(handle))
+        if selected is None:
+            return self._run(lambda: _atspi.do_press(handle))
+        if selected:
+            return True
+        bounds = element.bounds
+        if bounds is not None and bounds.width > 0 and bounds.height > 0:
+            try:
+                self.click(element)
+            except ComputerUseError:
+                if self._run(lambda: _atspi.row_is_selected(handle)):
+                    return True
+                raise
+            if self._run(lambda: _atspi.row_is_selected(handle)):
+                return True
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}) click did not change the selection",
+            detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+        )
 
     def scroll_into_view(self, element: Element) -> bool:
         from a11y_computer_use import observe
@@ -318,23 +341,47 @@ class LinuxDriver:
         if element.secure:
             self._focused_editable = None
             return False
+        self._focused_editable = None
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is not None:
+            kind = self._run(lambda: _atspi.control_kind(handle))
+            if kind == "combo":
+                # Selection or this combo's own entry. A miss raises before
+                # any keystroke, so the Runtime cannot type into a different
+                # focused field or leave the popup open.
+                self._run(lambda: _atspi.set_combo_value(handle, value))
+                return True
+            if kind == "value":
+                wrote = self._run(lambda: _atspi.set_numeric_value(handle, value))
+                if wrote:
+                    return True
+                if not _accepts_text(element):
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{element.ref} ({element.role}) has no Value interface",
+                        detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
+                    )
         # A menu, heading, label, or button is not a text target. Raising
         # here is what stops the Runtime from focusing it and typing the
         # value into whatever is frontmost. No key, click, or focus is sent.
         if not _accepts_text(element):
             raise _not_editable(element)
-        self._focused_editable = None
-        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
-        # not a bounded read that can echo the request. Marshaled onto the
-        # a11y thread.
+        # not a bounded read that can echo the request. A write that does not
+        # stick raises: returning False made the Runtime type into whatever
+        # was focused and still report success. Marshaled onto the a11y thread.
         success = self._run(lambda: _atspi.set_text(handle, value))
-        if success:
-            self._focused_editable = handle
-        return success
+        if not success:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"the value read back does not match {value!r}",
+                detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
+            )
+        self._focused_editable = handle
+        return True
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
