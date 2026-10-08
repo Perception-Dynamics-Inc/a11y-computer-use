@@ -27,6 +27,9 @@ def test_settle_longer_than_the_timeout_is_a_timeout(monkeypatch) -> None:
     with pytest.raises(ComputerUseError) as info:
         conditions.Checker().wait({"settle": 30}, timeout_s=5, poll_s=1)
     assert info.value.code is ErrorCode.TIMEOUT
+    assert info.value.detail["settle_s"] == 30
+    assert info.value.detail["elapsed_s"] == pytest.approx(5.0)
+    assert info.value.detail["polls"] >= 1 and "condition" in info.value.detail
 
 
 def test_settle_rejects_negative_or_absurd_seconds() -> None:

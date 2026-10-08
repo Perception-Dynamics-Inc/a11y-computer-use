@@ -3256,10 +3256,14 @@ class Runtime:
 
     @_serialized
     def wait_until(self, condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
-        """Wait for something outside the accessibility tree: a file to exist
-        or stop growing, a URL to answer, text to appear in an app's snapshot or
-        on screen. Read tier. Long timeouts are allowed (renders, deploys), up to
-        `conditions.MAX_WAIT_UNTIL_S`."""
+        """Wait for something outside the accessibility tree: a regular file to
+        exist or stop growing, a URL to answer, text to appear in an app's
+        snapshot or on screen. A path that exists and is not a regular file is
+        invalid_arguments on the first look; a missing path keeps waiting.
+        Read tier. Long timeouts are allowed (renders, deploys), up to
+        `conditions.MAX_WAIT_UNTIL_S`. A timeout detail includes the last
+        observation (URL status or connection error; file exists, path, size,
+        and min_bytes)."""
         kind = conditions.kind_of(condition)
         if not math.isfinite(timeout_s) or timeout_s < 0:
             raise ValueError("timeout_s must be finite and nonnegative")
@@ -4081,16 +4085,24 @@ def build_server(
     async def wait_until(condition: dict, timeout_s: float = 600.0, poll_s: float = 2.0) -> str:
         """Wait for something outside the accessibility tree, polling every
         poll_s seconds up to timeout_s (max 1800). condition is an object with
-        exactly one of: {"file_exists": path, "min_bytes": n} (path may use ~ and
-        globs; newest match wins), {"file_stable": path, "seconds": n} (size
+        exactly one of: {"file_exists": path, "min_bytes": n} (a regular file;
+        path may use ~ and globs; newest match wins; default min_bytes is 1),
+        {"file_stable": path, "seconds": n} (a regular file whose size is
         unchanged for n seconds: a finished download or render),
         {"url_status": url, "status": 200}, {"snapshot_text": text, "app": id}
         (re-snapshot the app until the text appears), {"screen_text": text}
         (OCR, where the backend supports it), or {"settle": seconds} (nothing to
         observe: an app with no accessibility tree is still loading or
-        animating; prefer an observable condition when one exists). Returns
-        JSON {matched, waited_s, polls} or a timeout error. Use it instead of
-        repeated snapshots while a render, upload, or deploy runs. Tier 'read'."""
+        animating; prefer an observable condition when one exists).
+        file_exists and file_stable match regular files only, and min_bytes
+        applies only to those files. A path that already exists and is not a
+        regular file, or a glob whose matches are all non-files, is
+        invalid_arguments on the first look (the path exists but is not a
+        regular file) and does not wait out timeout_s. A path that is not there
+        yet keeps waiting. Returns JSON {matched, waited_s, polls}. A timeout
+        names the condition, the time waited, and the poll count, and its
+        detail adds the last observation: last_status or last_error for a URL,
+        and exists, path, last_size, and min_bytes for a file. Tier 'read'."""
         return await run(runtime.wait_until, condition, timeout_s, poll_s)
 
     # Browser-only: a console feed is meaningful only where the backend has one,

@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.37] - 2026-10-08
+
+### Fixed
+
+- `wait_until` `file_exists` on a directory, or on a glob that only matches a directory, fails immediately instead of waiting out the timeout. On 0.4.36 the match went through `is_file()`, so `{"file_exists": "~/.a11y-computer-use"}` and a glob such as `~/some-existing-folder/su*` polled until `timeout_s` (600 by default) and then reported only `timeout: condition not met`. The documented contract is a regular file (`min_bytes` defaults to 1). A path that already exists and is not a regular file, or a glob whose matches are all non-files, raises `ValueError` on the first look, which the MCP layer reports as `invalid_arguments: wait_until: ... exists but is not a regular file; file_exists only matches regular files`. A path that is not there yet still waits, so a download can appear. `file_stable` uses the same rule, and `min_bytes` still applies only to regular files. A timeout detail still has `condition`, `waited_s`, and `polls`, and now adds the last observation: `last_status` or `last_error` (connection error class and message) for `url_status`; `exists`, `path`, `last_size`, and `min_bytes` for the file conditions (`stable_for_s` while a `file_stable` candidate is watched); `found` for `snapshot_text` and `screen_text`; `elapsed_s` and `settle_s` for `settle`. Paths outside the home directory and non-public URL addresses are still refused before any wait (#89) (2026-10-08).
+
 ## [0.4.36] - 2026-10-08
 
 ### Fixed
