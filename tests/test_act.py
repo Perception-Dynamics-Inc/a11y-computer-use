@@ -357,6 +357,19 @@ class TestTypeTextUnicode:
         assert excinfo.value.code is ErrorCode.SECURE_FIELD
         assert excinfo.value.detail["api"] == "AXFocusedUIElement"
 
+    def test_printable_chord_uses_the_same_password_probe(self, monkeypatch):
+        monkeypatch.setattr(act, "_focused_element_secure", lambda: True)
+        with pytest.raises(ComputerUseError) as excinfo:
+            act.key_chord("a", dry_run=True)
+        assert excinfo.value.code is ErrorCode.SECURE_FIELD
+        assert excinfo.value.detail["api"] == "AXFocusedUIElement"
+        with pytest.raises(ComputerUseError):
+            act.key_chord("shift+a", dry_run=True)
+        events = act.key_chord("tab", dry_run=True)
+        assert [event.kind for event in events] == ["key_down", "key_up"]
+        events = act.key_chord("ctrl+a", dry_run=True)
+        assert [event.kind for event in events] == ["key_down", "key_up"]
+
 
 # --- type_text: clipboard path -----------------------------------------------
 

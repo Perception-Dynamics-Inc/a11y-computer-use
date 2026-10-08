@@ -184,6 +184,10 @@ class RawNode:
     #: these is hollow. A nested iframe, or a document web already inside a
     #: page, restarts the kept-depth budget.
     atspi_web: str = ""
+    #: AT-SPI ``FOCUSABLE``. Default false, so macOS, Windows, and the browser
+    #: do not grow a new signal. A zero-size web wrapper that can take focus
+    #: stays a control; a plain div that cannot does not.
+    focusable: bool = False
 
 
 class TreeAccessor(Protocol):
@@ -1009,6 +1013,38 @@ def _prune_root(
     return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False, node=node)
 
 
+def _plain_zero_wrapper(raw: RawNode) -> bool:
+    """Unnamed, valueless, non-focusable wrapper whose box has a zero side.
+
+    Chrome adds ``click`` (mapped to AXPress), ``clickAncestor``, and
+    ``showContextMenu`` to plain divs. On a zero-size web wrapper those
+    actions are not a control: the node is hollow, and it is not a clickable
+    target. A focusable node, a named node, a node with a value or
+    description, or a real interactive role (push button, link, check box,
+    entry) is not this wrapper. ``clickAncestor`` and ``showContextMenu`` are
+    not press actions, so they never mark a node clickable on their own.
+    """
+    if raw.role not in _WRAPPER_ROLES:
+        return False
+    if raw.title or raw.description or raw.value is not None:
+        return False
+    if raw.focused or raw.focusable:
+        return False
+    return _zero_extent(raw.size)
+
+
+def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
+    """(clickable, editable, secure) for a kept node.
+
+    A plain zero-size wrapper is not clickable, even when Chrome gave it a
+    press action. Every other node uses `_flags`.
+    """
+    clickable, editable, secure = _flags(raw)
+    if _plain_zero_wrapper(raw):
+        clickable = False
+    return clickable, editable, secure
+
+
 def _noninteractive_wrapper(raw: RawNode) -> bool:
     """Untitled wrapper role that is not itself a control."""
     clickable, editable, _ = _flags(raw)
@@ -1087,10 +1123,15 @@ def _prune_inner(
     # gedit document, a VTE terminal) has real bounds below it. Such a hollow
     # container is kept only if descendants survive, with their union as rect.
     # Chrome does the same with a 0-height section around a painted form, but
-    # only under a document web/frame (or an internal frame). Zero-size outside
-    # that web content still drops, so macOS trees and their token budgets stay
-    # unchanged. A real rect that merely lies off every display still drops.
-    hollow_zero = in_web and _zero_extent(raw.size) and _noninteractive_wrapper(raw)
+    # only under a document web/frame (or an internal frame). The live Figma
+    # login wrapper is ``section#react-page`` at 1271 by 0 with actions
+    # ``click`` and ``showContextMenu``. ``click`` maps to AXPress, so the
+    # wrapper looks clickable; it is still hollow when it is unnamed,
+    # valueless, and not focusable. Zero-size outside that web content still
+    # drops, so macOS trees and their token budgets stay unchanged. A real
+    # rect that merely lies off every display still drops. A focusable,
+    # named, or genuinely interactive zero-size node still drops.
+    hollow_zero = in_web and _plain_zero_wrapper(raw)
     hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
     if bounds is None and not hollow:
         return None  # zero-size (not web) or fully offscreen: drop subtree
@@ -1148,7 +1189,7 @@ def _prune_inner(
             kept, dropped = _cap_children(kept, cap)
             elided += dropped
 
-    clickable, editable, _ = _flags(raw)
+    clickable, editable, _ = _target_flags(raw)
     interactive = clickable or editable
     if hollow:
         if not kept:
@@ -1217,7 +1258,11 @@ def _open_nested_frames(
             if pruned is not None:
                 kept.append(pruned)
             continue
-        if _noninteractive_wrapper(child_raw) or kind in ("docframe", "page", "iframe"):
+        if (
+            _noninteractive_wrapper(child_raw)
+            or _plain_zero_wrapper(child_raw)
+            or kind in ("docframe", "page", "iframe")
+        ):
             kids = tuple(accessor.children(child))
             room = kids[:_MAX_WALK_CHILDREN]
             elided += max(0, len(kids) - len(room))
@@ -1323,7 +1368,7 @@ def _flatten(
     """Assign pre-order refs and emit `Element`s (parents before children)."""
     ref = f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
-    clickable, editable, secure = _flags(node.raw)
+    clickable, editable, secure = _target_flags(node.raw)
     if node.node is not None:  # retain the live handle for act-time AX actions
         handles[ref] = node.node
     value: str | None = None

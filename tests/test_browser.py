@@ -396,6 +396,27 @@ def test_browser_scroll_wheel_sign_follows_the_tool_contract() -> None:
     assert wheel["deltaX"] == -2 and wheel["deltaY"] == -1
 
 
+def test_browser_printable_key_refuses_a_focused_password(monkeypatch) -> None:
+    d, t = _driver_on()
+    monkeypatch.setattr(d, "_focused_is_password", lambda: True)
+    with pytest.raises(ComputerUseError) as exc:
+        d.key_chord("a")
+    assert exc.value.code is ErrorCode.SECURE_FIELD
+    assert exc.value.detail["api"] == "document.activeElement"
+    with pytest.raises(ComputerUseError):
+        d.key_chord("shift+a")
+    assert [m for m, _p in t.sent if m == "Input.dispatchKeyEvent"] == []
+    d.key_chord("tab")
+    d.key_chord("ctrl+a")
+    downs = [p for m, p in t.sent if m == "Input.dispatchKeyEvent" and p["type"] == "keyDown"]
+    assert [p["key"] for p in downs] == ["Tab", "a"]
+    assert "text" not in downs[0] and downs[1]["modifiers"] == 2
+    monkeypatch.setattr(d, "_focused_is_password", lambda: False)
+    d.key_chord("a")
+    downs = [p for m, p in t.sent if m == "Input.dispatchKeyEvent" and p["type"] == "keyDown"]
+    assert downs[-1]["text"] == "a" and downs[-1]["modifiers"] == 0
+
+
 def test_browser_key_chord_dispatches_key_events() -> None:
     d, t = _driver_on()
     d.key_chord("cmd+a")

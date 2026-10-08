@@ -27,6 +27,7 @@ from a11y_computer_use.schema import (
     Snapshot,
     Target,
     WaitCondition,
+    printable_chord,
 )
 
 _TODO = (
@@ -212,6 +213,12 @@ class WindowsDriver:
         _win_input.validate_chord(chord)  # fail fast, including dry_run
         if dry_run:
             return None
+        if printable_chord(chord) and _focused_is_password():
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "the focused control is a password field; secrets are typed by the human",
+                detail={"api": "IUIAutomationElement.IsPassword (GetFocusedControl)"},
+            )
         _win_input.press_chord(chord)
         return None
 
