@@ -459,6 +459,9 @@ def linux_x11(monkeypatch):
     monkeypatch.setattr(pkg, "_linux_input", fake_input, raising=False)
     d = linux.LinuxDriver()
     monkeypatch.setattr(d, "frontmost_app", lambda: ("gedit", 42))
+    # These tests cover the XTEST password probe. The focused-editable lookup
+    # must not import gi (absent on macOS and Windows).
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app, **kw: None)
     return d, typed
 
 

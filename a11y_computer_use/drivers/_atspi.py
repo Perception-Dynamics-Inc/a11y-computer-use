@@ -130,12 +130,21 @@ _inited = False
 
 def _atspi():
     """The `Atspi` module, initialized once. Raises ImportError if PyGObject /
-    the AT-SPI2 typelib are absent (the driver turns that into a clear message)."""
-    global _inited
-    import gi
+    the AT-SPI2 typelib are absent (the driver turns that into a clear message).
 
-    gi.require_version("Atspi", "2.0")
-    from gi.repository import Atspi
+    The import stays inside this function. A missing ``gi`` module, or a
+    typelib ``require_version`` cannot load, is ImportError either way.
+    """
+    global _inited
+    try:
+        import gi
+    except ImportError as exc:
+        raise ImportError("PyGObject is not installed; the AT-SPI2 binding is unavailable") from exc
+    try:
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi
+    except (ImportError, ValueError) as exc:
+        raise ImportError("the AT-SPI2 typelib is not available") from exc
 
     if not _inited:
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
@@ -785,11 +794,15 @@ def focused_editable(app: str, *, max_nodes: int = 400):
 
     A password field is returned so the caller can refuse it before any
     write. None means there is no focused editable: nothing is focused, the
-    focused node has no EditableText, or the walk could not find focus. The
-    caller then uses keystrokes. The same node `insert_text` accepts, so a
-    coordinate click and a ref click share that helper.
+    focused node has no EditableText, the walk could not find focus, or
+    PyGObject is not installed. The caller then uses keystrokes. The same
+    node `insert_text` accepts, so a coordinate click and a ref click share
+    that helper.
     """
-    acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    except ImportError:
+        return None
     if truncated or acc is None:
         return None
     if is_secure(acc):

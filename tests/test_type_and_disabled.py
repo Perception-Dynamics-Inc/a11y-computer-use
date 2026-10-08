@@ -190,6 +190,14 @@ def test_selection_that_cannot_be_deleted_is_not_then_appended(atspi) -> None:
     assert field.lengths == []
 
 
+def test_focused_editable_without_pygobject_is_not_a_crash(monkeypatch) -> None:
+    def missing(*_args, **_kwargs):
+        raise ImportError("PyGObject is not installed")
+
+    monkeypatch.setattr(_atspi, "_focused_node", missing)
+    assert _atspi.focused_editable("editor") is None
+
+
 def test_coordinate_click_types_through_the_focused_editable(atspi, monkeypatch) -> None:
     """No remembered ref: look up the focused field and use insert_text."""
     driver = LinuxDriver()

@@ -457,9 +457,11 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
         assert driver.type_text("NEW") == 3
         assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep NEW keep"
 
-        front = driver.frontmost_app()[0]
         store = safety.PermissionStore(tmp_path / "permissions.json")
-        store.set_tier(front, safety.Tier.FULL)
+        store.set_tier(_TYPE_APP, safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != _TYPE_APP:
+            store.set_tier(front, safety.Tier.FULL)
         rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
         current = driver.snapshot(Scope.WINDOW, _TYPE_APP)
         rt._current = current
