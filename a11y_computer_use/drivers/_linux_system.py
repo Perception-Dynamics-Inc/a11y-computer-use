@@ -4,11 +4,14 @@ platform-dispatching helpers so the Runtime's gating works on Linux.
 
 App identity on Linux is the process comm name (e.g. "gedit", "chrome") read
 from ``/proc/<pid>/comm`` — the analog of a macOS bundle id / Windows exe for
-permission-keying. Comm is at most 15 bytes. A launcher the process drops
+permission-keying. A window with no pid uses its WM_CLASS instance when that
+property is set. Comm is at most 15 bytes. A launcher the process drops
 (``google-chrome`` runs as ``chrome``) and a name cut at that limit
 (``gnome-terminal-server`` runs as ``gnome-terminal-``) resolve to the comm.
 Window/desktop facts come from EWMH properties over python-xlib (pure Python,
-no build deps); clipboard shells out to xclip/xsel/wl-clipboard.
+no build deps). raise, focus, minimize, maximize, move, resize, and close are
+EWMH/ICCCM client messages. The clipboard shells out to xclip/xsel/wl-clipboard
+and returns text bytes unchanged.
 """
 
 from __future__ import annotations
@@ -62,6 +65,65 @@ def _comm_for_pid(pid: int) -> str | None:
 def _pid_of(win, d) -> int:
     val = _prop(win, d, "_NET_WM_PID")
     return int(val[0]) if val else 0
+
+
+def _wm_class_instance(win, d) -> str:
+    """WM_CLASS instance (the first of the two NUL-terminated strings).
+
+    A window with no ``_NET_WM_PID`` still has this name when the client set
+    it. xmessage's instance is ``xmessage``. An unreadable property is "".
+    """
+    val = _prop(win, d, "WM_CLASS")
+    if not val:
+        return ""
+    if isinstance(val, str):
+        return val.split("\x00", 1)[0].strip()
+    try:
+        raw = bytes(val)
+    except Exception:
+        return ""
+    return raw.split(b"\x00", 1)[0].decode("utf-8", "replace").strip()
+
+
+def _app_id(win, d) -> str:
+    """Permission-keying app id: process comm, else the WM_CLASS instance."""
+    return _comm_for_pid(_pid_of(win, d)) or _wm_class_instance(win, d)
+
+
+def _atom_is(candidate, expected) -> bool:
+    if candidate == expected:
+        return True
+    try:
+        return int(candidate) == int(expected)
+    except (TypeError, ValueError):
+        return str(candidate) == str(expected)
+
+
+def _is_hidden(win, d) -> bool:
+    """True when the window is iconic (ICCCM) or ``_NET_WM_STATE_HIDDEN``.
+
+    A property the display cannot intern (the synthetic tests hand back the
+    atom name as a string) is not treated as hidden, so a normal window stays
+    on screen.
+    """
+    state = _prop(win, d, "WM_STATE")
+    if state:
+        try:
+            if int(state[0]) == 3:  # IconicState
+                return True
+        except (TypeError, ValueError, IndexError):
+            pass
+    atoms = _prop(win, d, "_NET_WM_STATE")
+    if not atoms:
+        return False
+    try:
+        hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
+    except Exception:
+        return False
+    try:
+        return any(_atom_is(item, hidden) for item in atoms)
+    except Exception:
+        return False
 
 
 def _win_title(win, d) -> str:
@@ -171,7 +233,7 @@ def resolve_app(identifier: str) -> str:
     try:
         d = _display()
         for win in _managed_windows(d):
-            comm = (_comm_for_pid(_pid_of(win, d)) or "").lower()
+            comm = (_app_id(win, d) or "").lower()
             if needle in comm:
                 return comm  # the app itself beats any window that merely names it
             if by_alias is None and comm and _launcher_comm(needle, comm):
@@ -226,7 +288,7 @@ def running_apps() -> list[dict]:
         seen: set[str] = set()
         for win in _managed_windows(d):
             pid = _pid_of(win, d)
-            comm = _comm_for_pid(pid)
+            comm = _app_id(win, d)
             if not comm or comm in seen:
                 continue
             seen.add(comm)
@@ -238,23 +300,31 @@ def running_apps() -> list[dict]:
 
 
 def windows() -> list[dict]:
-    """Managed windows: {window_id, app, title, pid, bounds}."""
+    """Managed windows: {window_id, app, title, pid, bounds, on_screen}.
+
+    ``app`` is the process comm, or the WM_CLASS instance when the window has
+    no pid. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
+    ``on_screen`` false and ``bounds`` null, so a caller does not aim at the
+    rect it had before it was iconified.
+    """
     rows: list[dict] = []
     try:
         d = _display()
         for win in _managed_windows(d):
             pid = _pid_of(win, d)
-            geom = _geometry_on_root(win, d)
+            hidden = _is_hidden(win, d)
+            geom = None if hidden else _geometry_on_root(win, d)
             bounds = None
             if geom is not None:
                 gx, gy, gw, gh = geom
                 bounds = {"display_id": 0, "x": gx, "y": gy, "width": gw, "height": gh}
             rows.append({
                 "window_id": int(win.id),
-                "app": _comm_for_pid(pid) or "",
+                "app": _app_id(win, d),
                 "title": _win_title(win, d),
                 "pid": pid,
                 "bounds": bounds,
+                "on_screen": not hidden,
             })
     except Exception:
         return rows
@@ -270,40 +340,124 @@ def _window_by_id(d, window_id: int):
 
 
 def window_owner(window_id: int) -> str | None:
-    """comm name of the process owning managed window ``window_id`` (the
-    permission-keying app id), "" when the pid is unreadable, None when no
-    managed window has that id (or X is unreachable)."""
+    """App id of managed window ``window_id`` (the permission-keying name).
+
+    The process comm wins. A window with no pid uses its WM_CLASS instance.
+    "" when neither can be read. None when no managed window has that id
+    (or X is unreachable).
+    """
     try:
         d = _display()
         win = _window_by_id(d, window_id)
         if win is None:
             return None
-        return _comm_for_pid(_pid_of(win, d)) or ""
+        return _app_id(win, d)
     except Exception:
         return None
 
 
-def _send_active_window(d, win) -> None:
-    """EWMH: ask the window manager to activate ``win`` (raise + focus)."""
+def _client_message(d, win, atom_name: str, data: list) -> None:
+    """EWMH/ICCCM client message to the root, so the window manager handles it."""
     from Xlib import X, protocol
 
     event = protocol.event.ClientMessage(
-        window=win, client_type=_atom(d, "_NET_ACTIVE_WINDOW"),
-        data=(32, [1, X.CurrentTime, 0, 0, 0]),
+        window=win, client_type=_atom(d, atom_name),
+        data=(32, list(data)),
     )
     mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
     d.screen().root.send_event(event, event_mask=mask)
     d.flush()
 
 
+def _send_active_window(d, win) -> None:
+    """EWMH: ask the window manager to activate ``win`` (raise + focus)."""
+    from Xlib import X
+
+    _client_message(d, win, "_NET_ACTIVE_WINDOW", [1, X.CurrentTime, 0, 0, 0])
+
+
+def _with_window(window_id: int):
+    """(display, window) or (display, None) when the id is not managed."""
+    d = _display()
+    return d, _window_by_id(d, window_id)
+
+
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
     Returns False when no managed window has that id."""
-    d = _display()
-    win = _window_by_id(d, window_id)
+    d, win = _with_window(window_id)
     if win is None:
         return False
     _send_active_window(d, win)
+    return True
+
+
+def focus_window(window_id: int) -> bool:
+    """Ask the window manager to focus ``window_id`` (``_NET_ACTIVE_WINDOW``).
+
+    Under a standard EWMH window manager this is the same client message as
+    raise: activation raises and focuses, and a minimized window is restored.
+    The verb is still distinct so the caller can say which one it asked for.
+    Returns False when no managed window has that id.
+    """
+    return raise_window(window_id)
+
+
+def minimize_window(window_id: int) -> bool:
+    """Iconify ``window_id``: ICCCM ``WM_CHANGE_STATE`` plus ``_NET_WM_STATE_HIDDEN``.
+
+    Returns False when no managed window has that id.
+    """
+    d, win = _with_window(window_id)
+    if win is None:
+        return False
+    _client_message(d, win, "WM_CHANGE_STATE", [3, 0, 0, 0, 0])  # IconicState
+    hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
+    _client_message(d, win, "_NET_WM_STATE", [1, hidden, 0, 1, 0])  # _NET_WM_STATE_ADD
+    return True
+
+
+def maximize_window(window_id: int) -> bool:
+    """Maximize ``window_id`` vertically and horizontally in one ``_NET_WM_STATE``."""
+    d, win = _with_window(window_id)
+    if win is None:
+        return False
+    vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
+    horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
+    _client_message(d, win, "_NET_WM_STATE", [1, vert, horz, 1, 0])
+    return True
+
+
+def move_window(window_id: int, x: int, y: int) -> bool:
+    """Move ``window_id`` to root coordinates (x, y) via ``_NET_MOVERESIZE_WINDOW``.
+
+    Gravity is NorthWest. Only the X and Y flags are set, so the window
+    manager keeps the current size. Returns False when the id is not managed.
+    """
+    d, win = _with_window(window_id)
+    if win is None:
+        return False
+    # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
+    _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (3 << 8), int(x), int(y), 0, 0])
+    return True
+
+
+def resize_window(window_id: int, width: int, height: int) -> bool:
+    """Resize ``window_id`` via ``_NET_MOVERESIZE_WINDOW`` (width and height flags)."""
+    d, win = _with_window(window_id)
+    if win is None:
+        return False
+    # Flags Width=4 and Height=8.
+    _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (12 << 8), 0, 0, int(width), int(height)])
+    return True
+
+
+def close_window(window_id: int) -> bool:
+    """Ask the window manager to close ``window_id`` (``_NET_CLOSE_WINDOW``)."""
+    d, win = _with_window(window_id)
+    if win is None:
+        return False
+    _client_message(d, win, "_NET_CLOSE_WINDOW", [0, 1, 0, 0, 0])
     return True
 
 
@@ -454,7 +608,7 @@ def activate_app(identifier: str) -> str:
     resolved = identifier
     matched = None
     for win in _managed_windows(d):
-        comm = (_comm_for_pid(_pid_of(win, d)) or "").lower()
+        comm = (_app_id(win, d) or "").lower()
         title = _win_title(win, d).lower()
         if needle and (needle in comm or needle in title):
             resolved = comm or identifier
@@ -484,13 +638,24 @@ def activate_app(identifier: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _clip_reader() -> list[str] | None:
+# Text targets, most specific first. X11 atoms and Wayland MIME types.
+_TEXT_TARGETS = (
+    "UTF8_STRING",
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "STRING",
+    "TEXT",
+)
+
+
+def _clip_kind() -> str | None:
+    """Which clipboard reader is installed: xclip, xsel, or wl-paste."""
     if shutil.which("xclip"):
-        return ["xclip", "-selection", "clipboard", "-o"]
+        return "xclip"
     if shutil.which("xsel"):
-        return ["xsel", "--clipboard", "--output"]
+        return "xsel"
     if shutil.which("wl-paste"):
-        return ["wl-paste", "--no-newline"]
+        return "wl-paste"
     return None
 
 
@@ -504,21 +669,134 @@ def _clip_writer() -> list[str] | None:
     return None
 
 
-def read_clipboard() -> str | None:
-    cmd = _clip_reader()
-    if cmd is None:
-        return None
+def _clipboard_error(reason: str, message: str, **detail):
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    payload = {"platform": "linux", "reason": reason}
+    payload.update(detail)
+    return ComputerUseError(ErrorCode.UNSUPPORTED, message, detail=payload)
+
+
+def _no_clipboard_tool():
+    return _clipboard_error(
+        "missing_clipboard_tool",
+        "no clipboard tool found; install xclip, xsel, or wl-clipboard",
+        hint="apt install xclip, or apt install xsel, or apt install wl-clipboard",
+    )
+
+
+def _targets_cmd(kind: str) -> list[str]:
+    if kind == "xclip":
+        return ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"]
+    if kind == "xsel":
+        return ["xsel", "--clipboard", "--output", "--target", "TARGETS"]
+    return ["wl-paste", "--list-types"]
+
+
+def _read_cmd(kind: str, target: str) -> list[str]:
+    if kind == "xclip":
+        return ["xclip", "-selection", "clipboard", "-t", target, "-o"]
+    if kind == "xsel":
+        return ["xsel", "--clipboard", "--output", "--target", target]
+    # --no-newline keeps a clipboard that does not end in a newline exact.
+    return ["wl-paste", "--no-newline", "--type", target]
+
+
+def _run_clip(cmd: list[str], payload: bytes | None = None) -> subprocess.CompletedProcess:
+    """Run a clipboard tool and capture bytes. No universal-newline translation."""
+    return subprocess.run(cmd, input=payload, capture_output=True, timeout=5, check=False)
+
+
+def _target_lines(stdout: bytes) -> list[str]:
+    text = (stdout or b"").decode("utf-8", "replace")
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _pick_text_target(targets: list[str]) -> str | None:
+    present = {name.lower(): name for name in targets}
+    for name in _TEXT_TARGETS:
+        found = present.get(name.lower())
+        if found is not None:
+            return found
+    return None
+
+
+def read_clipboard() -> str:
+    """Clipboard text, byte for byte, decoded as UTF-8.
+
+    CR and CRLF are preserved. A text target that exists and holds zero bytes
+    returns "". Every other empty-looking case raises `ErrorCode.UNSUPPORTED`:
+
+    * no xclip, xsel, or wl-paste on PATH (reason ``missing_clipboard_tool``);
+    * targets exist and none of them are text (``clipboard_not_text``);
+    * the text bytes are not valid UTF-8 (``clipboard_invalid_utf8``);
+    * the clipboard has no owner, or the text target is not available
+      (``clipboard_no_owner``). That last one is not the zero-byte text case.
+    """
+    kind = _clip_kind()
+    if kind is None:
+        raise _no_clipboard_tool()
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return None
+        listed = _run_clip(_targets_cmd(kind))
+    except Exception as exc:
+        raise _clipboard_error(
+            "clipboard_no_owner",
+            f"clipboard targets could not be read: {exc}",
+        ) from exc
+    targets = _target_lines(listed.stdout)
+    if listed.returncode != 0 or not targets:
+        raise _clipboard_error(
+            "clipboard_no_owner",
+            "the clipboard has no owner, or no text target is available",
+            hint="A text clipboard that holds zero bytes is a different result and returns an empty string.",
+        )
+    target = _pick_text_target(targets)
+    if target is None:
+        shown = ", ".join(targets[:8])
+        raise _clipboard_error(
+            "clipboard_not_text",
+            f"the clipboard holds non-text data ({shown})",
+            targets=targets[:16],
+        )
+    try:
+        read = _run_clip(_read_cmd(kind, target))
+    except Exception as exc:
+        raise _clipboard_error(
+            "clipboard_no_owner",
+            f"clipboard text could not be read: {exc}",
+        ) from exc
+    if read.returncode != 0:
+        raise _clipboard_error(
+            "clipboard_no_owner",
+            "the clipboard has no owner, or the text target is not available",
+        )
+    data = read.stdout or b""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _clipboard_error(
+            "clipboard_invalid_utf8",
+            "the clipboard text is not valid UTF-8",
+            hint="The bytes were left unchanged; they were not replaced with U+FFFD.",
+        ) from exc
 
 
 def write_clipboard(text: str) -> None:
+    """Write ``text`` as UTF-8 bytes. A lone surrogate is `ValueError`.
+
+    No clipboard tool is `ErrorCode.UNSUPPORTED` (reason
+    ``missing_clipboard_tool``), naming xclip, xsel, and wl-clipboard.
+    """
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            "clipboard text must be valid Unicode; a lone surrogate cannot be encoded as UTF-8"
+        ) from exc
     cmd = _clip_writer()
     if cmd is None:
-        raise RuntimeError("no clipboard tool found; install xclip, xsel, or wl-clipboard")
+        raise _no_clipboard_tool()
     try:
-        subprocess.run(cmd, input=text, text=True, timeout=5, check=False)
-    except Exception as exc:  # pragma: no cover - environmental
-        raise RuntimeError(f"clipboard write failed: {exc}") from exc
+        _run_clip(cmd, payload)
+    except Exception as exc:
+        raise _clipboard_error("clipboard_write_failed", f"clipboard write failed: {exc}") from exc

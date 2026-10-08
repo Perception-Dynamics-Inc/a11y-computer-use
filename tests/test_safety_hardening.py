@@ -709,14 +709,49 @@ def test_linux_window_owner_and_raise_by_x_window_id(fake_x11) -> None:
         d.raise_window(8)
 
 
+def test_linux_ewmh_verbs_send_the_client_messages(fake_x11) -> None:
+    """focus, minimize, maximize, move, resize, and close are EWMH/ICCCM messages."""
+    _sent, messages = fake_x11
+    assert _linux_system.focus_window(7) is True
+    assert _linux_system.minimize_window(7) is True
+    assert _linux_system.maximize_window(7) is True
+    assert _linux_system.move_window(7, 30, 40) is True
+    assert _linux_system.resize_window(7, 200, 100) is True
+    assert _linux_system.close_window(7) is True
+    assert _linux_system.focus_window(8) is False
+    assert [m["client_type"] for m in messages] == [
+        "_NET_ACTIVE_WINDOW",
+        "WM_CHANGE_STATE",
+        "_NET_WM_STATE",
+        "_NET_WM_STATE",
+        "_NET_MOVERESIZE_WINDOW",
+        "_NET_MOVERESIZE_WINDOW",
+        "_NET_CLOSE_WINDOW",
+    ]
+    assert messages[1]["data"] == (32, [3, 0, 0, 0, 0])
+    assert messages[2]["data"] == (32, [1, "_NET_WM_STATE_HIDDEN", 0, 1, 0])
+    assert messages[3]["data"] == (
+        32, [1, "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ", 1, 0],
+    )
+    assert messages[4]["data"] == (32, [1 | (3 << 8), 30, 40, 0, 0])
+    assert messages[5]["data"] == (32, [1 | (12 << 8), 0, 0, 200, 100])
+    assert messages[6]["data"] == (32, [0, 1, 0, 0, 0])
+
+
 def test_linux_window_verbs_are_unsupported_on_native_wayland(monkeypatch) -> None:
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.delenv("DISPLAY", raising=False)
     d = linux.LinuxDriver()
-    for call in (lambda: d.window_owner(7), lambda: d.raise_window(7)):
+    for call in (
+        lambda: d.window_owner(7), lambda: d.raise_window(7), lambda: d.focus_window(7),
+        lambda: d.minimize_window(7), lambda: d.maximize_window(7),
+        lambda: d.move_window(7, 1, 2), lambda: d.resize_window(7, 10, 10),
+        lambda: d.close_window(7),
+    ):
         with pytest.raises(ComputerUseError) as ei:
             call()
         assert ei.value.code is ErrorCode.UNSUPPORTED
+        assert "Wayland" in ei.value.message
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS driver imports pyobjc")

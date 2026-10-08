@@ -547,9 +547,12 @@ class WaitFor:
 class WindowVerb(str, Enum):
     LIST = "list"
     RAISE = "raise"
+    FOCUS = "focus"
     MOVE = "move"
     RESIZE = "resize"
     MINIMIZE = "minimize"
+    MAXIMIZE = "maximize"
+    CLOSE = "close"
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,9 +560,9 @@ class WindowOp:
     """A window-management verb.
 
     Attributes:
-        verb: What to do.
-        window_id: CGWindowID of the target window; required for every verb
-            except LIST.
+        verb: What to do. Every value is a real verb. A backend that cannot
+            perform one returns `ErrorCode.UNSUPPORTED` and names the platform.
+        window_id: Window id of the target; required for every verb except LIST.
         position: New top-left corner (display-qualified), MOVE only.
         size: New (width, height) in physical pixels, RESIZE only.
     """

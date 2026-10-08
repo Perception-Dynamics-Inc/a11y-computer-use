@@ -243,6 +243,9 @@ def test_apps_windows_clipboard(app) -> None:
     payload = "clip-roundtrip ünï 42"
     driver.write_clipboard(payload)
     assert driver.read_clipboard() == payload
+    crlf = "a\r\nb\rc"
+    driver.write_clipboard(crlf)
+    assert driver.read_clipboard() == crlf
 
 
 @requires_desktop
@@ -278,3 +281,121 @@ def test_gated_runtime_coordinate_path(app, tmp_path, monkeypatch) -> None:
     assert _entry(_fresh(driver)).value == "runtime path ok"
     text = rt.desktop_snapshot(_APP)
     assert "Save" in text
+
+
+def _until(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        last = predicate()
+        if last:
+            return last
+        time.sleep(0.1)
+    return last
+
+
+@requires_desktop
+def test_clipboard_crlf_non_text_and_invalid_utf8() -> None:
+    """xclip under the Linux CI display: bytes in, the same bytes out, or an error."""
+    import shutil
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ComputerUseError
+
+    if shutil.which("xclip") is None:
+        pytest.skip("xclip is not installed")
+    driver = LinuxDriver()
+    driver.write_clipboard("a\r\nb\rc\x00ü")
+    assert driver.read_clipboard() == "a\r\nb\rc\x00ü"
+    subprocess.run(
+        ["xclip", "-selection", "clipboard", "-t", "image/png", "-i"],
+        input=b"\x89PNG\r\nnot-really", check=True, timeout=5,
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        driver.read_clipboard()
+    assert exc.value.detail["reason"] == "clipboard_not_text"
+    subprocess.run(
+        ["xclip", "-selection", "clipboard", "-t", "UTF8_STRING", "-i"],
+        input=b"ok\xff\xfe", check=True, timeout=5,
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        driver.read_clipboard()
+    assert exc.value.detail["reason"] == "clipboard_invalid_utf8"
+
+
+@requires_desktop
+def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
+    """An X client under openbox: WM_CLASS app id, minimized off-screen, EWMH verbs."""
+    import json
+
+    from Xlib import X, display
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ComputerUseError
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dpy = display.Display()
+    screen = dpy.screen()
+    win = screen.root.create_window(
+        40, 60, 180, 90, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
+        background_pixel=screen.white_pixel, event_mask=X.StructureNotifyMask,
+    )
+    win.set_wm_name("a11y-probe")
+    win.set_wm_class("a11yprobe", "A11yProbe")
+    win.map()
+    dpy.flush()
+    driver = LinuxDriver()
+
+    def row():
+        return next((item for item in driver.windows() if item["window_id"] == win.id), None)
+
+    try:
+        found = _until(row)
+        assert found is not None, "the window manager did not adopt the probe window"
+        assert found["app"] == "a11yprobe", found
+        assert found["on_screen"] is True and found["bounds"]
+        store = safety.PermissionStore(tmp_path / "p.json")
+        store.set_tier("a11yprobe", safety.Tier.CLICK)
+        store.set_tier("a11y", safety.Tier.READ)
+        store.set_tier("not-running-a11y-zzz", safety.Tier.READ)
+        rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+        matched = json.loads(rt.window("list", app="A11yProbe"))
+        assert any(item["window_id"] == win.id for item in matched)
+        assert json.loads(rt.window("list", app="not-running-a11y-zzz")) == []
+        assert all(item["window_id"] != win.id for item in json.loads(rt.window("list", app="a11y")))
+
+        rt.window("minimize", window_id=win.id)
+        hidden = _until(lambda: (current := row()) and current.get("on_screen") is False and current)
+        assert hidden, row()
+        assert hidden["on_screen"] is False and hidden["bounds"] is None
+
+        rt.window("focus", window_id=win.id)
+        shown = _until(lambda: (current := row()) and current.get("on_screen") is True and current)
+        assert shown, row()
+
+        rt.window("move", window_id=win.id, x=300, y=180)
+        moved = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["x"] - 300) < 48 and abs(current["bounds"]["y"] - 180) < 48
+        ) and current)
+        assert moved, row()
+
+        rt.window("resize", window_id=win.id, width=240, height=140)
+        resized = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["width"] - 240) < 48 and abs(current["bounds"]["height"] - 140) < 48
+        ) and current)
+        assert resized, row()
+
+        rt.window("maximize", window_id=win.id)
+        rt.window("close", window_id=win.id)
+        gone = _until(lambda: row() is None and True)
+        assert gone, row()
+    except ComputerUseError:
+        raise
+    finally:
+        try:
+            win.destroy()
+            dpy.flush()
+        except Exception:
+            pass
+        dpy.close()

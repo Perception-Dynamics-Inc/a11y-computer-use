@@ -899,12 +899,40 @@ class LinuxDriver:
 
     def raise_window(self, window_id: int) -> None:
         """EWMH ``_NET_ACTIVE_WINDOW`` client message for that window."""
+        self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
+
+    def focus_window(self, window_id: int) -> None:
+        """EWMH ``_NET_ACTIVE_WINDOW``. The window manager raises and focuses."""
+        self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
+
+    def minimize_window(self, window_id: int) -> None:
+        """ICCCM iconic state plus ``_NET_WM_STATE_HIDDEN``."""
+        self._ewmh(window_id, "minimize_window", lambda sys: sys.minimize_window(window_id))
+
+    def maximize_window(self, window_id: int) -> None:
+        """``_NET_WM_STATE`` maximized vertically and horizontally."""
+        self._ewmh(window_id, "maximize_window", lambda sys: sys.maximize_window(window_id))
+
+    def move_window(self, window_id: int, x: int, y: int) -> None:
+        """``_NET_MOVERESIZE_WINDOW`` with the X and Y flags."""
+        self._ewmh(window_id, "move_window", lambda sys: sys.move_window(window_id, x, y))
+
+    def resize_window(self, window_id: int, width: int, height: int) -> None:
+        """``_NET_MOVERESIZE_WINDOW`` with the width and height flags."""
+        self._ewmh(window_id, "resize_window", lambda sys: sys.resize_window(window_id, width, height))
+
+    def close_window(self, window_id: int) -> None:
+        """``_NET_CLOSE_WINDOW`` client message."""
+        self._ewmh(window_id, "close_window", lambda sys: sys.close_window(window_id))
+
+    def _ewmh(self, window_id: int, op: str, call) -> None:
+        """Run an X11 window verb. Native Wayland has no EWMH window ids."""
         if _on_wayland():
-            raise _wayland_window_error("raise_window")
+            raise _wayland_window_error(op)
         from a11y_computer_use.drivers import _linux_system
 
         self._focused_editable = None
-        if not _linux_system.raise_window(window_id):
+        if not call(_linux_system):
             raise _no_such_window(window_id)
 
     def _menu_root(self, app: str) -> object:
