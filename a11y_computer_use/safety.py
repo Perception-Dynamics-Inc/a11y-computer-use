@@ -39,6 +39,7 @@ from a11y_computer_use.schema import (
     Element,
     KeyChord,
     ObserveOp,
+    printable_chord,
     Scroll,
     TypeText,
     WaitFor,
@@ -59,7 +60,9 @@ REDACTED = "[REDACTED]"
 #: Param names that carry injectable content and are redacted when an action
 #: touches a secure field (`AuditLog.record_action` with ``secure=True``).
 #: `TypeText.text` is redacted on every call, secure or not; see
-#: `_redact_typed_text`. A key chord is redacted only when ``secure=True``.
+#: `_redact_typed_text`. A printable key chord is redacted the same way
+#: (`_redact_printable_chord`). Any other key chord is redacted only when
+#: ``secure=True``.
 _SENSITIVE_PARAMS: frozenset[str] = frozenset({"text", "chord"})
 
 
@@ -790,6 +793,19 @@ def _redact_typed_text(params: dict[str, object], text: str) -> dict[str, object
     return redacted
 
 
+def _redact_printable_chord(params: dict[str, object]) -> dict[str, object]:
+    """Drop a printable chord. The row keeps a placeholder and a count of 1.
+
+    A printable chord is one character, or shift plus that character. It can
+    spell a secret one key at a time, so the chord text is never stored.
+    Navigation chords are not passed here.
+    """
+    redacted = dict(params)
+    redacted["chord"] = REDACTED
+    redacted["chars"] = 1
+    return redacted
+
+
 def _redact_target_values(params: dict[str, object]) -> dict[str, object]:
     """Strip element ``value``s from serialized targets, keeping the anchor.
 
@@ -817,8 +833,9 @@ class AuditLog:
     Oversized records become explicit summaries, never silently broken JSON.
     Ordinary non-secure entries keep replayable params, except typed text:
     every `TypeText` stores ``text`` as ``[REDACTED]`` and ``chars`` as the
-    character count, and never the characters. Key chords stay in the row
-    unless ``secure=True``. Local processes sharing this directory serialize
+    character count, and never the characters. A printable key chord stores
+    ``chord`` as ``[REDACTED]`` and ``chars`` as 1. Other key chords stay in
+    the row unless ``secure=True``. Local processes sharing this directory serialize
     rotation and appends through a sidecar lock. Use separate directories per
     worker/tenant when isolation is required. Network filesystems are not
     supported.
@@ -999,8 +1016,13 @@ class AuditLog:
         every platform whether or not the field was detected as secure: the
         row stores ``text: "[REDACTED]"`` and ``chars`` (the character count)
         for `TypeText`, which is what ``type``, ``set_value``, an ``act`` type
-        step, and addressed typing record. A key chord is redacted only when
-        ``secure`` is true. Two further redactions are unconditional:
+        step, and addressed typing record. A printable `KeyChord` (one
+        character, or shift plus that character) stores ``chord`` as
+        ``[REDACTED]`` and ``chars`` as 1, on every platform, whether or not a
+        secure field was detected. That covers ``key`` and an ``act`` key
+        step. Tab, Enter, Escape, arrows, Backspace, Delete, Home, End, and
+        modifier shortcuts stay in the row unless ``secure`` is true. Two
+        further redactions are unconditional:
         clipboard-write text (the standard staging path for a secret about to
         be pasted) and element ``value``s inside serialized targets (a clicked
         field may hold a revealed secret).
@@ -1009,6 +1031,8 @@ class AuditLog:
         kind = payload.pop("kind")
         if isinstance(action, TypeText):
             payload = _redact_typed_text(payload, action.text)
+        elif isinstance(action, KeyChord) and printable_chord(action.chord):
+            payload = _redact_printable_chord(payload)
         elif secure or isinstance(action, ClipboardOp):
             payload = _redact(payload)
         if isinstance(action, WebMcpOp) and payload.get("arguments") is not None:

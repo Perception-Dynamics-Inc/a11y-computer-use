@@ -543,15 +543,18 @@ def fake_uiautomation(monkeypatch):
     auto.GetFocusedControl = lambda: state["focused"]
     monkeypatch.setitem(sys.modules, "uiautomation", auto)
     typed: list[str] = []
+    pressed: list[str] = []
     fake_input = types.ModuleType("a11y_computer_use.drivers._win_input")
     fake_input.type_unicode = typed.append
+    fake_input.press_chord = pressed.append
+    fake_input.validate_chord = lambda chord: None
     monkeypatch.setitem(sys.modules, "a11y_computer_use.drivers._win_input", fake_input)
     monkeypatch.setattr(pkg, "_win_input", fake_input, raising=False)
-    return state, typed
+    return state, typed, pressed
 
 
 def test_windows_type_refuses_a_focused_password_control(fake_uiautomation) -> None:
-    state, typed = fake_uiautomation
+    state, typed, _pressed = fake_uiautomation
     state["focused"] = types.SimpleNamespace(IsPassword=True)
     with pytest.raises(ComputerUseError) as ei:
         windows.WindowsDriver().type_text("hunter2")
@@ -563,6 +566,23 @@ def test_windows_type_refuses_a_focused_password_control(fake_uiautomation) -> N
     state["focused"] = None  # no focused control: no signal, typing proceeds
     windows.WindowsDriver().type_text("more")
     assert typed == ["hello", "more"]
+
+
+def test_windows_printable_key_refuses_a_focused_password_control(fake_uiautomation) -> None:
+    state, _typed, pressed = fake_uiautomation
+    state["focused"] = types.SimpleNamespace(IsPassword=True)
+    with pytest.raises(ComputerUseError) as ei:
+        windows.WindowsDriver().key_chord("a")
+    assert ei.value.code is ErrorCode.SECURE_FIELD and "IsPassword" in ei.value.detail["api"]
+    with pytest.raises(ComputerUseError):
+        windows.WindowsDriver().key_chord("shift+a")
+    assert pressed == []
+    windows.WindowsDriver().key_chord("tab")
+    windows.WindowsDriver().key_chord("ctrl+a")
+    assert pressed == ["tab", "ctrl+a"]
+    state["focused"] = types.SimpleNamespace(IsPassword=False)
+    windows.WindowsDriver().key_chord("a")
+    assert pressed[-1] == "a"
 
 
 # --------------------------------------------------------------------------- #

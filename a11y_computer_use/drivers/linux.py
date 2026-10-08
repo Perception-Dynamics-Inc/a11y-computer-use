@@ -24,6 +24,7 @@ from a11y_computer_use.schema import (
     ComputerUseError,
     Element,
     ErrorCode,
+    printable_chord,
     MouseButton,
     Point,
     Scope,
@@ -282,6 +283,10 @@ class LinuxDriver:
 
         self._focused_editable = None
         if element.secure:
+            return False
+        # A plain zero-size web wrapper can carry Chrome's click action and
+        # still not be a target. press_element must not fire that action.
+        if not element.clickable and not element.editable:
             return False
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
@@ -711,6 +716,20 @@ class LinuxDriver:
         # The XTEST path types into whatever holds keyboard focus, so probe the
         # focused node of the frontmost app first (the Linux analog of macOS's
         # AXFocusedUIElement check): a password field there refuses the typing.
+        self._refuse_xtest_password_focus()
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
+        return None
+
+    def _refuse_xtest_password_focus(self) -> None:
+        """The focused-password probe `type_text` uses before XTEST keystrokes.
+
+        A printable `key` chord lands in the same focused control, so it uses
+        this probe too. Navigation chords do not.
+        """
+        from a11y_computer_use.drivers import _atspi
+
         app_id, _pid = self.frontmost_app()
         verdict = self._run(lambda: _atspi.focused_secure(app_id)) if app_id else False
         if verdict is True:
@@ -724,10 +743,6 @@ class LinuxDriver:
                 "focus probe bound); focus a field through a ref (click/set_value) before typing",
                 detail={"api": "AT-SPI focus walk exhausted", "app": app_id},
             )
-        from a11y_computer_use.drivers import _linux_input
-
-        _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
-        return None
 
     def key_chord(self, chord: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
@@ -739,6 +754,8 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        if printable_chord(chord):
+            self._refuse_xtest_password_focus()
         self._focused_editable = None
         _linux_input.press_chord(chord)
         return None

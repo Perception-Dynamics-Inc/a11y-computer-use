@@ -42,6 +42,7 @@ from a11y_computer_use.schema import (
     Snapshot,
     Target,
     WaitCondition,
+    printable_chord,
 )
 
 if TYPE_CHECKING:
@@ -509,6 +510,12 @@ class BrowserDriver:
             return None
         if pre_check is not None:
             pre_check()
+        if printable_chord(chord) and self._focused_is_password():
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "the focused element is a password field; secrets are typed by the human",
+                detail={"api": "document.activeElement"},
+            )
         sess = self._connect()
         for ev in events:
             sess.call("Input.dispatchKeyEvent", ev)

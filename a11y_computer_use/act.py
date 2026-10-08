@@ -54,6 +54,7 @@ from a11y_computer_use.schema import (
     ErrorCode,
     KeyChord,
     MouseButton,
+    printable_chord,
     Point,
     Scroll,
     ScrollUnit,
@@ -246,6 +247,32 @@ def _secure_input_enabled() -> bool:
         return bool(lib.IsSecureEventInputEnabled())
     except (OSError, AttributeError):
         return False
+
+
+def _password_focus_signal() -> str | None:
+    """The same signal `type_text` uses when a password field has focus.
+
+    ``IsSecureEventInputEnabled`` when some app holds secure event input,
+    else ``AXFocusedUIElement`` when the focused element is an
+    ``AXSecureTextField``. None when neither is set.
+    """
+    if _secure_input_enabled():
+        return "IsSecureEventInputEnabled"
+    if _focused_element_secure():
+        return "AXFocusedUIElement"
+    return None
+
+
+def _refuse_password_focus() -> None:
+    """Raise `ErrorCode.SECURE_FIELD` when a password field has focus."""
+    signal = _password_focus_signal()
+    if signal is None:
+        return
+    raise ComputerUseError(
+        ErrorCode.SECURE_FIELD,
+        "a password field has focus; typing requires human handoff",
+        detail={"api": signal},
+    )
 
 
 def _focused_element_secure() -> bool:
@@ -720,17 +747,7 @@ def type_text(
         pre_check(action)
     if not text:
         return []
-    secure_signal = (
-        "IsSecureEventInputEnabled"
-        if _secure_input_enabled()
-        else ("AXFocusedUIElement" if _focused_element_secure() else None)
-    )
-    if secure_signal is not None:
-        raise ComputerUseError(
-            ErrorCode.SECURE_FIELD,
-            "a password field has focus; typing requires human handoff",
-            detail={"api": secure_signal},
-        )
+    _refuse_password_focus()
     if not dry_run:
         _require_ax()
     if len(text) > CLIPBOARD_PATH_THRESHOLD:
@@ -788,6 +805,8 @@ def key_chord(
     action = KeyChord(chord=chord)
     if pre_check is not None:
         pre_check(action)
+    if printable_chord(chord):
+        _refuse_password_focus()
     if not dry_run:
         _require_ax()
     events = [

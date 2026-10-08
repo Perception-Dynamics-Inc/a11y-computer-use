@@ -147,6 +147,77 @@ def test_failed_set_value_does_not_leave_a_typing_target(focus_driver, monkeypat
     assert driver._focused_editable is None
 
 
+@pytest.mark.parametrize("chord", ["a", "shift+a", "shift+1", "space"])
+def test_printable_key_refuses_a_focused_password_field(focus_driver, monkeypatch, chord: str) -> None:
+    driver, _, _, _, _, _ = focus_driver
+    pressed: list[str] = []
+    sys.modules["a11y_computer_use.drivers._linux_input"].press_chord = pressed.append
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: True)
+    with pytest.raises(ComputerUseError) as error:
+        driver.key_chord(chord)
+    assert error.value.code is ErrorCode.SECURE_FIELD
+    assert "password field" in error.value.message
+    assert pressed == []
+
+
+@pytest.mark.parametrize("chord", [
+    "tab", "shift+tab", "enter", "escape", "left", "right", "up", "down",
+    "backspace", "delete", "home", "end", "ctrl+a", "alt+f4",
+])
+def test_navigation_and_shortcuts_still_reach_a_focused_password_field(
+    focus_driver, monkeypatch, chord: str
+) -> None:
+    driver, _, _, _, _, _ = focus_driver
+    pressed: list[str] = []
+    sys.modules["a11y_computer_use.drivers._linux_input"].press_chord = pressed.append
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: True)
+    driver.key_chord(chord)
+    assert pressed == [chord]
+
+
+def test_key_and_act_key_refuse_and_redact_a_printable_chord(
+    focus_driver, monkeypatch, tmp_path
+) -> None:
+    driver, front, _, _, _, _ = focus_driver
+    pressed: list[str] = []
+    sys.modules["a11y_computer_use.drivers._linux_input"].press_chord = pressed.append
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: True)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(front["app"], safety.Tier.FULL)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: front["app"])
+    runtime = server.Runtime(
+        driver=driver, store=store, audit=safety.AuditLog(tmp_path / "audit"),
+    )
+    with pytest.raises(ComputerUseError) as error:
+        runtime.key("a")
+    assert error.value.code is ErrorCode.SECURE_FIELD
+    assert pressed == []
+    row = json.loads(next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()[-1])
+    assert row["action"] == "keychord" and row["result"] == "secure_field"
+    assert row["params"]["chord"] == "[REDACTED]" and row["params"]["chars"] == 1
+    raw = next((tmp_path / "audit").glob("*.jsonl")).read_text()
+    assert '"chord": "a"' not in raw
+
+    batch = json.loads(runtime.act_batch([{"do": "key", "chord": "shift+a"}]))
+    assert batch[0]["ok"] is False and "secure_field" in batch[0]["error"]
+    assert pressed == []
+    raw = next((tmp_path / "audit").glob("*.jsonl")).read_text()
+    assert "shift+a" not in raw
+
+    assert runtime.key("tab").startswith("pressed tab")
+    assert pressed == ["tab"]
+    tab = json.loads(next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()[-1])
+    assert tab["params"]["chord"] == "tab" and tab["result"] == "ok"
+
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
+    assert runtime.key("a").startswith("pressed a")
+    assert pressed[-1] == "a"
+    ok = json.loads(next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()[-1])
+    assert ok["result"] == "ok"
+    assert ok["params"]["chord"] == "[REDACTED]" and ok["params"]["chars"] == 1
+    assert '"chord": "a"' not in next((tmp_path / "audit").glob("*.jsonl")).read_text()
+
+
 def test_dry_run_keeps_the_existing_focus_target(focus_driver) -> None:
     driver, _, field, handle, _, _ = focus_driver
     driver.press_element(field)

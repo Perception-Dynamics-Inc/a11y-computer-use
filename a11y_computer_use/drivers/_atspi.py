@@ -107,6 +107,12 @@ def atspi_web_kind(role_name: str) -> str:
 
 # AT-SPI action name (lowercased) -> AX action the pruning engine treats as
 # "interactive" (`_PRESS_ACTIONS` = AXPress/AXOpen/AXConfirm/AXPick).
+# ``click`` on a real control is a press. Chrome also stamps ``click``,
+# ``clickAncestor``, and ``showContextMenu`` on plain divs. ``clickAncestor``
+# and ``showContextMenu`` are not presses: a context menu is not activation,
+# and clickAncestor would mark every container that holds a click listener.
+# A zero-size web wrapper that still receives AXPress from ``click`` is not a
+# target; the pruner drops that flag (`observe._plain_zero_wrapper`).
 _PRESS_ACTION_NAMES = frozenset(
     {"click", "press", "activate", "do default", "jump", "open", "toggle",
      "expand", "collapse", "expand or contract", "show", "showmenu", "menu"}
@@ -298,14 +304,14 @@ def _value_text(acc, role: str) -> object | None:
 
 
 def _state_flags(acc):
-    """(enabled, focused, checked, selected, expanded) from the state set.
+    """(enabled, focused, checked, selected, expanded, focusable) from the state set.
 
     checked/expanded are None when the element is not checkable/expandable so
     the shared schema can tell "off" apart from "not a checkbox"."""
     Atspi = _atspi()
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
-        return True, False, None, False, None
+        return True, False, None, False, None, False
     st = getattr(Atspi, "StateType", None)
 
     def has(name: str) -> bool:
@@ -317,7 +323,8 @@ def _state_flags(acc):
     checked = has("CHECKED") if (has("CHECKABLE") or has("CHECKED")) else None
     selected = has("SELECTED")
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
-    return enabled, focused, checked, selected, expanded
+    focusable = has("FOCUSABLE")
+    return enabled, focused, checked, selected, expanded, focusable
 
 
 # ARIA role (AT-SPI 'xml-roles' attribute, set by Chromium/GTK for web content)
@@ -501,7 +508,7 @@ class ATSPIAccessor:
             # Keep a 0-height section's size. Hit-testing still treats it as
             # no box; only the snapshot walk needs the zero extent.
             position, size = _extents(node, keep_zero=True)
-        enabled, focused, checked, selected, expanded = _state_flags(node)
+        enabled, focused, checked, selected, expanded, focusable = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
         return RawNode(
@@ -511,6 +518,7 @@ class ATSPIAccessor:
             description=str(description),
             enabled=enabled,
             focused=focused,
+            focusable=focusable,
             position=position,
             size=size,
             actions=_action_names(node),

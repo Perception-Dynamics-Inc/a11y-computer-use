@@ -323,6 +323,56 @@ Target: TypeAlias = Element | Point
 #: always lowercase.
 MODIFIER_KEYS: frozenset[str] = frozenset({"cmd", "ctrl", "alt", "shift", "fn"})
 
+#: Named keys that insert one character. Navigation and editing keys are not
+#: in this set. A chord of one of these, or shift plus one of these, is printable.
+_PRINTABLE_NAMED_KEYS: frozenset[str] = frozenset({
+    "space",
+    "minus", "equal", "plus", "comma", "period", "slash", "backslash",
+    "semicolon", "apostrophe", "quote", "grave", "backtick",
+    "bracketleft", "bracketright", "leftbracket", "rightbracket",
+    "less", "greater",
+})
+
+#: Keys that do not insert a character, including with Shift held.
+_NONPRINTABLE_KEYS: frozenset[str] = frozenset({
+    "tab", "enter", "return", "escape", "esc",
+    "left", "right", "up", "down",
+    "backspace", "delete", "forward_delete",
+    "home", "end", "pageup", "pagedown", "insert",
+    "capslock", "numlock", "scrolllock",
+    "print", "printscreen", "pause", "menu",
+}) | frozenset(f"f{i}" for i in range(1, 25))
+
+#: Modifiers that make a chord a shortcut rather than a typed character.
+#: Shift is the one modifier a printable chord may carry.
+_BLOCKING_MODIFIERS: frozenset[str] = frozenset({
+    "ctrl", "control", "alt", "option", "super", "win", "cmd", "meta", "fn",
+})
+
+
+def printable_chord(chord: str) -> bool:
+    """Whether ``chord`` inserts one character into the focused field.
+
+    Printable: a single character, or shift plus that character. Letters,
+    digits, space, and named punctuation count. Not printable, and therefore
+    still sent while a password field is focused: Tab, Shift+Tab, Enter,
+    Escape, the arrows, Backspace, Delete, Home, End, function keys, and any
+    chord that holds ctrl, alt, super, cmd, or fn.
+    """
+    parts = [part.strip().lower() for part in chord.split("+")]
+    if not parts or any(not part for part in parts):
+        return False
+    *mods, key = parts
+    if any(mod in _BLOCKING_MODIFIERS for mod in mods):
+        return False
+    if any(mod != "shift" for mod in mods):
+        return False
+    if key in _NONPRINTABLE_KEYS or key in _BLOCKING_MODIFIERS or key == "shift":
+        return False
+    if len(key) == 1 and key.isprintable():
+        return True
+    return key in _PRINTABLE_NAMED_KEYS
+
 
 @dataclass(frozen=True, slots=True)
 class Click:

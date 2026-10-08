@@ -311,8 +311,8 @@ def test_audit_redacts_secure_field_content(home: Path, action, param: str) -> N
 
 def test_audit_always_redacts_typed_text_and_keeps_the_count(home: Path) -> None:
     """``type``, ``set_value``, an ``act`` type step, and addressed typing all
-    record a TypeText. The characters never reach disk. A key chord is still
-    stored when the action is not secure."""
+    record a TypeText. The characters never reach disk. A navigation chord is
+    still stored when the action is not secure. A printable chord is not."""
     store = PermissionStore()
     store.set_tier(APP, Tier.FULL)
     typed = TypeText(text="hunter2-secret")
@@ -329,6 +329,38 @@ def test_audit_always_redacts_typed_text_and_keeps_the_count(home: Path) -> None
     path = AuditLog().record_action(chord, app=APP, decision=decision, result="ok")
     entry = json.loads(path.read_text().splitlines()[-1])
     assert entry["params"]["chord"] == "ctrl+a"
+
+
+def test_audit_always_redacts_a_printable_chord(home: Path) -> None:
+    """A single character, or shift plus that character, is never stored.
+
+    Tab, Shift+Tab, Enter, Escape, arrows, Backspace, Delete, Home, End,
+    and a modifier shortcut stay in the row when the action is not secure.
+    """
+    from a11y_computer_use.schema import printable_chord
+
+    store = PermissionStore()
+    store.set_tier(APP, Tier.FULL)
+    for chord in ("a", "shift+a", "shift+1", "space"):
+        assert printable_chord(chord)
+        action = KeyChord(chord=chord)
+        decision = check_action(action, APP, store=store)
+        path = AuditLog().record_action(action, app=APP, decision=decision, result="ok")
+        raw = path.read_text().splitlines()[-1]
+        entry = json.loads(raw)
+        assert entry["params"]["chord"] == REDACTED
+        assert entry["params"]["chars"] == 1
+        assert f'"chord": "{chord}"' not in raw
+    for chord in (
+        "tab", "shift+tab", "enter", "escape", "left", "backspace", "delete",
+        "home", "end", "ctrl+a", "cmd+shift+s", "alt+f4",
+    ):
+        assert not printable_chord(chord)
+        action = KeyChord(chord=chord)
+        decision = check_action(action, APP, store=store)
+        path = AuditLog().record_action(action, app=APP, decision=decision, result="ok")
+        entry = json.loads(path.read_text().splitlines()[-1])
+        assert entry["params"]["chord"] == chord
 
 
 def test_audit_always_redacts_clipboard_write_text(home: Path) -> None:

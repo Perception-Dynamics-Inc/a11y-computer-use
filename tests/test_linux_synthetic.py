@@ -67,14 +67,31 @@ def _geometry():
 
 
 def _node(role, title="", *, value=None, actions=(), pos=(0.0, 0.0), size=(1200.0, 700.0),
-          children=(), atspi_web=""):
+          children=(), atspi_web="", focusable=False, stable_id=None):
     return (
         RawNode(
             role=role, title=title, value=value, actions=actions, position=pos, size=size,
-            atspi_web=atspi_web,
+            atspi_web=atspi_web, focusable=focusable, stable_id=stable_id,
         ),
         list(children),
     )
+
+
+def _atspi_actions(*names: str) -> tuple[str, ...]:
+    """What `_action_names` stores for these AT-SPI action names."""
+
+    class _Action:
+        def get_n_actions(self):
+            return len(names)
+
+        def get_action_name(self, index):
+            return names[index]
+
+    class _Acc:
+        def get_action_iface(self):
+            return _Action()
+
+    return _atspi._action_names(_Acc())
 
 
 def test_atspi_vocabulary_flows_through_shared_engine() -> None:
@@ -162,7 +179,7 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
         seen["keep_zero"] = keep_zero
         return (8.0, 9.0), (0.0, 40.0)
 
-    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
     monkeypatch.setattr(_atspi, "_extents", extents)
 
     class Acc:
@@ -183,10 +200,24 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
     assert raw.size == (0.0, 40.0)
 
 
-def test_chromium_zero_height_section_keeps_the_login_form() -> None:
-    """document web 'Login | Figma' 1279x812 -> section 1279x0 -> section
-    1279x812 -> section -> form -> EMAIL, PASSWORD, the two buttons, a link.
-    The zero-height section used to take the form with it."""
+def test_section_click_actions_map_like_the_figma_wrapper() -> None:
+    """Live ``section#react-page`` exposes exactly click and showContextMenu.
+
+    ``click`` is a press. ``clickAncestor`` and ``showContextMenu`` are not,
+    so a container that only has those two is not clickable.
+    """
+    assert _atspi_actions("click", "showContextMenu") == ("AXPress",)
+    assert _atspi_actions("clickAncestor", "showContextMenu") == ()
+    assert _atspi._ROLE["section"] == "AXGroup"
+    assert _atspi._ROLE.get("div", "AXGroup") == "AXGroup"
+
+
+def _login_page(*, kind: str, wrapper_role: str = "AXGroup", wrapper_actions=(),
+                focusable: bool = False, wrapper_title: str = ""):
+    """document web 'Login | Figma' -> section#react-page 1271x0 -> the form.
+
+    The zero-height section carries the actions the caller mapped from AT-SPI.
+    """
     email = _node("AXTextField", "EMAIL", pos=(400.0, 300.0), size=(400.0, 40.0))
     password = _node(
         "AXSecureTextField", "PASSWORD", value="s3cret",
@@ -205,12 +236,20 @@ def test_chromium_zero_height_section_keeps_the_login_form() -> None:
         pos=(400.0, 520.0), size=(80.0, 16.0),
     )
     form = _node(
-        "AXGroup", "", pos=(380.0, 280.0), size=(440.0, 280.0),
+        "AXGroup", "", pos=(380.0, 280.0), size=(423.0, 480.0),
         children=[email, password, google, login, signup],
     )
-    inner = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 812.0), children=[form])
-    mid = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 812.0), children=[inner])
-    hollow = _node("AXGroup", "", pos=(0.0, 0.0), size=(1279.0, 0.0), children=[mid])
+    inner = _node("AXGroup", "", pos=(0.0, 0.0), size=(1271.0, 708.0), children=[form])
+    mid = _node(
+        "AXGroup", "", pos=(0.0, 0.0), size=(1271.0, 708.0),
+        actions=_atspi_actions("clickAncestor", "showContextMenu"),
+        children=[inner],
+    )
+    hollow = _node(
+        wrapper_role, wrapper_title, pos=(0.0, 0.0), size=(1271.0, 0.0),
+        actions=wrapper_actions, children=[mid], focusable=focusable,
+        stable_id="react-page",
+    )
     away = _node(
         "AXButton", "Away", actions=("AXPress",),
         pos=(-5000.0, -5000.0), size=(40.0, 20.0),
@@ -219,21 +258,17 @@ def test_chromium_zero_height_section_keeps_the_login_form() -> None:
         "AXButton", "GhostBtn", actions=("AXPress",),
         pos=(10.0, 10.0), size=(0.0, 20.0),
     )
-
-    def page(kind: str):
-        doc = _node(
-            "AXGroup", "Login | Figma", pos=(0.0, 0.0), size=(1279.0, 812.0),
-            children=[hollow, away, ghost], atspi_web=kind,
-        )
-        return _node(
-            "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
-            children=[doc],
-        )
-
-    snap = build_snapshot(
-        page("page"), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
-        geometry=_geometry(),
+    doc = _node(
+        "AXGroup", "Login | Figma", pos=(0.0, 0.0), size=(1271.0, 708.0),
+        children=[hollow, away, ghost], atspi_web=kind,
     )
+    return _node(
+        "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+        children=[doc],
+    )
+
+
+def _assert_login_form(snap) -> None:
     titles = {el.title for el in snap.elements}
     assert {"EMAIL", "Continue with Google", "Log in", "Sign up"} <= titles
     assert "Away" not in titles and "GhostBtn" not in titles
@@ -241,19 +276,88 @@ def test_chromium_zero_height_section_keeps_the_login_form() -> None:
     assert len(secure) == 1
     assert secure[0].title == "PASSWORD" and secure[0].secure and secure[0].value is None
     assert "s3cret" not in observe.render_text(snap)
+    assert observe.find_elements(snap, text="EMAIL")
+    assert observe.find_elements(snap, text="Continue with Google")
+    assert observe.find_elements(snap, text="Log in")
+    # The zero-height wrapper is kept and is not a clickable target.
+    assert any(el.role == "AXGroup" and not el.title and not el.clickable for el in snap.elements)
+    assert not any(
+        el.role == "AXGroup" and not el.title and el.clickable for el in snap.elements
+    )
+
+
+def test_chromium_zero_height_section_keeps_the_login_form(monkeypatch) -> None:
+    """section#react-page is 1271 by 0 and exposes click and showContextMenu.
+
+    Those actions used to make the wrapper look interactive, so the pruner
+    dropped it and the form with it. The entry, the secure field, and the
+    buttons stay. A click on the wrapper does not call do_action.
+    """
+    actions = _atspi_actions("click", "showContextMenu")
+    assert actions == ("AXPress",)
+    snap = build_snapshot(
+        _login_page(kind="page", wrapper_actions=actions),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    _assert_login_form(snap)
 
     framed = build_snapshot(
-        page("docframe"), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
-        geometry=_geometry(),
+        _login_page(kind="docframe", wrapper_actions=actions),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
     )
     assert any(el.title == "EMAIL" for el in framed.elements)
 
     bare = build_snapshot(
-        page(""), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
-        geometry=_geometry(),
+        _login_page(kind="", wrapper_actions=actions),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
     )
     assert "EMAIL" not in {el.title for el in bare.elements}
     assert not any(el.role == "AXSecureTextField" for el in bare.elements)
+
+    pressed: list[object] = []
+    monkeypatch.setattr(_atspi, "do_press", lambda handle: pressed.append(handle) or True)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    for el in snap.elements:
+        if el.role == "AXGroup" and not el.title:
+            assert driver.press_element(el) is False
+    assert pressed == []
+    login = next(el for el in snap.elements if el.title == "Log in")
+    assert driver.press_element(login) is True
+    assert pressed == [observe.ax_handle_for(login.snapshot_id, login.ref)]
+
+
+@pytest.mark.parametrize("role_name", ["section", "div"])
+def test_zero_section_or_div_with_click_and_show_context_menu_keeps_the_form(role_name: str) -> None:
+    """AT-SPI role ``section`` and an unmapped ``div`` are both AXGroup."""
+    role = _atspi._ROLE.get(role_name, "AXGroup")
+    assert role == "AXGroup"
+    snap = build_snapshot(
+        _login_page(
+            kind="page", wrapper_role=role,
+            wrapper_actions=_atspi_actions("click", "showContextMenu"),
+        ),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    _assert_login_form(snap)
+
+
+def test_focusable_or_named_zero_wrapper_still_drops_its_subtree() -> None:
+    """A zero-size node that can take focus, or that has a name, stays dropped.
+
+    A push button with a zero box stays dropped too.
+    """
+    actions = _atspi_actions("click", "showContextMenu")
+    for tree in (
+        _login_page(kind="page", wrapper_actions=actions, focusable=True),
+        _login_page(kind="page", wrapper_actions=actions, wrapper_title="Banner"),
+    ):
+        snap = build_snapshot(
+            tree, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+            geometry=_geometry(),
+        )
+        assert "EMAIL" not in {el.title for el in snap.elements}
+        assert "GhostBtn" not in {el.title for el in snap.elements}
 
 
 def _captcha_window(*, marked: bool):
