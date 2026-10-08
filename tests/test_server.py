@@ -914,12 +914,17 @@ def test_act_key_step_rejects_a_missing_chord_and_a_bad_type() -> None:
     import json as _json
 
     rt, calls = _act_argument_runtime()
-    for steps in ([{"do": "key"}], [{"do": "key", "keys": "b"}]):
-        assert _json.loads(rt.act_batch(steps)) == [{
-            "i": 0, "do": "key", "ok": False,
-            "error": "invalid_arguments: key: step 0: needs a 'chord'",
-        }]
-        assert calls == []
+    assert _json.loads(rt.act_batch([{"do": "key"}])) == [{
+        "i": 0, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 0: needs a 'chord'",
+    }]
+    assert calls == []
+    # A typo for the chord field is an unknown field, not a silent drop.
+    assert _json.loads(rt.act_batch([{"do": "key", "keys": "b"}])) == [{
+        "i": 0, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 0: unknown field 'keys'; expected chord, modifiers",
+    }]
+    assert calls == []
     wrong = "invalid_arguments: key: step 1: 'chord' must be a string"
     _assert_rejected(
         rt, calls,
@@ -938,6 +943,61 @@ def test_act_key_step_rejects_a_missing_chord_and_a_bad_type() -> None:
         "i": 1, "do": "key", "ok": False,
         "error": "invalid_arguments: key: step 1: unknown key 'not-a-key' in 'not-a-key'",
     }]
+
+
+def test_act_key_folds_a_modifier_list_and_rejects_a_string_or_unknown_field() -> None:
+    """Standalone key presses modifiers inside the chord. An act key step with
+    modifiers: ["ctrl"] and chord "a" presses ctrl+a. A string modifier and any
+    other field are invalid_arguments, and a later bad step runs nothing."""
+    import json as _json
+
+    rt, calls = _act_argument_runtime()
+    pressed: list[str] = []
+    rt.key = lambda chord: pressed.append(chord) or f"pressed {chord}"
+    out = _json.loads(rt.act_batch([
+        {"do": "key", "chord": "a", "modifiers": ["ctrl"]},
+        {"do": "key", "chord": "a", "modifiers": ["ctrl", "shift"]},
+        {"do": "key", "chord": "cmd+s", "modifiers": ["ctrl"]},
+    ]))
+    assert [step["ok"] for step in out] == [True, True, True]
+    assert pressed == ["ctrl+a", "ctrl+shift+a", "ctrl+cmd+s"]
+    assert calls == []
+
+    pressed.clear()
+    string_mod = _json.loads(rt.act_batch([
+        {"do": "type", "text": "earlier"},
+        {"do": "key", "chord": "a", "modifiers": "ctrl"},
+    ]))
+    assert pressed == [] and calls == []
+    assert string_mod == [{
+        "i": 1, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 1: 'modifiers' must be a list of modifier names",
+    }]
+
+    unknown_mod = _json.loads(rt.act_batch([
+        {"do": "type", "text": "earlier"},
+        {"do": "key", "chord": "a", "modifiers": ["super"]},
+    ]))
+    assert pressed == [] and calls == []
+    assert "unknown modifiers" in unknown_mod[0]["error"]
+    assert unknown_mod[0]["error"].startswith("invalid_arguments: key: step 1:")
+
+    extra = _json.loads(rt.act_batch([
+        {"do": "type", "text": "earlier"},
+        {"do": "key", "chord": "a", "keys": "b"},
+    ]))
+    assert pressed == [] and calls == []
+    assert extra == [{
+        "i": 1, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 1: unknown field 'keys'; expected chord, modifiers",
+    }]
+
+    other = _json.loads(rt.act_batch([
+        {"do": "click", "ref": "e1", "keys": "b"},
+    ]))
+    assert pressed == []
+    assert other[0]["ok"] is False and "unknown field 'keys'" in other[0]["error"]
+    assert other[0]["error"].startswith("invalid_arguments: click: step 0:")
 
 
 def test_act_scroll_step_rejects_a_missing_target_and_a_bad_type() -> None:
@@ -1043,6 +1103,44 @@ def test_act_batch_still_runs_a_valid_step_of_each_type() -> None:
     out = _json.loads(rt.act_batch(steps))
     assert [step["ok"] for step in out] == [True] * len(steps)
     assert calls == ["click", "hover", "type", "key", "scroll", "drag", "wait_for"]
+
+
+async def test_act_step_failure_is_a_tool_error_and_keeps_the_step_json(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    """A client that only checks isError must see a failed batch. The body
+    stays the per-step JSON, including a secure_field step and any earlier
+    step that did run."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "com.test.front")
+    store.set_tier("com.test.front", safety.Tier.FULL)
+
+    invalid = await call_tool(mcp_server, "act", {"steps": [{"do": "key"}]})
+    assert invalid.isError
+    invalid_body = json.loads(invalid.content[0].text)
+    assert invalid_body == [{
+        "i": 0, "do": "key", "ok": False,
+        "error": "invalid_arguments: key: step 0: needs a 'chord'",
+    }]
+
+    ok = await call_tool(mcp_server, "act", {"steps": [{"do": "type", "text": "hi"}]})
+    assert not ok.isError
+    assert json.loads(ok.content[0].text)[0]["ok"] is True
+    assert mocked_driver["type"] == ["hi"]
+
+    def refuse_key(chord, **_kwargs):
+        raise ComputerUseError(ErrorCode.SECURE_FIELD, "password field focused", detail={})
+
+    monkeypatch.setattr(act, "key_chord", refuse_key)
+    failed = await call_tool(mcp_server, "act", {"steps": [
+        {"do": "type", "text": "hi"},
+        {"do": "key", "chord": "a"},
+    ]})
+    assert failed.isError
+    body = json.loads(failed.content[0].text)
+    assert [step["ok"] for step in body] == [True, False]
+    assert "secure_field" in body[1]["error"]
+    assert body[0]["result"].startswith("typed")
+    assert "Error executing tool" not in failed.content[0].text
 
 
 def test_effect_receipt_appends_post_action_diff() -> None:

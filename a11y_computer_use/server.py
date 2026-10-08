@@ -121,6 +121,18 @@ MAX_SCROLLS = 100
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
 _TARGET_REQUIRED = "target an element ref, or both x and y coordinates"
+_ACT_STEP_FIELDS: dict[str, frozenset[str]] = {
+    "click": frozenset({"do", "ref", "x", "y", "display_id", "button", "count", "modifiers"}),
+    "hover": frozenset({"do", "ref", "x", "y", "display_id"}),
+    "type": frozenset({"do", "text"}),
+    "key": frozenset({"do", "chord", "modifiers"}),
+    "scroll": frozenset({"do", "ref", "x", "y", "display_id", "dx", "dy", "unit", "into_view"}),
+    "drag": frozenset({
+        "do", "start_ref", "start_x", "start_y", "end_ref", "end_x", "end_y",
+        "display_id", "path",
+    }),
+    "wait_for": frozenset({"do", "ref", "condition", "timeout_s"}),
+}
 
 
 def _act_argument_error(step_type: str, index: int, message: str) -> str:
@@ -167,6 +179,54 @@ def _ref_or_point_error(step: dict, ref_key: str, x_key: str, y_key: str, missin
     return _display_id_error(step)
 
 
+def _unknown_field_error(step: dict, do: str) -> str | None:
+    """A field the step does not accept. Extra keys used to be ignored."""
+    extra = sorted(set(step) - _ACT_STEP_FIELDS[do])
+    if not extra:
+        return None
+    expected = ", ".join(sorted(_ACT_STEP_FIELDS[do] - {"do"}))
+    names = ", ".join(repr(name) for name in extra)
+    label = "field" if len(extra) == 1 else "fields"
+    return f"unknown {label} {names}; expected {expected}"
+
+
+def _modifiers_error(step: dict) -> str | None:
+    """Same modifier check click uses: a list of known names, or absent."""
+    if "modifiers" not in step or step["modifiers"] is None:
+        return None
+    modifiers = step["modifiers"]
+    if isinstance(modifiers, str) or not isinstance(modifiers, (list, tuple)):
+        return "'modifiers' must be a list of modifier names"
+    try:
+        unknown = sorted(set(modifiers) - MODIFIER_KEYS)
+    except TypeError:
+        return "'modifiers' must be a list of modifier names"
+    if unknown:
+        return f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}"
+    return None
+
+
+def _folded_key_chord(step: dict) -> str:
+    """Modifiers first, then the chord's own key, as a standalone ``key`` chord.
+
+    ``{"chord": "a", "modifiers": ["ctrl"]}`` presses ``ctrl+a``. Names already
+    in the chord are not repeated. An empty modifier list leaves the chord.
+    """
+    chord = step["chord"]
+    modifiers = step.get("modifiers") or ()
+    if not modifiers:
+        return chord
+    parts = [part.strip().lower() for part in chord.split("+") if part.strip()]
+    if not parts:
+        return chord
+    *chord_mods, key = parts
+    merged: list[str] = []
+    for name in list(modifiers) + chord_mods:
+        if name not in merged:
+            merged.append(name)
+    return "+".join([*merged, key])
+
+
 def _click_step_error(step: dict) -> str | None:
     detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
     if detail is not None:
@@ -178,18 +238,7 @@ def _click_step_error(step: dict) -> str | None:
             return str(exc)
     if "count" in step and step["count"] not in (1, 2, 3):
         return f"count must be 1, 2 or 3, got {step['count']}"
-    modifiers = step.get("modifiers")
-    if modifiers is None:
-        return None
-    if isinstance(modifiers, str) or not isinstance(modifiers, (list, tuple)):
-        return "'modifiers' must be a list of modifier names"
-    try:
-        unknown = sorted(set(modifiers) - MODIFIER_KEYS)
-    except TypeError:
-        return "'modifiers' must be a list of modifier names"
-    if unknown:
-        return f"unknown modifiers {unknown}; expected {sorted(MODIFIER_KEYS)}"
-    return None
+    return _modifiers_error(step)
 
 
 def _scroll_step_error(step: dict) -> str | None:
@@ -262,6 +311,41 @@ def _wait_step_error(step: dict) -> str | None:
     if not ok:
         return "timeout_s must be finite and nonnegative"
     return None
+
+
+def _act_batch_has_failure(payload: str) -> bool:
+    """True when the act JSON reports a failed step.
+
+    A slow-call note may follow the JSON. ``raw_decode`` reads the value and
+    leaves that note alone.
+    """
+    try:
+        data, _end = json.JSONDecoder().raw_decode(payload)
+    except json.JSONDecodeError:
+        return False
+    steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(steps, list):
+        return False
+    return any(isinstance(step, dict) and step.get("ok") is False for step in steps)
+
+
+def _act_mcp_result(payload: str):
+    """Return the per-step JSON as the MCP tool result.
+
+    The tool is annotated as ``CallToolResult`` so FastMCP does not build an
+    output schema. A string return would be validated as that schema, and a
+    ``CallToolResult`` mixed with it loses the step JSON
+    (``structuredContent`` is empty). Standalone tools raise, so their MCP
+    result has ``isError`` true. ``act`` keeps the step list in the body
+    either way: a client that only checks ``isError`` must still see the
+    failure, and a client that reads the JSON still sees which step failed.
+    """
+    from mcp.types import CallToolResult, TextContent
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=payload)],
+        isError=_act_batch_has_failure(payload),
+    )
 
 
 _P = ParamSpec("_P")
@@ -2522,7 +2606,7 @@ class Runtime:
           {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
           {"do":"hover","ref":"e5"}  (or x/y/display_id; no button)
           {"do":"type","text":"..."}
-          {"do":"key","chord":"cmd+s"}
+          {"do":"key","chord":"cmd+s"}  (modifiers: ["ctrl"] folds into the chord)
           {"do":"scroll","ref":"e3","dy":5}  (+ dx, unit, into_view, or x/y)
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
           {"do":"wait_for","ref":"e7","condition":"actionable"}  (+ timeout_s)
@@ -2596,6 +2680,9 @@ class Runtime:
             return _act_argument_error(
                 do, index, f"unknown step '{do}' — use {_ACT_STEP_LIST}",
             )
+        detail = _unknown_field_error(step, do)
+        if detail is not None:
+            return _act_argument_error(do, index, detail)
         if do == "click":
             detail = _click_step_error(step)
         elif do == "hover":
@@ -2618,7 +2705,11 @@ class Runtime:
         detail = _required_str_error(step, "chord")
         if detail is not None:
             return detail
-        return self._chord_argument_message(step["chord"])
+        detail = _modifiers_error(step)
+        if detail is not None:
+            return detail
+        # Validate the chord that will actually be pressed, modifiers included.
+        return self._chord_argument_message(_folded_key_chord(step))
 
     def _chord_argument_message(self, chord: str) -> str | None:
         """The driver's own chord error, before any step runs.
@@ -2645,7 +2736,7 @@ class Runtime:
         if do == "type":
             return self.type_text(step["text"])
         if do == "key":
-            return self.key(step["chord"])
+            return self.key(_folded_key_chord(step))
         if do == "scroll":
             return self.scroll(step.get("ref"), step.get("x"), step.get("y"), step.get("display_id"),
                                step.get("dx", 0), step.get("dy", 0), step.get("unit", "lines"),
@@ -3333,7 +3424,13 @@ def build_server(
     import anyio.to_thread
     from mcp.server.fastmcp import FastMCP, Image
     from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.types import CallToolResult
     from pydantic import BaseModel
+
+    # ``from __future__ import annotations`` stores the act tool's return
+    # hint as a string. FastMCP evaluates it against this module's globals,
+    # and ``mcp`` stays imported only from ``build_server``.
+    globals()["CallToolResult"] = CallToolResult
 
     if isinstance(max_pending_calls, bool) or not isinstance(max_pending_calls, int) or max_pending_calls < 1:
         raise ValueError("max_pending_calls must be a positive integer")
@@ -3715,19 +3812,25 @@ def build_server(
         return await run(runtime.wait_for, ref, condition, timeout_s)
 
     @server.tool(name="act")
-    async def act(steps: list[dict], verify: bool = False) -> str:
+    async def act(steps: list[dict], verify: bool = False) -> CallToolResult:
         """Run a SEQUENCE of actions in ONE call (batched/transactional) — the
         fast path that collapses many observe→act round-trips into one. steps is
         a list of {"do": ...} objects executed in order. A missing or wrong-typed
         field is invalid_arguments (the step index, the step type, and the field)
         and is rejected before any step runs, so a later bad step does not leave
-        earlier steps done. A failure while a step runs (stale ref, secure field,
-        unsupported) still stops the batch and keeps the earlier results.
+        earlier steps done. A field the step does not accept is invalid_arguments
+        too; it is not ignored. A key step's "modifiers" list is folded into the
+        chord, modifiers first, the same shape the standalone key tool presses
+        (["ctrl"] and "a" press ctrl+a). A string or unknown modifier is rejected
+        the same way a click step rejects it. A failure while a step runs (stale
+        ref, secure field, unsupported) still stops the batch and keeps the
+        earlier results. If validation fails or any step fails, this tool call
+        is an error and the body is still that per-step JSON.
         Supported steps:
           {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
           {"do":"hover","ref":"e5"}  (or "x"/"y"; no button)
           {"do":"type","text":"..."}
-          {"do":"key","chord":"cmd+s"}
+          {"do":"key","chord":"cmd+s"}  (or "chord":"a","modifiers":["ctrl"])
           {"do":"scroll","ref":"e3","dy":5}  (+ "into_view")
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
           {"do":"wait_for","ref":"e7","condition":"actionable"}
@@ -3738,8 +3841,10 @@ def build_server(
         open a menu and pick an item) without a round-trip per action. verify=true
         returns {"steps":[...], "effect": "<post-batch snapshot diff>"} instead of
         the bare step list, so one diff confirms the net change of the whole batch."""
-        return await run(runtime.act_batch, steps,
-                         confirm=_confirmer_for(server.get_context()), verify=verify)
+        return _act_mcp_result(await run(
+            runtime.act_batch, steps,
+            confirm=_confirmer_for(server.get_context()), verify=verify,
+        ))
 
     @server.tool(name="set_value")
     async def set_value(ref: str, value: str) -> str:

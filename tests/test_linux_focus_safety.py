@@ -218,6 +218,43 @@ def test_key_and_act_key_refuse_and_redact_a_printable_chord(
     assert '"chord": "a"' not in next((tmp_path / "audit").glob("*.jsonl")).read_text()
 
 
+def test_act_key_modifiers_fold_and_keep_the_password_refusal(
+    focus_driver, monkeypatch, tmp_path
+) -> None:
+    """A modifiers list is part of the chord before the password probe.
+    shift+a built that way is printable: refused, nothing pressed, chord
+    redacted. ctrl+a built that way is a shortcut and is still pressed."""
+    driver, front, _, _, _, _ = focus_driver
+    pressed: list[str] = []
+    sys.modules["a11y_computer_use.drivers._linux_input"].press_chord = pressed.append
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: True)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(front["app"], safety.Tier.FULL)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: front["app"])
+    runtime = server.Runtime(
+        driver=driver, store=store, audit=safety.AuditLog(tmp_path / "audit"),
+    )
+
+    refused = json.loads(runtime.act_batch([
+        {"do": "key", "chord": "a", "modifiers": ["shift"]},
+    ]))
+    assert refused[0]["ok"] is False and "secure_field" in refused[0]["error"]
+    assert pressed == []
+    raw = next((tmp_path / "audit").glob("*.jsonl")).read_text()
+    row = json.loads(raw.splitlines()[-1])
+    assert row["result"] == "secure_field"
+    assert row["params"]["chord"] == "[REDACTED]" and row["params"]["chars"] == 1
+    assert "shift+a" not in raw
+
+    sent = json.loads(runtime.act_batch([
+        {"do": "key", "chord": "a", "modifiers": ["ctrl"]},
+    ]))
+    assert sent[0]["ok"] is True and "ctrl+a" in sent[0]["result"]
+    assert pressed == ["ctrl+a"]
+    shortcut = json.loads(next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()[-1])
+    assert shortcut["result"] == "ok" and shortcut["params"]["chord"] == "ctrl+a"
+
+
 def test_dry_run_keeps_the_existing_focus_target(focus_driver) -> None:
     driver, _, field, handle, _, _ = focus_driver
     driver.press_element(field)
