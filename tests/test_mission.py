@@ -133,7 +133,10 @@ def test_wait_until_url_status_and_timeout(tmp_path, monkeypatch) -> None:
         out = json.loads(rt.call_tool("wait_until", {"condition": {"url_status": url}, "timeout_s": 5, "poll_s": 0.05}))
         assert out["matched"].endswith("returned 200") and out["polls"] == 3
         with pytest.raises(ComputerUseError) as info:
-            rt.call_tool("wait_until", {"condition": {"url_status": url, "status": 418}, "timeout_s": 0.2, "poll_s": 0.05})
+            # One loopback probe can spend most of 0.2s on the Windows runner,
+            # so the deadline arrives before a second poll. One second still
+            # times out (418 never matches) and still requires a second look.
+            rt.call_tool("wait_until", {"condition": {"url_status": url, "status": 418}, "timeout_s": 1, "poll_s": 0.05})
         assert info.value.code is ErrorCode.TIMEOUT and info.value.detail["polls"] >= 2
     finally:
         httpd.shutdown()

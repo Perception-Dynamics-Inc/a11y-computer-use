@@ -303,6 +303,7 @@ def test_clipboard_write_keeps_unicode_nul_and_large_payloads(monkeypatch) -> No
     def run(cmd, input=None, **kwargs):
         captured["cmd"] = cmd
         captured["input"] = input
+        captured["kwargs"] = kwargs
         captured["text"] = kwargs.get("text", False)
         return _Proc(0, b"")
 
@@ -310,6 +311,7 @@ def test_clipboard_write_keeps_unicode_nul_and_large_payloads(monkeypatch) -> No
     text = "héllo\x00\r\n" + ("x" * 4_000_000)
     _linux_system.write_clipboard(text)
     assert captured["text"] is False
+    assert captured["kwargs"].get("capture_output") is not True
     assert captured["input"] == text.encode("utf-8")
     assert len(captured["input"]) == len(text.encode("utf-8"))
 

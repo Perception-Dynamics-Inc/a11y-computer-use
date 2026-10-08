@@ -393,9 +393,10 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
     except ComputerUseError:
         raise
     finally:
+        # close() flushes, and a display the server already dropped raises.
         try:
             win.destroy()
             dpy.flush()
+            dpy.close()
         except Exception:
             pass
-        dpy.close()

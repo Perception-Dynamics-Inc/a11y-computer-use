@@ -702,9 +702,16 @@ def _read_cmd(kind: str, target: str) -> list[str]:
     return ["wl-paste", "--no-newline", "--type", target]
 
 
-def _run_clip(cmd: list[str], payload: bytes | None = None) -> subprocess.CompletedProcess:
-    """Run a clipboard tool and capture bytes. No universal-newline translation."""
-    return subprocess.run(cmd, input=payload, capture_output=True, timeout=5, check=False)
+def _run_clip(cmd: list[str], payload: bytes | None = None, *, capture: bool = True) -> subprocess.CompletedProcess:
+    """Run a clipboard tool. Reads capture bytes. Writes do not.
+
+    ``text`` is never set, so CR and CRLF are not rewritten. A write must not
+    capture stdout: xclip and wl-copy fork a process that keeps the selection,
+    and that child holds the captured pipe open until ``run`` times out.
+    """
+    if capture:
+        return subprocess.run(cmd, input=payload, capture_output=True, timeout=5, check=False)
+    return subprocess.run(cmd, input=payload, timeout=5, check=False)
 
 
 def _target_lines(stdout: bytes) -> list[str]:
@@ -797,6 +804,6 @@ def write_clipboard(text: str) -> None:
     if cmd is None:
         raise _no_clipboard_tool()
     try:
-        _run_clip(cmd, payload)
+        _run_clip(cmd, payload, capture=False)
     except Exception as exc:
         raise _clipboard_error("clipboard_write_failed", f"clipboard write failed: {exc}") from exc
