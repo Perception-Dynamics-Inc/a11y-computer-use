@@ -60,6 +60,18 @@ MAX_DEPTH = 12
 #: which costs O(_MAX_RAW_DEPTH) reads.
 _MAX_RAW_DEPTH = 64
 
+#: Nested Chromium iframes may each restart the kept-depth budget this many
+#: times per snapshot (an ``internal frame``, or a ``document web`` that is
+#: already inside a page). Each restart walks at most `MAX_DEPTH` further kept
+#: levels. The raw-depth backstop still applies.
+_MAX_WEB_DEPTH_RESTARTS = 4
+
+#: Extra node reads, per snapshot, spent looking for one of those frames after
+#: a web subtree is already past `MAX_DEPTH`. The scan keeps only the frame it
+#: opens; ordinary deep nodes stay elided, so a page with no nested frame
+#: still drops the same children.
+_MAX_WEB_FRAME_SCAN = 64
+
 #: Kept-children cap per node. Overflow is elided with a "… N more" marker,
 #: keeping interactive/labelled children preferentially.
 MAX_CHILDREN = 24
@@ -165,6 +177,13 @@ class RawNode:
     expanded: bool | None = None
     placeholder: str = ""
     stable_id: str | None = None
+    #: Linux AT-SPI only. Empty on macOS, Windows, and the browser, so those
+    #: trees keep today's walk and token budget. ``"page"`` is a Chromium
+    #: ``document web``, ``"docframe"`` a ``document frame``, ``"iframe"`` an
+    #: ``internal frame``. A zero-size non-interactive wrapper under any of
+    #: these is hollow. A nested iframe, or a document web already inside a
+    #: page, restarts the kept-depth budget.
+    atspi_web: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -980,7 +999,9 @@ def _prune_root(
             position=main.origin,
             size=(main.display.width / main.display.scale, main.display.height / main.display.scale),
         )
-    pruned = _prune_inner(node, raw, accessor, geometry, depth=0, kept_depth=0)
+    pruned = _prune_inner(
+        node, raw, accessor, geometry, depth=0, kept_depth=0, web=_WebWalk()
+    )
     if pruned is not None:
         return pruned
     # Roots survive even when pruning would drop them (offscreen/decorative).
@@ -988,19 +1009,35 @@ def _prune_root(
     return _PNode(raw=raw, bounds=bounds, children=[], elided=0, has_interactive=False, node=node)
 
 
-def _wrapper_candidate(raw: RawNode, depth: int) -> bool:
-    """Could this node collapse onto a single kept child? The child-independent
-    half of the collapse test (the other half is "exactly one kept child and
-    nothing elided", known only after its subtree is pruned)."""
+def _noninteractive_wrapper(raw: RawNode) -> bool:
+    """Untitled wrapper role that is not itself a control."""
     clickable, editable, _ = _flags(raw)
     return (
-        depth > 0
-        and raw.role in _WRAPPER_ROLES
+        raw.role in _WRAPPER_ROLES
         and not (clickable or editable)
         and not raw.title
         and not raw.description
         and raw.value is None
     )
+
+
+def _wrapper_candidate(raw: RawNode, depth: int) -> bool:
+    """Could this node collapse onto a single kept child? The child-independent
+    half of the collapse test (the other half is "exactly one kept child and
+    nothing elided", known only after its subtree is pruned)."""
+    return depth > 0 and _noninteractive_wrapper(raw)
+
+
+@dataclass
+class _WebWalk:
+    """Per-snapshot bounds on the Chromium iframe exception.
+
+    macOS, Windows, and browser nodes leave ``RawNode.atspi_web`` empty, so
+    this counter is never spent and the walk is the one those trees had.
+    """
+
+    restarts: int = _MAX_WEB_DEPTH_RESTARTS
+    scan_reads: int = _MAX_WEB_FRAME_SCAN
 
 
 def _prune_inner(
@@ -1010,12 +1047,36 @@ def _prune_inner(
     geometry: tuple[DisplayGeometry, ...],
     depth: int,
     kept_depth: int,
+    *,
+    in_page: bool = False,
+    in_web: bool = False,
+    web: _WebWalk | None = None,
 ) -> _PNode | None:
     """``depth`` is the raw tree depth; ``kept_depth`` is the exact pruned depth
     of this node. A wrapper candidate adds a level for its children only when it
     will NOT collapse, which is decided from the children's raw attributes before
     recursing, so `MAX_DEPTH` is applied during the walk (bounding its cost) and
-    a node whose pruned depth is under the cap is never elided."""
+    a node whose pruned depth is under the cap is never elided.
+
+    Linux AT-SPI web content is the exception. ``in_web`` means this node sits
+    under a Chromium document web, document frame, or internal frame. A
+    zero-size non-interactive wrapper there is hollow, the same as GTK's
+    negative extent. A nested iframe restarts ``kept_depth``. Nodes with an
+    empty ``atspi_web`` (macOS, Windows, the browser) never set ``in_web``.
+    """
+    kind = raw.atspi_web
+    # An internal frame always restarts. A document web that is already inside
+    # a page restarts only once it is deeper than the first level, so the
+    # document directly under a frame that just restarted does not spend a
+    # second restart. One iframe then costs one restart, and four restarts
+    # cover four frames.
+    restart = kind == "iframe" or (kind == "page" and in_page and kept_depth > 1)
+    if web is not None and web.restarts > 0 and depth < _MAX_RAW_DEPTH and restart:
+        web.restarts -= 1
+        kept_depth = 0
+    child_in_page = in_page or kind in ("page", "iframe")
+    child_in_web = in_web or kind in ("page", "docframe", "iframe")
+
     bounds = _to_bounds(raw.position, raw.size, geometry)
     if _is_decorative(raw):
         return None
@@ -1025,16 +1086,28 @@ def _prune_inner(
     # notebook page tab whose label is hidden while the page's content (the
     # gedit document, a VTE terminal) has real bounds below it. Such a hollow
     # container is kept only if descendants survive, with their union as rect.
-    # Zero-size stays a drop so macOS trees (and their token budgets) are unchanged.
-    hollow = bounds is None
-    if hollow and not _degenerate_size(raw.size):
-        return None  # zero-size or fully offscreen: drop subtree
+    # Chrome does the same with a 0-height section around a painted form, but
+    # only under a document web/frame (or an internal frame). Zero-size outside
+    # that web content still drops, so macOS trees and their token budgets stay
+    # unchanged. A real rect that merely lies off every display still drops.
+    hollow_zero = in_web and _zero_extent(raw.size) and _noninteractive_wrapper(raw)
+    hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
+    if bounds is None and not hollow:
+        return None  # zero-size (not web) or fully offscreen: drop subtree
 
     kept: list[_PNode] = []
     elided = 0
     raw_children = tuple(accessor.children(node))
     candidate = _wrapper_candidate(raw, depth)
-    if kept_depth >= MAX_DEPTH or depth >= _MAX_RAW_DEPTH:
+    past_cap = kept_depth >= MAX_DEPTH or depth >= _MAX_RAW_DEPTH
+    # A web subtree already at the cap still opens a nested iframe, bounded by
+    # ``web.scan_reads``. Anything else at the cap is elided without a read,
+    # which is what keeps the macOS/Windows walk count unchanged.
+    if past_cap and in_web and depth < _MAX_RAW_DEPTH and web is not None and web.scan_reads > 0:
+        kept, elided = _open_nested_frames(
+            raw_children, accessor, geometry, depth, child_in_page, child_in_web, web
+        )
+    elif past_cap:
         elided = len(raw_children)
     else:
         walked = raw_children[:_MAX_WALK_CHILDREN]
@@ -1045,7 +1118,8 @@ def _prune_inner(
         # the kept depth passed down is exact, not a lower bound. This is what
         # bounds walk cost on deep wrapper soup and on cyclic trees: a wrapper
         # that keeps >1 child consumes a level, so MAX_DEPTH fires during the
-        # walk. The reads happen here anyway.
+        # walk. The reads happen here anyway. A hollow web wrapper is not a
+        # survivor here; its own child, which has the real rect, is.
         read_children = [(child, accessor.read(child)) for child in walked]
         survivors = sum(
             1
@@ -1056,7 +1130,17 @@ def _prune_inner(
         collapses = candidate and survivors == 1 and elided == 0
         child_kept_depth = kept_depth if collapses else kept_depth + 1
         for child, child_raw in read_children:
-            pruned = _prune_inner(child, child_raw, accessor, geometry, depth + 1, child_kept_depth)
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                depth + 1,
+                child_kept_depth,
+                in_page=child_in_page,
+                in_web=child_in_web,
+                web=web,
+            )
             if pruned is not None:
                 kept.append(pruned)
         cap = DENSE_MAX_CHILDREN if raw.role in _DENSE_CONTAINER_ROLES else MAX_CHILDREN
@@ -1082,11 +1166,91 @@ def _prune_inner(
     )
 
 
+def _open_nested_frames(
+    raw_children: Sequence[object],
+    accessor: TreeAccessor,
+    geometry: tuple[DisplayGeometry, ...],
+    depth: int,
+    in_page: bool,
+    in_web: bool,
+    web: _WebWalk,
+) -> tuple[list[_PNode], int]:
+    """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
+
+    Descend only through non-interactive wrappers, spending ``web.scan_reads``.
+    A found ``internal frame`` (or a ``document web`` already inside a page)
+    is pruned with a restarted kept-depth budget. Other children stay elided,
+    so the scan does not pull a whole deep page into the snapshot.
+    """
+    kept: list[_PNode] = []
+    elided = 0
+    pending: list[tuple[object, int, bool, bool]] = [
+        (child, depth + 1, in_page, in_web) for child in raw_children[:_MAX_WALK_CHILDREN]
+    ]
+    elided += max(0, len(raw_children) - len(pending))
+    seen: set[int] = set()
+    while pending and web.scan_reads > 0 and len(kept) < MAX_CHILDREN:
+        child, child_depth, page, web_here = pending.pop(0)
+        if child_depth >= _MAX_RAW_DEPTH:
+            elided += 1
+            continue
+        marker = id(child)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        web.scan_reads -= 1
+        child_raw = accessor.read(child)
+        kind = child_raw.atspi_web
+        nested = kind == "iframe" or (kind == "page" and page)
+        if nested and web.restarts > 0:
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                child_depth,
+                MAX_DEPTH,
+                in_page=page,
+                in_web=web_here,
+                web=web,
+            )
+            if pruned is not None:
+                kept.append(pruned)
+            continue
+        if _noninteractive_wrapper(child_raw) or kind in ("docframe", "page", "iframe"):
+            kids = tuple(accessor.children(child))
+            room = kids[:_MAX_WALK_CHILDREN]
+            elided += max(0, len(kids) - len(room))
+            next_page = page or kind in ("page", "iframe")
+            next_web = web_here or kind in ("page", "docframe", "iframe")
+            for kid in room:
+                pending.append((kid, child_depth + 1, next_page, next_web))
+            continue
+        elided += 1
+    elided += len(pending)
+    return kept, elided
+
+
 def _degenerate_size(size: tuple[float, float] | None) -> bool:
     """A rect the toolkit marked invalid with a negative extent (GTK's -1
     sentinel for a widget that has no allocation of its own), as opposed to a
     zero-size rect or a real rect that merely lies off every display."""
     return size is not None and (size[0] < 0 or size[1] < 0)
+
+
+def _zero_extent(size: tuple[float, float] | None) -> bool:
+    """A rect with a zero width or height and no negative component.
+
+    Chrome reports this for an empty wrapper section (1279 by 0) whose
+    children still have a painted box. Distinct from GTK's negative sentinel
+    and from a positive rect that lies off every display.
+    """
+    return (
+        size is not None
+        and size[0] >= 0
+        and size[1] >= 0
+        and (size[0] == 0 or size[1] == 0)
+    )
 
 
 def _union_bounds(rects: list[Bounds]) -> Bounds:

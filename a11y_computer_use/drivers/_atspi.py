@@ -48,6 +48,9 @@ _ROLE = {
     "document frame": "AXGroup",
     "document web": "AXGroup",
     "document email": "AXGroup",
+    # A cross-origin iframe (reCAPTCHA's "I'm not a robot" lives in one).
+    # Explicit, not the AXGroup fallback: the pruner restarts kept depth here.
+    "internal frame": "AXGroup",
     "label": "AXStaticText",
     "static": "AXStaticText",
     "heading": "AXStaticText",
@@ -88,6 +91,19 @@ _ROLE = {
     "separator": "AXSplitter",
     "unknown": "AXUnknown",
 }
+
+# AT-SPI role name -> RawNode.atspi_web. Only Chromium document/frame roles.
+# Anything else stays "" so the pruner's macOS/Windows path is unchanged.
+_ATSPI_WEB = {
+    "document web": "page",
+    "document frame": "docframe",
+    "internal frame": "iframe",
+}
+
+
+def atspi_web_kind(role_name: str) -> str:
+    """``page`` / ``docframe`` / ``iframe`` for a Chromium document or frame, else ``""``."""
+    return _ATSPI_WEB.get((role_name or "").lower(), "")
 
 # AT-SPI action name (lowercased) -> AX action the pruning engine treats as
 # "interactive" (`_PRESS_ACTIONS` = AXPress/AXOpen/AXConfirm/AXPick).
@@ -196,8 +212,14 @@ def _component(acc):
     return _call_first(acc, ("get_component_iface", "get_component"))
 
 
-def _extents(acc):
-    """(position, size) in SCREEN pixels, or (None, None)."""
+def _extents(acc, *, keep_zero: bool = False):
+    """(position, size) in SCREEN pixels, or (None, None).
+
+    A zero width or height is ``(None, None)`` for hit-testing and scrolling.
+    The snapshot read passes ``keep_zero=True`` so a 0-height Chromium section
+    still carries its size into the pruner, which keeps the painted children
+    under a web document. Callers that do not opt in are unchanged.
+    """
     Atspi = _atspi()
     comp = _component(acc)
     if comp is None:
@@ -214,6 +236,8 @@ def _extents(acc):
         # the engine keeps the page's content below it instead of dropping it.
         return (-1.0, -1.0), (-1.0, -1.0)
     if w == 0 or h == 0:
+        if keep_zero:
+            return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
         return None, None
     return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
 
@@ -474,7 +498,9 @@ class ATSPIAccessor:
         if override is not None:
             position, size = override
         else:
-            position, size = _extents(node)
+            # Keep a 0-height section's size. Hit-testing still treats it as
+            # no box; only the snapshot walk needs the zero extent.
+            position, size = _extents(node, keep_zero=True)
         enabled, focused, checked, selected, expanded = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
@@ -494,6 +520,7 @@ class ATSPIAccessor:
             selected=selected,
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
+            atspi_web=atspi_web_kind(role_str),
         )
 
     def children(self, node: object) -> Sequence[object]:

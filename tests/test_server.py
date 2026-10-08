@@ -275,7 +275,9 @@ async def test_type_gated_against_frontmost_app(
     assert mocked_driver["type"] == ["hello"]
     entry, = audit_entries(audit_dir)
     assert entry["app"] == "com.test.front"
-    assert entry["params"]["text"] == "hello"  # non-secure entries keep params
+    assert entry["params"]["text"] == safety.REDACTED
+    assert entry["params"]["chars"] == 5
+    assert "hello" not in "".join(p.read_text() for p in audit_dir.glob("*.jsonl"))
 
 
 async def test_secure_field_driver_error_is_audited_and_redacted(
