@@ -150,27 +150,50 @@ def firefox_form(tmp_path_factory):
     other = root / "other.html"
     page.write_text(_FORM)
     other.write_text(_OTHER)
-    profile = root / "profile"
-    profile.mkdir()
-    (profile / "user.js").write_text(_PROFILE_JS)
     env = os.environ.copy()
     env["MOZ_ENABLE_ACCESSIBILITY"] = "1"
     env["GTK_MODULES"] = "gail:atk-bridge"
     env["NO_AT_BRIDGE"] = "0"
-    proc = subprocess.Popen(
-        [binary, "--profile", str(profile), "--no-remote", "--new-instance", page.as_uri(), other.as_uri()],
-        env=env,
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    proc = None
+    log_f = None
     try:
-        snap = _wait_for_form(driver)
+        snap = None
+        # The first launch on a busy runner can exit before AT-SPI sees the
+        # app. One fresh profile is enough when that happens; a second miss
+        # still fails.
+        for attempt in (1, 2):
+            if proc is not None:
+                _stop(proc)
+            if log_f is not None:
+                log_f.close()
+            profile = root / f"profile-{attempt}"
+            profile.mkdir()
+            (profile / "user.js").write_text(_PROFILE_JS)
+            log_f = (root / f"firefox-{attempt}.log").open("w", encoding="utf-8")
+            proc = subprocess.Popen(
+                [binary, "--profile", str(profile), "--no-remote", "--new-instance", page.as_uri(), other.as_uri()],
+                env=env,
+                start_new_session=True,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+            )
+            snap = _wait_for_form(driver)
+            if snap is not None:
+                break
         if snap is None:
-            pytest.fail("Firefox did not publish the form in an AT-SPI snapshot")
+            if log_f is not None:
+                log_f.flush()
+            tail = (root / "firefox-2.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            pytest.fail(
+                "Firefox did not publish the form in an AT-SPI snapshot "
+                f"(exit={proc.poll() if proc is not None else None}). log:\n{tail}"
+            )
         yield driver
     finally:
-        _stop(proc)
+        if proc is not None:
+            _stop(proc)
+        if log_f is not None:
+            log_f.close()
 
 
 def _wait_for_form(driver, timeout_s: float = 25.0):

@@ -938,6 +938,94 @@ def pid_of(acc) -> int | None:
     return int(pid) if pid else None
 
 
+_DOC_URL_KEYS = ("docurl", "uri", "url")
+_LINK_URL_KEYS = ("href", "link-target")
+
+
+def _hyperlink_target(acc) -> str | None:
+    """The Hyperlink URI of this node, not a document URL inherited from a parent."""
+    from a11y_computer_use.untrusted import looks_like_url
+
+    link = _call_first(acc, ("get_hyperlink",))
+    if link is not None:
+        uri = _call_first(link, ("get_uri",), 0)
+        if isinstance(uri, str) and looks_like_url(uri.strip()):
+            return uri.strip()
+    attrs = _get_attributes(acc)
+    for key, val in attrs.items():
+        if str(key).lower() in _LINK_URL_KEYS and isinstance(val, str) and looks_like_url(val.strip()):
+            return val.strip()
+    return None
+
+
+def hyperlink_uri(acc) -> str | None:
+    """URI of a link node, or of an ancestor whose role is link.
+
+    Chromium's document exposes Hyperlink as the page URL. That is the
+    document URL, not a navigation target, so the walk stops at a document.
+    """
+    node = acc
+    for _ in range(6):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if "document" in role:
+            return None
+        if role == "link":
+            return _hyperlink_target(node)
+        node = _call_first(node, ("get_parent",))
+    return None
+
+
+def _doc_url(acc) -> str | None:
+    """DocURL for a document accessible, else None."""
+    from a11y_computer_use.untrusted import looks_like_url
+
+    role = _role_name(acc)
+    if "document" not in role:
+        return None
+    # Chromium exposes the page URL as the document's hyperlink. That is not
+    # a link the agent clicked; document_url is the only reader that wants it.
+    link = _call_first(acc, ("get_hyperlink",))
+    if link is not None:
+        uri = _call_first(link, ("get_uri",), 0)
+        if isinstance(uri, str) and looks_like_url(uri.strip()):
+            return uri.strip()
+    for key in ("DocURL", "URI", "Url"):
+        val = _call_first(acc, ("get_document_attribute_value",), key)
+        if isinstance(val, str) and looks_like_url(val.strip()):
+            return val.strip()
+    attrs = _get_attributes(acc)
+    for key, val in attrs.items():
+        if str(key).lower() in _DOC_URL_KEYS and isinstance(val, str) and looks_like_url(val.strip()):
+            return val.strip()
+    description = _call_first(acc, ("get_description",), default="")
+    if isinstance(description, str) and looks_like_url(description.strip()):
+        return description.strip()
+    return None
+
+
+def document_url_of(root) -> str | None:
+    """DocURL of the first document under ``root``, bounded so a large tree
+    cannot turn one policy check into a full walk."""
+    if root is None:
+        return None
+    queue = [root]
+    seen = 0
+    while queue and seen < 200:
+        node = queue.pop(0)
+        seen += 1
+        url = _doc_url(node)
+        if url:
+            return url
+        count = _call_first(node, ("get_child_count",), default=0) or 0
+        for index in range(min(int(count), 80)):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    return None
+
+
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 

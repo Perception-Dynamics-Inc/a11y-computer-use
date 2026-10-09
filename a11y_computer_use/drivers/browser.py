@@ -880,6 +880,38 @@ class BrowserDriver:
             )
         self.navigate(identifier)
 
+    def document_url(self) -> str | None:
+        """Current page URL from ``Page.getFrameTree``, or None if CDP has none."""
+        try:
+            sess = self._connect()
+            tree = sess.call("Page.getFrameTree", timeout=2.0)
+        except Exception:  # noqa: BLE001 - a missing URL fails open for the policy
+            return None
+        frame = tree.get("frameTree", {}).get("frame", {}) if isinstance(tree, dict) else {}
+        url = frame.get("url") if isinstance(frame, dict) else None
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+        return None
+
+    def element_url(self, element: Element) -> str | None:
+        """Absolute href of ``element`` or its nearest link, via the DOM."""
+        backend = self._backend_id(element)
+        if backend is None:
+            return None
+        try:
+            value = self._call_on(
+                backend,
+                "function(){try{var el=(this.closest&&this.closest('a'))||this;"
+                "return (el && (el.href||(el.getAttribute&&el.getAttribute('href'))))||'';}"
+                "catch(e){return '';}}",
+                return_value=True,
+            )
+        except ComputerUseError:
+            return None
+        if isinstance(value, str) and _looks_like_url(value.strip()):
+            return value.strip()
+        return None
+
     def navigate(self, url: str, *, timeout_s: float = 15.0) -> None:
         """Open ``url`` in the bound tab and block until the document finishes
         loading (``document.readyState == "complete"``) or ``timeout_s`` elapses.

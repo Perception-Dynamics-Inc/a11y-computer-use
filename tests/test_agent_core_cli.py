@@ -141,3 +141,17 @@ def test_missing_model_exits_3():
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", "a goal"])
     assert exc.value.code == 3
+
+
+def test_domain_flags_reach_the_agent():
+    parser = cli._build_parser()
+    args = parser.parse_args([
+        "run", "stay here", "--model", "scripted:turns.json",
+        "--allowed-domains", "file,example.com",
+        "--blocked-domains", "blocked.example",
+    ])
+    agent = cli.build_agent(args)
+    assert isinstance(agent, Agent)
+    assert agent.domain_policy.allowed == ("file", "example.com")
+    assert agent.domain_policy.blocked == ("blocked.example",)
+    assert agent.fence_untrusted is True

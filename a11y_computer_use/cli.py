@@ -65,6 +65,23 @@ def _build_parser() -> argparse.ArgumentParser:
     grant.set_defaults(handler=_cmd_grant)
 
     mcp = sub.add_parser("mcp", help="run the MCP server over stdio")
+    mcp.add_argument(
+        "--fence-untrusted",
+        action="store_true",
+        help="wrap snapshot, find, screen_text, and clipboard-read text in <untrusted> fences",
+    )
+    mcp.add_argument(
+        "--allowed-domains",
+        default=None,
+        dest="allowed_domains",
+        help="comma-separated hosts or origins the browser may be acted on or navigated to",
+    )
+    mcp.add_argument(
+        "--blocked-domains",
+        default=None,
+        dest="blocked_domains",
+        help="comma-separated hosts or origins that fail with domain_blocked (blocked wins)",
+    )
     mcp.set_defaults(handler=_cmd_mcp)
 
     doctor = sub.add_parser(
@@ -264,10 +281,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_mcp(_args: argparse.Namespace) -> int:
+def _cmd_mcp(args: argparse.Namespace) -> int:
     from a11y_computer_use import server
 
-    server.build_server().run(transport="stdio")
+    server.build_server(
+        fence_untrusted=True if args.fence_untrusted else None,
+        allowed_domains=args.allowed_domains,
+        blocked_domains=args.blocked_domains,
+    ).run(transport="stdio")
     return 0
 
 

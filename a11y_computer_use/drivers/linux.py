@@ -270,6 +270,42 @@ class LinuxDriver:
 
         return self._run(_do)
 
+    def document_url(self, app: str | None = None) -> str | None:
+        """AT-SPI DocURL for ``app``'s document, or None when the tree has none."""
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Scope
+
+        if not app:
+            return None
+
+        def _do() -> str | None:
+            root = _atspi.find_root(app, Scope.WINDOW)
+            url = _atspi.document_url_of(root) if root is not None else None
+            if url:
+                return url
+            app_root = _atspi.find_root(app, Scope.APP)
+            if app_root is None or app_root is root:
+                return None
+            return _atspi.document_url_of(app_root)
+
+        try:
+            return self._run(_do)
+        except Exception:  # noqa: BLE001 - a missing URL must not block native apps
+            return None
+
+    def element_url(self, element: Element) -> str | None:
+        """Hyperlink URI for ``element``, walking a few ancestors. None if unset."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.hyperlink_uri(handle))
+        except Exception:  # noqa: BLE001 - no URI is "not a link", not a failure
+            return None
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution

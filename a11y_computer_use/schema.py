@@ -343,6 +343,9 @@ class ErrorCode(str, Enum):
     ELEMENT_DISABLED = "element_disabled"
     """The ref is disabled (not sensitive, or not enabled). No input was sent."""
 
+    DOMAIN_BLOCKED = "domain_blocked"
+    """The action or navigation targets an origin outside the domain policy."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.
