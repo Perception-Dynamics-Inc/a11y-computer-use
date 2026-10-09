@@ -962,6 +962,22 @@ class LinuxDriver:
                 return inserted
             if inserted:
                 return len(text)
+            # Chrome's contenteditable has no EditableText. insert_text
+            # returns None without sending keys. Type, then poll: the first
+            # AT-SPI read is often still the old text. A settled read that
+            # lacks the characters is text_mismatch. Inputs and GTK do not
+            # take this branch.
+            landed = self._run(lambda: _atspi.chromium_contenteditable_type(handle, text))
+            if landed is True:
+                return len(text)
+            if landed is False:
+                after = self._run(lambda: _atspi._readable_text(handle))
+                raise _atspi._text_mismatch(
+                    "text_mismatch",
+                    f"the text read back does not contain {text!r}",
+                    expected=text,
+                    actual=after,
+                )
         if _on_wayland():  # a11y path unavailable and XTEST can't reach Wayland apps
             raise _wayland_input_error("type_text (no focused editable for the a11y path)")
         # The XTEST path types into whatever holds keyboard focus, so probe the
@@ -974,6 +990,26 @@ class LinuxDriver:
         before = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
         after = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        # A Chrome contenteditable can publish the keys after that first
+        # read. Poll until the text settles. Any other focused control keeps
+        # the single read. No readable text is still not a mismatch.
+        if (
+            app_id
+            and after is not None
+            and not _atspi._typed_visible(before, after, text)
+        ):
+            focused = self._run(lambda: _atspi._focused_contenteditable(app_id))
+            if focused is not None:
+                # Sleep between reads on this thread. Each read is its own
+                # AT-SPI call, so the a11y thread is not held for the wait.
+                after = _atspi._poll_typed_text(
+                    lambda: self._run(lambda: _atspi._readable_text(focused)),
+                    before,
+                    text,
+                    chrome=True,
+                )
+                if _atspi._typed_visible(before, after, text, chrome=True):
+                    return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
         if after is not None and not _atspi._typed_visible(before, after, text):

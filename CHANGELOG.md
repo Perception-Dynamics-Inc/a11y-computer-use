@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [Unreleased]
+
+### Fixed
+
+- `set_value ""` clears a Chrome contenteditable. On 0.4.51 `set_value` of an empty string on `<div contenteditable role=textbox>` (Editor A, including after it held `Ayşe café ₸`) returned `unsupported` with reason `text_mismatch` and the text stayed. Firefox already cleared it. The clear focuses the editor, selects all, and sends BackSpace and Delete, then polls the read. A newline, a space, or NULL (the empty editor's `<br>`) is empty. Words that are still there are `text_mismatch`, and the previous text stays. An `<input>`, a `<textarea>`, a number input, and a GTK entry are unchanged. A live Chrome page sets Editor A to `Ayşe café ₸` and then clears it: `set_value ""` returns `set … = ''`, and the snapshot no longer shows that text. An empty editor with no box of its own is not listed, which is the same zero-size drop as any other field. `type` into a Chrome contenteditable polls until the AT-SPI text settles. On 0.4.52 one type in twelve returned `text_mismatch` while the characters had landed, because the first read was still the previous text. NBSP compares as a space, one trailing newline is the `<br>`, and a trailing space Chrome does not keep is not a mismatch. An interior space still is, and a read that settles without the typed characters is still `text_mismatch`. A live Chrome page types ten times into the editor, and each token is in the snapshot (#165) (2026-10-09).
+
 ## [0.4.54] - 2026-10-09
 
 ### Added
