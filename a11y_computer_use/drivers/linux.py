@@ -1540,9 +1540,34 @@ class LinuxDriver:
         after = self._typed_readback(app_id)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
-        # first read can be a truncated URL. LibreOffice already read the
-        # open cell editor, so it does not take this poll. Any other focused
-        # control keeps the single read. No readable text is still not a mismatch.
+        # first read can be a truncated URL. Calc is the same lag: the cell
+        # editor and the cell value publish after the keys, and one empty
+        # read is not a failed type. A sheet that still does not show the
+        # text is a mismatch. Any other focused control keeps the single
+        # read. No readable text is still not a mismatch.
+        if (
+            app_id
+            and _atspi.libreoffice_app(app_id)
+            and not _atspi._typed_visible(before, after, text)
+        ):
+            sheet = bool(self._run(lambda: _atspi.spreadsheet_open(app_id)))
+            after = _atspi.poll_sheet_type(
+                lambda: self._run(lambda: _atspi.sheet_editor_text(app_id)),
+                lambda: self._run(lambda: _atspi.selected_sheet_text(app_id)),
+                lambda: self._run(lambda: _atspi.focused_text(app_id)),
+                before,
+                text,
+                sheet=sheet,
+            )
+            if _atspi._typed_visible(before, after, text):
+                return len(text)
+            if sheet:
+                raise _atspi._text_mismatch(
+                    "text_mismatch",
+                    f"the text read back does not contain {text!r}",
+                    expected=text,
+                    actual=after,
+                )
         if (
             app_id
             and after is not None
@@ -1679,8 +1704,10 @@ class LinuxDriver:
         For LibreOffice, an open cell editor's paragraph is the in-progress
         string. The focused cell's own text stays empty until Return, which
         is why 0.4.45 reported ``actual: ""`` after the digits had landed.
-        Any other app uses the focused node's text, so a terminal that shows
-        the inverted string is still a mismatch.
+        ``type_text`` polls that editor, then the selected cell, when this
+        first read does not show the request. Any other app uses the focused
+        node's text, so a terminal that shows the inverted string is still
+        a mismatch.
         """
         from a11y_computer_use.drivers import _atspi
 
