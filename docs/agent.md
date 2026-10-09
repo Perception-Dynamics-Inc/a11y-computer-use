@@ -261,12 +261,14 @@ the action. The agent is constructed with an approve hook, so the CLI
 instead of being skipped immediately.
 
 Every UI or page string is passed through `a11y_computer_use.untrusted.fence`
-before it leaves the server. That includes observations, window titles,
+once before it leaves the server. That includes observations, window titles,
 element names, action results, errors that quote the screen, condition
 details, `needs_human` message and window, answers, and the trajectory JSONL.
-A string that already contains `<untrusted nonce=...>` is not returned as-is:
-closers are escaped and the whole string is wrapped again, so a page cannot
-plant a fence and leave a line outside it. A phrase such as "ignore previous
+A fence this process already issued is returned as that fence, so a step
+result the agent wrapped is not wrapped again. A page-supplied
+`<untrusted nonce=...>` block is not returned as-is: openers and closers are
+escaped and the whole string is wrapped again, so a page cannot plant a fence
+and leave a line outside it. A phrase such as "ignore previous
 instructions" is marked `suspicious=1` and is not removed. Screenshot bytes
 are not wrapped. Status tokens such as `done` and `cancelled` are not fenced.
 
