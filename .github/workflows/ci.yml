@@ -309,23 +309,21 @@ jobs:
           /tmp/wheel-venv/bin/python -c "import a11y_computer_use, a11y_computer_use.server, a11y_computer_use.agent, a11y_computer_use.adapters, a11y_computer_use.h2h; print('wheel imports ok', a11y_computer_use.__version__ if hasattr(a11y_computer_use, '__version__') else '')"
       # A plain install, not the [linux] extra. python-xlib is a core
       # dependency on Linux, so this venv can list an X11 window.
+      # The checker is written with echo so every line stays indented:
+      # a column-0 line ends the YAML block and the workflow file fails
+      # to parse, which starts none of the jobs.
       - name: clean install lists windows
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb openbox x11-utils
-          xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
-            openbox >/dev/null 2>&1 &
-            sleep 1
-            xmessage -timeout 30 "clean-install-window" >/dev/null 2>&1 &
-            sleep 1
-            /tmp/wheel-venv/bin/python -c "
-import importlib.metadata as md
-reqs = md.requires(\"a11y-computer-use\") or []
-assert any(\"python-xlib\" in r and \"linux\" in r for r in reqs), reqs
-from a11y_computer_use.drivers._linux_system import windows
-rows = windows()
-blob = \" \".join((str(r.get(\"app\") or \"\") + \" \" + str(r.get(\"title\") or \"\")).lower() for r in rows)
-print(rows)
-assert \"xmessage\" in blob or \"clean-install-window\" in blob, rows
-"
-          '
+          {
+            echo 'import importlib.metadata as md'
+            echo 'reqs = md.requires("a11y-computer-use") or []'
+            echo 'assert any("python-xlib" in r and "linux" in r for r in reqs), reqs'
+            echo 'from a11y_computer_use.drivers._linux_system import windows'
+            echo 'rows = windows()'
+            echo 'blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
+            echo 'print(rows)'
+            echo 'assert "xmessage" in blob or "clean-install-window" in blob, rows'
+          } > /tmp/list-windows.py
+          xvfb-run -a -s "-screen 0 1280x800x24" bash -c 'openbox >/dev/null 2>&1 & sleep 1; xmessage -timeout 30 clean-install-window >/dev/null 2>&1 & sleep 1; /tmp/wheel-venv/bin/python /tmp/list-windows.py'
