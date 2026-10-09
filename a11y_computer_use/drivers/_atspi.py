@@ -2558,9 +2558,11 @@ def set_text(acc, text: str) -> bool:
     ``text``, the field is focused and the value is typed, and success is
     still that read-back. Chromium and GTK keep the previous tail: keys are
     sent only when the snapshot read is already empty, because focusing a
-    Chrome number input can make an empty field read back as 0. If that
-    write cannot be verified, the text from before the call is put back, so
-    a contenteditable is not left empty.
+    Chrome number input can make an empty field read back as 0. When the
+    snapshot read is left blank and the new text cannot be verified, the
+    text from before the call is put back, so a contenteditable is not left
+    empty. A Chromium field that still reads a value (an empty number input
+    reads 0) is not focused in order to restore it.
     """
     eti = _editable_iface(acc)
     if eti is None:
@@ -2573,7 +2575,6 @@ def set_text(acc, text: str) -> bool:
     if current is None:
         return wrote
     if not _clear_text(acc, eti, current):
-        _restore_text(acc, original)
         return False
     if not _call_first(eti, ("set_text_contents",), text, default=False):
         insert = None
@@ -2586,7 +2587,6 @@ def set_text(acc, text: str) -> bool:
             if _text_is_gone(acc) and _x11_keys_available():
                 _type_string(text)
             else:
-                _restore_text(acc, original)
                 return False
     if _confirm_text(acc, text):
         return True
@@ -2599,7 +2599,11 @@ def set_text(acc, text: str) -> bool:
         _type_string(text)
         if _confirm_text(acc, text):
             return True
-    _restore_text(acc, original)
+    # Only a blank read is restored. A Chromium number input that reads 0
+    # after a failed clear is not blank, and focusing it to put the old
+    # digits back is what makes the empty field read 0.
+    if _text_is_gone(acc):
+        _restore_text(acc, original)
     return False
 
 
