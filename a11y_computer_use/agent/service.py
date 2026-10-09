@@ -410,6 +410,7 @@ class RunStore:
             "display": display,
             "max_steps": limits["max_steps"],
             "max_time_s": limits["max_time_s"],
+            "model_timeout_s": limits["model_timeout_s"],
             "approve": lambda action, record=record: self._approve(record, action),
             "auto_deny": False,
             "allow_exec": allow_exec,
@@ -470,10 +471,17 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, list[
         raise ValueError("limits must be an object")
     max_steps = limits.get("max_steps", 50)
     max_time_s = limits.get("max_time_s", 900)
+    model_timeout_s = limits.get("model_timeout_s", 120)
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise ValueError("limits.max_steps must be a positive integer")
     if isinstance(max_time_s, bool) or not isinstance(max_time_s, (int, float)) or float(max_time_s) <= 0:
         raise ValueError("limits.max_time_s must be a positive number")
+    if (
+        isinstance(model_timeout_s, bool)
+        or not isinstance(model_timeout_s, (int, float))
+        or float(model_timeout_s) <= 0
+    ):
+        raise ValueError("limits.model_timeout_s must be a positive number")
     if "allow_exec" in body and not isinstance(body.get("allow_exec"), bool):
         raise ValueError("allow_exec must be a boolean")
     allow_exec = bool(body.get("allow_exec", False))
@@ -483,7 +491,11 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, list[
         goal,
         model,
         display,
-        {"max_steps": int(max_steps), "max_time_s": float(max_time_s)},
+        {
+            "max_steps": int(max_steps),
+            "max_time_s": float(max_time_s),
+            "model_timeout_s": float(model_timeout_s),
+        },
         allow_exec,
         domains,
         blocked,

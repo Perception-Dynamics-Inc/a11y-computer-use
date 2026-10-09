@@ -34,6 +34,7 @@ def build_agent_mcp(store: RunStore | None = None):
         display: str | None = None,
         max_steps: int = 50,
         max_time_s: float = 900,
+        model_timeout_s: float = 120,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
@@ -43,7 +44,11 @@ def build_agent_mcp(store: RunStore | None = None):
             "goal": goal,
             "model": model,
             "display": display,
-            "limits": {"max_steps": max_steps, "max_time_s": max_time_s},
+            "limits": {
+                "max_steps": max_steps,
+                "max_time_s": max_time_s,
+                "model_timeout_s": model_timeout_s,
+            },
             "allow_exec": allow_exec,
         }
         if allowed_domains is not None:

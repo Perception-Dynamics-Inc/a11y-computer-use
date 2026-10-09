@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import time
 from types import SimpleNamespace
 
 from a11y_computer_use.agent import Agent, ReservedPermission, tool_schemas
@@ -296,6 +297,101 @@ def test_max_steps_stops_before_a_third_observation():
     # Two plan-time observations and one post-action observation per click.
     # The third turn is refused before it observes.
     assert types(events).count("observation") == 4
+
+
+def test_model_call_uses_the_fixed_timeout_not_the_run_budget():
+    """The model gets model_timeout_s, not the seconds left in max_time."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    seen: list[float | None] = []
+
+    class _Recording(ScriptedModel):
+        def complete(self, messages, tools, *, timeout=None):
+            seen.append(timeout)
+            return super().complete(messages, tools, timeout=timeout)
+
+    model = _Recording([turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))])
+    result, _events, _runtime, agent = run(model, elements, max_time_s=3, model_timeout_s=120)
+    assert result.reason == "done"
+    assert seen == [120.0]
+    assert agent.model_timeout_s == 120.0
+
+
+def test_budget_is_checked_again_before_the_model_call():
+    """Observation can spend the budget. The next model call does not start."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    called = {"n": 0}
+
+    def snapshot(app, **kwargs):
+        time.sleep(0.05)
+        return FakeRuntime.desktop_snapshot(runtime, app, **kwargs)
+
+    runtime.desktop_snapshot = snapshot  # type: ignore[method-assign]
+
+    def script(_messages):
+        called["n"] += 1
+        return turn(ToolCall("click", {"ref": "e2"}))
+
+    result, _events, _runtime, _agent = run(
+        ScriptedModel(script), elements, runtime=runtime, max_time_s=0.02, model_timeout_s=30,
+    )
+    assert result.status == "failed"
+    assert result.reason == "max_time"
+    assert called["n"] == 0
+    assert result.steps == 0
+
+
+def test_model_timeout_after_the_budget_is_max_time_not_an_error():
+    """A backend timeout once the run budget is spent is max_time, exit 1."""
+    from a11y_computer_use.agent.cli import exit_code
+    from a11y_computer_use.agent.models.base import ModelError
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    class _SlowTimeout:
+        name = "slow"
+        supports_images = False
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools
+            assert timeout == 30.0
+            time.sleep(0.05)
+            raise ModelError("command model timed out after 1.36s: python3")
+
+    result, events, runtime, _agent = run(
+        _SlowTimeout(), elements, max_time_s=0.02, model_timeout_s=30,
+    )
+    assert result.status == "failed"
+    assert result.reason == "max_time"
+    assert not result.reason.startswith("error:")
+    assert exit_code(result) == 1
+    assert runtime.calls == []
+    assert "error" not in types(events)
+
+
+def test_model_timeout_with_budget_left_stays_an_error():
+    """A model that times out while the run budget remains is still an error."""
+    from a11y_computer_use.agent.cli import exit_code
+    from a11y_computer_use.agent.models.base import ModelError
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    class _Timeout:
+        name = "timeout"
+        supports_images = False
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            raise ModelError("command model timed out after 120s: python3")
+
+    result, events, _runtime, _agent = run(
+        _Timeout(), elements, max_time_s=30, model_timeout_s=120,
+    )
+    assert result.status == "failed"
+    assert result.reason.startswith("error: ModelError:")
+    assert "timed out" in result.reason
+    assert exit_code(result) == 3
+    assert "error" in types(events)
 
 
 def test_max_time_zero_stops_immediately():

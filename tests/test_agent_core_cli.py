@@ -232,6 +232,18 @@ def test_missing_model_exits_3():
     assert exc.value.code == 3
 
 
+def test_model_timeout_flag_defaults_to_120_and_is_configurable(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    custom = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}", "--model-timeout", "45",
+    ])
+    assert cli.build_agent(default).model_timeout_s == 120.0
+    assert cli.build_agent(custom).model_timeout_s == 45.0
+
+
 def test_domain_flags_reach_the_agent():
     parser = cli._build_parser()
     args = parser.parse_args([
