@@ -2706,3 +2706,243 @@ def test_linux_chrome_cross_origin_iframe_checkbox(tmp_path) -> None:
         _stop(proc)
         parent.shutdown()
         child.shutdown()
+
+
+_LO_REGISTRY = """<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.VCL/Settings/org.openoffice.VCL:ConfigurableSettings['Accessibility']"><prop oor:name="EnableATToolSupport" oor:op="fuse"><value>true</value></prop></item>
+</oor:items>
+"""
+
+
+def _kill_libreoffice() -> None:
+    """Stop soffice by comm. A Python command line that mentions the name is left alone."""
+    import signal
+
+    comms = {"soffice", "soffice.bin", "oosplash"}
+    for _ in range(15):
+        alive = False
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                    comm = fh.read().strip()
+            except OSError:
+                continue
+            if comm not in comms:
+                continue
+            alive = True
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+            except OSError:
+                pass
+        if not alive:
+            return
+        time.sleep(0.2)
+
+
+def _cell(snap, title: str):
+    return next((el for el in snap.elements if el.title == title), None)
+
+
+def _wait_cell_value(driver, title: str, value: str):
+    deadline = time.monotonic() + 8
+    last = None
+    while time.monotonic() < deadline:
+        shot = driver.snapshot(Scope.WINDOW, "soffice")
+        cell = _cell(shot, title)
+        last = None if cell is None else cell.value
+        if last == value:
+            return shot
+        time.sleep(0.3)
+    raise AssertionError(f"{title} value is {last!r}, expected {value!r}")
+
+
+def _stop_group(proc: subprocess.Popen) -> None:
+    import signal
+
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+
+
+def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) -> None:
+    """Live LibreOffice Calc with the gtk3 accessibility bridge.
+
+    A local sheet, not a third-party document. The gen VCL plugin is started
+    afterwards and must not be reported as app_not_found.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-profile"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                if _cell(shot, "A1") is not None and _cell(shot, "B2") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose A1 and B2\n{last}"
+        a1 = _cell(snap, "A1")
+        assert a1 is not None and a1.role == "AXCell"
+        assert a1.value in (None, ""), a1.value
+        assert _cell(snap, "B2") is not None
+        assert observe.find_elements(snap, text="B2")
+
+        d1 = _cell(snap, "D1")
+        assert d1 is not None
+        assert driver.set_value(d1, "setv") is True
+        snap = _wait_cell_value(driver, "D1", "setv")
+        assert observe.find_elements(snap, text="setv")
+
+        e1 = _cell(snap, "E1")
+        assert e1 is not None
+        assert driver.set_value(e1, "Résumé ✓") is True
+        snap = _wait_cell_value(driver, "E1", "Résumé ✓")
+
+        f1 = _cell(snap, "F1")
+        assert f1 is not None
+        driver.activate_app("soffice")
+        driver.click(f1)
+        driver.type_text("11")
+        driver.key_chord("return")
+        _wait_cell_value(driver, "F1", "11")
+
+        g1 = _cell(snap, "G1")
+        assert g1 is not None
+        assert driver.set_value(g1, "=B1*2") is True
+        shot = driver.snapshot(Scope.WINDOW, "soffice")
+        held = _cell(shot, "G1")
+        assert held is not None
+        assert held.value in {"0", "=B1*2", "B1*2"}, held.value
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+    gen_profile = tmp_path / "lo-gen"
+    (gen_profile / "user").mkdir(parents=True)
+    env["SAL_USE_VCLPLUGIN"] = "gen"
+    gen = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{gen_profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        saw = None
+        while time.monotonic() < deadline:
+            try:
+                driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                saw = exc
+                if exc.code is ErrorCode.UNSUPPORTED:
+                    break
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                saw = None
+            if gen.poll() is not None and saw is not None and saw.code is ErrorCode.APP_NOT_FOUND:
+                break
+            time.sleep(0.4)
+        assert saw is not None and saw.code is ErrorCode.UNSUPPORTED, (
+            None if saw is None else (saw.code, saw.message)
+        )
+        assert "libreoffice-gtk3" in saw.message
+        assert "SAL_USE_VCLPLUGIN=gtk3" in saw.message
+        with pytest.raises(ComputerUseError) as other:
+            driver.snapshot(Scope.WINDOW, "xfce4-terminal")
+        assert other.value.code is ErrorCode.APP_NOT_FOUND
+    finally:
+        _stop_group(gen)
+        _kill_libreoffice()
+
+    with pytest.raises(ComputerUseError) as stopped:
+        driver.snapshot(Scope.WINDOW, "soffice")
+    assert stopped.value.code is ErrorCode.APP_NOT_FOUND
+
+
+def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
+    """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
+
+    ``app launch`` returns when the first window is up. AT-SPI can still be
+    registering for several seconds after that, which is when app list and
+    window list already show ``soffice.bin``. The snapshot must not answer
+    ``app_not_found``.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v libreoffice"], capture_output=True, text=True)
+    assert found.stdout.strip(), "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    previous = os.environ.get("SAL_USE_VCLPLUGIN")
+    os.environ["SAL_USE_VCLPLUGIN"] = "gtk3"
+    os.environ["GTK_MODULES"] = "gail:atk-bridge"
+    os.environ["NO_AT_BRIDGE"] = "0"
+    runtime = _runtime_for(tmp_path, driver, "libreoffice", "soffice", "soffice.bin")
+    try:
+        launched = runtime.app("launch", "libreoffice", activate=False)
+        assert "first window:" in launched, launched
+        text = runtime.desktop_snapshot("LibreOffice", mode="interactive")
+        assert text
+        assert "app_not_found" not in text
+        again = runtime.desktop_snapshot("soffice.bin", mode="interactive")
+        assert again
+        third = runtime.desktop_snapshot("libreoffice", mode="interactive")
+        assert third
+    finally:
+        if previous is None:
+            os.environ.pop("SAL_USE_VCLPLUGIN", None)
+        else:
+            os.environ["SAL_USE_VCLPLUGIN"] = previous
+        _kill_libreoffice()

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from collections.abc import Sequence
 
@@ -76,6 +77,9 @@ _ROLE = {
     "tree table": "AXOutline",
     "tree item": "AXRow",
     "table": "AXTable",
+    # LibreOffice Calc. The name is the address (A1). AXGroup is in
+    # _NO_VALUE_ROLES, so mapping this to a group hid the cell text.
+    "table cell": "AXCell",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
     "scroll bar": "AXScrollBar",
@@ -762,6 +766,16 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
         return choice
+    if role_name == "table cell":
+        # An empty Calc cell's Value interface is a full double range whose
+        # current value is 0.0. That is not the cell's text. A formula is
+        # shown only when the text interface is empty; LibreOffice stores
+        # the formula without a leading "=".
+        formula = _sheet_formula_text(acc)
+        if formula:
+            return formula
+        if _SHEET_ADDRESS.match(_node_name(acc)):
+            return None
     if role_name in _RANGE_ROLE_NAMES:
         return _range_value(acc)
     # A Qt label, check, row, or empty line edit has a Value interface whose
@@ -1063,7 +1077,17 @@ class ATSPIAccessor:
         if visible is not None:
             return _cached_rows_for_snapshot(self._visible_bounds, visible)
         count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
-        count = min(int(count), _MAX_CHILDREN_FETCH)
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 0
+        # Calc reports 1048576×16384 and get_child_at_index is row-major, so
+        # the first fetch is all of row 1. A modest child count is the
+        # visible cells (LibreOffice 25.2 exposes about 65) and is walked
+        # as usual. The observe cap for address-titled cells is 96.
+        if count > _MAX_CHILDREN_FETCH and _spreadsheet_table(node):
+            return _sheet_window_cells(node)
+        count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
@@ -2168,6 +2192,301 @@ def _range_message(value: str, low: float, high: float, *, open_upper: bool) -> 
         return f"value {value!r} is below the minimum {_format_bound(low)}"
     return f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
 
+# Calc cell name. A1, B2, AA10. Not a calendar day ("15") and not row 0.
+_SHEET_ADDRESS = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")
+_CELL_EDITOR_PANEL = re.compile(r"^Cell\s+([A-Z]{1,3}[1-9][0-9]*)$")
+_SHEET_SCAN_ROWS = 32
+_SHEET_SCAN_COLS = 16
+_SHEET_KEEP = 96
+_LO_COMMS = frozenset({"soffice", "soffice.bin", "oosplash"})
+
+
+def _sheet_formula(acc) -> str | None:
+    """The Formula attribute, or None when the cell has none.
+
+    LibreOffice stores ``=B1*2`` as ``B1*2``. An empty attribute is not a formula.
+    """
+    attrs = _get_attributes(acc)
+    for key, val in attrs.items():
+        if str(key).lower() != "formula":
+            continue
+        text = str(val or "").strip()
+        return text or None
+    return None
+
+
+def _sheet_formula_text(acc) -> str | None:
+    """Formula text for a snapshot, with the leading ``=`` restored."""
+    formula = _sheet_formula(acc)
+    if not formula:
+        return None
+    if formula.startswith("="):
+        return formula
+    return "=" + formula
+
+
+def is_sheet_cell(acc) -> bool:
+    """True for a Calc cell: address title, or a non-empty Formula attribute.
+
+    A GTK tree cell and an HTML table cell are not addresses, so they stay
+    on the path they already had.
+    """
+    if _role_name(acc) != "table cell":
+        return False
+    if _SHEET_ADDRESS.match(_node_name(acc)):
+        return True
+    return _sheet_formula(acc) is not None
+
+
+def libreoffice_app(app: str) -> bool:
+    """True when ``app`` names LibreOffice. The comm is often ``soffice.bin``."""
+    name = (app or "").lower()
+    return "soffice" in name or "libreoffice" in name
+
+
+def libreoffice_process_running() -> bool:
+    """True when a LibreOffice process comm is ``soffice``, ``soffice.bin``, or ``oosplash``.
+
+    Reads ``/proc/<pid>/comm``. A command line that merely mentions the name
+    is not a match.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return False
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                comm = fh.read().strip()
+            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                stat = fh.read()
+        except OSError:
+            continue
+        if comm not in _LO_COMMS:
+            continue
+        # A zombie still has the comm until its parent reaps it. It is not
+        # a running LibreOffice.
+        end = stat.rfind(")")
+        state = stat[end + 2:].split(None, 1)[0] if end >= 0 and end + 2 < len(stat) else ""
+        if state == "Z":
+            continue
+        return True
+    return False
+
+
+def libreoffice_without_bridge(app: str) -> bool:
+    """True when ``app`` is LibreOffice and a soffice process is running.
+
+    The caller has already failed to find an AT-SPI root. The gen VCL plugin
+    stays off the bus; gtk3 with libreoffice-gtk3 does not.
+    """
+    return libreoffice_app(app) and libreoffice_process_running()
+
+
+# LibreOffice's X window shows up in app list and window list while AT-SPI is
+# still registering. That gap was 3–13 s. Snapshot polls until this deadline,
+# then reports the app missing (or the missing gtk3 bridge).
+ATSPI_REGISTER_WAIT_S = 15.0
+ATSPI_REGISTER_POLL_S = 0.25
+
+
+def app_listed(identifier: str) -> bool:
+    """True when app list or window list already shows ``identifier``.
+
+    App list keys the row by process comm. Window list uses that comm, the
+    WM_CLASS, and the title. Those are the same names ``resolve_app`` uses,
+    so a snapshot of ``LibreOffice`` sees the ``soffice.bin`` row the list
+    already returned.
+    """
+    if not (identifier or "").strip():
+        return False
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        apps = _linux_system.running_apps()
+    except Exception:
+        apps = []
+    for row in apps or []:
+        if not isinstance(row, dict):
+            continue
+        comm = str(row.get("bundle_id") or row.get("name") or "")
+        if _linux_system._comm_matches_identifier(identifier, comm):
+            return True
+    try:
+        rows = _linux_system.windows()
+    except Exception:
+        rows = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        comm = str(row.get("app") or "")
+        if comm and _linux_system._comm_matches_identifier(identifier, comm):
+            return True
+        if _linux_system._class_matches_identifier(
+            identifier,
+            str(row.get("wm_class") or ""),
+            str(row.get("wm_class_class") or ""),
+        ):
+            return True
+        title = str(row.get("title") or "").lower()
+        if title and any(
+            name and name in title for name in _linux_system._identity_needles(identifier)
+        ):
+            return True
+    return False
+
+
+def should_wait_for_atspi(identifier: str) -> bool:
+    """True when snapshot should wait for this app to appear on the AT-SPI bus.
+
+    The app is already in the app list or the window list, or a LibreOffice
+    process is running and has not registered yet. A name that is in neither
+    place, and is not that process, is ``app_not_found`` on the first look.
+    """
+    if app_listed(identifier):
+        return True
+    return libreoffice_app(identifier) and libreoffice_process_running()
+
+
+def _table_dimensions(acc) -> tuple[int | None, int | None]:
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None, None
+    table = getattr(Atspi, "Table", None)
+    if table is None:
+        return None, None
+
+    def _as_int(value) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return int(value)
+
+    return (
+        _as_int(_safe(lambda: table.get_n_rows(acc))),
+        _as_int(_safe(lambda: table.get_n_columns(acc))),
+    )
+
+
+def _spreadsheet_table(node) -> bool:
+    """True for a Calc grid, not a calendar or a GTK tree table."""
+    if _role_name(node) != "table":
+        return False
+    rows, cols = _table_dimensions(node)
+    if rows is not None and cols is not None and (rows >= 256 or cols >= 64):
+        return True
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and "spreadsheet" in _role_name(parent):
+        return True
+    return False
+
+
+def _sheet_window_cells(acc) -> list:
+    """Cells from ``Table.get_accessible_at``, on-screen ones first.
+
+    Scans 32 rows by 16 columns and keeps up to 96 cells that have a
+    positive size. That window includes B2 and E1–G1 on a new sheet. When
+    every cell in the scan is 0×0, the first 96 are returned so a toolkit
+    that does not report extents still lists addresses.
+    """
+    try:
+        table = _atspi().Table
+    except (ImportError, AttributeError):
+        return []
+    on_screen: list = []
+    fallback: list = []
+    for row in range(_SHEET_SCAN_ROWS):
+        for col in range(_SHEET_SCAN_COLS):
+            cell = _safe(lambda r=row, c=col: table.get_accessible_at(acc, r, c))
+            if cell is None:
+                continue
+            fallback.append(cell)
+            _pos, size = _extents(cell, keep_zero=True)
+            width = (size or (0, 0))[0] or 0
+            height = (size or (0, 0))[1] or 0
+            if width > 0 and height > 0:
+                on_screen.append(cell)
+                if len(on_screen) >= _SHEET_KEEP:
+                    return on_screen
+    if on_screen:
+        return on_screen
+    return fallback[:_SHEET_KEEP]
+
+
+def sheet_cell_matches(acc, value: str) -> bool:
+    """True when the cell text is ``value``, or the formula is that request.
+
+    The formula attribute omits a leading ``=``. The computed text (``0``
+    when ``=B1*2`` and B1 is empty) does not have to equal the request when
+    the formula does.
+    """
+    if _full_text(acc) == value:
+        return True
+    formula = _sheet_formula(acc)
+    if not formula:
+        return False
+    wanted = value[1:] if value.startswith("=") else value
+    return formula == value or formula == wanted or ("=" + formula) == value
+
+
+def _find_cell_editor(node, budget: list[int]):
+    """The ``Cell A1`` group opened while a cell is being edited.
+
+    The name is matched on any role: LibreOffice 24.2 exposes it as a
+    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    A Calc table's child count is huge, and the editor is a sibling of the
+    table, not a cell.
+    """
+    if budget[0] <= 0 or node is None:
+        return None
+    if _CELL_EDITOR_PANEL.match(_node_name(node)):
+        return node
+    role = _role_name(node)
+    if role in {"table", "menu", "menu bar", "popup menu"}:
+        return None
+    budget[0] -= 1
+    count = _child_count(node)
+    if count > 40:
+        count = 40
+    for index in range(count):
+        child = _child_at(node, index)
+        found = _find_cell_editor(child, budget)
+        if found is not None:
+            return found
+    return None
+
+
+def sheet_editor_text(app: str) -> str | None:
+    """Paragraph text of the open cell editor, or None.
+
+    Only LibreOffice. The panel is a sibling of the sheet, named ``Cell F1``,
+    and its paragraph is the in-progress string. Absent when no edit is open.
+    """
+    if not libreoffice_app(app):
+        return None
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.APP)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    panel = _find_cell_editor(root, [160])
+    if panel is None:
+        return None
+    count = min(_child_count(panel), 8)
+    for index in range(count):
+        child = _child_at(panel, index)
+        if child is None:
+            continue
+        text = _full_text(child)
+        if text:
+            return text
+    return None
+
 
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
@@ -2200,7 +2519,11 @@ def control_kind(acc) -> str | None:
         return None
     if role in {"spin button", "slider"} or _number_input(acc):
         return "value"
-    if role in _TEXT_ROLE_NAMES:
+    if role in _TEXT_ROLE_NAMES or is_sheet_cell(acc):
+        # A spreadsheet cell's Value interface is the numeric range of a
+        # double, including 0.0 on an empty cell. The text is written by
+        # typing, not by Value.set_current_value. Checked before
+        # ``_value_range``, which imports gi.
         return None
     if _value_range(acc) is not None:
         return "value"

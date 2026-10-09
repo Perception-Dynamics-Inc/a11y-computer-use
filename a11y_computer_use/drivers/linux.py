@@ -38,6 +38,19 @@ from a11y_computer_use.schema import (
 )
 
 
+def _resolved_app(identifier: str) -> str:
+    """The app id app list would show for ``identifier``.
+
+    A window title, a process comm, and a WM_CLASS all resolve to the comm,
+    the same way ``resolve_app`` does before an app-list row is built. An
+    unmatched name is returned unchanged.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    found = _linux_system.resolve_app(identifier)
+    return found or identifier
+
+
 def _point_of(target: Target) -> tuple[int, int]:
     """Screen (x, y) for a coordinate action: a Point directly, else an
     Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1)."""
@@ -244,30 +257,87 @@ class LinuxDriver:
                         "--force-renderer-accessibility. See docs/linux-port.md."},
             )
 
+    def _root_for_snapshot(self, app: str, scope: Scope):
+        """(name, accessible) for a snapshot.
+
+        The given name wins when it already selects an application. The
+        comm from app list is the fallback, which is how ``LibreOffice``
+        becomes ``soffice.bin``.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        root = self._run(lambda name=app: _atspi.find_root(name, scope))
+        if root is not None:
+            return app, root
+        resolved = _resolved_app(app)
+        if resolved != app:
+            root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+            return resolved, root
+        return app, None
+
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        def _do() -> Snapshot:
-            root = _atspi.find_root(app, scope)
-            # An empty tree is a running app with nothing to show. No AT-SPI
-            # application at all is the same answer menu list already gives:
-            # the app is not running. An empty snapshot there told the agent
-            # the app was open and custom-drawn.
-            if root is None:
+        # A name find_root already answers is the AT-SPI application. Two
+        # Python windows share the comm python3; resolving that name to the
+        # comm first would snapshot the other window. LibreOffice is the
+        # other case: the caller says LibreOffice and the bus says
+        # soffice.bin, so the comm is used only after the given name misses.
+        resolved, root = self._root_for_snapshot(app, scope)
+        # The X window is in app list and window list before the application
+        # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
+        # the list still shows the app, or a LibreOffice process is up, and
+        # stop at ATSPI_REGISTER_WAIT_S. A name that is not listed does not
+        # wait. The missing gtk3 bridge is reported after that deadline, not
+        # during the registration gap.
+        if root is None and (
+            _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
+        ):
+            deadline = time.monotonic() + _atspi.ATSPI_REGISTER_WAIT_S
+            while root is None and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_atspi.ATSPI_REGISTER_POLL_S, remaining))
+                resolved, root = self._root_for_snapshot(app, scope)
+                if root is not None:
+                    break
+                if not (
+                    _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
+                ):
+                    break
+        # An empty tree is a running app with nothing to show. No AT-SPI
+        # application at all is the same answer menu list already gives:
+        # the app is not running. An empty snapshot there told the agent
+        # the app was open and custom-drawn.
+        if root is None:
+            if _atspi.libreoffice_without_bridge(resolved):
                 raise ComputerUseError(
-                    ErrorCode.APP_NOT_FOUND,
-                    f"no running application matches {app!r}",
-                    detail={"app": app},
+                    ErrorCode.UNSUPPORTED,
+                    "LibreOffice is running without an accessibility bridge. "
+                    "Install libreoffice-gtk3 and start it with SAL_USE_VCLPLUGIN=gtk3.",
+                    detail={
+                        "app": resolved,
+                        "reason": "no_accessibility_bridge",
+                        "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
+                    },
                 )
-            pid = _atspi.pid_of(root) if root is not None else None
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"no running application matches {resolved!r}",
+                detail={"app": resolved},
+            )
+
+        def _do() -> Snapshot:
+            pid = _atspi.pid_of(root)
             accessor = _atspi.ATSPIAccessor()
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
             return observe.build_snapshot(
-                root, accessor, scope=scope, app=app, pid=pid,
+                root, accessor, scope=scope, app=resolved, pid=pid,
                 geometry=_atspi.primary_geometry(),
             )
 
@@ -489,6 +559,12 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
+            # Not the Value interface: that range is a double and rejects text.
+            # Focus, type (a selected cell replaces), commit with Return, then
+            # the cell text or the formula attribute has to match.
+            self._write_sheet_cell(handle, value)
+            return True
         if handle is not None:
             kind = self._run(lambda: _atspi.control_kind(handle))
             if kind == "combo":
@@ -987,15 +1063,17 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         app_id, _pid = self.frontmost_app()
-        before = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        before = self._typed_readback(app_id)
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
-        after = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        after = self._typed_readback(app_id)
         # A Chrome contenteditable can publish the keys after that first
-        # read. Poll until the text settles. Any other focused control keeps
-        # the single read. No readable text is still not a mismatch.
+        # read. Poll until the text settles. LibreOffice already read the
+        # open cell editor, so it does not take this poll. Any other focused
+        # control keeps the single read. No readable text is still not a mismatch.
         if (
             app_id
             and after is not None
+            and not _atspi.libreoffice_app(app_id)
             and not _atspi._typed_visible(before, after, text)
         ):
             focused = self._run(lambda: _atspi._focused_contenteditable(app_id))
@@ -1020,6 +1098,53 @@ class LinuxDriver:
                 actual=after,
             )
         return len(text)
+
+    def _typed_readback(self, app_id: str | None) -> str | None:
+        """Text used to verify a keystroke type.
+
+        For LibreOffice, an open cell editor's paragraph is the in-progress
+        string. The focused cell's own text stays empty until Return, which
+        is why 0.4.45 reported ``actual: ""`` after the digits had landed.
+        Any other app uses the focused node's text, so a terminal that shows
+        the inverted string is still a mismatch.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if not app_id:
+            return None
+        text = self._run(lambda: _atspi.focused_text(app_id))
+        if not _atspi.libreoffice_app(app_id):
+            return text
+        editor = self._run(lambda: _atspi.sheet_editor_text(app_id))
+        if editor:
+            return editor
+        return text
+
+    def _write_sheet_cell(self, handle, value: str) -> None:
+        """Type ``value`` into a Calc cell and commit it with Return."""
+        from a11y_computer_use.drivers import _atspi
+
+        self._run(lambda: _atspi.grab_focus(handle))
+        if _on_wayland():
+            raise _wayland_input_error("set_value on a spreadsheet cell")
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.type_string(value)
+        _linux_input.press_chord("return")
+        for attempt in range(15):
+            if self._run(lambda: _atspi.sheet_cell_matches(handle, value)):
+                return
+            if attempt + 1 < 15:
+                time.sleep(0.1)
+        actual = self._run(lambda: _atspi._full_text(handle))
+        formula = self._run(lambda: _atspi._sheet_formula(handle))
+        raise _atspi._text_mismatch(
+            "text_mismatch",
+            f"the value read back does not match {value!r}",
+            expected=value,
+            actual=actual,
+            formula=formula,
+        )
 
     def _refuse_xtest_password_focus(self) -> None:
         """The focused-password probe `type_text` uses before XTEST keystrokes.

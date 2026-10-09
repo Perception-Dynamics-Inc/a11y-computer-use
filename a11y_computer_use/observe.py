@@ -22,6 +22,7 @@ meaningful against their own epoch; `resolve_ref` re-resolves an element in a
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import itertools
 import difflib
@@ -77,11 +78,18 @@ _MAX_WEB_FRAME_SCAN = 64
 MAX_CHILDREN = 24
 
 #: Tighter per-widget cap for dense, repetitive containers (grids/tables/
-#: outlines — e.g. Calendar's month grid, a spreadsheet). These blow the
-#: snapshot token budget with near-identical rows, so cap them harder; the
-#: elision marker tells the agent to scroll/re-observe for the rest (COM-12).
+#: outlines — e.g. Calendar's month grid). These blow the snapshot token
+#: budget with near-identical rows, so cap them harder; the elision marker
+#: tells the agent to scroll/re-observe for the rest (COM-12). A spreadsheet
+#: whose cells are titled with addresses uses `SHEET_MAX_CHILDREN` instead.
 DENSE_MAX_CHILDREN = 12
 _DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
+
+#: A Calc sheet is an AXTable whose children are titled with cell addresses.
+#: The dense cap of 12 keeps A1–L1 and elides B2. Calendars stay at 12.
+#: A visible sheet window is about 16 columns by 6 rows.
+_SHEET_ADDRESS = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")
+SHEET_MAX_CHILDREN = 96
 
 #: Raw children inspected per node before giving up — virtualized lists can
 #: report thousands of rows and each read costs several AX round-trips.
@@ -1195,7 +1203,12 @@ def _prune_inner(
             )
             if pruned is not None:
                 kept.append(pruned)
-        cap = DENSE_MAX_CHILDREN if raw.role in _DENSE_CONTAINER_ROLES else MAX_CHILDREN
+        if _sheet_table(raw, kept):
+            cap = SHEET_MAX_CHILDREN
+        elif raw.role in _DENSE_CONTAINER_ROLES:
+            cap = DENSE_MAX_CHILDREN
+        else:
+            cap = MAX_CHILDREN
         if len(kept) > cap:
             kept, dropped = _cap_children(kept, cap)
             elided += dropped
@@ -1327,6 +1340,23 @@ def _union_bounds(rects: list[Bounds]) -> Bounds:
     x2 = max(r.x + r.width for r in same)
     y2 = max(r.y + r.height for r in same)
     return Bounds(display_id=first.display_id, x=x1, y=y1, width=x2 - x1, height=y2 - y1)
+
+
+def _sheet_table(raw: RawNode, kept: list[_PNode]) -> bool:
+    """True when this table's kept children are spreadsheet addresses.
+
+    Two address titles are enough. A calendar cell is titled ``15``, not
+    ``B2``, and stays on the dense cap.
+    """
+    if raw.role != "AXTable":
+        return False
+    hits = 0
+    for node in kept:
+        if _SHEET_ADDRESS.match(node.raw.title or ""):
+            hits += 1
+            if hits >= 2:
+                return True
+    return False
 
 
 def _cap_children(kept: list[_PNode], cap: int) -> tuple[list[_PNode], int]:
