@@ -244,7 +244,10 @@ def test_audit_row_redacts_arguments(tmp_path) -> None:
     row = _audit_rows(tmp_path)[-1]
     assert row["action"] == "webmcpop" and row["params"]["name"] == "leave_review"
     assert row["params"]["arguments"] == safety.REDACTED
-    assert "4111" not in json.dumps(row)
+    # The clock is in the row. A timestamp such as 1791586345.8411171 contains
+    # the four digits of this fixture, so the card is checked everywhere else.
+    body = {key: value for key, value in row.items() if key != "ts"}
+    assert "4111" not in json.dumps(body)
 
 
 # -- runtime: the webmcp tool, w refs, and the snapshot block ------------------

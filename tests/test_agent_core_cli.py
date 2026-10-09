@@ -513,9 +513,15 @@ def _spawn_run(script, trace, home):
     # not "unknown", so a grant for only that name refuses the wait at once
     # and the next step has started before a poll can see this one. Grant the
     # app NSWorkspace reports, which is the same app the wait checks.
+    # The file is the HOME this process was given. PermissionStore() with no
+    # path uses Path.home(), and on Windows that is USERPROFILE, not HOME, so
+    # a bare store would write the grant into the runner profile and later
+    # tests would be allowed through to the unimplemented Windows backend.
     child = (
+        "import os\n"
+        "from pathlib import Path\n"
         "from a11y_computer_use.safety import PermissionStore, Tier, frontmost_app\n"
-        "store = PermissionStore()\n"
+        "store = PermissionStore(Path(os.environ['HOME']) / '.a11y-computer-use' / 'permissions.json')\n"
         "store.set_tier('unknown', Tier.READ)\n"
         "bundle, _pid = frontmost_app()\n"
         "if bundle:\n"
