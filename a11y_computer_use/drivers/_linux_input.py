@@ -29,8 +29,14 @@ def _disp():
     """A cached Xlib display connection (reopened if it went away)."""
     global _display
     if _display is None:
-        from Xlib import display as _xd
+        try:
+            from Xlib import display as _xd
+        except ImportError as exc:
+            from a11y_computer_use.drivers._linux_system import missing_xlib, xlib_required
 
+            if xlib_required():
+                raise missing_xlib(exc) from exc
+            raise
         _display = _xd.Display()
     return _display
 

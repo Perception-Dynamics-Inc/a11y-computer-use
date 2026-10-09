@@ -8,8 +8,9 @@ HTTP providers speak to OpenAI-compatible chat completions (OpenAI, xAI, Ollama,
 pip install 'a11y-computer-use[agent]'
 ```
 
-On Linux, install the desktop backend in the same command. `gi` (PyGObject)
-and `Xlib` (python-xlib) are not pulled in by `[agent]` alone:
+On Linux, install the AT-SPI backend in the same command. `gi` (PyGObject)
+is not pulled in by `[agent]` alone. `Xlib` (python-xlib) is a core
+dependency when `sys_platform == 'linux'`:
 
 ```bash
 pip install 'a11y-computer-use[agent,linux]'
