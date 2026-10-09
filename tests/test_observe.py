@@ -558,6 +558,37 @@ def test_dense_container_capped_tighter_than_lists() -> None:
     assert f"… {30 - observe.DENSE_MAX_CHILDREN} more" in render_text(snap)
 
 
+def test_table_within_max_children_keeps_headers_and_cells() -> None:
+    """A Qt-sized table is headers plus a 4×3 grid, 19 children.
+
+    That is under MAX_CHILDREN, so the dense cap does not drop the headers
+    or the last cell. A grid with more children than MAX_CHILDREN still
+    uses the dense cap.
+    """
+    children = []
+    y = 60.0
+    for name in ("1", "2", "3"):
+        children.append(ax("AXColumn", title=name, at=(110.0, y), size=(80.0, 18.0)))
+        y += 20.0
+    for row in range(4):
+        children.append(ax("AXRow", title=str(row + 1), at=(100.0, y), size=(20.0, 18.0)))
+        for col in range(3):
+            children.append(button(f"R{row}C{col}", (140.0 + 40.0 * col, y)))
+        y += 20.0
+    assert len(children) == 19
+    assert len(children) <= MAX_CHILDREN
+    table = ax("AXTable", title="Grid", at=(100.0, 50.0), size=(400.0, 400.0), children=children)
+    root = ax("AXWindow", title="Qt", at=(80.0, 40.0), size=(500.0, 500.0), children=[table])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+    table_el = next(el for el in snap.elements if el.role == "AXTable")
+    kept = [el for el in snap.elements if el.parent == table_el.ref]
+    assert len(kept) == 19
+    assert any(el.role == "AXColumn" and el.title == "3" for el in kept)
+    assert any(el.role == "AXRow" and el.title == "4" for el in kept)
+    assert any(el.title == "R3C2" for el in kept)
+    assert "more" not in render_text(snap)
+
+
 def test_spreadsheet_addresses_keep_b2_and_cell_text() -> None:
     """A sheet titled A1, B2, … is not the calendar cap of 12.
 

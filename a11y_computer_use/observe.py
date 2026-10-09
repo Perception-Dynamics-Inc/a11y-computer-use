@@ -87,7 +87,9 @@ _DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
 
 #: A Calc sheet is an AXTable whose children are titled with cell addresses.
 #: The dense cap of 12 keeps A1–L1 and elides B2. Calendars stay at 12.
-#: A visible sheet window is about 16 columns by 6 rows.
+#: A visible sheet window is about 16 columns by 6 rows. A table or outline
+#: with at most MAX_CHILDREN children is not that grid: a Qt 4×3 table plus
+#: its headers is 19 nodes and keeps every cell.
 _SHEET_ADDRESS = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")
 SHEET_MAX_CHILDREN = 96
 
@@ -1205,7 +1207,7 @@ def _prune_inner(
                 kept.append(pruned)
         if _sheet_table(raw, kept):
             cap = SHEET_MAX_CHILDREN
-        elif raw.role in _DENSE_CONTAINER_ROLES:
+        elif raw.role in _DENSE_CONTAINER_ROLES and len(kept) > MAX_CHILDREN:
             cap = DENSE_MAX_CHILDREN
         else:
             cap = MAX_CHILDREN
