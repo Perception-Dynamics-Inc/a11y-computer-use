@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.52] - 2026-10-09
+
+### Added
+
+- UI text that reaches a model can be wrapped in nonce-tagged `<untrusted>` boundaries. Phrases that read like instructions are marked and kept. Agent observations are fenced by default. MCP tool output stays unfenced unless `A11Y_COMPUTER_USE_FENCE_UNTRUSTED` or the server option is set. Browser navigation and actions to a disallowed origin fail with `domain_blocked`. Allow and block lists are `Agent(allowed_domains=..., blocked_domains=...)`, the `a11y-agent` flags, and the MCP server option. A live Linux Chrome page under AT-SPI contains an injection string and a link to a blocked domain; a scripted model does not follow it. A live headless Chromium check reads the document URL from CDP `Page.getFrameTree` and a link href from the DOM (#121) (8573ea9, 2026-10-09).
+
 ## [0.4.51] - 2026-10-09
 
 ### Fixed
