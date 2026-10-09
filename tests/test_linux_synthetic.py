@@ -5531,6 +5531,60 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
+    """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
+
+    A write that does not read back as the request puts the paragraph back.
+    A cell inside a spreadsheet stays on the Calc path.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    assert _atspi.writer_text_cell(cell) is True
+    assert _atspi.writer_cell_text(cell) == "Cell B2"
+
+    def replace(acc, text):
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", replace)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+    assert _atspi.writer_cell_outcome_text("NEWB2-1", cell) == "NEWB2-1"
+
+    paragraph.text = "Cell B2"
+    calls = {"n": 0}
+
+    def miss(acc, text):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            acc.text = "NEWB2-1\nCell B2"
+            return False
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", miss)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "Cell B2"
+    assert paragraph.text == "Cell B2"
+    assert calls["n"] == 2
+
+    sheet = _Acc("spreadsheet", name="Sheet")
+    grid = _Acc("table", name="Sheet1")
+    calc = _Acc("table cell", name="B2")
+    calc_text = _Acc("paragraph", name="")
+    calc_text.text = "42"
+    _adopt(sheet, grid)
+    _adopt(grid, calc)
+    _adopt(calc, calc_text)
+    assert _atspi.writer_text_cell(calc) is False
+
+
 def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
     """Synthetic AT-SPI nodes. Not a live LibreOffice.
 
