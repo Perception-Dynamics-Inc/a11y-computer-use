@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 import threading
 from collections.abc import Callable, Iterator
@@ -79,7 +80,10 @@ missing information.
 Call done only when the goal is finished. done requires an answer and 1 to 3
 conditions the loop can see: an element role and name, a field value, a window
 title, or a file on disk. A condition that fails is rejected and you must
-continue. Do not claim success without one of those checks.
+continue. Do not claim success without one of those checks. When the goal
+saves or creates a file, one condition must be file_exists for that path,
+and it must include contains when the goal names the text. A window title
+is not evidence that the file was written.
 
 Each action result includes outcome (confirmed, suspected_noop, unverifiable,
 partial, or refused), evidence, and next. Follow next when outcome is not
@@ -267,6 +271,7 @@ class Agent:
         self._last_snap: Snapshot | None = None
         self._injection = False
         self._crop_block: dict | None = None
+        self._goal = goal
         try:
             self._prepare()
             yield from self._drive(goal, started)
@@ -725,10 +730,15 @@ class Agent:
             "digest": snapshot_digest(snap, observation),
             "injection": self._injection,
         })
-        checked = check_conditions(list(action.args.get("conditions") or []), snap)
+        raw_conditions = list(action.args.get("conditions") or [])
+        structural = file_evidence_error(self._goal, raw_conditions)
+        checked = check_conditions(raw_conditions, snap)
         self._conditions = checked
-        ok = all(item["ok"] for item in checked)
-        detail = "; ".join(item["detail"] for item in checked if not item["ok"]) or "conditions held"
+        ok = structural is None and all(item["ok"] for item in checked)
+        if structural:
+            detail = structural
+        else:
+            detail = "; ".join(item["detail"] for item in checked if not item["ok"]) or "conditions held"
         turn_stop = None if ok else "failure"
         skipped = remaining if not ok or remaining else []
         self._commit(
@@ -1325,6 +1335,92 @@ def target_human_kind(action: Action, snap: Snapshot | None) -> str | None:
     if element is None:
         return None
     return human_kind(element)
+
+
+_FILE_VERBS = re.compile(
+    r"\b(?:save|saves|saved|saving|create|creates|created|creating|"
+    r"write|writes|wrote|writing|download|downloads|downloaded|downloading|"
+    r"export|exports|exported|exporting)\b",
+    re.IGNORECASE,
+)
+_FILE_NOUNS = re.compile(
+    r"\b(?:file|files|document|documents|spreadsheet|workbook|notes?)\b",
+    re.IGNORECASE,
+)
+_FILE_PATH = re.compile(
+    r"(?:~/|\\|/|\b[\w.-]+\.(?:txt|md|csv|json|html|pdf|png|py|docx|ods|xlsx)\b)",
+    re.IGNORECASE,
+)
+_SAVE_AS = re.compile(r"\bsave\s+as\b", re.IGNORECASE)
+_QUOTED = re.compile(r"[\"“]([^\"”\n]{1,240})[\"”]|'([^'\n]{1,240})'")
+_LABELED_TEXT = re.compile(
+    r"\b(?:containing|contains|with the text|with text|that says|that reads|reading)\s+"
+    r"(?:[\"“']([^\"”']+)[\"”']|([^\n]+))",
+    re.IGNORECASE,
+)
+_TRAILING_PATH = re.compile(r"\s+(?:to|into|in|at)\s+\S+\s*$", re.IGNORECASE)
+
+
+def goal_writes_a_file(goal: str) -> bool:
+    """True when the goal is to save, create, download, or export a file.
+
+    The check is the wording of the goal. It does not name a benchmark task.
+    """
+    text = goal or ""
+    if _SAVE_AS.search(text):
+        return True
+    if not _FILE_VERBS.search(text):
+        return False
+    return bool(_FILE_NOUNS.search(text) or _FILE_PATH.search(text))
+
+
+def _path_token(text: str) -> bool:
+    token = text.strip()
+    if not token or token.startswith("~") or "/" in token or "\\" in token:
+        return True
+    return bool(re.search(
+        r"\.(?:txt|md|csv|json|html|pdf|png|py|docx|ods|xlsx)$", token, re.IGNORECASE,
+    ))
+
+
+def known_file_text(goal: str) -> list[str]:
+    """Text the goal says the file must hold. Paths and filenames are not text."""
+    found: list[str] = []
+    for match in _LABELED_TEXT.finditer(goal or ""):
+        text = (match.group(1) or match.group(2) or "").strip()
+        text = _TRAILING_PATH.sub("", text).strip(" .,;")
+        if text and not _path_token(text) and text not in found:
+            found.append(text)
+    for match in _QUOTED.finditer(goal or ""):
+        text = (match.group(1) or match.group(2) or "").strip()
+        if text and not _path_token(text) and text not in found:
+            found.append(text)
+    return found
+
+
+def file_evidence_error(goal: str, conditions: list) -> str | None:
+    """Why done cannot prove a file goal, or None when the evidence is enough.
+
+    A window title, an element, or a field value does not show that a file
+    was written. When the goal names the text, ``file_exists`` has to carry
+    ``contains`` for that text.
+    """
+    if not goal_writes_a_file(goal):
+        return None
+    files = [
+        item for item in conditions
+        if isinstance(item, dict) and "file_exists" in item
+    ]
+    if not files:
+        return (
+            "a goal that saves or creates a file needs a file_exists condition; "
+            "a window title is not evidence the file was written"
+        )
+    for content in known_file_text(goal):
+        if any(content in str(item.get("contains") or "") for item in files):
+            continue
+        return f"file_exists must contain {content!r}"
+    return None
 
 
 def check_conditions(conditions_arg: list, snap: Snapshot | None) -> list[dict]:
