@@ -2169,7 +2169,6 @@ class Runtime:
             alive = outcome.pid_alive(pid)
         return {
             "snap": snap,
-            "state": outcome.state_fingerprint(snap),
             "bounds": outcome.bounds_fingerprint(snap),
             "pid": pid,
             "app": snap.app,
@@ -2310,7 +2309,7 @@ class Runtime:
         readable = after is not None and before is not None
         changed: bool | None = None
         if readable and before is not None and after is not None:
-            changed = before["state"] != outcome.state_fingerprint(after)
+            changed = outcome.relevant_state_changed(before["snap"], after, element)
             if bounds and not changed:
                 changed = before["bounds"] != outcome.bounds_fingerprint(after)
         readback = None
