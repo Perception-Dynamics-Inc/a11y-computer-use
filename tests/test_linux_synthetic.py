@@ -1040,6 +1040,20 @@ class _FakeAtspi:
         ANYWHERE = "ANYWHERE"
         TOP_EDGE = "TOP_EDGE"
 
+    class Hypertext:
+        @staticmethod
+        def get_n_links(acc):
+            return len(getattr(acc, "links", ()) or ())
+
+        @staticmethod
+        def get_link(acc, index):
+            return (getattr(acc, "links")[index],)
+
+    class Hyperlink:
+        @staticmethod
+        def get_object(link, index):
+            return link[0] if index == 0 else None
+
     class Text:
         @staticmethod
         def get_caret_offset(acc):
@@ -1681,6 +1695,100 @@ def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_a
     assert _atspi.set_text(field, "BETA") is False
     assert field.text != "BETA"
     assert sent == []
+
+
+def test_contenteditable_clear_that_leaves_a_newline_still_types(fake_atspi, monkeypatch) -> None:
+    """Fake transport. Chrome's empty contenteditable reads back as a newline.
+
+    That newline used to look like leftover text, so the replacement stopped
+    after the clear and the editor stayed empty.
+    """
+    field = _KeyClearedWebField("Hello world")
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Set 0") is True
+    assert field.text == "Set 0"
+    assert sent == ["ctrl+a", "backspace"]
+
+
+def test_contenteditable_restores_the_original_when_the_write_does_not_land(
+    fake_atspi, monkeypatch
+) -> None:
+    """Fake transport. A failed read-back types the original text back."""
+    field = _KeyClearedWebField("Hello world")
+    field.get_editable_text_iface = None
+
+    def press_chord(chord: str) -> None:
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text if text == "Hello world" else "WRONG"
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Set 0") is False
+    assert field.text == "Hello world"
+
+
+def test_contenteditable_nbsp_read_back_matches(fake_atspi, monkeypatch) -> None:
+    """Fake transport. A NBSP in the read-back is the space that was requested."""
+    field = _KeyClearedWebField("Hello world")
+    field.get_editable_text_iface = None
+
+    def press_chord(chord: str) -> None:
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text.replace(" ", "\u00a0")
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Set 0") is True
+    assert field.text == "Set\u00a00"
+
+
+def test_insert_text_accepts_an_expanded_object_replacement(fake_atspi, monkeypatch) -> None:
+    """Fake transport. The parent text stays U+FFFC; the child gained the characters."""
+    parent = _KeyClearedWebField("\ufffc\ufffc")
+    first = _KeyClearedWebField("First para")
+    second = _KeyClearedWebField("Second bold para")
+    parent.links = [first, second]
+
+    def insert_text(pos, text, length):
+        first.text = text[:length] + first.text
+        return True
+
+    parent.insert_text = insert_text
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.insert_text(parent, "ZZ") == 2
+    assert first.text.startswith("ZZ")
 
 
 def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:

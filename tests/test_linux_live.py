@@ -1060,6 +1060,276 @@ def _runtime_for(tmp_path, driver, *apps: str):
     return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
 
 
+_PARA_PAGE = """<!doctype html><meta charset=utf-8><title>cuapara</title>
+<style>
+body{margin:8px;font:13px sans-serif}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+p,label,div,h1{margin:2px}
+h1{font-size:14px}
+</style>
+<h1>Para variants</h1>
+<div class=row>
+<p><label>Bravo <input id=bravo></label></p>
+<p>Read <a href="#x">the docs link</a> now.</p>
+<p><button type=button>Para button</button></p>
+<p><input aria-label="Bare para input"></p>
+<p><input type=checkbox id=k> <label for=k>Para checkbox</label></p>
+<div><button type=button>Div button</button></div>
+<form><p><label>Name <input id=name></label></p></form>
+<label>Form name <input id=formname></label>
+</div>
+<p>The <a href="#a">quick brown</a> fox <b>jumps</b> over the <em>lazy</em> dog.</p>
+<div class=row>
+<div id=ed contenteditable=true role=textbox aria-label="Editor A">Hello world</div>
+<div contenteditable=true aria-label="Editor B"><p>First para</p><p>Second <b>bold</b> para</p></div>
+<label><input type=checkbox aria-label="Verify you are human"></label>
+<label><input type=checkbox aria-label="Accept terms"></label>
+<label><input type=radio name=r aria-label="Option one"></label>
+<label><input aria-label="Your answer"></label>
+<label><input type=checkbox id=x2> Text label</label>
+<label><input type=checkbox aria-label="Icon checkbox"><span aria-hidden=true>✓</span></label>
+<input type=checkbox aria-label="Bare checkbox">
+</div>
+"""
+
+_PARA_CONTROLS = (
+    "Bravo",
+    "the docs link",
+    "Para button",
+    "Bare para input",
+    "Para checkbox",
+    "Div button",
+    "Name",
+    "Form name",
+    "Verify you are human",
+    "Accept terms",
+    "Option one",
+    "Your answer",
+    "Text label",
+    "Icon checkbox",
+    "Bare checkbox",
+)
+
+
+def _firefox_binary() -> str | None:
+    import shutil
+
+    for name in ("firefox", "firefox-esr"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
+    page = tmp_path / "cuapara.html"
+    page.write_text(_PARA_PAGE)
+    url = page.resolve().as_uri()
+    profile = tmp_path / f"{kind}-profile"
+    profile.mkdir()
+    if kind == "chrome":
+        binary = _chrome_binary()
+        if binary is None:
+            pytest.skip("no Chrome/Chromium binary for the paragraph AT-SPI test")
+        proc = subprocess.Popen(
+            [
+                binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+                "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+                "--disable-component-update", f"--user-data-dir={profile}",
+                "--window-size=1100,800", url,
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return proc, "chrome"
+    binary = _firefox_binary()
+    if binary is None:
+        pytest.skip("no Firefox binary for the paragraph AT-SPI test")
+    (profile / "user.js").write_text(
+        'user_pref("accessibility.force_disabled", -1);\n'
+        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
+        'user_pref("datareporting.policy.dataSubmissionEnabled", false);\n'
+        'user_pref("browser.aboutwelcome.enabled", false);\n'
+        'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n'
+    )
+    env = os.environ.copy()
+    env["MOZ_ENABLE_ACCESSIBILITY"] = "1"
+    proc = subprocess.Popen(
+        [binary, "-no-remote", "-profile", str(profile), url],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return proc, "firefox"
+
+
+def _wait_para_snapshot(driver, app: str):
+    from a11y_computer_use import observe
+
+    deadline = time.monotonic() + 30
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            shot = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            shot = None
+        else:
+            last = observe.render_text(shot)
+            if "Div button" in last and "the docs link" in last and "Verify you are human" in last:
+                return shot
+        time.sleep(0.5)
+    raise AssertionError(f"{app} did not expose the paragraph page through AT-SPI\n{last}")
+
+
+def _para_page_lists_controls(driver, runtime, app: str) -> None:
+    """Live AT-SPI page. Full and interactive snapshots list the controls, and find matches."""
+    from a11y_computer_use import observe
+
+    snap = _wait_para_snapshot(driver, app)
+    for mode in ("full", "interactive"):
+        rendered = observe.render_text(snap, mode=mode)
+        missing = [name for name in _PARA_CONTROLS if name not in rendered]
+        assert not missing, f"{app} {mode} missing {missing}\n{rendered}"
+    sentence = "The quick brown fox jumps over the lazy dog."
+    assert any(sentence in str(el.value or "") for el in snap.elements), observe.render_text(snap)
+    runtime._current = snap
+    for text in ("Bravo", "Para button", "quick brown fox", "The quick", "Verify you are human", "Accept terms"):
+        found = runtime.find(app, text=text)
+        assert "no elements match" not in found, found
+    boxes = runtime.find(app, role="checkbox")
+    for name in ("Verify you are human", "Accept terms", "Para checkbox", "Bare checkbox"):
+        assert name in boxes, boxes
+    fields = runtime.find(app, role="textfield")
+    assert "Bare para input" in fields and "Your answer" in fields, fields
+    human = next(
+        el for el in snap.elements
+        if el.role == "AXCheckBox" and el.title == "Verify you are human"
+    )
+    runtime._current = snap
+    clicked = runtime.click(human.ref)
+    assert "clicked" in clicked, clicked
+    deadline = time.monotonic() + 4
+    checked = None
+    last = snap
+    while time.monotonic() < deadline:
+        last = driver.snapshot(Scope.WINDOW, app)
+        human = next(
+            (el for el in last.elements if el.role == "AXCheckBox" and el.title == "Verify you are human"),
+            None,
+        )
+        checked = human.checked if human is not None else None
+        if checked is True:
+            return
+        time.sleep(0.25)
+    raise AssertionError(observe.render_text(last))
+
+
+def _para_page_edits_contenteditable(driver, runtime, app: str) -> None:
+    """Live contenteditable. set_value lands, and type does not report a false mismatch."""
+    from a11y_computer_use import observe
+
+    driver.activate_app(app)
+    for value in ("Set 0", "Set 1", "Set 2"):
+        shot = _wait_para_snapshot(driver, app)
+        editor = next(el for el in shot.elements if el.title == "Editor A" and el.editable)
+        runtime._current = shot
+        result = runtime.set_value(editor.ref, value)
+        assert result.startswith("set "), result
+        deadline = time.monotonic() + 4
+        shown = None
+        last = shot
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, app)
+            editor = next(el for el in last.elements if el.title == "Editor A")
+            shown = "" if editor.value is None else str(editor.value).replace("\u00a0", " ").strip()
+            if shown == value:
+                break
+            time.sleep(0.25)
+        assert shown == value, f"{app} editor read {shown!r}\n{observe.render_text(last)}"
+    shot = driver.snapshot(Scope.WINDOW, app)
+    editor = next(el for el in shot.elements if el.title == "Editor A")
+    runtime._current = shot
+    runtime.click(editor.ref)
+    runtime.key("ctrl+end")
+    typed = runtime.type_text("  two spaces end ")
+    assert "typed" in typed, typed
+    shot = driver.snapshot(Scope.WINDOW, app)
+    editor = next(el for el in shot.elements if el.title == "Editor A")
+    shown = "" if editor.value is None else str(editor.value).replace("\u00a0", " ")
+    assert "two spaces end" in shown, shown
+    other = next(el for el in shot.elements if el.title == "Editor B")
+    runtime._current = shot
+    runtime.click(other.ref)
+    typed = runtime.type_text("ZZ")
+    assert "typed" in typed, typed
+    shot = driver.snapshot(Scope.WINDOW, app)
+    blob = " ".join(
+        f"{el.title} {el.value or ''}" for el in shot.elements if el.title in {"Editor B", "Editor A"} or "ZZ" in f"{el.title} {el.value or ''}"
+    )
+    assert "ZZ" in blob, blob
+
+
+def _browser_ids(driver, *needles: str) -> tuple[str, ...]:
+    """Permission-keying comms for a browser, plus whatever is in front.
+
+    A Firefox tarball's window owner is ``firefox-bin`` while the AT-SPI name
+    still matches ``firefox``. The grant has to be the comm ``find`` resolves.
+    """
+    names = {needle for needle in needles if needle}
+    front = driver.frontmost_app()[0]
+    if front:
+        names.add(front)
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        folded = tuple(needle.lower() for needle in needles if needle)
+        for app in _linux_system.running_apps():
+            comm = str(app.get("bundle_id") or "")
+            if comm and any(needle in comm.lower() for needle in folded):
+                names.add(comm)
+    except Exception:
+        pass
+    return tuple(names)
+
+
+def test_linux_chrome_paragraph_label_and_contenteditable(tmp_path) -> None:
+    """Live Chrome AT-SPI: controls in p and in an empty label, the sentence, set_value, and type.
+
+    Skips when no Chrome binary is on PATH. The Linux CI image has one.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc, app = _launch_para_browser(tmp_path, "chrome")
+    try:
+        _wait_para_snapshot(driver, app)
+        app = driver.activate_app(app)
+        runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app))
+        _para_page_lists_controls(driver, runtime, app)
+        _para_page_edits_contenteditable(driver, runtime, app)
+    finally:
+        _stop(proc)
+
+
+def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
+    """Live Firefox AT-SPI: the same local page, including the empty-label checkbox click.
+
+    Skips when no Firefox binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc, app = _launch_para_browser(tmp_path, "firefox")
+    try:
+        _wait_para_snapshot(driver, app)
+        app = driver.activate_app(app)
+        runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
+        _para_page_lists_controls(driver, runtime, app)
+    finally:
+        _stop(proc)
+
+
 def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
     """Down and Return stay in the open File menu. The document is not edited."""
     from a11y_computer_use.drivers.linux import LinuxDriver

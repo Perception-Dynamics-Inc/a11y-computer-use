@@ -810,7 +810,10 @@ def find_elements(
             # The stored value is clipped for the model; the index keeps the
             # field's real text so a token past the cap still matches.
             value = full_values.get(el.ref, el.value or "")
-            if needle not in f"{el.title} {value}".lower():
+            # NBSP is a space. The container value already has each U+FFFC
+            # replaced by the embedded child's text, so the sentence matches.
+            haystack = f"{el.title} {value}".replace("\u00a0", " ").lower()
+            if needle.replace("\u00a0", " ") not in haystack:
                 continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
             continue
@@ -1114,7 +1117,11 @@ def _prune_inner(
     child_in_web = in_web or kind in ("page", "docframe", "iframe")
 
     bounds = _to_bounds(raw.position, raw.size, geometry)
-    if _is_decorative(raw):
+    # An empty label or paragraph is decorative static text. Returning here
+    # used to drop the checkbox, button, or field inside it (#124, #136).
+    # Walk those children. A childless empty text node is still dropped below.
+    text_container = _empty_text_container(raw)
+    if _is_decorative(raw) and not text_container:
         return None
     # A node with no rect of its own drops its subtree when it is zero-size or
     # fully offscreen (scrolled-away rows, hidden GTK widgets parked at -2^31),
@@ -1133,7 +1140,8 @@ def _prune_inner(
     # named, or genuinely interactive zero-size node still drops.
     hollow_zero = in_web and _plain_zero_wrapper(raw)
     hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
-    if bounds is None and not hollow:
+    # The empty label may have no box of its own. Its checkbox still does.
+    if bounds is None and not hollow and not text_container:
         return None  # zero-size (not web) or fully offscreen: drop subtree
 
     kept: list[_PNode] = []
@@ -1168,7 +1176,10 @@ def _prune_inner(
             if _to_bounds(child_raw.position, child_raw.size, geometry) is not None
             and not _is_decorative(child_raw)
         )
-        collapses = candidate and survivors == 1 and elided == 0
+        # An empty label is not a survivor on its own, and it may still keep
+        # a checkbox. Do not spend the collapse depth until that walk is done.
+        textish = sum(1 for _, child_raw in read_children if _empty_text_container(child_raw))
+        collapses = candidate and survivors == 1 and elided == 0 and textish == 0
         child_kept_depth = kept_depth if collapses else kept_depth + 1
         for child, child_raw in read_children:
             pruned = _prune_inner(
@@ -1195,6 +1206,15 @@ def _prune_inner(
         if not kept:
             return None  # zero-size and nothing visible below it
         bounds = _union_bounds([c.bounds for c in kept])
+    if text_container:
+        if not kept:
+            return None  # empty static text with nothing under it stays decorative
+        if bounds is None:
+            bounds = _union_bounds([c.bounds for c in kept])
+        # One control replaces the empty label, the same way a wrapper
+        # collapses. Several controls stay parented so none of them is dropped.
+        if len(kept) == 1 and elided == 0:
+            return kept[0]
     if candidate and len(kept) == 1 and elided == 0:
         return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
     return _PNode(
@@ -1330,6 +1350,16 @@ def _is_decorative(raw: RawNode) -> bool:
     if raw.role == "AXImage" and not labelled:
         return True
     return raw.role == "AXStaticText" and not labelled and raw.value in (None, "")
+
+
+def _empty_text_container(raw: RawNode) -> bool:
+    """A label, paragraph, or other text container with no text of its own.
+
+    AT-SPI maps ``<label>`` and ``<p>`` to static text. An empty one is
+    decorative, and dropping it used to drop the checkbox or button inside.
+    ``_prune_inner`` walks these and keeps whatever descendants survive.
+    """
+    return raw.role in _TEXT_LIKE_ROLES and _is_decorative(raw)
 
 
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:

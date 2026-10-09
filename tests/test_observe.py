@@ -93,6 +93,100 @@ def test_decorative_nodes_dropped_but_described_image_kept() -> None:
     assert not any(el.role == "AXStaticText" and not el.value for el in snap.elements)
 
 
+def test_controls_inside_an_empty_text_container_are_kept() -> None:
+    """A label or paragraph with no text of its own is not a reason to drop its controls.
+
+    Synthetic tree. An empty static text used to be decorative, and the walk
+    returned before the checkbox or button inside it.
+    """
+    tree = ax(
+        "AXWindow",
+        title="Doc",
+        at=(0.0, 0.0),
+        size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXStaticText",
+                value="",
+                at=(20.0, 20.0),
+                size=(220.0, 32.0),
+                children=[button("Para button", (30.0, 21.0))],
+            ),
+            ax(
+                "AXStaticText",
+                value=None,
+                at=(20.0, 60.0),
+                size=(240.0, 28.0),
+                children=[
+                    ax(
+                        "AXCheckBox",
+                        title="Verify you are human",
+                        at=(24.0, 62.0),
+                        size=(200.0, 22.0),
+                        actions=("AXPress",),
+                    )
+                ],
+            ),
+            ax(
+                "AXStaticText",
+                value="",
+                at=(20.0, 100.0),
+                size=(300.0, 40.0),
+                children=[
+                    button("Left", (24.0, 104.0)),
+                    button("Right", (120.0, 104.0)),
+                ],
+            ),
+            ax("AXStaticText", value="", at=(20.0, 160.0), size=(80.0, 16.0)),
+            ax("AXImage", at=(20.0, 190.0), size=(16.0, 16.0)),
+            ax(
+                "AXStaticText",
+                at=(20.0, 220.0),
+                size=(400.0, 20.0),
+                children=[
+                    button("Nested", (24.0, 4000.0)),
+                ],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    titles = {el.title for el in snap.elements}
+    assert "Para button" in titles
+    assert "Verify you are human" in titles
+    assert {"Left", "Right"} <= titles
+    assert "Nested" not in titles
+    kids: dict[str | None, list] = {}
+    for el in snap.elements:
+        kids.setdefault(el.parent, []).append(el)
+    assert not any(
+        el.role == "AXStaticText" and not el.value and not kids.get(el.ref)
+        for el in snap.elements
+    )
+    checkbox = next(el for el in snap.elements if el.title == "Verify you are human")
+    assert checkbox.role == "AXCheckBox"
+    assert observe.find_elements(snap, text="Verify you are human")
+    assert observe.find_elements(snap, role="checkbox")
+
+
+def test_find_treats_nbsp_as_a_space() -> None:
+    tree = ax(
+        "AXWindow",
+        title="Doc",
+        at=(0.0, 0.0),
+        size=(800.0, 400.0),
+        children=[
+            ax(
+                "AXStaticText",
+                value="The quick\u00a0brown fox",
+                at=(20.0, 20.0),
+                size=(400.0, 20.0),
+            )
+        ],
+    )
+    snap = snap_of(tree)
+    assert observe.find_elements(snap, text="quick brown fox")
+
+
 def test_single_child_wrappers_collapse() -> None:
     snap = snap_of(typical_app_window())
     editor = by_title(snap, "Document body")
