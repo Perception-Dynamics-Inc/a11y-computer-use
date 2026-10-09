@@ -361,6 +361,33 @@ def _chrome_page(*extra: Element) -> list[Element]:
     ]
 
 
+def test_relevant_state_compares_mixed_none_and_text_values() -> None:
+    """Two controls can share a name while one value is missing and one is text.
+
+    Sorting those rows used to raise TypeError and abort the click.
+    """
+    elements = (
+        _element("w", "AXWindow", "Demo", path=("AXWindow",)),
+        _element("a", "AXButton", "Close", parent="w", path=("AXWindow", "AXButton")),
+        _element(
+            "b", "AXButton", "Close", parent="w",
+            path=("AXWindow", "AXGroup", "AXButton"), checked=False,
+        ),
+        _element(
+            "c", "AXStaticText", "Note", parent="w",
+            path=("AXWindow", "AXStaticText"), value="1",
+        ),
+        _element(
+            "d", "AXStaticText", "Note", parent="w",
+            path=("AXWindow", "AXGroup", "AXStaticText"),
+        ),
+    )
+    snap = Snapshot(
+        "snap", Scope.WINDOW, APP, 1, 0.0, (), elements,
+    )
+    assert outcome.relevant_state_changed(snap, snap, elements[1]) is False
+
+
 def test_chrome_churn_outside_the_page_does_not_confirm_a_click(tmp_path) -> None:
     """Toolbar text and document focus are not proof a page button did nothing.
 

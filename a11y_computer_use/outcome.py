@@ -303,13 +303,28 @@ def _page_row(element: object) -> tuple:
     )
 
 
+def _sort_key(row: tuple) -> tuple:
+    """A key ``sorted`` can compare. Values mix None, bools, and strings."""
+    key = []
+    for part in row:
+        if part is None:
+            key.append((0, ""))
+        elif isinstance(part, bool):
+            key.append((1, part))
+        elif isinstance(part, tuple):
+            key.append((3, part))
+        else:
+            key.append((2, str(part)))
+    return tuple(key)
+
+
 def _page_rows(snap: object, target: object | None) -> tuple:
     root = _page_root(snap, target)
     if root is None:
         elements = [el for el in _snap_elements(snap) if not _chrome_ui(el)]
     else:
         elements = _subtree(snap, root)
-    return tuple(sorted(_page_row(el) for el in elements))
+    return tuple(sorted((_page_row(el) for el in elements), key=_sort_key))
 
 
 def _window_rows(snap: object) -> tuple:
