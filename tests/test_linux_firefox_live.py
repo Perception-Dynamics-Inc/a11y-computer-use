@@ -12,6 +12,10 @@ the read-back has to match. The page's own log records input and change events.
 
 #128: a background tab and the preloaded New Tab page are not in the snapshot
 or in find. A click on a link in the hidden tab is an error, not "clicked".
+
+#151: type into a Firefox contenteditable reports success when the text landed.
+The key fallback's read-back treats NBSP as a space and U+FFFC as the child
+text, and set_value replaces Editor A instead of leaving it empty.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ _FORM = textwrap.dedent(
     <div><label>Count <input id="n" type="number"></label></div>
     <div><label>Notes <textarea id="ta"></textarea></label></div>
     <div><label>Color <select id="s"><option>Red</option><option>Green</option><option>Blue</option></select></label></div>
+    <div id="ed" contenteditable="true" role="textbox" aria-label="Editor A">Hello world</div>
+    <div id="edb" contenteditable="true" aria-label="Editor B"><p>First para</p><p>Second <b>bold</b> para</p></div>
     <p id="log"></p>
     <script>
     function hook(el) {
@@ -314,6 +320,100 @@ def _dump(driver) -> str:
     except ComputerUseError as exc:
         return exc.message
     return "\n".join(f"{el.ref} {el.role} {el.title!r}={el.value!r}" for el in snap.elements)
+
+
+def _editor_text(snap, title: str) -> str:
+    el = next((item for item in snap.elements if item.title == title), None)
+    if el is None:
+        return ""
+    return str(el.value or "").replace("\u00a0", " ").replace("\ufffc", "")
+
+
+def test_firefox_contenteditable_type_and_set_value(firefox_form, tmp_path) -> None:
+    """Live Firefox ESR. type and set_value on a contenteditable.
+
+    The page is the same window as the form tests. Editor A starts as
+    "Hello world". Editor B is two paragraphs. This is not a synthetic tree.
+    """
+    from a11y_computer_use import observe
+
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    driver.activate_app("firefox")
+
+    def current():
+        runtime.desktop_snapshot("firefox")
+        return runtime._current
+
+    shot = current()
+    editor = next(
+        (el for el in shot.elements if el.title == "Editor A" and (el.editable or el.role == "AXTextField")),
+        None,
+    )
+    assert editor is not None, observe.render_text(shot)
+    runtime._current = shot
+    assert runtime.click(editor.ref).startswith("clicked ")
+    runtime.key("ctrl+end")
+    typed = runtime.type_text("  two spaces end ")
+    assert typed.startswith("typed "), typed
+    deadline = time.monotonic() + 4
+    shown = ""
+    last = shot
+    while time.monotonic() < deadline:
+        last = current()
+        shown = _editor_text(last, "Editor A")
+        if "two spaces end" in shown:
+            break
+        time.sleep(0.25)
+    assert shown.count("two spaces end") == 1, observe.render_text(last)
+
+    other = next(el for el in last.elements if el.title == "Editor B")
+    runtime._current = last
+    assert runtime.click(other.ref).startswith("clicked ")
+    typed = runtime.type_text("ZZ")
+    assert typed.startswith("typed "), typed
+    deadline = time.monotonic() + 4
+    blob = ""
+    while time.monotonic() < deadline:
+        last = current()
+        blob = " ".join(
+            f"{el.title or ''} {el.value or ''}" for el in last.elements
+            if el.title in {"Editor B", "Editor A"} or "ZZ" in f"{el.title or ''} {el.value or ''}"
+        ).replace("\ufffc", "")
+        if blob.count("ZZ") == 1:
+            break
+        time.sleep(0.25)
+    assert blob.count("ZZ") == 1, observe.render_text(last)
+
+    editor = next(el for el in last.elements if el.title == "Editor A")
+    runtime._current = last
+    assert runtime.click(editor.ref).startswith("clicked ")
+    runtime.key("ctrl+a")
+    runtime.key("backspace")
+    typed = runtime.type_text(" more")
+    assert typed.startswith("typed "), typed
+    deadline = time.monotonic() + 4
+    shown = ""
+    while time.monotonic() < deadline:
+        last = current()
+        shown = _editor_text(last, "Editor A")
+        if "more" in shown:
+            break
+        time.sleep(0.25)
+    assert shown.count("more") == 1, observe.render_text(last)
+
+    editor = next(el for el in last.elements if el.title == "Editor A" and el.editable)
+    runtime._current = last
+    assert runtime.set_value(editor.ref, "Set 0").startswith("set ")
+    deadline = time.monotonic() + 4
+    shown = ""
+    while time.monotonic() < deadline:
+        last = current()
+        shown = _editor_text(last, "Editor A").strip()
+        if shown == "Set 0":
+            break
+        time.sleep(0.25)
+    assert shown == "Set 0", observe.render_text(last)
 
 
 def _hidden_link(driver):

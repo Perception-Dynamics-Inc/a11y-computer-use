@@ -1791,6 +1791,127 @@ def test_insert_text_accepts_an_expanded_object_replacement(fake_atspi, monkeypa
     assert first.text.startswith("ZZ")
 
 
+def test_insert_text_unchanged_compares_the_expanded_text(fake_atspi) -> None:
+    """Fake transport. A parent that stays U+FFFC is unchanged only when the
+    child text did not change. The error shows that child text."""
+    parent = _KeyClearedWebField("\ufffc\ufffc")
+    first = _KeyClearedWebField("First para")
+    second = _KeyClearedWebField("Second bold para")
+    parent.links = [first, second]
+    parent.insert_text = lambda *_args: True
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.insert_text(parent, "ZZ")
+    assert exc.value.detail["unchanged"] is True
+    assert exc.value.detail["actual"] == "First paraSecond bold para"
+    assert "\ufffc" not in exc.value.detail["actual"]
+
+
+def test_gecko_type_accepts_nbsp_and_an_expanded_child(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. The key fallback lands, and the read-back
+    is not a mismatch. Not a live browser."""
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    editor = _NoopWebField("Hello world")
+    _mark_toolkit(editor, "Gecko", "Firefox")
+    editor.get_component_iface = lambda: editor
+
+    def grab_focus():
+        editor.focused = True
+        return True
+
+    editor.grab_focus = grab_focus
+
+    def type_string(text: str) -> None:
+        editor.text += text.replace(" ", "\u00a0")
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("firefox", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 7)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "firefox")
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    driver._focused_editable = editor
+    assert driver.type_text("  two spaces end ") == len("  two spaces end ")
+    assert "two spaces end" in editor.text.replace("\u00a0", " ")
+
+    parent = _NoopWebField("\ufffc\ufffc")
+    _mark_toolkit(parent, "Gecko", "Firefox")
+    child = _KeyClearedWebField("First para")
+    parent.links = [child]
+    parent.get_component_iface = lambda: parent
+    parent.grab_focus = grab_focus
+
+    def type_child(text: str) -> None:
+        child.text = text + child.text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_child)
+    driver._focused_editable = parent
+    assert driver.type_text("ZZ") == 2
+    assert child.text == "ZZFirst para"
+
+
+def test_gecko_contenteditable_set_value_restores_when_the_keys_do_not_land(
+    fake_atspi, monkeypatch
+) -> None:
+    """Fake Firefox contenteditable. A failed replace types the original back.
+
+    Not a live browser. The clear is what erases Hello world.
+    """
+    field = _NoopWebField("Hello world")
+    _mark_toolkit(field, "Gecko", "Firefox")
+    field.get_component_iface = lambda: field
+
+    def grab_focus():
+        field.focused = True
+        return True
+
+    field.grab_focus = grab_focus
+
+    def press_chord(chord: str) -> None:
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text if text == "Hello world" else "\n"
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Set 0") is False
+    assert field.text == "Hello world"
+
+
+def test_gecko_contenteditable_set_value_accepts_a_nbsp_read_back(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. NBSP in the read-back matches the request."""
+    field = _NoopWebField("Hello world")
+    _mark_toolkit(field, "Gecko", "Firefox")
+    field.get_component_iface = lambda: field
+    field.grab_focus = lambda: True
+
+    def press_chord(chord: str) -> None:
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text.replace(" ", "\u00a0")
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Set 0") is True
+    assert field.text.replace("\u00a0", " ") == "Set 0"
+
+
 def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:
     web = _AppendingField("earlier")
     pad = _ReplacingField("earlier")

@@ -1377,17 +1377,26 @@ def insert_text(acc, text: str) -> int | None:
     actual = _full_text(acc)
     if actual == current and not wrote:
         return None
-    # Firefox web fields implement EditableText and return true while the DOM
-    # stays empty. ``unchanged`` tells the caller the insert was a no-op, so
-    # it can focus the field and send key events. A field that changed to
-    # something else is still a mismatch, with no key fallback.
+    # ``unchanged`` is the words, not the raw object-replacement string.
+    # A Firefox contenteditable can keep ``\ufffc\ufffc`` while a child
+    # paragraph gains the typed text. That is a change. A parent that still
+    # reads the same sentence did not change, and the caller may send keys.
+    # A field that changed to something else is still a mismatch, with no
+    # key fallback.
+    if before_readable is None:
+        unchanged = actual == current
+        shown = actual
+    else:
+        unchanged = _norm_nbsp(after_readable) == _norm_nbsp(before_readable)
+        shown = after_readable if after_readable is not None else actual
     raise _text_mismatch(
         "text_mismatch",
         "the field text after type does not match what was inserted",
         expected=_excerpt(expected),
-        actual=_excerpt(actual),
+        actual=_excerpt(shown),
         inserted_chars=len(typed),
-        unchanged=actual == current,
+        unchanged=unchanged,
+        before=_excerpt(before_readable if before_readable is not None else current),
     )
 
 
@@ -1466,12 +1475,36 @@ def _type_string(text: str) -> None:
     _linux_input.type_string(text)
 
 
+def _shown_matches(acc, text: str) -> bool:
+    """True when the readable text is ``text``.
+
+    NBSP is a space. One trailing newline is the empty contenteditable's
+    ``<br>`` and is not part of the value. U+FFFC is expanded before the
+    comparison, so a paragraph child counts.
+    """
+    raw = _full_text(acc)
+    if _texts_match(raw, text):
+        return True
+    shown = _readable_text(acc)
+    if shown is None:
+        return False
+    if _texts_match(shown, text):
+        return True
+    if shown.endswith("\n") and _texts_match(shown[:-1], text):
+        return True
+    return False
+
+
 def _confirm_text_landed(acc, text: str) -> bool:
-    """Like ``_confirm_text``, with a longer wait for a key event to land."""
-    for attempt in range(8):
-        if _full_text(acc) == text:
+    """Like ``_confirm_text``, with a longer wait for a key event to land.
+
+    The comparison is the readable text: NBSP is a space, and U+FFFC is the
+    child text. A Firefox contenteditable updates a beat after the key.
+    """
+    for attempt in range(16):
+        if _shown_matches(acc, text):
             return True
-        if attempt + 1 < 8:
+        if attempt + 1 < 16:
             time.sleep(0.05)
     return False
 
@@ -1482,21 +1515,24 @@ def focus_and_type_into(acc, text: str) -> bool:
     True only when a later read of this field contains ``text``. A Firefox
     web entry's EditableText insert returns true and leaves the field empty;
     the same key events ``key`` already delivers do land once the entry has
-    focus. No EditableText is not this path: the caller types into whatever
-    is focused and uses that read-back.
+    focus. The read-back is the expanded text, so a NBSP is a space and a
+    contenteditable whose parent string stays U+FFFC still shows the words
+    in its children. The read is polled: Firefox applies the keys a beat
+    after they are sent. No EditableText is not this path: the caller types
+    into whatever is focused and uses that read-back.
     """
     if not _x11_keys_available():
         return False
     grab_focus(acc)
-    before = _full_text(acc)
+    before = _readable_text(acc)
     if before is None:
         return False
     _type_string(text)
-    for attempt in range(8):
-        after = _full_text(acc)
+    for attempt in range(16):
+        after = _readable_text(acc)
         if _typed_visible(before, after, text):
             return True
-        if attempt + 1 < 8:
+        if attempt + 1 < 16:
             time.sleep(0.05)
     return False
 
@@ -1504,19 +1540,21 @@ def focus_and_type_into(acc, text: str) -> bool:
 def _focus_and_replace(acc, text: str) -> bool:
     """Focus ``acc``, replace its text with key events, and read it back.
 
-    True only when the snapshot read equals ``text``. An empty field is
-    focused and typed. A field that still has other text is cleared first;
-    if that clear does not stick, nothing is typed on top of it.
+    True only when the readable text equals ``text``. An empty field,
+    including one whose snapshot read is a newline, is focused and typed.
+    A field that still has other text is cleared first; if that clear does
+    not stick, nothing is typed on top of it. The caller puts the original
+    text back when this returns False, so a contenteditable is not left empty.
     """
     if not _x11_keys_available():
         return False
     grab_focus(acc)
     current = _full_text(acc)
-    if current == text:
+    if _shown_matches(acc, text):
         return True
     if current is None:
         return False
-    if current:
+    if not _text_is_blank(current):
         _x11_select_all_and_delete(acc)
         if not _wait_until_gone(acc):
             return False
@@ -2593,8 +2631,13 @@ def set_text(acc, text: str) -> bool:
     # Firefox returns true from set_text_contents and insert_text and the DOM
     # stays empty. Key events land after the field is focused. Chromium is
     # not this path: focusing an empty number input can make the read-back 0.
+    # A contenteditable that does not confirm is not left empty: the clear
+    # already removed "Hello world", so the original is typed back.
     if _gecko_app(acc):
-        return _focus_and_replace(acc, text)
+        if _focus_and_replace(acc, text):
+            return True
+        _restore_text(acc, original)
+        return False
     if _text_is_gone(acc) and _x11_keys_available():
         _type_string(text)
         if _confirm_text(acc, text):
