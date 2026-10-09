@@ -80,6 +80,7 @@ _ROLE = {
     "tool bar": "AXToolbar",
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
+    "progress bar": "AXProgressIndicator",
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
@@ -310,6 +311,10 @@ _SELECTING_ACTION_NAMES = frozenset({
 _TEXT_ROLE_NAMES = frozenset({
     "entry", "text", "password text", "terminal", "document text", "paragraph",
 })
+# Roles whose Value interface is a real range. Qt exposes Value on labels,
+# checks, rows, and empty text fields too; those numbers are 0.0 or an
+# uninitialized double, not a value the widget holds.
+_RANGE_ROLE_NAMES = frozenset({"slider", "spin button", "progress bar"})
 
 
 def _strip_objects(text: str) -> str:
@@ -546,6 +551,129 @@ def _selected_option_text(acc) -> str | None:
     return ", ".join(nested)
 
 
+def _toolkit_name(acc) -> str:
+    """AT-SPI toolkit name for ``acc``'s application, cached per application.
+
+    Qt and GTK share the GI client. The server is what interprets insert
+    length and which Value numbers are real, so the split is the toolkit
+    name (``Qt`` or ``gtk``), not the binding module.
+    """
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    cached = getattr(app, "_a11y_toolkit_name", None)
+    if isinstance(cached, str):
+        return cached
+    name = (_call_first(app, ("get_toolkit_name", "getToolkitName"), default="") or "")
+    text = str(name).lower()
+    try:
+        setattr(app, "_a11y_toolkit_name", text)
+    except Exception:
+        pass
+    return text
+
+
+def _qt_app(acc) -> bool:
+    """True when this node belongs to Qt. GTK and a fake with no toolkit are not."""
+    return "qt" in _toolkit_name(acc)
+
+
+def _sane_range(low: float, high: float) -> bool:
+    """True when minimum and maximum are a real widget range.
+
+    An uninitialized Qt double is finite and tiny (about ``1e-310``), and the
+    minimum, maximum, and current value are the same garbage. A range needs
+    a finite minimum strictly below a finite maximum, and neither end may be
+    a subnormal.
+    """
+    if not math.isfinite(low) or not math.isfinite(high) or not low < high:
+        return False
+    for number in (low, high):
+        if number != 0.0 and abs(number) < 1e-200:
+            return False
+    return True
+
+
+def _relation_type_token(value) -> str:
+    parts = (
+        value,
+        getattr(value, "value_name", ""),
+        getattr(value, "value_nick", ""),
+    )
+    return " ".join(str(part) for part in parts).lower().replace("-", "_")
+
+
+def _relation_set(acc):
+    """Relations on ``acc``. Fakes expose ``get_relation_set``. GI uses the class form."""
+    if not hasattr(type(acc), "__gtype__"):
+        got = _call_first(acc, ("get_relation_set", "getRelationSet"))
+        if got:
+            return got
+    return _safe(lambda: _atspi().Accessible.get_relation_set(acc)) or []
+
+
+def _gi_object(obj) -> bool:
+    return hasattr(type(obj), "__gtype__")
+
+
+def _relation_kind(rel) -> str:
+    rtype = None
+    if not _gi_object(rel):
+        rtype = _call_first(rel, ("get_relation_type", "getRelationType"))
+    if rtype is None:
+        rtype = _safe(lambda: _atspi().Relation.get_relation_type(rel))
+    if rtype is None:
+        return ""
+    return _relation_type_token(rtype)
+
+
+def _relation_targets(acc, kind: str) -> list:
+    """Targets of relations whose type token contains ``kind``."""
+    wanted = kind.lower().replace("-", "_")
+    targets: list = []
+    for rel in _relation_set(acc):
+        if wanted not in _relation_kind(rel):
+            continue
+        count = None
+        if not _gi_object(rel):
+            count = _call_first(rel, ("get_n_targets", "getNTargets"))
+        if not isinstance(count, int) or isinstance(count, bool):
+            count = _safe(lambda r=rel: _atspi().Relation.get_n_targets(r))
+        if not isinstance(count, int) or isinstance(count, bool):
+            continue
+        for index in range(int(count)):
+            target = None
+            if not _gi_object(rel):
+                target = _call_first(rel, ("get_target", "getTarget"), index)
+            if target is None:
+                target = _safe(lambda r=rel, i=index: _atspi().Relation.get_target(r, i))
+            if target is not None:
+                targets.append(target)
+    return targets
+
+
+def _labelled_by_name(acc) -> str:
+    """Name of the first LABELLED_BY target, or ``""``."""
+    for target in _relation_targets(acc, "labelled_by"):
+        label = _node_name(target)
+        if label:
+            return label
+    return ""
+
+
+def _combo_display_name(acc, name: str) -> str:
+    """Title for a combo box.
+
+    On Linux, Qt puts the current item in the accessible name and says the
+    label relation is the widget's name. A GTK combo already carries the name
+    it was given, so this returns that name unchanged.
+    """
+    if not _qt_app(acc):
+        return name
+    label = _labelled_by_name(acc)
+    if label and label != name:
+        return label
+    return name
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -565,6 +693,13 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     content is a control is not an empty text leaf. An empty number field
     exposes Value 0.0 with no text; that default is not shown. A slider has no
     text interface and still reports its Value.
+
+    Qt publishes a Value interface on labels, checks, rows, and empty text
+    fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
+    Text, or the accessible name, is what those roles show. Value is read for
+    a slider, spin button, or progress bar, and only when Qt's minimum and
+    maximum are a real range. GTK's fallback for a non-range control is
+    unchanged.
     """
     if role == "AXSecureTextField":
         return None
@@ -601,10 +736,38 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
         return choice
+    if role_name in _RANGE_ROLE_NAMES:
+        return _range_value(acc)
+    # A Qt label, check, row, or empty line edit has a Value interface whose
+    # current value is not a number the widget holds. The name is the title.
+    if _qt_app(acc):
+        return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is not None:
         return cur
     return None
+
+
+def _range_value(acc):
+    """Current Value for a slider, spin button, or progress bar.
+
+    Qt's minimum and maximum have to be a real range. A denormal or a
+    minimum that is not below the maximum is not shown. Other toolkits keep
+    the current value whenever the interface returns a finite number.
+    """
+    if _qt_app(acc):
+        span = _value_range(acc)
+        if span is None or not _sane_range(*span):
+            return None
+    cur = _safe(lambda: _atspi().Value.get_current_value(acc))
+    if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+        return None
+    number = float(cur)
+    if not math.isfinite(number):
+        return None
+    if _qt_app(acc) and number != 0.0 and abs(number) < 1e-200:
+        return None
+    return cur
 
 
 def _state_flags(acc):
@@ -825,6 +988,8 @@ class ATSPIAccessor:
         enabled, focused, checked, selected, expanded, focusable = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
+        if role_str == "combo box":
+            name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
         if checked is None and role == "AXButton":
@@ -1330,19 +1495,27 @@ def _state_has(acc, name: str) -> bool:
     return bool(_safe(lambda: sset.contains(member), False))
 
 
-def _insert_length(method, text: str) -> int:
+def _insert_length(method, text: str, acc=None) -> int:
     """The ``length`` argument EditableText.insert_text actually wants.
 
-    libatspi and ``gi.repository.Atspi`` take a UTF-8 byte count. Passing the
-    character count keeps only that many bytes, so ``Привет`` becomes ``При``
-    and a cut code point inserts nothing. A Python double that slices
-    characters has no ``gi.`` module and gets ``len(text)`` unless it sets
-    ``_length_unit`` to ``bytes`` or ``chars``.
+    GTK through libatspi and ``gi.repository.Atspi`` takes a UTF-8 byte count.
+    Passing the character count keeps only that many bytes, so ``Привет``
+    becomes ``При`` and a cut code point inserts nothing. Qt's adaptor does
+    ``QString::resize(length)`` and inserts that string, so the same byte
+    count reads past the text and appends uninitialized characters
+    (``ünï`` becomes ``ünï`` plus a NUL and whatever followed it). Qt gets
+    the character count. The position is a character offset on both.
+
+    A Python double that slices characters has no ``gi.`` module and gets
+    ``len(text)`` unless it sets ``_length_unit`` to ``bytes`` or ``chars``.
+    ``_length_unit`` wins over the toolkit, so a test can force either one.
     """
     unit = getattr(method, "_length_unit", None)
     if unit == "bytes":
         return len(text.encode("utf-8"))
     if unit == "chars":
+        return len(text)
+    if acc is not None and _qt_app(acc):
         return len(text)
     func = getattr(method, "__func__", method)
     module = str(getattr(method, "__module__", None) or getattr(func, "__module__", "") or "")
@@ -1414,8 +1587,12 @@ def insert_text(acc, text: str) -> int | None:
     field that does not contain that text raises `ErrorCode.UNSUPPORTED`
     instead of reporting success. A CRLF is one newline.
 
-    The insert length is the UTF-8 byte count on the GI/C binding and the
-    character count on a binding that slices characters.
+    The insert length is the UTF-8 byte count on the GTK GI/C binding and the
+    character count for Qt and for a binding that slices characters. The
+    position is a character offset. A Qt read-back also requires the
+    character count to equal that string: a D-Bus string stops at an
+    embedded NUL, so the text alone can look right while the widget holds
+    extra characters.
     """
     eti = _editable_iface(acc)
     if eti is None:
@@ -1453,14 +1630,17 @@ def insert_text(acc, text: str) -> int | None:
         insert = getattr(eti, name, None)
         if insert is not None:
             break
-    length = _insert_length(insert, typed) if insert is not None else len(typed)
+    length = _insert_length(insert, typed, acc) if insert is not None else len(typed)
     wrote = bool(_call_first(eti, ("insert_text", "insertText"), int(offset), typed, int(length), default=False))
     if _confirm_text(acc, expected):
         return len(typed)
     # The raw string can still be U+FFFC, or spaces can come back as NBSP.
     # Compare the expanded read so a successful insert is not a mismatch.
+    # Qt still has to report the character count of the string that was
+    # asked for: GetText stops at a NUL, so the readable text can match
+    # while the widget is longer.
     after_readable = _readable_text(acc)
-    if _typed_visible(before_readable, after_readable, typed):
+    if _typed_visible(before_readable, after_readable, typed) and _qt_text_count_matches(acc, expected):
         return len(typed)
     actual = _full_text(acc)
     if actual == current and not wrote:
@@ -1726,9 +1906,31 @@ def _clear_text(acc, eti, current: str) -> bool:
     return _wait_until_gone(acc)
 
 
+def _character_count(acc) -> int | None:
+    """``Text.get_character_count``, or None when that read fails."""
+    count = _safe(lambda: _atspi().Text.get_character_count(acc))
+    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+        return int(count)
+    return None
+
+
+def _qt_text_count_matches(acc, text: str) -> bool:
+    """True when a Qt field's character count equals ``text``.
+
+    GTK is not checked here. Qt's ``InsertText`` can append a NUL and more
+    characters when the length was a byte count. ``GetText`` is a D-Bus
+    string and stops at the NUL, so the text compares equal while the
+    character count is longer than the string that was asked for.
+    """
+    if not _qt_app(acc):
+        return True
+    return _character_count(acc) == len(text)
+
+
 def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
-        if _texts_match(_full_text(acc), text):
+        shown = _full_text(acc)
+        if _texts_match(shown, text) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -1791,6 +1993,12 @@ def control_kind(acc) -> str | None:
     slider, or other Value-interface control is set through current value.
     A plain text role stays on ``set_text``. A scroll bar's Value drives
     pixel scroll and is not a ``set_value`` target.
+
+    Qt publishes Value on labels and empty text as well. Those are not
+    numeric targets. A Qt slider, spin button, or progress bar is a numeric
+    target only when its minimum and maximum are a real range. A non-Qt
+    control keeps the previous rule: a spin button, a slider, a number
+    input, or any other non-text role that exposes a range.
     """
     role = _role_name(acc)
     if role == "combo box":
@@ -1800,6 +2008,12 @@ def control_kind(acc) -> str | None:
     # A missing role is a fake or a node we cannot classify. Do not probe
     # Value: that import is gi, and a plain text write must stay on set_text.
     if role == "scroll bar" or role == "":
+        return None
+    if _qt_app(acc):
+        if role in _RANGE_ROLE_NAMES:
+            span = _value_range(acc)
+            if span is not None and _sane_range(*span):
+                return "value"
         return None
     if role in {"spin button", "slider"} or _number_input(acc):
         return "value"
@@ -1869,6 +2083,13 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         if isinstance(text, str):
             return True, (_strip_objects(text) or None)
         return True, None
+    # Linux Qt stores the current item in the accessible name. That name is
+    # the value. The label relation, applied in the snapshot title, is the
+    # widget's name. The Value interface on the combo is uninitialized.
+    if _qt_app(acc):
+        current = _node_name(acc)
+        if current:
+            return True, current
     return True, _selected_option_text(acc)
 
 
@@ -1881,7 +2102,7 @@ def _set_entry_contents(entry, value: str) -> bool:
     eti = _editable_iface(entry)
     if eti is None:
         return False
-    if _full_text(entry) == value:
+    if _full_text(entry) == value and _qt_text_count_matches(entry, value):
         return True
     _call_first(eti, ("set_text_contents",), value, default=False)
     if _confirm_text(entry, value):
@@ -1901,7 +2122,7 @@ def _set_entry_contents(entry, value: str) -> bool:
     for name in ("insert_text", "insertText"):
         method = getattr(eti, name, None)
         if method is not None:
-            length = _insert_length(method, value)
+            length = _insert_length(method, value, entry)
             break
     if length is None:
         return False
@@ -1938,6 +2159,11 @@ def _popup_open(acc) -> bool:
     """
     if _state_has(acc, "EXPANDED"):
         return True
+    # Qt keeps the combo's list SHOWING in the tree while the popup is closed.
+    # EXPANDED on the combo is the popup. Treating that list as open would
+    # send Escape on every set and then still see the list as showing.
+    if _qt_app(acc):
+        return False
     count = min(_child_count(acc), 12)
     for index in range(count):
         child = _child_at(acc, index)
@@ -2026,10 +2252,57 @@ def _combo_active_label(acc) -> str | None:
     return None
 
 
+def _qt_combo_current(acc) -> str | None:
+    """Qt's current combo item. On Linux that is the accessible name."""
+    name = _node_name(acc)
+    return name or None
+
+
+def _qt_combo_shows(combo, label: str) -> bool:
+    """Whether Qt's current item is ``label``. The name can trail the click."""
+    for attempt in range(8):
+        if _qt_combo_current(combo) == label:
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def _open_qt_popup(combo) -> None:
+    """Show the Qt combo popup. A combo that is already expanded is left open."""
+    if _state_has(combo, "EXPANDED"):
+        return
+    _do_action_named(combo, frozenset({"showmenu", "press", "show", "open"}))
+    for _attempt in range(8):
+        if _state_has(combo, "EXPANDED"):
+            return
+        time.sleep(0.05)
+
+
+def _activate_qt_option(combo, label: str, node) -> None:
+    """Choose ``label`` on a Qt combo through its list popup.
+
+    The combo has no Selection interface. ``Toggle`` on a list item returns
+    true and leaves the current item alone. Opening the popup and clicking
+    the item's center is what changes ``currentText``. The popup closes
+    itself when that click lands. The caller reads the name back.
+    """
+    if _qt_combo_current(combo) == label:
+        return
+    _open_qt_popup(combo)
+    target = _option_named(combo, label) or node
+    _click_center(target)
+    _qt_combo_shows(combo, label)
+
+
 def _combo_landed(acc, entry, value: str) -> bool:
     if entry is not None:
         text = _full_text(entry)
         return text is not None and text.replace(_OBJECT_REPLACEMENT, "") == value
+    if _qt_app(acc):
+        if _qt_combo_current(acc) == value:
+            return True
+        return _selected_option_text(acc) == value
     if _chromium_control(acc):
         # The same text the snapshot shows: the SELECTED option's name. Chrome
         # keeps the combobox name as the aria-label and its text as U+FFFC.
@@ -2210,6 +2483,9 @@ def _activate_combo_option(combo, options, match) -> None:
         return
     if _gecko_app(combo):
         _activate_gecko_option(combo, label, node, options)
+        return
+    if _qt_app(combo):
+        _activate_qt_option(combo, label, node)
         return
     if _combo_active_label(combo) == label:
         return
@@ -2727,16 +3003,19 @@ def set_text(acc, text: str) -> bool:
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
     A field with no EditableText is cleared and typed on X11; that also
-    returns True only when the snapshot read equals ``text``. On Firefox,
-    when EditableText returns success and the snapshot read is still not
-    ``text``, the field is focused and the value is typed, and success is
-    still that read-back. Chromium and GTK keep the previous tail: keys are
-    sent only when the snapshot read is already empty, because focusing a
-    Chrome number input can make an empty field read back as 0. When the
-    snapshot read is left blank and the new text cannot be verified, the
-    text from before the call is put back, so a contenteditable is not left
-    empty. A Chromium field that still reads a value (an empty number input
-    reads 0) is not focused in order to restore it.
+    returns True only when the snapshot read equals ``text``. On Qt the
+    character count has to equal that string too: ``GetText`` stops at an
+    embedded NUL, so the text alone can match while the widget is longer.
+    On Firefox, when EditableText returns success and the snapshot read is
+    still not ``text``, the field is focused and the value is typed, and
+    success is still that read-back. Chromium and GTK keep the previous
+    tail: keys are sent only when the snapshot read is already empty,
+    because focusing a Chrome number input can make an empty field read
+    back as 0. When the snapshot read is left blank and the new text cannot
+    be verified, the text from before the call is put back, so a
+    contenteditable is not left empty. A Chromium field that still reads a
+    value (an empty number input reads 0) is not focused in order to restore
+    it.
     """
     eti = _editable_iface(acc)
     if eti is None:
@@ -2744,7 +3023,7 @@ def set_text(acc, text: str) -> bool:
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
-    if current == text or _texts_match(current, text):
+    if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
         return wrote
@@ -2756,7 +3035,7 @@ def set_text(acc, text: str) -> bool:
             insert = getattr(eti, name, None)
             if insert is not None:
                 break
-        length = _insert_length(insert, text) if insert is not None else len(text)
+        length = _insert_length(insert, text, acc) if insert is not None else len(text)
         if not _call_first(eti, ("insert_text", "insertText"), 0, text, length, default=False):
             if _text_is_gone(acc) and _x11_keys_available():
                 _type_string(text)

@@ -821,15 +821,17 @@ class LinuxDriver:
         Primary path: AT-SPI EditableText. A ref click remembers the element.
         A coordinate click does not, so this looks up the focused accessible
         of the frontmost app and uses the same `insert_text` helper: UTF-8
-        byte length on the GI binding, insert at the caret, replace a
-        selection, and return the character count read back. A mismatch
-        raises instead of reporting success. When EditableText returns
-        success and the field text does not change (Firefox web entries),
-        the field is focused and the same text is sent as key events, and
-        that field is read back. Falls back to synthetic XTEST keystrokes
-        when that lookup finds no EditableText (Chrome's ATK objects, or a
-        click that focused nothing editable). A CRLF is one newline on both
-        paths.
+        byte length for GTK, character length for Qt, insert at the caret
+        (a character offset), replace a selection, and return the character
+        count read back. A Qt field also has to report that same character
+        count, because a NUL in the widget truncates the D-Bus string. A
+        mismatch raises instead of reporting success. When EditableText
+        returns success and the field text does not change (Firefox web
+        entries), the field is focused and the same text is sent as key
+        events, and that field is read back. Falls back to synthetic XTEST
+        keystrokes when that lookup finds no EditableText (Chrome's ATK
+        objects, or a click that focused nothing editable). A CRLF is one
+        newline on both paths.
         """
         if dry_run or not text:
             return None

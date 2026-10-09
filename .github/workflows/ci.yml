@@ -176,12 +176,16 @@ jobs:
       # driver imports (Atspi, Gtk3), apt's PyGObject (python3-gi), a virtual X
       # server + D-Bus session for the live run, a real window manager (openbox)
       # so focus and pointer semantics resemble a desktop, xdotool/x11-utils for
-      # the pointer checks, and xclip for the clipboard.
+      # the pointer checks, and xclip for the clipboard. python3-pyqt6 is the
+      # Qt fixture for the live line-edit, combo, and value test. The fixture
+      # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's
+      # Qt 5 build ships no AT-SPI adaptor, so a PyQt5 window never appears
+      # on the bus.
       - name: install AT-SPI2 / GTK / X11 system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
+            at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi python3-pyqt6 \
             xvfb dbus dbus-x11 openbox xdotool x11-utils xclip \
             curl xz-utils libdbus-glib-1-2 libxt6t64 libasound2t64
       # No setup-python here on purpose: apt's python3-gi is built for the
