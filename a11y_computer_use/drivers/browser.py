@@ -224,6 +224,9 @@ class BrowserDriver:
         self._webmcp_shim = bool(webmcp_shim)
         self._webmcp_shim_installed = False
         self._session: CDPSession | None = None  # connected lazily
+        # targetId -> {session_id, parent_id, url} for OOPIFs on this connection.
+        # A later setAutoAttach does not re-emit targets that are already attached.
+        self._oopif_targets: dict[str, dict] = {}
         self._console: deque[dict] = deque(maxlen=_FEED_LIMIT)
         self._net_pending: dict[str, dict] = {}  # requestId -> {method,url} in flight
         self._network: deque[dict] = deque(maxlen=_FEED_LIMIT)
@@ -279,6 +282,7 @@ class BrowserDriver:
         if self._session is not None:
             self._session.close()
         self._session = None
+        self._oopif_targets = {}
         self._webmcp_shim_installed = False  # the recorder lives in the session
         self._console.clear()
         self._network.clear()
@@ -303,6 +307,12 @@ class BrowserDriver:
         # then offset each frame's boxes into the top document's space.
         raw_geom, secure_ids, empty_numbers = _cdp_ax.parse_dom_snapshot(dom)
         offsets = _cdp_ax.build_frame_offsets(raw_geom, frames)
+        from a11y_computer_use.drivers import _cdp_frames
+
+        # OOPIF boxes live in the child session's snapshot, not the parent's.
+        # Their backend ids collide with the parent document, so they are stored
+        # under (session_id, backend) after this shift.
+        local = _cdp_frames.place_oopif_offsets(frames, raw_geom, offsets)
         # Single-frame pages (the common case) offset to (0,0) everywhere, so the
         # second parse would be identity — reuse the first instead of re-walking
         # the whole DOMSnapshot (and re-scanning every node for password fields).
@@ -310,10 +320,20 @@ class BrowserDriver:
             geometry, _, _ = _cdp_ax.parse_dom_snapshot(dom, offsets)
         else:
             geometry = raw_geom
-        stitched = _cdp_ax.stitch_frames(
-            [{"nodes": f["nodes"], "owner_backend": f["owner_backend"]} for f in frames]
-        )
-        accessor = _cdp_ax.CDPAccessor(stitched, geometry, secure_ids, empty_numbers)
+        geometry = dict(geometry)
+        secure: set = set(secure_ids)
+        empty: set = set(empty_numbers)
+        _cdp_frames.merge_oopif_geometry(frames, local, offsets, geometry, secure, empty)
+        stitched = _cdp_ax.stitch_frames([
+            {
+                "nodes": f["nodes"],
+                "owner_backend": f["owner_backend"],
+                "session_id": f.get("session_id") or "",
+                "parent_session_id": f.get("parent_session_id") or "",
+            }
+            for f in frames
+        ])
+        accessor = _cdp_ax.CDPAccessor(stitched, geometry, frozenset(secure), frozenset(empty))
         return observe.build_snapshot(
             accessor.root(), accessor, scope=scope, app=self._target_id, pid=None,
             geometry=self._page_geometry(dom),
@@ -326,12 +346,16 @@ class BrowserDriver:
     def _collect_frames(self, sess: CDPSession) -> list[dict]:
         """The main AX tree plus each reachable child frame's, in tree order.
 
-        Cross-origin out-of-process iframes live in a separate CDP target; their
-        ``getFullAXTree``/``getFrameOwner`` raise here and are skipped (a
-        documented follow-up), so same-process (same-origin/about:blank) frames —
-        the common embedded-form/widget case — become observable without the
-        stitch ever crashing on an OOPIF.
+        Same-process frames (same-origin, about:blank, srcdoc) come from
+        ``Page.getFrameTree``. A cross-origin iframe is a separate target:
+        ``getFullAXTree(frameId)`` on the page session fails, and the frame is
+        absent from the frame tree. ``Target.setAutoAttach`` (flatten) attaches
+        that target; its tree is read on the child session and grafted under
+        the owner iframe. A frame that still cannot be read is skipped, so one
+        detached iframe does not fail the snapshot.
         """
+        from a11y_computer_use.drivers import _cdp_frames
+
         main_nodes = sess.call("Accessibility.getFullAXTree").get("nodes", [])
         tree = sess.call("Page.getFrameTree").get("frameTree", {})
         main_id = tree.get("frame", {}).get("id")
@@ -340,7 +364,7 @@ class BrowserDriver:
         attempts = 1
         while queue and attempts < self._MAX_FRAMES:
             node, parent_id = queue.popleft()
-            attempts += 1  # failed/OOPIF lookups consume the budget too
+            attempts += 1  # failed lookups consume the budget too
             fid = node.get("frame", {}).get("id")
             if not fid:
                 continue
@@ -350,11 +374,14 @@ class BrowserDriver:
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.UNSUPPORTED:
                     raise
-                continue  # OOPIF / detached frame; transport failures still surface
+                continue  # detached frame; transport failures still surface
             frames.append({"id": fid, "parent_id": parent_id,
                            "owner_backend": owner, "nodes": sub})
             available = max(0, self._MAX_FRAMES - attempts - len(queue))
             queue.extend((c, fid) for c in islice(node.get("childFrames", []), available))
+        _cdp_frames.attach_oopif_frames(
+            sess, frames, limit=self._MAX_FRAMES, remembered=self._oopif_targets,
+        )
         return frames
 
     def _bind(self, app: str | None) -> CDPSession:
@@ -393,24 +420,40 @@ class BrowserDriver:
         return observe.rematch_ref(snap, ref, live)
 
     # -- a11y-first act (coordinate-free) -----------------------------------
-    def _backend_id(self, element: Element) -> int | None:
+    def _ax_handle(self, element: Element) -> dict | None:
         from a11y_computer_use import observe
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
-        if not isinstance(handle, dict):
-            return None
-        return handle.get("backendDOMNodeId")
+        return handle if isinstance(handle, dict) else None
 
-    def _object_id(self, backend_id: int) -> str | None:
+    def _backend_id(self, element: Element) -> int | None:
+        handle = self._ax_handle(element)
+        if handle is None:
+            return None
+        backend = handle.get("backendDOMNodeId")
+        return backend if isinstance(backend, int) else None
+
+    def _session_id(self, element: Element) -> str | None:
+        """Child-session id for an OOPIF node; None addresses the page session."""
+        handle = self._ax_handle(element)
+        if handle is None:
+            return None
+        session = handle.get("_sessionId")
+        return session if isinstance(session, str) and session else None
+
+    def _object_id(self, backend_id: int, session_id: str | None = None) -> str | None:
         sess = self._connect()
         try:
-            obj = sess.call("DOM.resolveNode", {"backendNodeId": backend_id}).get("object", {})
+            obj = sess.call(
+                "DOM.resolveNode", {"backendNodeId": backend_id}, session_id=session_id,
+            ).get("object", {})
         except ComputerUseError:
             return None
         return obj.get("objectId")
 
-    def _call_on(self, backend_id: int, fn: str, args: list | None = None, *, return_value: bool = False):
-        object_id = self._object_id(backend_id)
+    def _call_on(self, backend_id: int, fn: str, args: list | None = None, *,
+                 return_value: bool = False, session_id: str | None = None):
+        object_id = self._object_id(backend_id, session_id)
         if object_id is None:
             return False
         sess = self._connect()
@@ -420,7 +463,7 @@ class BrowserDriver:
                 "functionDeclaration": fn,
                 "arguments": [{"value": a} for a in (args or [])],
                 "returnByValue": True,
-            })
+            }, session_id=session_id)
             if result.get("exceptionDetails"):
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED, "the page could not perform the DOM action",
@@ -434,7 +477,8 @@ class BrowserDriver:
             # CDP keeps every resolved node alive until explicitly released.
             # Navigating in the action may already have destroyed its context.
             try:
-                sess.call("Runtime.releaseObject", {"objectId": object_id}, timeout=1.0)
+                sess.call("Runtime.releaseObject", {"objectId": object_id},
+                          timeout=1.0, session_id=session_id)
             except ComputerUseError:
                 pass
 
@@ -444,18 +488,20 @@ class BrowserDriver:
         backend = self._backend_id(element)
         if backend is None:
             return False
+        session_id = self._session_id(element)
         if element.editable:
             # Focus so a following type_text (Input.insertText) lands here — the
             # coordinate-free analog of the macOS/Linux focus-then-type path.
-            return self._call_on(backend, "function(){this.focus()}")
-        return self._call_on(backend, "function(){this.click()}")
+            return self._call_on(backend, "function(){this.focus()}", session_id=session_id)
+        return self._call_on(backend, "function(){this.click()}", session_id=session_id)
 
     def scroll_into_view(self, element: Element) -> bool:
         backend = self._backend_id(element)
         if backend is None:
             return False
         return self._call_on(
-            backend, "function(){this.scrollIntoView({block:'center',inline:'center'})}"
+            backend, "function(){this.scrollIntoView({block:'center',inline:'center'})}",
+            session_id=self._session_id(element),
         )
 
     def set_value(self, element: Element, value: str) -> bool:
@@ -469,7 +515,11 @@ class BrowserDriver:
         # listeners). One deterministic op, no keystrokes. A select whose
         # option does not exist, or a number/range outside its type, raises
         # ValueError before the setter runs. The JS result is the read-back.
-        result = self._call_on(backend, _SET_VALUE_FN, [value], return_value=True)
+        # An OOPIF node is resolved in its own session; backend ids collide.
+        result = self._call_on(
+            backend, _SET_VALUE_FN, [value], return_value=True,
+            session_id=self._session_id(element),
+        )
         if result is False:
             return False
         _raise_for_set_result(result, value)

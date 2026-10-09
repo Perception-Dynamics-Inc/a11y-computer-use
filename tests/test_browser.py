@@ -34,16 +34,32 @@ class ScriptedTransport:
     def __init__(self, responder) -> None:
         self.responder = responder
         self.sent: list[tuple[str, dict]] = []
+        # Parallel to ``sent``. None addresses the page session. Kept off
+        # ``sent`` so ``(method, params) in t.sent`` stays a pair.
+        self.session_ids: list[str | None] = []
+        self.current_session: str | None = None
         self._inbox: list[str] = []
 
     def send(self, payload: str) -> None:
         msg = json.loads(payload)
         self.sent.append((msg["method"], msg.get("params", {})))
+        self.current_session = msg.get("sessionId")
+        self.session_ids.append(msg.get("sessionId"))
         try:
             result = self.responder(msg["method"], msg.get("params", {}))
-            self._inbox.append(json.dumps({"id": msg["id"], "result": result or {}}))
         except _CDPError as exc:
             self._inbox.append(json.dumps({"id": msg["id"], "error": {"message": str(exc)}}))
+            return
+        events: list = []
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], list):
+            result, events = result
+        for event in events:
+            # Queued before the reply so CDPSession buffers it while matching id.
+            self._inbox.append(json.dumps(event))
+        reply: dict = {"id": msg["id"], "result": result or {}}
+        if msg.get("sessionId"):
+            reply["sessionId"] = msg["sessionId"]
+        self._inbox.append(json.dumps(reply))
 
     def recv(self, timeout=None) -> str:
         assert self._inbox, "recv() with nothing queued — a call had no scripted reply"
@@ -290,6 +306,151 @@ def test_browser_snapshot_survives_cross_origin_frame() -> None:
     snap = d.snapshot(Scope.WINDOW, "TAB1")  # must not raise
     titles = {e.title for e in snap.elements}
     assert "Outer" in titles and "Inner" not in titles  # OOPIF skipped, main intact
+
+
+_OOPIF_MAIN_AX = [
+    _ax("1", "RootWebArea", backend=100, children=["2", "3"]),
+    _ax("2", "button", "Outer", backend=101, parent="1", props={"focusable": True}),
+    _ax("3", "Iframe", backend=110, parent="1"),
+]
+_OOPIF_CHILD_AX = [
+    _ax("1", "RootWebArea", backend=1, children=["2"]),
+    # Backend 8 collides with a node in the parent document. The session key
+    # is what keeps this button's box at the iframe, not at (1, 1).
+    _ax("2", "button", "Inner", backend=8, parent="1", props={"focusable": True}),
+]
+_OOPIF_PARENT_DOM = {
+    "strings": ["MAIN"],
+    "documents": [{
+        "frameId": 0, "contentWidth": 800, "contentHeight": 600,
+        "nodes": {"backendNodeId": [100, 101, 110, 8], "nodeName": [-1, -1, -1, -1],
+                  "attributes": [[], [], [], []]},
+        "layout": {"nodeIndex": [0, 1, 2, 3],
+                   "bounds": [[0, 0, 800, 600], [8, 8, 80, 30], [50, 60, 300, 200],
+                              [1, 1, 9, 9]]},
+    }],
+}
+_OOPIF_CHILD_DOM = {
+    "strings": ["CHILD"],
+    "documents": [{
+        "frameId": 0, "contentWidth": 300, "contentHeight": 200,
+        "nodes": {"backendNodeId": [1, 8], "nodeName": [-1, -1], "attributes": [[], []]},
+        "layout": {"nodeIndex": [0, 1], "bounds": [[0, 0, 300, 200], [8, 8, 80, 30]]},
+    }],
+}
+
+
+class _OopifResponder:
+    """Page.getFrameTree has no child. The iframe arrives as an attach event.
+
+    The event is injected only on the first setAutoAttach. A second snapshot
+    has to reuse the session the driver remembered.
+    """
+
+    def __init__(self) -> None:
+        self.transport: ScriptedTransport | None = None
+        self.attach_calls = 0
+
+    def __call__(self, method: str, params: dict):
+        session = self.transport.current_session if self.transport is not None else None
+        if method == "Target.setAutoAttach":
+            self.attach_calls += 1
+            event = {
+                "method": "Target.attachedToTarget",
+                "params": {
+                    "sessionId": "CHILDSESS",
+                    "targetInfo": {
+                        "targetId": "CHILD",
+                        "type": "iframe",
+                        "url": "http://localhost:9/child",
+                        "title": "child",
+                        "parentFrameId": "MAIN",
+                    },
+                },
+            }
+            if self.attach_calls == 1:
+                return {}, [event]
+            return {}
+        if method == "Accessibility.getFullAXTree":
+            nodes = _OOPIF_CHILD_AX if session == "CHILDSESS" else _OOPIF_MAIN_AX
+            return {"nodes": nodes}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "MAIN"}, "childFrames": []}}
+        if method == "DOM.getFrameOwner":
+            assert params.get("frameId") == "CHILD"
+            assert session in (None, "")
+            return {"backendNodeId": 110}
+        if method == "DOMSnapshot.captureSnapshot":
+            return _OOPIF_CHILD_DOM if session == "CHILDSESS" else _OOPIF_PARENT_DOM
+        if method in ("DOM.enable", "Page.enable", "Runtime.enable", "Accessibility.enable",
+                      "Runtime.releaseObject"):
+            return {}
+        if method == "DOM.resolveNode":
+            return {"object": {"objectId": f"obj-{params.get('backendNodeId')}"}}
+        if method == "Runtime.callFunctionOn":
+            return {"result": {"type": "undefined"}}
+        raise AssertionError(f"unexpected CDP method {method} session={session}")
+
+
+def test_browser_snapshot_includes_cross_origin_iframe_and_presses_in_its_session() -> None:
+    responder = _OopifResponder()
+    driver, transport = _driver_on(responder)
+    responder.transport = transport
+    snap = driver.snapshot(Scope.WINDOW, "TAB1")
+    titles = {el.title: el for el in snap.elements}
+    assert "Outer" in titles
+    inner = titles["Inner"]
+    assert inner.clickable and inner.role == "AXButton"
+    # iframe at (50, 60) plus the child button at (8, 8); not the parent node
+    # that happens to reuse backend id 8 at (1, 1).
+    assert inner.bounds.x == 58 and inner.bounds.y == 68
+    assert inner.stable_id == "CHILDSESS:8"
+
+    again = driver.snapshot(Scope.WINDOW, "TAB1")
+    assert any(el.title == "Inner" and el.stable_id == "CHILDSESS:8" for el in again.elements)
+    assert responder.attach_calls == 2  # the second attach emitted no new target
+
+    transport.sent.clear()
+    transport.session_ids.clear()
+    assert driver.press_element(inner) is True
+    paired = list(zip(transport.sent, transport.session_ids, strict=True))
+    assert any(
+        method == "DOM.resolveNode" and params.get("backendNodeId") == 8 and sid == "CHILDSESS"
+        for (method, params), sid in paired
+    )
+    assert any(
+        method == "Runtime.callFunctionOn" and sid == "CHILDSESS"
+        and "this.click()" in params.get("functionDeclaration", "")
+        for (method, params), sid in paired
+    )
+
+
+def test_cdp_call_puts_session_id_on_the_message() -> None:
+    class T:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+            self.q: list[str] = []
+
+        def send(self, payload: str) -> None:
+            msg = json.loads(payload)
+            self.sent.append(msg)
+            self.q.append(json.dumps({
+                "id": msg["id"], "sessionId": msg.get("sessionId"), "result": {"ok": True},
+            }))
+
+        def recv(self, timeout=None) -> str:
+            return self.q.pop(0)
+
+        def close(self) -> None:
+            pass
+
+    transport = T()
+    session = _cdp.CDPSession(transport)
+    assert session.call("DOM.resolveNode", {"backendNodeId": 3}, session_id="CHILDSESS") == {"ok": True}
+    assert transport.sent[0]["sessionId"] == "CHILDSESS"
+    assert transport.sent[0]["params"] == {"backendNodeId": 3}
+    session.call("Page.getFrameTree")
+    assert "sessionId" not in transport.sent[1]
 
 
 # --------------------------------------------------------------------------- #
@@ -977,6 +1138,106 @@ def test_live_iframe_content_is_observable_and_actionable() -> None:
     assert inner.clickable and inner.role == "AXButton"
     assert d.press_element(inner) is True  # coordinate-free click INTO the iframe
     d._reset()
+
+
+def _cross_origin_pages():
+    """Parent on 127.0.0.1, child on localhost, different ports.
+
+    The host in the URL is the origin. Both servers bind the loopback, so the
+    child is reachable as ``http://localhost:<port>/`` without a public network.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Quiet(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = self.server.html.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            return
+
+    def serve(html: str, host: str):
+        httpd = ThreadingHTTPServer((host, 0), _Quiet)
+        httpd.html = html
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        return httpd
+
+    child = serve(
+        "<!doctype html><meta charset=utf-8><title>oopif-child</title>"
+        "<label><input id=agree type=checkbox aria-label=Agree> Agree</label>"
+        "<button id=go type=button>InnerGo</button>",
+        "127.0.0.1",
+    )
+    child_port = child.server_address[1]
+    parent = serve(
+        "<!doctype html><meta charset=utf-8><title>oopif-parent</title>"
+        "<button id=outer type=button>OuterBtn</button>"
+        f"<iframe title=guest src=\"http://localhost:{child_port}/\" "
+        "width=480 height=260></iframe>",
+        "127.0.0.1",
+    )
+    parent_port = parent.server_address[1]
+    return parent, child, f"http://127.0.0.1:{parent_port}/"
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_cross_origin_iframe_checkbox_reads_checked() -> None:
+    """Click the checkbox inside a cross-origin iframe and read checked back.
+
+    Live against the Browser job's Chrome. The page is served locally; no
+    third-party captcha host is contacted.
+    """
+    import time
+
+    parent, child, url = _cross_origin_pages()
+    driver = browser.BrowserDriver(endpoint=_live_endpoint())
+    try:
+        driver.navigate(url)
+        deadline = time.monotonic() + 15
+        box = None
+        last = None
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, driver._target_id)
+            titles = {el.title for el in last.elements}
+            found = [
+                el for el in last.elements
+                if el.title == "Agree" and el.role == "AXCheckBox"
+            ]
+            if "OuterBtn" in titles and "InnerGo" in titles and found:
+                box = found[0]
+                break
+            time.sleep(0.3)
+        assert box is not None, [
+            (el.role, el.title, el.checked) for el in (last.elements if last else [])
+        ]
+        assert box.checked is not True
+        assert driver.press_element(box) is True
+        deadline = time.monotonic() + 8
+        checked = None
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, driver._target_id)
+            again = next(
+                (el for el in last.elements if el.title == "Agree" and el.role == "AXCheckBox"),
+                None,
+            )
+            checked = None if again is None else again.checked
+            if checked is True:
+                break
+            time.sleep(0.3)
+        assert checked is True, [
+            (el.role, el.title, el.checked) for el in last.elements
+        ]
+    finally:
+        driver._reset()
+        parent.shutdown()
+        child.shutdown()
 
 
 @pytest.mark.skipif(_live_endpoint() is None,

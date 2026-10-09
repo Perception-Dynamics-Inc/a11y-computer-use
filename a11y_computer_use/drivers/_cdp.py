@@ -10,8 +10,9 @@ The live handshake uses ``suppress_origin`` so no ``Origin`` header is sent —
 Chrome otherwise rejects a WebSocket whose origin it was not told to allow
 (``--remote-allow-origins``), so this keeps the browser launchable with zero
 extra flags. One connection speaks to one page target directly (the
-``/devtools/page/<id>`` URL), so no ``Target.attachToTarget``/``sessionId``
-plumbing is needed.
+``/devtools/page/<id>`` URL). Out-of-process iframes are reached on that same
+socket with flattened ``sessionId`` routing (``Target.setAutoAttach``);
+commands that do not pass a session id still address the page itself.
 """
 
 from __future__ import annotations
@@ -157,11 +158,14 @@ class CDPSession:
         self.dropped_events = 0
         self._default_timeout = default_timeout
 
-    def call(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> dict:
+    def call(self, method: str, params: dict | None = None, *, timeout: float | None = None,
+             session_id: str | None = None) -> dict:
         """Send once and wait for its reply; queueing consumes the same timeout.
 
         Commands are never automatically retried: a timed-out click may already
         have executed. Late replies are ignored by id on the next call.
+        ``session_id`` routes the command to a flattened child session (an
+        out-of-process iframe). The page itself is addressed when it is omitted.
         """
         timeout = self._default_timeout if timeout is None else timeout
         if not math.isfinite(timeout) or timeout <= 0:
@@ -175,15 +179,19 @@ class CDPSession:
                                        detail={"method": method, "sent": False})
             if time.monotonic() >= deadline:
                 raise self._timeout(method, timeout, sent=False)
-            return self._call(method, params, timeout, deadline)
+            return self._call(method, params, timeout, deadline, session_id)
         finally:
             self._lock.release()
 
-    def _call(self, method: str, params: dict | None, timeout: float, deadline: float) -> dict:
+    def _call(self, method: str, params: dict | None, timeout: float, deadline: float,
+              session_id: str | None = None) -> dict:
         self._id += 1
         mid = self._id
+        payload: dict = {"id": mid, "method": method, "params": params or {}}
+        if session_id:
+            payload["sessionId"] = session_id
         try:
-            self._t.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+            self._t.send(json.dumps(payload))
         except TimeoutError as exc:
             # A partial send leaves the stream unusable; reconnect on next use.
             self._disconnect()
@@ -266,6 +274,28 @@ class CDPSession:
             self._event_sizes.clear()
             self._event_bytes = 0
             return out
+
+    def pop_events(self, method: str) -> list[dict]:
+        """Remove buffered events whose method is ``method``; leave the rest.
+
+        ``Target.attachedToTarget`` arrives on the same socket as console and
+        network events. Snapshot needs the attach events without discarding
+        the feeds those other events belong to.
+        """
+        with self._lock:
+            kept: list[tuple[dict, int]] = []
+            taken: list[dict] = []
+            while self._events:
+                event = self._events.popleft()
+                size = self._event_sizes.popleft()
+                self._event_bytes -= size
+                if event.get("method") == method:
+                    taken.append(event)
+                else:
+                    kept.append((event, size))
+            for event, size in kept:
+                self._buffer_event(event, size)
+            return taken
 
     def close(self) -> None:
         with self._lock:
