@@ -26,7 +26,9 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -223,10 +225,171 @@ def _runtime(tmp_path, driver):
 
     store = safety.PermissionStore(tmp_path / "permissions.json")
     store.set_tier("firefox", safety.Tier.FULL)
+    store.set_tier("firefox-bin", safety.Tier.FULL)
     front = driver.frontmost_app()[0]
     if front:
         store.set_tier(front, safety.Tier.FULL)
     return server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+
+def _serve_pages(host: str, pages: dict[str, str]):
+    class _Quiet(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            body = self.server.pages.get(path)
+            if body is None:
+                self.send_error(404)
+                return
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, fmt, *args):
+            return
+
+    httpd = ThreadingHTTPServer((host, 0), _Quiet)
+    httpd.pages = pages
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+_CHILD_PAGE = (
+    "<!doctype html><meta charset=utf-8><title>Titled Child</title>"
+    "<label><input id=agree type=checkbox aria-label=Agree> Agree</label>"
+    "<button id=go type=button>InnerGo</button>"
+)
+
+
+def _parent_page(src: str) -> str:
+    return (
+        "<!doctype html><meta charset=utf-8><title>Titled Parent</title>"
+        "<button id=outer type=button>OuterBtn</button>"
+        f"<iframe title=guest src=\"{src}\" width=480 height=260></iframe>"
+    )
+
+
+def _launch_firefox(tmp_path, url: str) -> subprocess.Popen:
+    binary = _firefox_binary()
+    if binary is None:
+        pytest.fail("Firefox is not installed; the Linux live job installs it when it is missing")
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "user.js").write_text(_PROFILE_JS)
+    env = os.environ.copy()
+    env["MOZ_ENABLE_ACCESSIBILITY"] = "1"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    log_f = (tmp_path / "firefox.log").open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        [binary, "--profile", str(profile), "--no-remote", "--new-instance", url],
+        env=env,
+        start_new_session=True,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+    )
+    proc._log = log_f  # type: ignore[attr-defined]
+    return proc
+
+
+def _wait_titled_frame(driver, runtime, timeout_s: float = 60.0):
+    """Snapshot through ``find``, so the grant is the process comm Firefox uses."""
+    deadline = time.monotonic() + timeout_s
+    shot = None
+    while time.monotonic() < deadline:
+        if getattr(driver, "_proc", None) is not None and driver._proc.poll() is not None:
+            raise AssertionError(
+                f"Firefox exited with status {driver._proc.returncode} before the titled frame was exposed"
+            )
+        try:
+            runtime.find("firefox", text="Agree")
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            shot = None
+        else:
+            shot = runtime._current
+            titles = {el.title for el in shot.elements}
+            boxes = [el for el in shot.elements if el.title == "Agree" and el.role == "AXCheckBox"]
+            if boxes and "InnerGo" in titles and "OuterBtn" in titles:
+                return shot, boxes[0]
+        time.sleep(0.5)
+    return shot, None
+
+
+def _titled_child_frame_exposes_its_checkbox(tmp_path, *, cross_origin: bool) -> None:
+    """Live Firefox. A child page with its own title is in the snapshot and in find.
+
+    Same-origin and cross-origin both. The parent is Titled Parent. The child
+    is Titled Child, with a checkbox named Agree and a button named InnerGo.
+    No third-party captcha host.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    if cross_origin:
+        child = _serve_pages("127.0.0.1", {"/": _CHILD_PAGE})
+        child_port = child.server_address[1]
+        parent = _serve_pages("127.0.0.1", {"/": _parent_page(f"http://localhost:{child_port}/")})
+        parent_port = parent.server_address[1]
+        url = f"http://127.0.0.1:{parent_port}/"
+        servers = (parent, child)
+    else:
+        parent = _serve_pages("127.0.0.1", {"/": _parent_page("/child"), "/child": _CHILD_PAGE})
+        url = f"http://127.0.0.1:{parent.server_address[1]}/"
+        servers = (parent,)
+    proc = None
+    try:
+        proc = _launch_firefox(tmp_path, url)
+        driver._proc = proc
+        runtime = _runtime(tmp_path, driver)
+        shot, box = _wait_titled_frame(driver, runtime)
+        assert box is not None, [
+            (el.role, el.title, el.checked) for el in (shot.elements if shot else [])
+        ]
+        assert box.checked is not True
+        found = observe.find_elements(shot, text="Agree")
+        assert any(el.role == "AXCheckBox" for el in found), [(el.role, el.title) for el in found]
+        clicked = runtime.click(box.ref)
+        assert str(clicked).startswith("clicked"), clicked
+        deadline = time.monotonic() + 8
+        checked = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "firefox")
+            again = next(
+                (el for el in shot.elements if el.title == "Agree" and el.role == "AXCheckBox"),
+                None,
+            )
+            checked = None if again is None else again.checked
+            if checked is True:
+                break
+            time.sleep(0.3)
+        assert checked is True, [
+            (el.role, el.title, el.checked) for el in shot.elements
+        ]
+        assert observe.find_elements(shot, text="InnerGo")
+    finally:
+        if proc is not None:
+            _stop(proc)
+            proc._log.close()
+        for server in servers:
+            server.shutdown()
+
+
+def test_linux_firefox_same_origin_titled_iframe_checkbox(tmp_path) -> None:
+    """Live Firefox. A same-origin child frame with its own title stays in the tree."""
+    _titled_child_frame_exposes_its_checkbox(tmp_path, cross_origin=False)
+
+
+def test_linux_firefox_cross_origin_titled_iframe_checkbox(tmp_path) -> None:
+    """Live Firefox. A cross-origin child frame with its own title stays in the tree.
+
+    The parent is ``http://127.0.0.1`` and the child is ``http://localhost``.
+    """
+    _titled_child_frame_exposes_its_checkbox(tmp_path, cross_origin=True)
 
 
 def test_firefox_set_value_and_type_land_in_web_fields(firefox_form, tmp_path) -> None:
