@@ -783,7 +783,10 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        deadline = time.monotonic() + 25
+        # Chrome on a busy runner can take well over 10s to publish the
+        # document (the same image's CDP port has taken ~10s). The strings
+        # below still all have to be present; this only waits longer.
+        deadline = time.monotonic() + 45
         snap = None
         while time.monotonic() < deadline:
             try:

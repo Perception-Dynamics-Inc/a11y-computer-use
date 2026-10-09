@@ -516,12 +516,36 @@ def _with_window(window_id: int):
         yield d, _window_by_id(d, window_id)
 
 
+def _restore_if_hidden(d, win) -> None:
+    """Ask the window manager to uniconify ``win`` before a later verb.
+
+    Openbox 3.6 handles ``_NET_ACTIVE_WINDOW`` in ``client_activate``. That
+    path uniconifies only when focus-stealing prevention allows the focus
+    change. When it refuses, the window stays iconic and a following move or
+    resize is not visible: ``window list`` reports ``on_screen`` false and
+    ``bounds`` null. ``MapRequest`` on an iconic window uses that same
+    activate path. ``WM_CHANGE_STATE`` NormalState and ``_NET_WM_STATE``
+    remove of ``_NET_WM_STATE_HIDDEN`` call ``client_iconify(FALSE)``
+    directly, so the window is mapped even when activation is refused.
+    A window that is already showing is left alone, and this sends nothing.
+    """
+    if not _is_hidden(win, d):
+        return
+    _client_message(d, win, "WM_CHANGE_STATE", [1, 0, 0, 0, 0])  # NormalState
+    hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
+    _client_message(d, win, "_NET_WM_STATE", [0, hidden, 0, 1, 0])  # _NET_WM_STATE_REMOVE
+
+
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
-    Returns False when no managed window has that id."""
+
+    A minimized window is uniconified first. Returns False when no managed
+    window has that id.
+    """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
+        _restore_if_hidden(d, win)
         _send_active_window(d, win)
         return True
 
@@ -529,8 +553,9 @@ def raise_window(window_id: int) -> bool:
 def focus_window(window_id: int) -> bool:
     """Ask the window manager to focus ``window_id`` (``_NET_ACTIVE_WINDOW``).
 
-    Under a standard EWMH window manager this is the same client message as
-    raise: activation raises and focuses, and a minimized window is restored.
+    Under a standard EWMH window manager activation raises and focuses.
+    Openbox does not uniconify when focus-stealing prevention refuses that
+    message, so a minimized window is restored before the activate message.
     The verb is still distinct so the caller can say which one it asked for.
     Returns False when no managed window has that id.
     """
@@ -601,6 +626,7 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
+        _restore_if_hidden(d, win)
         left, top = _frame_insets(win, d)
         # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
         _client_message(
@@ -611,10 +637,15 @@ def move_window(window_id: int, x: int, y: int) -> bool:
 
 
 def resize_window(window_id: int, width: int, height: int) -> bool:
-    """Resize ``window_id`` via ``_NET_MOVERESIZE_WINDOW`` (width and height flags)."""
+    """Resize ``window_id`` via ``_NET_MOVERESIZE_WINDOW`` (width and height flags).
+
+    A minimized window is uniconified first. Openbox applies the size, and
+    ``window list`` only reports bounds for a window that is on screen.
+    """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
+        _restore_if_hidden(d, win)
         # Flags Width=4 and Height=8.
         _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (12 << 8), 0, 0, int(width), int(height)])
         return True

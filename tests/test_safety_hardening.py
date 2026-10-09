@@ -741,6 +741,26 @@ def test_linux_ewmh_verbs_send_the_client_messages(fake_x11) -> None:
     assert messages[6]["data"] == (32, [0, 1, 0, 0, 0])
 
 
+def test_focus_and_resize_uniconify_a_hidden_window_before_the_verb(fake_x11, monkeypatch) -> None:
+    """Openbox ignores _NET_ACTIVE_WINDOW as an uniconify when focus stealing refuses it."""
+    _sent, messages = fake_x11
+    monkeypatch.setattr(_linux_system, "_is_hidden", lambda win, d: win.id == 7)
+    assert _linux_system.focus_window(7) is True
+    assert _linux_system.resize_window(7, 240, 140) is True
+    assert [m["client_type"] for m in messages] == [
+        "WM_CHANGE_STATE",
+        "_NET_WM_STATE",
+        "_NET_ACTIVE_WINDOW",
+        "WM_CHANGE_STATE",
+        "_NET_WM_STATE",
+        "_NET_MOVERESIZE_WINDOW",
+    ]
+    assert messages[0]["data"] == (32, [1, 0, 0, 0, 0])  # NormalState
+    assert messages[1]["data"] == (32, [0, "_NET_WM_STATE_HIDDEN", 0, 1, 0])
+    assert messages[2]["data"] == (32, [1, 0, 0, 0, 0])
+    assert messages[5]["data"] == (32, [1 | (12 << 8), 0, 0, 240, 140])
+
+
 def test_move_places_the_client_inside_the_frame(fake_x11, monkeypatch) -> None:
     """A 5px border and a 29px title bar used to list (100, 80) as (105, 109)."""
     _sent, messages = fake_x11

@@ -1036,11 +1036,11 @@ class LinuxDriver:
         return owner
 
     def raise_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW`` client message for that window."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
         self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
 
     def focus_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW``. The window manager raises and focuses."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
         self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
 
     def minimize_window(self, window_id: int) -> None:
