@@ -1,0 +1,307 @@
+{
+  "roundtrip_request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 4096,
+    "system": "You drive the computer.",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Click Save."
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Clicking Save."
+          },
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "click",
+            "input": {
+              "ref": "e2"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "clicked e2"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "click",
+        "description": "Click a ref.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "type",
+        "description": "Type text.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "roundtrip_response": {
+    "id": "msg_fixture",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "text",
+        "text": "Typing."
+      },
+      {
+        "type": "tool_use",
+        "id": "call_2",
+        "name": "type",
+        "input": {
+          "text": "hi"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "input_tokens": 20,
+      "output_tokens": 8
+    }
+  },
+  "multi_request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Do both."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "click",
+        "description": "Click a ref.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "type",
+        "description": "Type text.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "multi_response": {
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "c1",
+        "name": "click",
+        "input": {
+          "ref": "e2"
+        }
+      },
+      {
+        "type": "tool_use",
+        "id": "c2",
+        "name": "type",
+        "input": {
+          "text": "hi"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "usage": {
+      "input_tokens": 3,
+      "output_tokens": 4
+    }
+  },
+  "image_request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is this?"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "media_type": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "click",
+        "description": "Click a ref.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "name": "type",
+        "description": "Type text.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      }
+    ]
+  },
+  "tool_image_request": {
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Look"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_s",
+            "name": "screenshot",
+            "input": {}
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_s",
+            "content": [
+              {
+                "type": "text",
+                "text": "screen"
+              },
+              {
+                "type": "image",
+                "source": {
+                  "type": "base64",
+                  "media_type": "image/png",
+                  "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "screenshot",
+        "description": "Capture the screen.",
+        "input_schema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ]
+  },
+  "text_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "ok"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1,
+      "output_tokens": 1
+    }
+  }
+}
