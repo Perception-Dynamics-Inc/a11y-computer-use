@@ -445,9 +445,11 @@ class PermissionStore:
     def _identity_keys(self, bundle_id: str) -> list[str]:
         """Stored keys that name ``bundle_id``, exact string first.
 
-        Case, a desktop id, and alias groups (Files/nautilus, Terminal/xterm,
-        libreoffice calc/soffice) share a grant. The caller's own string is
-        always included so an unknown app stays a miss.
+        Case, a desktop id, and alias groups share a grant. Files covers the
+        file managers, Text Editor covers mousepad, gedit, and
+        gnome-text-editor, and the Chrome names cover each other. A terminal
+        binary covers only its own aliases, not a different terminal. The
+        caller's own string is always included so an unknown app stays a miss.
         """
         from a11y_computer_use.app_identity import identity_keys
 

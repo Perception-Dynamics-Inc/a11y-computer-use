@@ -17,16 +17,34 @@ def test_alias_and_case_share_a_grant(tmp_path) -> None:
     store.set_tier("thunar", Tier.FULL)
     store.set_tier("xfce4-terminal", Tier.CLICK)
     store.set_tier("soffice", Tier.CLICK)
+    store.set_tier("mousepad", Tier.FULL)
+    store.set_tier("google-chrome", Tier.CLICK)
     assert store.get_tier("Files") is Tier.FULL
     assert store.get_tier("FILES") is Tier.FULL
     assert store.get_tier("nautilus") is Tier.FULL
-    assert store.get_tier("Terminal") is Tier.CLICK
-    assert store.get_tier("gnome-terminal") is Tier.CLICK
-    assert store.get_tier("xterm") is Tier.CLICK
+    assert store.get_tier("xfce4-terminal") is Tier.CLICK
+    assert store.get_tier("Terminal") is None
+    assert store.get_tier("gnome-terminal") is None
+    assert store.get_tier("xterm") is None
+    assert store.get_tier("Text Editor") is Tier.FULL
+    assert store.get_tier("gedit") is Tier.FULL
+    assert store.get_tier("gnome-text-editor") is Tier.FULL
+    assert store.get_tier("chrome") is Tier.CLICK
+    assert store.get_tier("chromium") is Tier.CLICK
+    assert store.get_tier("chromium-browser") is Tier.CLICK
+    assert store.get_tier("google-chrome-stable") is Tier.CLICK
+    store.set_tier("gnome-terminal", Tier.FULL)
+    assert store.get_tier("gnome-terminal-server") is Tier.FULL
+    assert store.get_tier("org.gnome.Terminal") is Tier.FULL
+    assert store.get_tier("xterm") is None
+    assert store.get_tier("Terminal") is None
     assert store.get_tier("libreoffice calc") is Tier.CLICK
     assert store.get_tier("LibreOffice Calc") is Tier.CLICK
     assert store.get_tier("soffice.bin") is Tier.CLICK
     assert same_app("chrome", "notchrome") is False
+    assert same_app("chrome", "google-chrome") is True
+    assert same_app("xterm", "gnome-terminal") is False
+    assert same_app("gnome-terminal", "gnome-terminal-server") is True
     assert same_app("Files", "profiles") is False
     assert matching_stored_key("Mousepad", ["mousepad"]) == "mousepad"
 
@@ -79,6 +97,35 @@ def test_resolve_launch_rewrites_labels_and_rejects_unknown_names() -> None:
     )
     assert missing.resolved is False
 
+    editor_entries = [
+        {"id": "org.xfce.mousepad", "name": "Text Editor", "exec": "mousepad", "wm_class": "mousepad"},
+    ]
+    editor = resolve_launch(
+        "Text Editor", granted=["gedit"], entries=editor_entries, path_lookup=lambda _name: None,
+    )
+    assert editor.resolved is True
+    assert editor.launch_name == "gedit"
+    assert editor.gate_key == "gedit"
+
+    other_terminal = resolve_launch(
+        "gnome-terminal", granted=["xterm"], entries=entries, path_lookup=lambda _name: "/usr/bin/gnome-terminal",
+    )
+    assert other_terminal.gate_key != "xterm"
+    assert same_app(other_terminal.gate_key or "", "xterm") is False
+
+    # CI installs xterm and no desktop file named Terminal. The grant alone resolves.
+    bare = resolve_launch(
+        "Terminal", granted=["pcmanfm", "xterm"], entries=[], path_lookup=lambda _name: None,
+    )
+    assert bare.resolved is True
+    assert bare.launch_name == "xterm"
+    assert bare.gate_key == "xterm"
+
+    ambiguous = resolve_launch(
+        "Terminal", granted=["xterm", "kitty"], entries=[], path_lookup=lambda _name: None,
+    )
+    assert ambiguous.resolved is False
+
 
 def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_errors(
     tmp_path, monkeypatch,
@@ -119,12 +166,16 @@ def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_erro
     store = safety.PermissionStore(tmp_path / "p.json")
     store.set_tier("thunar", Tier.CLICK)
     store.set_tier("soffice", Tier.CLICK)
+    store.set_tier("xterm", Tier.FULL)
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
     runtime.APP_LAUNCH_WAIT_S = 1
     text = runtime.app("launch", "Files")
     assert "needs_permission" not in text
     assert "ask the user" not in text
     assert launched == ["thunar"]
+    terminal = runtime.app("launch", "Terminal")
+    assert "needs_permission" not in terminal
+    assert launched == ["thunar", "xterm"]
 
     with pytest.raises(ComputerUseError) as exc:
         runtime.app("launch", "not-a-real-app-zz9")

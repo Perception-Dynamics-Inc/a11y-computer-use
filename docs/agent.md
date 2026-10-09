@@ -458,10 +458,12 @@ Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 - exec with `allow_exec` writing a file, and the same command denied by the
   approve hook
 - an empty desktop's first observation, Files/Terminal grant aliases, a
-  Submit button that is not sent for approval, a Pay now button named on the
-  approve callback when `--allow-payments` is set, a checkout page that
-  stops as `needs_human` payment by default, and a number field with a
-  minimum and no maximum
+  Text Editor grant covering mousepad, gedit, or gnome-text-editor, Chrome
+  names covering each other, and a terminal grant that does not cover a
+  different terminal binary, a Submit button that is not sent for approval,
+  a Pay now button named on the approve callback when `--allow-payments` is
+  set, a checkout page that stops as `needs_human` payment by default, and
+  a number field with a minimum and no maximum
 
 Hermetic, on every OS, with `ScriptedModel` and `FakeRuntime`
 (`tests/test_agent_http.py`, `tests/test_agent_mcp.py`):

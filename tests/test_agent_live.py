@@ -1384,6 +1384,63 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
 
 
 @requires_display
+def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path, isolated_home) -> None:
+    """Live. Text Editor and the Chrome names share a grant. Terminals do not.
+
+    mousepad, gedit, or gnome-text-editor is launched as Text Editor. A grant
+    for xterm does not launch gnome-terminal. Chrome's names are checked on
+    the real permission store; this test does not start a browser.
+    """
+    import shutil
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.app_identity import same_app
+    from a11y_computer_use.safety import Tier
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+    from a11y_computer_use.server import ActionRefused
+
+    editor = next((
+        name for name in ("mousepad", "gedit", "gnome-text-editor")
+        if shutil.which(name)
+    ), None)
+    assert editor, "no text editor binary; the linux job installs mousepad"
+    store = safety.PermissionStore()
+    store.set_tier(editor, Tier.FULL)
+    assert store.get_tier("Text Editor") is Tier.FULL
+    assert store.get_tier("gedit") is Tier.FULL
+    store.set_tier("chromium", Tier.CLICK)
+    assert store.get_tier("google-chrome") is Tier.CLICK
+    assert store.get_tier("chrome") is Tier.CLICK
+    assert store.get_tier("chromium-browser") is Tier.CLICK
+    store.set_tier("xterm", Tier.FULL)
+    assert store.get_tier("gnome-terminal") is None
+    assert store.get_tier("kitty") is None
+    assert same_app("xterm", "gnome-terminal") is False
+    assert same_app("gnome-terminal", "gnome-terminal-server") is True
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    runtime.APP_LAUNCH_WAIT_S = 12
+    try:
+        text = runtime.app("launch", "Text Editor")
+        assert "needs_permission" not in text, text
+        assert "launched" in text, text
+        launched_other = False
+        try:
+            other = runtime.app("launch", "gnome-terminal")
+        except ComputerUseError as exc:
+            assert exc.code in {ErrorCode.APP_NOT_FOUND, ErrorCode.UNSUPPORTED}
+        except ActionRefused:
+            launched_other = False
+        else:
+            launched_other = str(other).startswith("launched")
+        assert launched_other is False
+    finally:
+        try:
+            runtime.app("quit", editor)
+        except Exception:
+            subprocess.run(["pkill", "-x", editor], check=False, timeout=3)
+
+
+@requires_display
 def test_agent_submit_button_does_not_need_approval(tmp_path, isolated_home) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     script_path = tmp_path / "submit.py"
