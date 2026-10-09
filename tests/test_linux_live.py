@@ -2089,6 +2089,10 @@ def test_linux_type_and_key_with_app_land_in_that_app(tmp_path) -> None:
         assert "z" in target_text, target_text
         assert "z" not in other_text, other_text
         assert "other-kept" in other_text, other_text
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert typed.evidence
+        assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+        assert pressed.evidence
     finally:
         _stop(target_proc)
         _stop(other_proc)
@@ -2501,6 +2505,7 @@ _GTK_OUTCOME = textwrap.dedent(
     win.set_name("cuaoutcome")
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     entry = Gtk.Entry()
+    entry.get_accessible().set_name("Outcome field")
     btn = Gtk.Button(label="Save")
     btn.connect("clicked", lambda _b: entry.set_text("SAVED"))
     idle = Gtk.Button(label="Idle label")
@@ -2634,6 +2639,207 @@ def test_linux_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
         assert not any((el.value or "") == "SAVED" for el in after.elements)
     finally:
         _stop(proc)
+
+
+def test_linux_second_click_without_a_snapshot_is_suspected_noop(tmp_path) -> None:
+    """Live GTK. Two Save clicks with no snapshot between them.
+
+    The first click writes SAVED. The second does not change the tree. It is
+    compared with the state after the first click, so the outcome is
+    suspected_noop.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.clickable and el.title == "Save" for el in shot.elements),
+        )
+        assert snap is not None, "the outcome window never appeared"
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP)
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.clickable and el.title == "Save")
+        first = runtime.click(button.ref)
+        assert first.outcome == "confirmed", (first.outcome, first.evidence)
+        second = runtime.click(button.ref)
+        assert str(second).startswith("clicked ")
+        assert second.outcome == "suspected_noop", (second.outcome, second.evidence)
+        assert "did not change" in second.evidence
+    finally:
+        _stop(proc)
+
+
+_COVER_APP = "cuacover"
+
+_GTK_COVER = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuacover")
+    win = Gtk.Window(title="cuacover")
+    win.set_name("cuacover")
+    win.set_default_size(1000, 800)
+    win.move(0, 0)
+    win.set_keep_above(True)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_set_value_on_a_covered_window_is_refused(tmp_path) -> None:
+    """Live GTK entry, the same EditableText path Mousepad uses.
+
+    A window of another process covers the entry. set_value must not report
+    confirmed. The entry text stays empty.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    target = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    cover = _launch_named(tmp_path, _GTK_COVER, "cuacover.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.editable and el.role in {"AXTextField", "AXTextArea"} for el in shot.elements),
+        )
+        assert snap is not None, "the entry never appeared"
+
+        def _row(name: str):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                for row in driver.windows() or []:
+                    if name in {row.get("wm_class"), row.get("title"), row.get("app")}:
+                        return row
+                time.sleep(0.2)
+            return None
+
+        cover_row = _row(_COVER_APP)
+        assert cover_row is not None, driver.windows()
+        target_row = _row(_OUTCOME_APP)
+        assert target_row is not None, driver.windows()
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP, _COVER_APP, "python3")
+        # Frame insets are subtracted from the request. An origin of (0, 0)
+        # becomes negative and X rejects it. These origins stay positive and
+        # the cover still contains the entry. The ref is taken after the move
+        # so it names the field where it sits under the cover.
+        runtime.window("move", window_id=int(target_row["window_id"]), x=80, y=140)
+        runtime.window("move", window_id=int(cover_row["window_id"]), x=40, y=80)
+        _focus_window(driver, int(cover_row["window_id"]))
+        covered = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+        runtime._current = covered
+        entry = next(el for el in covered.elements if el.editable and el.title == "Outcome field")
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(entry.ref, "covered-text")
+        assert exc.value.detail["reason"] == "covered", exc.value.detail
+        assert exc.value.detail["outcome"] == "refused"
+        after = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+        assert not any((el.value or "") == "covered-text" for el in after.elements)
+    finally:
+        _stop(cover)
+        _stop(target)
+
+
+_TWO_APP = "cuatwowin"
+
+_GTK_TWO = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuatwowin")
+    def mk(title, tag, x):
+        w = Gtk.Window(title=title)
+        w.move(x, 80)
+        w.set_default_size(420, 220)
+        b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        e = Gtk.Entry()
+        e.get_accessible().set_name("Field " + tag)
+        b.pack_start(e, False, False, 0)
+        b.pack_start(Gtk.Button(label="Press " + tag), False, False, 0)
+        w.add(b)
+        w.connect("destroy", Gtk.main_quit)
+        w.show_all()
+        return w
+    mk("Alpha Window", "A", 40)
+    beta = mk("Beta Window", "B", 520)
+    beta.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
+    """Two GTK windows in one process. Beta is in front.
+
+    set_value on Field A writes the text. A window-scope snapshot does not
+    contain that field, which used to make the outcome unverifiable. The ref
+    came from find(scope='app'), and that read-back matches, so the outcome
+    is confirmed. This is not the covered-window case: nothing is on top of
+    Alpha, and a read-back that did not match would not be confirmed.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    proc = _launch_named(tmp_path, _GTK_TWO, "cuatwowin.py")
+    try:
+        snap = _wait_app(
+            driver, _TWO_APP,
+            lambda shot: any(el.title == "Field B" for el in shot.elements),
+        )
+        assert snap is not None, "the two-window app never appeared"
+
+        def _row(title: str):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for row in driver.windows() or []:
+                    if row.get("title") == title:
+                        return row
+                time.sleep(0.2)
+            return None
+
+        beta = _row("Beta Window")
+        assert beta is not None, driver.windows()
+        _focus_window(driver, int(beta["window_id"]))
+        front = driver.snapshot(Scope.WINDOW, _TWO_APP)
+        assert any(el.title == "Field B" for el in front.elements), [
+            (el.role, el.title) for el in front.elements
+        ]
+        assert not any(el.title == "Field A" for el in front.elements), [
+            (el.role, el.title) for el in front.elements
+        ]
+        runtime = _runtime_for(tmp_path, driver, _TWO_APP, "python3")
+        runtime.find(_TWO_APP, text="Field A", scope="app")
+        current = runtime._current
+        assert current is not None and current.scope is Scope.APP
+        field = next(el for el in current.elements if el.title == "Field A" and el.editable)
+        result = runtime.set_value(field.ref, "alpha-ok")
+        assert str(result).startswith("set ")
+        assert result.outcome == "confirmed", (result.outcome, result.evidence)
+        assert "alpha-ok" in result.evidence
+        found = runtime.find(_TWO_APP, text="Field A", scope="app")
+        assert "alpha-ok" in found
+        runtime.find(_TWO_APP, text="Field B", scope="window")
+        current = runtime._current
+        assert current is not None
+        front_field = next(el for el in current.elements if el.title == "Field B" and el.editable)
+        front_result = runtime.set_value(front_field.ref, "bravo-set")
+        assert front_result.outcome == "confirmed", (front_result.outcome, front_result.evidence)
+        assert "bravo-set" in front_result.evidence
+    finally:
+        _stop(proc)
+
+
 
 
 def test_linux_click_that_exits_the_process_is_not_confirmed(tmp_path) -> None:
