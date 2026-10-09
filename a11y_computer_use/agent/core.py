@@ -453,13 +453,19 @@ class Agent:
             self._commit(
                 requested, requested, blocked, verified=False, error=blocked,
                 duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+                skipped=remaining, turn_stop="failure",
             )
             yield Event("action", _action_event(index, requested, self._last_snap))
-            yield Event("step_finished", {"index": index, "verified": False, "error": blocked})
-            self._messages.append(Message(
-                role="tool", content=blocked, tool_call_id=call.id, name=requested.name,
+            yield Event("step_finished", _step_finished(
+                index, verified=False, error=blocked, skipped=remaining, turn_stop="failure",
+                ran=[*prior, _call_view(call)],
             ))
-            return False
+            self._messages.append(Message(
+                role="tool",
+                content=_with_stop_note(blocked, remaining, "failure"),
+                tool_call_id=call.id, name=requested.name,
+            ))
+            return "stop_turn"
 
         label = _action_label(requested, self._last_snap)
         allowed, denial = self._allowed(requested, label)

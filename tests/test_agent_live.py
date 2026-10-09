@@ -11,10 +11,12 @@ display (the Linux live job). Hermetic jobs have no display and skip them.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -1346,4 +1348,87 @@ def test_agent_number_min_only_accepts_a_value(tmp_path, isolated_home) -> None:
         assert str(live.value) in {"3", "3.0"}, (result, observe.render_text(again))
     finally:
         stop_process(proc)
+
+
+@requires_display
+def test_agent_server_streams_a_gtk_save(tmp_path, isolated_home) -> None:
+    """Start ``a11y-agent``'s HTTP server and save the GTK note through it.
+
+    The model is ``ScriptedModel``. The server process is in-process on a
+    worker thread, which is how ``a11y-agent serve`` runs a goal. The test
+    follows the SSE stream until the server closes it.
+    """
+    from a11y_computer_use.agent.httpapi import bind_server
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.agent.service import RunStore
+
+    assert isolated_home.is_dir()
+    dest = _short_dest()
+    dest.unlink(missing_ok=True)
+    proc = launch_gtk()
+    script = _SaveScript(dest, ModelTurn, ToolCall)
+    store = RunStore(
+        model_factory=lambda _spec: ScriptedModel(script),
+        trace_root=tmp_path / "server-traces",
+        approval_timeout_s=5,
+    )
+    httpd = bind_server(host="127.0.0.1", port=0, store=store)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+        body = json.dumps({
+            "goal": f"In {APP_NAME}, write the note, set Format to plain, and save it to {dest}.",
+            "model": "scripted:live",
+            "display": os.environ.get("DISPLAY"),
+            "limits": {"max_steps": 16, "max_time_s": 180},
+        }).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", "/runs", body=body, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+        })
+        response = conn.getresponse()
+        started = json.loads(response.read().decode())
+        conn.close()
+        assert response.status == 202, started
+        run_id = started["id"]
+
+        stream = http.client.HTTPConnection("127.0.0.1", port, timeout=180)
+        stream.request("GET", f"/runs/{run_id}/events")
+        streamed = stream.getresponse()
+        raw = streamed.read().decode()
+        stream.close()
+        assert streamed.status == 200, raw[:500]
+        events = []
+        for block in raw.split("\n\n"):
+            for line in block.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+        kinds = [event["type"] for event in events]
+        assert "observation" in kinds, kinds
+        assert kinds[-1] == "done", kinds
+        observations = [event["data"]["text"] for event in events if event["type"] == "observation"]
+        assert observations
+        assert all("<untrusted nonce=" in text for text in observations)
+
+        result_conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        result_conn.request("GET", f"/runs/{run_id}")
+        result_response = result_conn.getresponse()
+        result = json.loads(result_response.read().decode())
+        result_conn.close()
+        assert result_response.status == 200
+        assert result["status"] == "success", result
+        assert dest.read_text() == NOTE
+        assert script.calls >= 1
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        stop_process(proc)
+        dest.unlink(missing_ok=True)
 

@@ -854,6 +854,38 @@ def test_blocked_navigation_and_link_click_are_not_sent(tmp_path):
     assert "https://blocked.example/phish" in result.step_log[0].error
 
 
+def test_domain_block_stops_the_rest_of_the_turn():
+    """A blocked action is a failure: later calls in that turn do not run."""
+    elements = window(
+        el("e2", "AXLink", "phish", parent="e1", clickable=True),
+        el("e3", "AXButton", "Save", parent="e1", clickable=True),
+    )
+    runtime = FakeRuntime(elements)
+    runtime.element_url = lambda element: (
+        "https://blocked.example/phish" if element.ref == "e2" else None
+    )
+    runtime.current_document_url = lambda: "file:///tmp/page.html"
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(
+                ToolCall("click", {"ref": "e2"}),
+                ToolCall("click", {"ref": "e3"}),
+            ),
+            turn(done("stayed", [{"element": {"role": "AXButton", "name": "Save"}}])),
+        ]),
+        elements,
+        runtime=runtime,
+        allowed_domains=["file"],
+        blocked_domains=["blocked.example"],
+    )
+    assert runtime.calls == []
+    assert result.status == "success"
+    assert result.step_log[0].turn_stop == "failure"
+    assert result.step_log[0].skipped
+    assert result.step_log[0].skipped[0]["name"] == "click"
+    assert result.step_log[1].action == "done"
+
+
 def test_action_on_a_blocked_origin_is_refused_and_an_allowed_one_runs():
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     blocked = FakeRuntime(elements)

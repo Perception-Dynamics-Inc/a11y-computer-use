@@ -124,6 +124,15 @@ PyGObject 3.58.0 is sdist-only on PyPI and pycairo publishes no Linux wheel, so 
 - Wayland (`WAYLAND_DISPLAY` set, no `DISPLAY`): snapshot, `find`, ref press, `set_value`, and typing into a field focused through the driver work over D-Bus; coordinate `click`, `drag`, `scroll`, and `key_chord` return `unsupported` with a hint to use ref-based actions (`a11y_computer_use/drivers/linux.py:48-63`). Screenshots there go through `grim`. The Wayland matrix in `docs/linux-port.md` has no test in this repo behind it.
 - Live in CI under Xvfb with the openbox window manager against a GTK3 window: snapshot, an accessibility press with an observable effect, and accessibility typing (`tests/test_linux_live.py`), plus coordinate clicks, wheel scrolls, drags, key chords, XTEST typing including off-keymap Unicode, and the app, window, and clipboard tools (`tests/test_linux_desktop_live.py`). `tests/test_linux_firefox_live.py` launches Firefox ESR on local pages and checks web form entry and that a background tab is not a click target. The GTK and desktop suites ran on a real Ubuntu desktop (`docs/box-testbed.md`). Screenshots are implemented and were checked by hand there, not asserted by a test.
 
+## Agent HTTP client
+
+`a11y-agent serve` is the goal-level HTTP API described in `docs/agent.md`.
+`examples/agent_server_curl.sh` posts one goal with curl and follows the SSE
+stream. `examples/agent_client.js` does the same with Node's `http` module
+and no npm packages. Neither script is run by tests or CI. They do not change
+the desktop `a11y-computer-use mcp` tool list. `a11y-agent mcp` is a separate
+stdio server whose tools are `run_goal`, `get_run`, `cancel_run`, and `approve`.
+
 ## Your integration checklist (macOS)
 
 1. Sign your app with your own Developer ID (Authenticode on Windows). We ship no cert and need none.

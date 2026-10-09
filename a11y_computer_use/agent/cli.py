@@ -4,6 +4,9 @@
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
 ``--approve-policy deny`` is the default for risky actions. ``--approve``
 prompts on the terminal (stderr or the tty, never stdout).
+
+``a11y-agent serve`` is the HTTP API. ``a11y-agent mcp`` is the goal-level
+MCP server (``run_goal``, ``get_run``, ``cancel_run``, ``approve``).
 """
 
 from __future__ import annotations
@@ -26,6 +29,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the agent CLI. Returns a process exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        return _serve(args)
+    if args.command == "mcp":
+        return _mcp(args)
     policy = getattr(args, "approve_policy", "deny")
     if args.approve and args.auto_deny:
         return _emit(args, _error_body("error: pass only one of --approve and --auto-deny"), 3)
@@ -131,7 +138,62 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="blocked_domains",
         help="comma-separated hosts or origins that fail with domain_blocked (blocked wins)",
     )
+    serve = sub.add_parser("serve", help="HTTP API for one agent process")
+    serve.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
+    serve.add_argument("--port", type=int, default=8765, help="bind port (default 8765)")
+    serve.add_argument("--token", default=None, help="bearer token; required when --host is not loopback")
+    serve.add_argument(
+        "--approval-timeout",
+        type=float,
+        default=60.0,
+        dest="approval_timeout",
+        help="seconds to wait for an approval before denying it (default 60)",
+    )
+    mcp = sub.add_parser("mcp", help="goal-level MCP server on stdio")
+    mcp.add_argument(
+        "--approval-timeout",
+        type=float,
+        default=60.0,
+        dest="approval_timeout",
+        help="seconds to wait for an approval before denying it (default 60)",
+    )
     return parser
+
+
+def _serve(args: argparse.Namespace) -> int:
+    from a11y_computer_use.agent.httpapi import bind_server
+
+    try:
+        httpd = bind_server(
+            host=args.host,
+            port=args.port,
+            token=args.token,
+            approval_timeout_s=args.approval_timeout,
+        )
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"a11y-agent: error: {exc}\n")
+        return 3
+    host, port = httpd.server_address[:2]
+    sys.stderr.write(f"listening on http://{host}:{port}\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        httpd.server_close()
+    return 0
+
+
+def _mcp(args: argparse.Namespace) -> int:
+    from a11y_computer_use.agent.mcp_server import build_agent_mcp
+    from a11y_computer_use.agent.service import RunStore
+
+    store = RunStore(approval_timeout_s=args.approval_timeout)
+    try:
+        build_agent_mcp(store).run()
+    except KeyboardInterrupt:
+        return 0
+    return 0
 
 
 def _stdin_approve(action: Action) -> bool:
