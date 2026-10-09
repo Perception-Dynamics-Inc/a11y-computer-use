@@ -32,9 +32,11 @@ def _disp():
         try:
             from Xlib import display as _xd
         except ImportError as exc:
-            from a11y_computer_use.drivers._linux_system import missing_xlib
+            from a11y_computer_use.drivers._linux_system import missing_xlib, xlib_required
 
-            raise missing_xlib(exc) from exc
+            if xlib_required():
+                raise missing_xlib(exc) from exc
+            raise
         _display = _xd.Display()
     return _display
 

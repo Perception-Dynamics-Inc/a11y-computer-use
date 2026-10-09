@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
 
@@ -30,6 +31,17 @@ from a11y_computer_use.schema import ComputerUseError
 # ---------------------------------------------------------------------------
 # X / EWMH plumbing (python-xlib, lazily imported)
 # ---------------------------------------------------------------------------
+
+
+def xlib_required() -> bool:
+    """True when a failed ``Xlib`` import is a missing Linux dependency.
+
+    python-xlib is installed only on Linux. The synthetic Linux-driver
+    suite also runs on macOS and Windows, where the import fails because
+    the marker did not select the package. That is not a Linux session
+    with the backend missing, so those probes stay empty.
+    """
+    return sys.platform.startswith("linux")
 
 
 def missing_xlib(exc: BaseException):
@@ -58,7 +70,9 @@ def _display():
     try:
         from Xlib import display as _xd
     except ImportError as exc:
-        raise missing_xlib(exc) from exc
+        if xlib_required():
+            raise missing_xlib(exc) from exc
+        raise
     return _xd.Display()
 
 
