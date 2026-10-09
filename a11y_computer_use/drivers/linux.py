@@ -626,6 +626,11 @@ class LinuxDriver:
 
         if not app:
             return None
+        # Calc has no document URL. Searching the sheet for one wedges the
+        # accessibility connection; the action that follows then takes the
+        # per-call timeout on every read.
+        if _atspi.libreoffice_app(app):
+            return None
 
         def _do() -> str | None:
             window = _atspi.find_root(app, Scope.WINDOW)

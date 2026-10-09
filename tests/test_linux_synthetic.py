@@ -2160,6 +2160,22 @@ def _firefox_documents():
     }
 
 
+def test_calc_document_url_does_not_search_the_sheet(monkeypatch) -> None:
+    """LibreOffice has no page URL. Collection on the sheet wedges the bus."""
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    sheet = _GeckoNode("application", "soffice")
+
+    def boom(_root):
+        raise AssertionError("collection searched a Calc tree")
+
+    monkeypatch.setattr(_atspi, "_collected_content_document", boom)
+    assert _atspi.document_url_of(sheet) is None
+    assert LinuxDriver().document_url("soffice.bin") is None
+    assert LinuxDriver().document_url("LibreOffice Calc") is None
+
+
 def test_document_url_follows_the_showing_tab_and_skips_browser_chrome(monkeypatch) -> None:
     """Synthetic trees. The first document is not the page, and an omnibox URL is not either."""
     from a11y_computer_use.drivers import _atspi
