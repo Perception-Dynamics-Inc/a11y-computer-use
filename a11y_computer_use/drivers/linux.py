@@ -223,13 +223,16 @@ class LinuxDriver:
             # a11y tree (org.a11y.Status flip) before we probe — turns a
             # Grok-style a11y-OFF desktop into an a11y-first one, no relaunch.
             _atspi.enable_a11y_status()  # Gio/session bus — not libatspi, runs inline
-            desktop = self._run(lambda: _atspi._safe(lambda: _atspi._atspi().get_desktop(0)))
+            # ImportError from a missing gi or typelib must not be swallowed
+            # by _safe: that used to look like an unreachable accessibility bus.
+            Atspi = _atspi._atspi()
+            desktop = self._run(lambda: _atspi._safe(lambda: Atspi.get_desktop(0)))
         except ImportError as exc:
             raise ComputerUseError(
                 ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
                 "AT-SPI2 Python bindings are missing",
-                detail={"hint": "pip install a11y_computer_use[linux]; apt install "
-                        "gir1.2-atspi-2.0 at-spi2-core", "error": str(exc)},
+                detail={"hint": "pip install 'a11y-computer-use[agent,linux]'; apt install "
+                        "gir1.2-atspi-2.0 at-spi2-core python3-gi", "error": str(exc)},
             ) from exc
         if desktop is None:
             raise ComputerUseError(

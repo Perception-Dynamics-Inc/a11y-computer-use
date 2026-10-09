@@ -1095,3 +1095,255 @@ def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
     finally:
         good.unlink(missing_ok=True)
 
+
+def _clear_focus() -> str:
+    """Drop the active window so the next observation is the empty desktop."""
+    import shutil
+
+    if shutil.which("wmctrl"):
+        subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
+    try:
+        from Xlib import Xatom, display
+
+        opened = display.Display()
+        root = opened.screen().root
+        atom = opened.intern_atom("_NET_ACTIVE_WINDOW")
+        root.change_property(atom, Xatom.WINDOW, 32, [0])
+        opened.flush()
+        opened.close()
+    except Exception:
+        pass
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        return _linux_system.frontmost_app_id() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+@requires_display
+def test_agent_empty_desktop_first_observation_is_usable(tmp_path, isolated_home) -> None:
+    """No focused app: the scripted model sees a desktop overview, not unknown."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    marker = isolated_home / "desk.txt"
+    marker.write_text("ready", encoding="utf-8")
+    front = _clear_focus()
+    seen: list[str] = []
+
+    def script(messages):
+        seen.append(message_text(messages))
+        return ModelTurn(calls=[ToolCall(
+            name="done",
+            args={
+                "answer": "desktop",
+                "conditions": [{"file_exists": str(marker), "contains": "ready"}],
+            },
+        )])
+
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    result = _run_agent(
+        Agent,
+        ScriptedModel(script),
+        "Look at the desktop and stop.",
+        trace,
+        approve=None,
+        auto_deny=True,
+        max_steps=4,
+    )
+    assert seen, result
+    first = seen[0]
+    assert front in {"", "unknown"}, front
+    assert "No application is focused" in first
+    assert "launch" in first
+    assert "unknown has no permission grant" not in first
+    assert "ask the user" not in first
+    assert "needs_permission" not in first
+    assert result.status == "success", result
+
+
+@requires_display
+def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
+    """A grant for the real binary covers Files and Terminal."""
+    import shutil
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.safety import Tier
+
+    files = next((
+        name for name in ("thunar", "nautilus", "nemo", "dolphin", "pcmanfm")
+        if shutil.which(name)
+    ), None)
+    terminal = next((
+        name for name in ("xfce4-terminal", "gnome-terminal", "xterm", "konsole", "kitty")
+        if shutil.which(name)
+    ), None)
+    if files is None and terminal is None:
+        pytest.skip("no file manager or terminal binary")
+    store = safety.PermissionStore()
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+    runtime.APP_LAUNCH_WAIT_S = 12
+    try:
+        if files is not None:
+            store.set_tier(files, Tier.FULL)
+            text = runtime.app("launch", "Files")
+            assert "needs_permission" not in text, text
+            assert "ask the user" not in text, text
+        if terminal is not None:
+            store.set_tier(terminal, Tier.FULL)
+            text = runtime.app("launch", "Terminal")
+            assert "needs_permission" not in text, text
+            assert "ask the user" not in text, text
+    finally:
+        for name in (files, terminal):
+            if not name:
+                continue
+            try:
+                runtime.app("quit", name)
+            except Exception:
+                subprocess.run(["pkill", "-x", name], check=False, timeout=3)
+
+
+@requires_display
+def test_agent_submit_button_does_not_need_approval(tmp_path, isolated_home) -> None:
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    script_path = tmp_path / "submit.py"
+    script_path.write_text(
+        "import gi\n"
+        "gi.require_version('Gtk', '3.0')\n"
+        "from gi.repository import GLib, Gtk\n"
+        "GLib.set_prgname('cuagentsubmit')\n"
+        "window = Gtk.Window(title='cuagentsubmit')\n"
+        "window.set_default_size(320, 120)\n"
+        "box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)\n"
+        "status = Gtk.Label(label='idle')\n"
+        "button = Gtk.Button(label='Submit')\n"
+        "button.connect('clicked', lambda _button: status.set_text('submitted'))\n"
+        "box.pack_start(status, False, False, 0)\n"
+        "box.pack_start(button, False, False, 0)\n"
+        "window.add(box)\n"
+        "window.connect('destroy', Gtk.main_quit)\n"
+        "window.show_all()\n"
+        "Gtk.main()\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen([sys.executable, str(script_path)], env=env)
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        deadline = time.monotonic() + 15
+        from a11y_computer_use.schema import Scope
+
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuagentsubmit")
+            except Exception:
+                snap = None
+            if snap is not None and any(el.title == "Submit" for el in snap.elements):
+                break
+            time.sleep(0.2)
+        assert snap is not None and any(el.title == "Submit" for el in snap.elements)
+        _grant("cuagentsubmit", "python3", "python")
+
+        def script(messages):
+            text = message_text(messages)
+            if "submitted" in text:
+                marker = isolated_home / "submitted.txt"
+                marker.write_text("submitted", encoding="utf-8")
+                return ModelTurn(calls=[ToolCall(
+                    name="done",
+                    args={
+                        "answer": "submitted",
+                        "conditions": [{"file_exists": str(marker), "contains": "submitted"}],
+                    },
+                )])
+            elements = parse_snapshot(text)
+            button = next((item for item in elements if item.name == "Submit"), None)
+            assert button is not None, text
+            return ModelTurn(calls=[ToolCall(name="click", args={"ref": button.ref})])
+
+        result = _run_agent(
+            Agent,
+            ScriptedModel(script),
+            "Click Submit.",
+            trace,
+            approve=None,
+            auto_deny=True,
+            max_steps=6,
+        )
+        assert result.status == "success", result
+        assert result.status != "needs_human"
+        assert result.answer == "submitted"
+        assert not any(
+            str(getattr(step, "error", "") or "").startswith("approval_denied")
+            for step in result.step_log
+        )
+    finally:
+        stop_process(proc)
+
+
+@requires_display
+def test_agent_number_min_only_accepts_a_value(tmp_path, isolated_home) -> None:
+    """A Chrome number input with min and no max accepts 3."""
+    from a11y_computer_use import observe, safety, server
+    from a11y_computer_use.schema import ErrorCode, Scope
+    from a11y_computer_use.safety import Tier
+
+    binary = chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary")
+    page = tmp_path / "minonly.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuaminonly</title>"
+        "<label>Qty <input id=qty type=number min=0 aria-label=Qty></label>",
+        encoding="utf-8",
+    )
+    profile = tmp_path / "chrome-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=800,600", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        store = safety.PermissionStore()
+        for app_id in ("chrome", "chromium", "google-chrome", "chromium-browser"):
+            store.set_tier(app_id, Tier.FULL)
+        runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"))
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            for app_id in ("chrome", "chromium", "google-chrome"):
+                try:
+                    shot = runtime.driver.snapshot(Scope.WINDOW, app_id)
+                except Exception as exc:
+                    if getattr(exc, "code", None) not in {None, ErrorCode.APP_NOT_FOUND}:
+                        raise
+                    shot = None
+                if shot is not None and any(el.title == "Qty" for el in shot.elements):
+                    snap = shot
+                    break
+            if snap is not None:
+                break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not expose the min-only number field"
+        field = next(el for el in snap.elements if el.title == "Qty")
+        runtime._current = snap
+        result = runtime.set_value(field.ref, "3")
+        assert "outside" not in result
+        assert "0..0" not in result
+        again = runtime.driver.snapshot(Scope.WINDOW, snap.app or "chrome")
+        live = next(el for el in again.elements if el.title == "Qty")
+        assert str(live.value) in {"3", "3.0"}, (result, observe.render_text(again))
+    finally:
+        stop_process(proc)
+

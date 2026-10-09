@@ -998,3 +998,32 @@ def test_runtime_does_not_type_into_the_focused_field_when_a_combo_cannot_be_set
         runtime.set_value("e2", "Green")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert calls == []
+
+
+def test_number_input_with_min_and_no_real_max_is_unbounded_above(monkeypatch) -> None:
+    """Chrome reports maximum 0 when the input has min and no max."""
+    number = _Node(
+        "spin button", "Qty", text="1", value=1.0, minimum=0.0, maximum=0.0,
+        attrs={"tag": "input", "text-input-type": "number"},
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+
+    def set_current_value(acc, new):
+        acc.value_sets.append(float(new))
+        acc.value = float(new)
+        return True
+
+    monkeypatch.setattr(_Atspi.Value, "set_current_value", staticmethod(set_current_value))
+    assert _atspi.set_numeric_value(number, "3") is True
+    assert number.value_sets == [3.0]
+    with pytest.raises(ValueError, match="below the minimum 0") as low:
+        _atspi.set_numeric_value(number, "-1")
+    assert "0..0" not in str(low.value)
+    with pytest.raises(ValueError, match="minimum is 0") as bad:
+        _atspi.set_numeric_value(number, "abc")
+    assert "0..0" not in str(bad.value)
+
+    bounded = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
+    with pytest.raises(ValueError, match=r"outside 0\.\.10"):
+        _atspi.set_numeric_value(bounded, "11")

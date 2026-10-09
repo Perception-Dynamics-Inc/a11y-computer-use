@@ -103,6 +103,18 @@ PyPI publishes the package (0.1.1 through 0.4.4, the current release). Install t
 pip install 'a11y-computer-use[linux]'
 ```
 
+An agent that drives the Linux desktop needs the agent extra as well. The
+two extras install together; there is no separate `[agent,linux]` package
+name:
+
+```bash
+pip install 'a11y-computer-use[agent,linux]'
+```
+
+`a11y-agent` refuses to start when `gi` or `Xlib` cannot be imported. The
+process exits 3 with status `failed` and an install message. It does not hand
+that ImportError to the model as a permission observation.
+
 From a clone, the same extra is an editable install:
 
 ```bash

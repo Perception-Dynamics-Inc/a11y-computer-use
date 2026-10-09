@@ -36,15 +36,20 @@ ACTION_NAMES = frozenset({
 #: ``allow_exec`` is set. They are not added to the MCP server.
 EXEC_ACTION_NAMES = frozenset({"shell", "python"})
 
-_SUBMIT_WORDS = (
-    "submit",
-    "send",
+_SEND_WORDS = ("send",)
+_PAYMENT_WORDS = (
     "pay now",
     "purchase",
     "place order",
     "buy now",
     "confirm purchase",
     "confirm payment",
+)
+_DELETE_WORDS = (
+    "delete",
+    "move to trash",
+    "empty trash",
+    "trash",
 )
 
 
@@ -132,8 +137,12 @@ def risk_reason(action: Action, label: str | None) -> str | None:
     if action.name == "window" and verb == "close":
         return "closing a window"
     text = (label or "").casefold()
-    if action.name in {"click", "menu"} and any(word in text for word in _SUBMIT_WORDS):
-        return f"submitting {label}"
+    if action.name in {"click", "menu"} and any(word in text for word in _PAYMENT_WORDS):
+        return f"paying {label}"
+    if action.name in {"click", "menu"} and any(word in text for word in _SEND_WORDS):
+        return f"sending {label}"
+    if action.name in {"click", "menu"} and any(word in text for word in _DELETE_WORDS):
+        return f"deleting {label}"
     if action.name == "menu" and any(word in text for word in ("quit", "exit", "close window", "log out", "sign out")):
         return f"menu {label}"
     if action.name == "shell":

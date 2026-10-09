@@ -64,10 +64,14 @@ refused, or needs a human, later calls in that turn do not run.
 
 Use element refs from the latest observation. Prefer set_value and select for
 fields and options. click, type, key, scroll, app, window, menu, and wait are
-available. app quit, closing a window, and submitting or sending need approval.
+available. Request the action. The loop approves or denies app quit, closing
+a window, sending a message, paying, and deleting. An ordinary form submit,
+a save, or a button such as Update cart does not need approval. Do not call
+ask_human before those.
 
-Never type a password, one-time code, or card number. If the screen is a
-login, a 2FA prompt, a payment form, or a captcha, call ask_human instead.
+Never type a password, one-time code, or card number. Call ask_human only for
+a login, a 2FA prompt, a captcha, a payment the agent must not complete, or
+missing information.
 
 Call done only when the goal is finished. done requires an answer and 1 to 3
 conditions the loop can see: an element role and name, a field value, a window
@@ -87,6 +91,50 @@ or type a password, one-time code, or card number.
 _HUMAN_KINDS = ("captcha", "payment", "2fa", "login")
 _FIELD_ROLES = ("textfield", "textarea", "securetextfield", "passwordfield", "combobox", "text", "password", "secure")
 
+_LINUX_INSTALL = (
+    "Install with pip install 'a11y-computer-use[agent,linux]' "
+    "and apt install gir1.2-atspi-2.0 at-spi2-core python3-gi."
+)
+
+
+def linux_binding_message() -> str | None:
+    """Why the Linux backend cannot start, or None when its imports work.
+
+    ``gi`` is PyGObject (the AT-SPI binding). ``Xlib`` is python-xlib (window
+    list and focus). A missing import is an environment error, not an
+    observation the model should ask a person to fix.
+    """
+    missing: list[str] = []
+    try:
+        import gi  # noqa: F401
+    except ImportError:
+        missing.append("gi (PyGObject)")
+    try:
+        import Xlib  # noqa: F401
+    except ImportError:
+        missing.append("Xlib (python-xlib)")
+    if not missing:
+        return None
+    return (
+        "Linux accessibility bindings are missing: "
+        + ", ".join(missing)
+        + ". "
+        + _LINUX_INSTALL
+    )
+
+
+def _operational_risk(reason: str) -> bool:
+    """Quit and window close. Pay, send, delete, and exec stay gated."""
+    text = reason.casefold()
+    if text.startswith("app quit") or text.startswith("closing a window"):
+        return True
+    if text.startswith("menu "):
+        label = text[len("menu "):]
+        if any(word in label for word in ("log out", "sign out")):
+            return False
+        return any(word in label for word in ("quit", "exit", "close window"))
+    return False
+
 
 class _Cancelled(Exception):
     """Raised on the loop thread when ``cancel`` has been set."""
@@ -97,8 +145,11 @@ class Agent:
 
     ``model`` is a ``Model`` or a spec such as ``scripted:/path.json``.
     ``display`` is copied to ``$DISPLAY`` before the runtime is created.
-    ``approve`` is called for quit, close, submit, and exec actions. When it
-    is omitted, ``auto_deny`` skips those actions. ``allow_exec`` exposes
+    ``approve`` is called for quit, close, pay, send, delete, and exec.
+    When it is omitted, ``auto_deny`` skips those actions. ``approve_policy``
+    ``allow-safe`` runs quit and window close without a prompt and still
+    denies pay, send, delete, and exec. ``allow-all`` runs them.
+    ``allow_exec`` exposes
     ``shell`` and ``python``; it is off by default, and each exec call is
     still approved and audited. ``cancel`` is safe to call from another thread.
     Observations are wrapped in ``<untrusted>`` fences (``fence_untrusted``,
@@ -115,6 +166,7 @@ class Agent:
         max_time_s: float = 900,
         approve: Callable[[Action], bool] | None = None,
         auto_deny: bool = True,
+        approve_policy: str = "deny",
         allow_exec: bool = False,
         on_event: Callable[[Event], None] | None = None,
         trace_dir: str | os.PathLike | None = None,
@@ -130,8 +182,11 @@ class Agent:
         self.display = display
         self.max_steps = max_steps
         self.max_time_s = max_time_s
+        if approve_policy not in {"deny", "allow-safe", "allow-all"}:
+            raise ValueError("approve_policy must be deny, allow-safe, or allow-all")
         self.approve = approve
         self.auto_deny = auto_deny
+        self.approve_policy = approve_policy
         self.allow_exec = allow_exec
         self.on_event = on_event
         self._trace_dir = trace_dir
@@ -199,7 +254,6 @@ class Agent:
     def _prepare(self) -> None:
         if self.display:
             os.environ["DISPLAY"] = self.display
-        self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         if self._runtime is None:
             from a11y_computer_use.server import Runtime
 
@@ -217,6 +271,8 @@ class Agent:
                     pass
             elif isinstance(existing, DomainPolicy):
                 self.domain_policy = existing
+        self._require_linux_bindings()
+        self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         self.trace = Trace(self._trace_dir)
         prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
         if self.fence_untrusted:
@@ -421,6 +477,7 @@ class Agent:
         level = self._levels.get(key, 0)
         executed, forced = forced_method(requested, level, self._last_snap)
         recovery = [forced] if forced else []
+        pre_snap = self._last_snap
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
         result, error = self._invoke(executed)
@@ -453,6 +510,8 @@ class Agent:
             requested, executed, result, verified=verified, error=error,
             duration=time.perf_counter() - started_at, recovery=recovery,
             turn=turn, started_at=started_at, skipped=skipped, turn_stop=turn_stop,
+            target=target_view(executed, pre_snap),
+            sensitive=target_human_kind(executed, pre_snap) is not None,
         )
         yield Event("action", _action_event(index, executed, snap))
         yield Event("observation", {
@@ -517,6 +576,7 @@ class Agent:
             return "stop_turn"
 
         timeout_s = bound_timeout(float(requested.args.get("timeout_s", DEFAULT_EXEC_TIMEOUT_S)))
+        pre_snap = self._last_snap
         started_at = time.perf_counter()
         if requested.name == "python":
             outcome = run_command(
@@ -544,6 +604,8 @@ class Agent:
             requested, requested, detail, verified=verified, error=outcome.error,
             duration=time.perf_counter() - started_at, recovery=[], turn=turn,
             started_at=started_at, skipped=skipped, turn_stop=turn_stop,
+            target=target_view(requested, pre_snap),
+            sensitive=target_human_kind(requested, pre_snap) is not None,
         )
         yield Event("action", _action_event(index, requested, self._last_snap))
         yield Event("observation", {
@@ -680,6 +742,10 @@ class Agent:
         reason = risk_reason(action, label)
         if reason is None:
             return True, None
+        if self.approve_policy == "allow-all":
+            return True, None
+        if self.approve_policy == "allow-safe" and _operational_risk(reason):
+            return True, None
         if self.approve is not None:
             if self.approve(action):
                 return True, None
@@ -694,12 +760,20 @@ class Agent:
         return not self.auto_deny
 
     def _observe(self) -> tuple[str, Snapshot | None]:
+        from a11y_computer_use.schema import ErrorCode
         from a11y_computer_use.server import error_text
 
-        app = self._app_name()
+        app = self._focused_app()
+        if app is None:
+            return self._desktop_overview(), None
         try:
             text = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
         except ComputerUseError as exc:
+            if exc.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY:
+                raise
+            if exc.code is ErrorCode.APP_NOT_FOUND:
+                self._app = None
+                return self._desktop_overview(), None
             text = error_text(exc)
         except Exception as exc:  # noqa: BLE001 - observation is data, not fatal
             text = f"error: {type(exc).__name__}: {exc}"
@@ -749,6 +823,48 @@ class Agent:
             urls.append(document)
         return _policy_error(policy, urls)
 
+    def _desktop_overview(self) -> str:
+        """A desktop with no focused app: windows, apps, and how to launch.
+
+        A permission refusal is not an observation. List calls that come back
+        as one are omitted, and the model is told how to launch or focus.
+        """
+        lines = [
+            "No application is focused. This is the desktop.",
+            "Open windows and running apps are listed below.",
+            "Launch an app with app action=launch name=<id>, or focus one with "
+            "app action=focus name=<id>.",
+        ]
+        apps = self._listed("app", {"action": "list"})
+        windows = self._listed("window", {"action": "list"})
+        lines.append("Running apps: " + (apps if apps else "(none listed)"))
+        lines.append("Open windows: " + (windows if windows else "(none listed)"))
+        return "\n".join(lines)
+
+    def _listed(self, tool: str, params: dict) -> str | None:
+        try:
+            raw = self.runtime.call_tool(tool, params, confirm=self._safety_confirm)  # type: ignore[union-attr]
+        except Exception:
+            return None
+        text = _stringify(raw).strip()
+        folded = text.casefold()
+        if (
+            not text
+            or "needs_permission" in folded
+            or "has no permission grant" in folded
+            or "ask the user" in folded
+        ):
+            return None
+        return text
+
+    def _require_linux_bindings(self) -> None:
+        driver = getattr(self.runtime, "driver", None)
+        if getattr(driver, "name", None) != "linux":
+            return
+        message = linux_binding_message()
+        if message:
+            raise RuntimeError(message)
+
     def _vision_image(self, observation: str, snap: Snapshot | None) -> dict | None:
         if not self.vision or not _needs_vision(observation, snap):
             return None
@@ -792,10 +908,14 @@ class Agent:
         conditions: list[dict] | None = None,
         skipped: list | None = None,
         turn_stop: str | None = None,
+        target: dict | None = None,
+        sensitive: bool | None = None,
     ) -> None:
         del started_at
-        target = target_view(executed, self._last_snap)
-        sensitive = target_human_kind(executed, self._last_snap) is not None
+        if target is None:
+            target = target_view(executed, self._last_snap)
+        if sensitive is None:
+            sensitive = target_human_kind(executed, self._last_snap) is not None
         args, secrets = redact_args(_public_args(executed.args), sensitive=sensitive)
         step = StepRecord(
             index=len(self._steps) + 1,
@@ -861,18 +981,29 @@ class Agent:
     def _timed_out(self, started: float) -> bool:
         return (time.perf_counter() - started) >= self.max_time_s
 
-    def _app_name(self) -> str:
+    def _focused_app(self) -> str | None:
+        """The app to snapshot, or None when nothing is focused.
+
+        ``unknown`` and a blank frontmost name are an empty desktop, not an
+        app id. Snapshotting them asked for a permission grant of ``unknown``.
+        """
         if self._app:
             return self._app
         front = getattr(self.runtime, "_frontmost", None)
-        if callable(front):
-            try:
-                name = front()
-            except Exception:  # noqa: BLE001
-                return "unknown"
-            if name:
-                return str(name)
-        return "unknown"
+        if not callable(front):
+            return None
+        try:
+            name = front()
+        except Exception:  # noqa: BLE001
+            return None
+        text = "" if name is None else str(name).strip()
+        if not text or text.casefold() == "unknown":
+            return None
+        return text
+
+    def _app_name(self) -> str:
+        focused = self._focused_app()
+        return focused if focused else "desktop"
 
     def _finish(
         self,
