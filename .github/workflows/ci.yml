@@ -247,6 +247,11 @@ jobs:
       # run. Xvfb without a window manager hid three pointer bugs
       # (docs/box-testbed.md). GTK_MODULES=gail:atk-bridge + NO_AT_BRIDGE=0
       # force GTK3's atk-bridge on so the app publishes its tree.
+      # tests/test_agent_live.py is the M1 agent fixture. It launches the GTK
+      # app and the local HTML pages (headless Chrome, already on the runner)
+      # and drives Agent(...).run with a scripted model. Those cases skip only
+      # when there is no Linux display, so this live step runs every one of
+      # them. They are not a separate job.
       - name: linux backend (live AT-SPI2 + XTEST under openbox)
         env:
           GTK_MODULES: gail:atk-bridge
@@ -261,7 +266,7 @@ jobs:
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
             ( openbox >/dev/null 2>&1 & )
             sleep 2
-            timeout -k 5 480 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py -q -rs -p no:cacheprovider
+            timeout -k 5 600 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
 
   package:

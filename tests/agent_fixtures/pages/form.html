@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>cuagent form</title>
+</head>
+<body>
+  <h1>Fixture form</h1>
+  <form id="fixture-form">
+    <label for="name">Name</label>
+    <input id="name" name="name" type="text" aria-label="Name" autocomplete="off">
+    <label for="color">Color</label>
+    <select id="color" name="color" aria-label="Color">
+      <option value="">Choose</option>
+      <option value="red">red</option>
+      <option value="blue">blue</option>
+    </select>
+    <label for="subscribe">Subscribe</label>
+    <input id="subscribe" name="subscribe" type="checkbox" aria-label="Subscribe">
+    <button id="submit" type="submit">Submit</button>
+  </form>
+  <p id="result" role="status" aria-label="Result"></p>
+  <script>
+    document.getElementById("fixture-form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var name = document.getElementById("name").value;
+      var color = document.getElementById("color").value;
+      var subscribe = document.getElementById("subscribe").checked ? "yes" : "no";
+      var text = "RESULT name=" + name + " color=" + color + " subscribe=" + subscribe;
+      document.getElementById("result").textContent = text;
+      document.title = text;
+    });
+  </script>
+</body>
+</html>
