@@ -95,9 +95,12 @@ conditions the loop can see: an element role and name, a field value, a window
 title, or a file on disk. A condition that fails is rejected and you must
 continue. Do not claim success without one of those checks. When the goal
 saves or creates a file, one condition must be file_exists for that path,
-and it must include contains when the goal names the text. contains on
-.odt, .ods, .docx, and .xlsx reads the document text inside the zip, not
-the raw bytes. A window title is not evidence that the file was written.
+and it must include contains for the text the file should hold. When the
+goal says to replace or remove text, contains is the new text, not the
+text being replaced or removed; a file that still has the old text is
+rejected. contains on .odt, .ods, .docx, and .xlsx reads the document
+text inside the zip, not the raw bytes. A window title is not evidence
+that the file was written.
 
 Each action result includes outcome (confirmed, suspected_noop, unverifiable,
 partial, or refused), evidence, and next. Follow next when outcome is not
@@ -827,7 +830,7 @@ class Agent:
         })
         raw_conditions = list(action.args.get("conditions") or [])
         structural = file_evidence_error(self._goal, raw_conditions)
-        checked = check_conditions(raw_conditions, snap)
+        checked = check_conditions(raw_conditions, snap, self._goal)
         self._conditions = checked
         ok = structural is None and all(item["ok"] for item in checked)
         if structural:
@@ -1549,6 +1552,54 @@ _LABELED_TEXT = re.compile(
     re.IGNORECASE,
 )
 _TRAILING_PATH = re.compile(r"\s+(?:to|into|in|at)\s+\S+\s*$", re.IGNORECASE)
+_QUOTE_TOKEN = r"[\"“'][^\"”'\n]{1,240}[\"”']"
+_QUOTE_FILLER = (
+    r"(?:\s+(?:every|each|all|the|a|an|word|words|occurrence|occurrences|"
+    r"instance|instances|text|string|phrase|of))*"
+)
+_FIND_REPLACE = re.compile(
+    r"\b(?:find|finds|finding|search|searches|searched|searching|look|looks|looking)\b"
+    r"(?:\s+for)?"
+    + _QUOTE_FILLER
+    + r"\s*"
+    + _QUOTE_TOKEN
+    + r"[\s,;:.]+(?:and\s+|then\s+)?(?:replace|replaces|replaced|replacing|"
+    r"change|changes|changed|changing)\b"
+    r"(?:\s+(?:it|them|that|those|all))?"
+    r"\s+(?:with|by|to|for)\s*"
+    + _QUOTE_TOKEN,
+    re.IGNORECASE,
+)
+_REPLACE = re.compile(
+    r"\b(?:replace|replaces|replaced|replacing|change|changes|changed|changing|"
+    r"rename|renames|renamed|renaming)\b"
+    + _QUOTE_FILLER
+    + r"\s*"
+    + _QUOTE_TOKEN
+    + r"\s+(?:with|by|to|for)\s*"
+    + _QUOTE_TOKEN,
+    re.IGNORECASE,
+)
+_REMOVE = re.compile(
+    r"\b(?:remove|removes|removed|removing|delete|deletes|deleted|deleting)\b"
+    + _QUOTE_FILLER
+    + r"\s*"
+    + _QUOTE_TOKEN,
+    re.IGNORECASE,
+)
+_SEARCH = re.compile(
+    r"\b(?:find|finds|finding|search|searches|searched|searching|look|looks|looking)\b"
+    r"(?:[^\"“'\n]{0,200}?\bfor\b"
+    + _QUOTE_FILLER
+    + r"\s*"
+    + _QUOTE_TOKEN
+    + r"|"
+    + _QUOTE_FILLER
+    + r"\s*"
+    + _QUOTE_TOKEN
+    + r")",
+    re.IGNORECASE,
+)
 
 
 def goal_writes_a_file(goal: str) -> bool:
@@ -1573,27 +1624,128 @@ def _path_token(text: str) -> bool:
     ))
 
 
-def known_file_text(goal: str) -> list[str]:
-    """Text the goal says the file must hold. Paths and filenames are not text."""
-    found: list[str] = []
-    for match in _LABELED_TEXT.finditer(goal or ""):
-        text = (match.group(1) or match.group(2) or "").strip()
-        text = _TRAILING_PATH.sub("", text).strip(" .,;")
-        if text and not _path_token(text) and text not in found:
-            found.append(text)
-    for match in _QUOTED.finditer(goal or ""):
-        text = (match.group(1) or match.group(2) or "").strip()
-        if text and not _path_token(text) and text not in found:
-            found.append(text)
+def _quotes_in(match: re.Match[str]) -> list[tuple[int, str]]:
+    """Quoted strings inside ``match``, with start indexes in the whole goal."""
+    found: list[tuple[int, str]] = []
+    for quote in _QUOTED.finditer(match.group(0)):
+        text = (quote.group(1) or quote.group(2) or "").strip()
+        if text:
+            found.append((match.start() + quote.start(), text))
     return found
+
+
+def _quote_roles(goal: str) -> dict[int, str]:
+    """Role of each quoted span: ``present``, ``absent``, or ``search``.
+
+    A span the goal does not classify stays out of the map and counts as
+    text the file must hold. Replace and remove win over a search verb in
+    the same sentence, so ``find "colour" and replace it with "color"``
+    marks colour absent.
+    """
+    roles: dict[int, str] = {}
+
+    def assign(match: re.Match[str], first: str, second: str | None = None) -> None:
+        quotes = _quotes_in(match)
+        if not quotes:
+            return
+        roles.setdefault(quotes[0][0], first)
+        if second is not None and len(quotes) > 1:
+            roles.setdefault(quotes[1][0], second)
+
+    for match in _FIND_REPLACE.finditer(goal):
+        assign(match, "absent", "present")
+    for match in _REPLACE.finditer(goal):
+        assign(match, "absent", "present")
+    for match in _REMOVE.finditer(goal):
+        assign(match, "absent")
+    for match in _SEARCH.finditer(goal):
+        assign(match, "search")
+    return roles
+
+
+def _append_file_text(found: list[str], text: str) -> None:
+    text = text.strip()
+    if text and not _path_token(text) and text not in found:
+        found.append(text)
+
+
+def _file_text_expectations(goal: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """``(must hold, absent specs)`` for a saved file.
+
+    Each absent spec is ``(text, mode)``. ``substring`` means the old text
+    must not appear at all. ``token`` means it must not appear as its own
+    word, used when the new text contains the old text as a prefix
+    (``cat`` replaced with ``catalog``).
+    """
+    text = goal or ""
+    roles = _quote_roles(text)
+    present: list[str] = []
+    absent: list[str] = []
+    for match in _LABELED_TEXT.finditer(text):
+        labeled = (match.group(1) or match.group(2) or "").strip()
+        labeled = _TRAILING_PATH.sub("", labeled).strip(" .,;")
+        _append_file_text(present, labeled)
+    for match in _QUOTED.finditer(text):
+        quoted = (match.group(1) or match.group(2) or "").strip()
+        role = roles.get(match.start(), "present")
+        if role == "search":
+            continue
+        if role == "absent":
+            _append_file_text(absent, quoted)
+            continue
+        _append_file_text(present, quoted)
+    specs: list[tuple[str, str]] = []
+    for old in absent:
+        if old in present:
+            continue
+        hosts = [item for item in present if old in item]
+        if hosts and any(_standalone_text(old, item) for item in hosts):
+            continue
+        specs.append((old, "token" if hosts else "substring"))
+    return present, specs
+
+
+def _standalone_text(needle: str, body: str) -> bool:
+    """True when ``needle`` appears as its own token, not inside a longer word."""
+    if not needle:
+        return False
+    pattern = re.escape(needle)
+    if needle[0].isalnum() or needle[0] == "_":
+        pattern = r"(?<!\w)" + pattern
+    if needle[-1].isalnum() or needle[-1] == "_":
+        pattern = pattern + r"(?!\w)"
+    return re.search(pattern, body) is not None
+
+
+def _old_text_remains(old: str, body: str, mode: str) -> bool:
+    if mode == "token":
+        return _standalone_text(old, body)
+    return old in body
+
+
+def known_file_text(goal: str) -> list[str]:
+    """Text the goal says the file must hold. Paths and filenames are not text.
+
+    Quoted text the goal says to replace, remove, delete, or search for is
+    not included. The text that replaces it is.
+    """
+    return _file_text_expectations(goal)[0]
+
+
+def replaced_file_text(goal: str) -> list[str]:
+    """Text a replace or remove goal says must be gone from the saved file."""
+    if not goal_writes_a_file(goal or ""):
+        return []
+    return [old for old, _mode in _file_text_expectations(goal)[1]]
 
 
 def file_evidence_error(goal: str, conditions: list) -> str | None:
     """Why done cannot prove a file goal, or None when the evidence is enough.
 
     A window title, an element, or a field value does not show that a file
-    was written. When the goal names the text, ``file_exists`` has to carry
-    ``contains`` for that text.
+    was written. When the goal names text the file should hold, ``file_exists``
+    has to carry ``contains`` for that text. Text the goal says to replace or
+    remove is not demanded here; the file check rejects it if it is still there.
     """
     if not goal_writes_a_file(goal):
         return None
@@ -1613,16 +1765,27 @@ def file_evidence_error(goal: str, conditions: list) -> str | None:
     return None
 
 
-def check_conditions(conditions_arg: list, snap: Snapshot | None) -> list[dict]:
-    """Evaluate done-evidence. Each result is condition, ok, detail."""
+def check_conditions(
+    conditions_arg: list, snap: Snapshot | None, goal: str | None = None,
+) -> list[dict]:
+    """Evaluate done-evidence. Each result is condition, ok, detail.
+
+    When ``goal`` saves a file and says to replace or remove text, a
+    ``file_exists`` condition fails while that text is still in the file.
+    """
+    absent = _file_text_expectations(goal)[1] if goal and goal_writes_a_file(goal) else []
     checked: list[dict] = []
     for condition in conditions_arg:
-        ok, detail = _one_condition(condition, snap)
+        ok, detail = _one_condition(condition, snap, absent)
         checked.append({"condition": condition, "ok": ok, "detail": detail})
     return checked
 
 
-def _one_condition(condition: object, snap: Snapshot | None) -> tuple[bool, str]:
+def _one_condition(
+    condition: object,
+    snap: Snapshot | None,
+    absent: list[tuple[str, str]] | None = None,
+) -> tuple[bool, str]:
     if not isinstance(condition, dict) or not condition:
         return False, "a condition must be one object with one key"
     # file_exists may carry contains and min_bytes beside the path.
@@ -1630,7 +1793,7 @@ def _one_condition(condition: object, snap: Snapshot | None) -> tuple[bool, str]
         extra = set(condition) - {"file_exists", "contains", "min_bytes"}
         if extra:
             return False, "a condition must be one object with one key"
-        return _file_condition(condition)
+        return _file_condition(condition, absent or [])
     if len(condition) != 1:
         return False, "a condition must be one object with one key"
     key = next(iter(condition))
@@ -1667,7 +1830,9 @@ def _one_condition(condition: object, snap: Snapshot | None) -> tuple[bool, str]
     return False, f"unrecognized condition {key!r}"
 
 
-def _file_condition(condition: dict) -> tuple[bool, str]:
+def _file_condition(
+    condition: dict, absent: list[tuple[str, str]] | None = None,
+) -> tuple[bool, str]:
     raw = condition["file_exists"]
     probe_condition = {"file_exists": raw}
     if "min_bytes" in condition:
@@ -1682,7 +1847,8 @@ def _file_condition(condition: dict) -> tuple[bool, str]:
     if not matched:
         return False, f"file {raw!r} was not found"
     contains = condition.get("contains")
-    if contains is None:
+    pending = list(absent or [])
+    if contains is None and not pending:
         return True, str(matched)
     path = (state.get("last") or {}).get("path")
     if not path:
@@ -1691,8 +1857,13 @@ def _file_condition(condition: dict) -> tuple[bool, str]:
         body = _file_text(path)
     except OSError as exc:
         return False, f"file exists but could not be read: {exc}"
-    if str(contains) not in body:
+    if contains is not None and str(contains) not in body:
         return False, f"file {path} does not contain {contains!r}"
+    for old, mode in pending:
+        if _old_text_remains(old, body, mode):
+            return False, f"file {path} still contains {old!r}"
+    if contains is None:
+        return True, str(matched)
     return True, f"{matched}; contains {contains!r}"
 
 
