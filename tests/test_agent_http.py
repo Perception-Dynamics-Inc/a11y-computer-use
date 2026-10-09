@@ -445,6 +445,55 @@ def _assert_reforged(text: str) -> None:
     assert text.count("</untrusted nonce=") == 1
 
 
+def _assert_fenced_once(text: str, raw: str) -> None:
+    assert text.count("<untrusted ") == 1
+    assert text.count("</untrusted nonce=") == 1
+    assert _plain(text) == raw
+    assert "<untrusted" not in _plain(text)
+
+
+def test_step_result_is_fenced_once(tmp_path: Path) -> None:
+    """A tool result the agent already fenced leaves the server as one fence."""
+    store, runtime = _store(
+        tmp_path,
+        ScriptedModel([
+            ModelTurn(calls=[ToolCall("click", {"ref": "e2"})]),
+            _done_turn(),
+        ]),
+    )
+    httpd, port = _serve(store)
+    try:
+        status, started = _post_run(port)
+        assert status == 202
+        events = _events(port, started["id"])
+        finished = [
+            event["data"]["result"]
+            for event in events
+            if event["type"] == "step_finished" and event["data"].get("result")
+        ]
+        click_events = [text for text in finished if _plain(text) == "click ok"]
+        assert len(click_events) == 1
+        _assert_fenced_once(click_events[0], "click ok")
+        for text in finished:
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
+        result = _wait(port, started["id"])
+        click_steps = [
+            step["result"] for step in result["step_log"]
+            if step.get("action") == "click" and step.get("result")
+        ]
+        assert len(click_steps) == 1
+        _assert_fenced_once(click_steps[0], "click ok")
+        logged = [step["result"] for step in result["step_log"] if step.get("result")]
+        assert logged
+        for text in logged:
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
+        assert runtime.calls == [("click", {"ref": "e2"})]
+    finally:
+        httpd.shutdown()
+
+
 def test_forged_fence_in_a_response_is_escaped_and_wrapped(tmp_path: Path) -> None:
     """A page-supplied fence must not be returned as a trusted boundary."""
     store, _runtime = _store(
