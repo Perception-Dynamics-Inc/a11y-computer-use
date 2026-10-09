@@ -2096,6 +2096,19 @@ def test_typed_visible_ignores_nbsp_and_one_trailing_newline() -> None:
         chrome=True,
     )
     assert _atspi._typed_visible("Hello", "Hello", " m0 ", chrome=True) is False
+    # The find bar reopens with the query selected. Typing it again leaves
+    # the same string, and that string is the text that landed.
+    assert _atspi._typed_visible("4711", "4711", "4711") is True
+    assert _atspi._typed_visible("hello world", "hello world", "4711") is False
+
+
+def test_omnibox_poll_accepts_the_url_after_a_truncated_read() -> None:
+    """The address bar can publish a prefix first. The later full URL matches."""
+    url = "https://2captcha.com/demo/recaptcha-v2"
+    reads = iter([url[:28], url[:28], url])
+    seen = _atspi._poll_typed_text(lambda: next(reads), "file:///tmp/omni.html", url)
+    assert seen == url
+    assert _atspi._typed_visible("file:///tmp/omni.html", seen, url)
     assert _atspi._typed_visible("Hello", "Helloa b", "a  b", chrome=True) is False
     assert _atspi._typed_visible(
         "ZZFirst paraSecond bold para",

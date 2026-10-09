@@ -26,6 +26,8 @@ A cross-origin captcha iframe is in the tree and used to be cut by `MAX_DEPTH` (
 
 hCaptcha and reCAPTCHA image-challenge tiles carry no accessible names. They are image content and stay unsolvable without vision. FunCAPTCHA / Arkose draws on a canvas the accessibility tree does not describe. This backend does not add OCR or a screen-text engine for those tiles. The "I'm not a robot" checkbox is a named check box; the image grid is not.
 
+A Chrome `<input type=date>`, `type=time`, or `type=month` is a `date editor` whose segments are spin buttons. The text interface is empty. `valuetext` is the segment ("03", "17", "1994", "AM", "March"). An unset segment's `valuetext` is "0", and that is not shown. The Value interface is not the segment: `set_current_value` can leave it at 0.0, and a filled date can publish one float across the segments (the year read back as 171994.0 in #146). `set_value` on a segment types that segment and succeeds when `valuetext` matches. "03" matches "3" and, on a month input, "March". A mismatch reports that displayed text, not the float. `week` and `datetime-local` use the same editor. The address bar (`Address and search bar`) is polled after `type` until the typed URL is visible or the field settles on a different string. A settled rewrite is not `text_mismatch`; the outcome judge reads the string the bar shows. The find bar (`Find`) that already contains exactly the typed query is a match, including when the bar reopens with that query selected.
+
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
 | Driver primitive | Linux (implemented) | macOS / Windows analog |

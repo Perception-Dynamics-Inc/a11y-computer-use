@@ -3999,3 +3999,233 @@ def test_linux_qt_checkable_menu_action_reports_checked(tmp_path) -> None:
     finally:
         _stop(proc)
         log.close()
+
+
+def _launch_chrome(tmp_path, page: str, name: str):
+    """Start Chrome on ``page``. Returns (proc, profile). Skips when Chrome is absent."""
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the AT-SPI Chrome test")
+    path = tmp_path / f"{name}.html"
+    path.write_text(page)
+    profile = tmp_path / f"{name}-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1100,800", "--lang=en-US",
+            path.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return proc, profile
+
+
+def _stop_chrome(proc) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _chrome_runtime(tmp_path, driver):
+    driver.activate_app("chrome")
+    return _runtime_for(tmp_path, driver, "chrome")
+
+
+def _chrome_text(shot) -> str:
+    """Titles and values, unclipped. ``render_text`` shortens long names."""
+    parts: list[str] = []
+    for el in shot.elements:
+        parts.append(el.title or "")
+        if el.value is not None:
+            parts.append(str(el.value))
+    return "\n".join(parts)
+
+
+def _wait_chrome(driver, needle: str, timeout: float = 45):
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = exc.message
+            time.sleep(0.4)
+            continue
+        last = _chrome_text(shot)
+        if needle in last:
+            return shot
+        time.sleep(0.4)
+    raise AssertionError(f"Chrome did not show {needle!r}\n{last[:1200]}")
+
+
+def test_linux_chrome_date_time_month_set_value_reads_the_segment(tmp_path) -> None:
+    """Live Chrome: date, time, and month segments read valuetext, not a float.
+
+    A prefilled date shows 03, 17, and 1994. set_value on the day types 18
+    and the input's value becomes 1994-03-18. The Value float is not the
+    read-back. Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = (
+        "<!doctype html><meta charset=utf-8><title>cudate</title>"
+        "<label>Date of birth <input type=date id=dob value=1994-03-17></label><br>"
+        "<label>When <input type=time id=when value=09:30></label><br>"
+        "<label>Month <input type=month id=mo value=1994-03></label>"
+        "<p id=dobstat role=status>dob=</p>"
+        "<p id=whenstat role=status>when=</p>"
+        "<p id=mostat role=status>mo=</p>"
+        "<script>"
+        "function show(){"
+        "dobstat.textContent='dob='+document.getElementById('dob').value;"
+        "whenstat.textContent='when='+document.getElementById('when').value;"
+        "mostat.textContent='mo='+document.getElementById('mo').value;}"
+        "for (const id of ['dob','when','mo']){"
+        "document.getElementById(id).addEventListener('input',show);"
+        "document.getElementById(id).addEventListener('change',show);}"
+        "show();"
+        "</script>"
+    )
+    proc, profile = _launch_chrome(tmp_path, page, "cudate")
+    try:
+        snap = _wait_chrome(driver, "dob=1994-03-17")
+        snap = _wait_chrome(driver, "when=09:30")
+        snap = _wait_chrome(driver, "mo=1994-03")
+
+        def value_of(title):
+            match = next((el for el in snap.elements if el.title == title), None)
+            assert match is not None, observe.render_text(snap)
+            return match
+
+        year = value_of("Year Date of birth")
+        day = value_of("Day Date of birth")
+        month_seg = value_of("Month Date of birth")
+        hours = value_of("Hours When")
+        minutes = value_of("Minutes When")
+        month_name = value_of("Month Month")
+        month_year = value_of("Year Month")
+        assert year.value == "1994"
+        assert day.value == "17"
+        assert month_seg.value == "03"
+        assert hours.value == "09"
+        assert minutes.value == "30"
+        assert month_year.value == "1994"
+        assert isinstance(month_name.value, str) and month_name.value not in {"", "0"}
+        assert "." not in str(month_name.value)
+        ampm = next((el for el in snap.elements if el.title == "AM/PM When"), None)
+        if ampm is not None:
+            assert ampm.value == "AM"
+        for el in snap.elements:
+            assert el.value != 171994.0
+            assert str(el.value) != "171994.0"
+
+        runtime = _chrome_runtime(tmp_path, driver)
+        runtime._current = snap
+        set_day = runtime.set_value(day.ref, "18")
+        assert str(set_day).startswith("set "), set_day
+        assert set_day.outcome == "confirmed", (set_day.outcome, set_day.evidence)
+        snap = _wait_chrome(driver, "dob=1994-03-18")
+        day = next(el for el in snap.elements if el.title == "Day Date of birth")
+        assert day.value == "18"
+        year = next(el for el in snap.elements if el.title == "Year Date of birth")
+        assert year.value == "1994"
+
+        runtime._current = snap
+        minutes = next(el for el in snap.elements if el.title == "Minutes When")
+        set_minutes = runtime.set_value(minutes.ref, "45")
+        assert str(set_minutes).startswith("set "), set_minutes
+        assert set_minutes.outcome == "confirmed", (set_minutes.outcome, set_minutes.evidence)
+        snap = _wait_chrome(driver, "when=09:45")
+
+        runtime._current = snap
+        month_year = next(el for el in snap.elements if el.title == "Year Month")
+        set_year = runtime.set_value(month_year.ref, "1995")
+        assert str(set_year).startswith("set "), set_year
+        assert set_year.outcome == "confirmed", (set_year.outcome, set_year.evidence)
+        _wait_chrome(driver, "mo=1995-03")
+    finally:
+        _stop_chrome(proc)
+        import shutil
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+def test_linux_chrome_omnibox_and_find_bar_type_matches(tmp_path) -> None:
+    """Live Chrome: type into the address bar and the find bar.
+
+    The address bar has to contain the URL that was typed. The find bar
+    reopens with 4711 selected; typing 4711 again is a match, not
+    text_mismatch. Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = (
+        "<!doctype html><meta charset=utf-8><title>cuomni</title>"
+        "<p>The code is 4711 and again 4711.</p>"
+    )
+    proc, profile = _launch_chrome(tmp_path, page, "cuomni")
+    try:
+        snap = _wait_chrome(driver, "4711")
+        runtime = _chrome_runtime(tmp_path, driver)
+        runtime._current = snap
+        runtime.key("ctrl+l")
+        url = "https://example.com/demo/recaptcha-v2"
+        typed = runtime.type_text(url)
+        assert str(typed).startswith("typed "), typed
+        assert typed.outcome != "refused", (typed.outcome, typed.evidence)
+        deadline = time.monotonic() + 4
+        shown = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            bar = next((el for el in shot.elements if el.title == "Address and search bar"), None)
+            if bar is not None and url in str(bar.value or ""):
+                shown = bar.value
+                break
+            time.sleep(0.2)
+        assert shown is not None and url in str(shown), shown
+
+        def wait_find() -> None:
+            from a11y_computer_use.drivers import _atspi
+
+            def focused_name() -> str:
+                acc, truncated = _atspi._focused_node("chrome")
+                if truncated or acc is None:
+                    return ""
+                return _atspi._node_name(acc) or ""
+
+            deadline = time.monotonic() + 4
+            seen = ""
+            while time.monotonic() < deadline:
+                seen = driver._run(focused_name)
+                if seen == "Find":
+                    return
+                time.sleep(0.1)
+            raise AssertionError(f"the find bar did not take focus ({seen!r})")
+
+        runtime.key("escape")
+        runtime.key("ctrl+f")
+        wait_find()
+        first = runtime.type_text("4711")
+        assert str(first).startswith("typed "), first
+        assert first.outcome != "refused", (first.outcome, first.evidence)
+        runtime.key("escape")
+        runtime.key("ctrl+f")
+        wait_find()
+        second = runtime.type_text("4711")
+        assert str(second).startswith("typed "), second
+        assert second.outcome != "refused", (second.outcome, second.evidence)
+    finally:
+        _stop_chrome(proc)
+        import shutil
+        shutil.rmtree(profile, ignore_errors=True)

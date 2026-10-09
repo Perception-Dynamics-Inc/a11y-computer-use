@@ -1042,3 +1042,81 @@ def test_number_input_with_min_and_no_real_max_is_unbounded_above(monkeypatch) -
     bounded = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
     with pytest.raises(ValueError, match=r"outside 0\.\.10"):
         _atspi.set_numeric_value(bounded, "11")
+
+
+def _date_segment(name, valuetext, *, kind="date", value=171994.0):
+    editor = _Node(
+        "date editor", "Date of birth", text="",
+        attrs={"tag": "input", "text-input-type": kind, "id": "dob"},
+    )
+    editor.toolkit = "Chromium"
+    segment = _Node(
+        "spin button", name, text="", value=value, minimum=1.0, maximum=275760.0,
+        attrs={"tag": "span", "xml-roles": "spinbutton", "valuetext": valuetext, "placeholder": "yyyy"},
+    )
+    segment.toolkit = "Chromium"
+    editor.children.append(segment)
+    segment.parent = editor
+    return editor, segment
+
+
+def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> None:
+    """The year segment's Value float is not the read-back.
+
+    171994.0 is the cross-segment number from #146. valuetext "1994" is the
+    segment. set_value does not call Value.set_current_value. A segment that
+    stays unset reports the displayed text, which is empty, not 0.0.
+    """
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_click_center", lambda _acc: None)
+    typed: list[str] = []
+
+    def type_string(text):
+        typed.append(text)
+        if text == "03":
+            month.attrs["valuetext"] = "March"
+        elif text == "17":
+            day.attrs["valuetext"] = text
+
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+
+    _editor, year = _date_segment("Year Date of birth", "1994")
+    assert _atspi.control_kind(year) is None
+    assert ATSPIAccessor().read(year).value == "1994"
+    assert year.value == 171994.0
+    assert _atspi.set_text(year, "1994") is True
+    assert year.value_sets == []
+    assert typed == []
+
+    _blank_editor, day = _date_segment("Day Date of birth", "0", value=0.0)
+    assert ATSPIAccessor().read(day).value is None
+    assert _atspi.set_text(day, "17") is True
+    assert typed == ["17"]
+    assert ATSPIAccessor().read(day).value == "17"
+    assert day.value == 0.0
+
+    _month_editor, month = _date_segment("Month Month", "0", kind="month", value=0.0)
+    assert _atspi.set_text(month, "03") is True
+    assert month.attrs["valuetext"] == "March"
+    assert ATSPIAccessor().read(month).value == "March"
+
+    stuck = _date_segment("Day Date of birth", "0", value=0.0)[1]
+
+    def type_nothing(text):
+        typed.append(text)
+
+    monkeypatch.setattr(_atspi, "_type_string", type_nothing)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(stuck, "17")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == ""
+    assert exc.value.detail["expected"] == "17"
+    assert "0.0" not in exc.value.message
+    assert "171994" not in exc.value.message
+
+    gtk = _Node("spin button", "Quantity", text="5", value=5.0, minimum=0.0, maximum=10.0)
+    gtk.toolkit = "GTK"
+    assert _atspi.control_kind(gtk) == "value"
+    assert ATSPIAccessor().read(gtk).value == "5"
