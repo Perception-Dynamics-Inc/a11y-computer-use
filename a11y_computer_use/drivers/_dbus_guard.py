@@ -17,8 +17,12 @@ None of those paths raise a Python exception. This module:
 
 * forces ``DBUS_FATAL_WARNINGS=0`` before the first libdbus warning
 * turns exit-on-disconnect off on connections libatspi opens
-* closes a still-connected private socket before its last unref
-* keeps the last reference on a shared bus so libatspi's pointer does not dangle
+* keeps the last reference on a still-connected socket
+
+Closing that socket disconnects the app: Firefox's document then never
+appears. Freeing it under the GLib watch is the use-after-free. Holding the
+last reference does neither. The connection object leaks once per
+replacement, which is the same choice ``_revive_application`` already makes.
 
 ``call_with_reconnect`` then reconnects once and either returns the retried
 call or a retryable ``timeout`` (``reason=bus_disconnected``).
@@ -45,6 +49,7 @@ _patched = False
 _refcount_ok = False
 _layout_ok = False
 _drops = 0
+_held = 0
 _in_reconnect = False
 
 _private: set[int] = set()
@@ -74,12 +79,10 @@ _open_hook = None
 _bus_hook = None
 
 _BUS_TEXT = (
-    "dbus",
     "disconnected",
     "not connected",
     "connection was dropped",
     "accessibility bus",
-    "org.a11y",
 )
 
 
@@ -97,6 +100,7 @@ def status() -> dict[str, object]:
         "layout_ok": _layout_ok,
         "symbols": list(_patched_symbols),
         "drops": _drops,
+        "held": _held,
         "error": _install_error,
     }
 
@@ -209,18 +213,18 @@ def _exercise_private_unref(address: str) -> dict[str, object]:
     """Open a private socket and drop its last reference through the hook.
 
     ``tests/test_dbus_guard.py`` runs this in a child process. A correct
-    hook closes the socket first, so libdbus does not warn and the process
+    hook keeps the last reference, so libdbus does not warn and the process
     does not abort even when ``DBUS_FATAL_WARNINGS`` started as ``1``.
     """
     install()
     if _unref_hook is None or _open_hook is None:
         raise RuntimeError(f"dbus hook is not installed: {status()}")
-    before = _drops
+    before = _held
     conn = _open_hook(address.encode(), None)
     if not conn:
         raise RuntimeError("dbus_connection_open_private failed")
     _unref_hook(conn)
-    result: dict[str, object] = {"drops": _drops - before, "status": status()}
+    result: dict[str, object] = {"held": _held - before, "drops": _drops, "status": status()}
     if _bus_hook is not None and _real_get_exit is not None:
         session = _bus_hook(0, None)
         if session:
@@ -354,24 +358,15 @@ def _should_intercept(conn: int) -> bool:
     return conn in _private or conn in _shared or _layout_ok
 
 
-def _is_shared(conn: int) -> bool:
-    """Whether ``conn`` is a dbus_bus_get connection that must not be closed.
-
-    An untagged connection is left alone unless the layout probe recognized
-    the shared-connection bit. Closing a shared bus is a fatal libdbus check.
-    """
-    if conn in _private:
-        return False
-    if conn in _shared:
-        return True
-    if _layout_ok:
-        return bool(_shared_bit(conn))
-    return True
-
-
 def _on_unref(conn) -> None:
-    """libatspi's dbus_connection_unref. Close a private socket before the last unref."""
-    global _drops
+    """libatspi's dbus_connection_unref. Do not free a socket that is still connected.
+
+    A last unref of a connected socket is what prints "the last reference on
+    a connection was dropped" and then frees the fd under its GLib watch.
+    Closing it first avoids that crash and also drops the app: Firefox's
+    document never comes back. One extra reference makes this unref a no-op.
+    """
+    global _held
     if not conn:
         return
     conn = int(conn)
@@ -383,14 +378,10 @@ def _on_unref(conn) -> None:
         connected = bool(_real_is_connected(conn))
         refs = _refcount(conn) if _refcount_ok else 2
         if connected and _refcount_ok and refs <= 1 and _should_intercept(conn):
-            _drops += 1
-            if _is_shared(conn):
-                # Leave the caller's unref as a no-op. The static a11y-bus
-                # pointer in libatspi aliases this connection.
-                _real_ref(conn)
-                _real_unref(conn)
-                return
-            _real_close(conn)
+            _held += 1
+            _real_ref(conn)
+            _real_unref(conn)
+            return
         if refs <= 1:
             _private.discard(conn)
             _shared.discard(conn)

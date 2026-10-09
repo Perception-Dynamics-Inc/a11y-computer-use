@@ -2,7 +2,7 @@
 
 LibreOffice Calc's registration makes libatspi unref a private connection
 without closing it. libdbus then warns "The last reference on a connection
-was dropped" and can abort the process. The hook closes that socket first.
+was dropped" and can abort the process. The hook keeps that last reference.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def test_private_unref_does_not_warn_or_abort() -> None:
     assert "last reference on a connection was dropped" not in proc.stderr, proc.stderr
     assert "last reference on a connection was dropped" not in proc.stdout, proc.stdout
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert payload["drops"] >= 1, payload
+    assert payload["held"] >= 1, payload
     info = payload["status"]
     assert info["patched"] is True, info
     assert info["refcount_ok"] is True, info
