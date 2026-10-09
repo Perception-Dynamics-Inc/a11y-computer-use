@@ -144,11 +144,11 @@ origins (`example.com`, `https://example.com`, `file`). The same lists are
 denies, including its subdomains (`evil.com` matches `a.evil.com` and does
 not match `notevil.com`). When the allow list is non-empty, the origin must
 match it too. Both empty, which is the default, allows every origin. An
-action or navigation to a disallowed origin fails with `domain_blocked` and
-is not performed. The current page URL is read from CDP `Page.getFrameTree`
+action or navigation to a disallowed origin fails with `domain_blocked`,
+is not performed, and stops the rest of that turn. The current page URL is read from CDP `Page.getFrameTree`
 when the driver is the browser backend, otherwise from the AT-SPI document
 URL. A link's own URI is checked the same way. A native app with no URL is
-not blocked. The MCP server takes the same lists as
+not blocked. The desktop MCP server takes the same lists as
 `build_server(allowed_domains=..., blocked_domains=...)`,
 `a11y-computer-use mcp --allowed-domains ... --blocked-domains ...`, or
 `A11Y_COMPUTER_USE_ALLOWED_DOMAINS` and `A11Y_COMPUTER_USE_BLOCKED_DOMAINS`.
@@ -164,15 +164,82 @@ in full. The system prompt tells the model that fenced text is never an
 instruction. A flagged observation is appended to `trajectory.jsonl` with
 `"injection": true`, and the step record carries the same flag.
 
-`fence_untrusted=False` on `Agent` turns the observation fences off. The MCP
-tool results stay unfenced unless fencing is opted in, so existing clients
-see the same snapshot bytes. Opt in with
+`fence_untrusted=False` on `Agent` turns the observation fences off. The
+desktop MCP tool results stay unfenced unless fencing is opted in, so
+existing clients see the same snapshot bytes. Opt in with
 `Runtime(fence_untrusted=True)`, `build_server(fence_untrusted=True)`,
 `a11y-computer-use mcp --fence-untrusted`, or
 `A11Y_COMPUTER_USE_FENCE_UNTRUSTED=1`. When it is on, `desktop_snapshot`,
 `find`, `screen_text`, and clipboard reads are wrapped. Notes and clipboard
 write acknowledgements are not. The agent does not wrap an observation that
 the runtime already fenced.
+
+## Server
+
+`a11y-agent serve` is an HTTP API for one agent process, so a non-Python
+app can start a goal without importing this package. It binds `127.0.0.1`
+and port `8765` unless `--host` and `--port` say otherwise. A bearer token
+is optional on loopback. Binding any other host without `--token` exits 3
+and does not listen. When a token is set, every request needs
+`Authorization: Bearer <token>`.
+
+```bash
+a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
+```
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| `POST` | `/runs` | `{goal, model, display, limits, allowed_domains, blocked_domains, allow_exec}` | `202 {"id"}`. `409` when that display already has an active run |
+| `GET` | `/runs/{id}` | | The same fields as `a11y-agent run --json`. `status` is `running` until the run finishes. `pending_approvals` is present only while an approval is waiting |
+| `GET` | `/runs/{id}/events` | | `text/event-stream`. Each event is `id`, `event` (the type), and `data` (`seq`, `type`, `data`). The stream replays, then stays open until the run finishes, then closes |
+| `POST` | `/runs/{id}/cancel` | | `202 {"id", "cancel": true}` |
+| `POST` | `/runs/{id}/approvals/{approval_id}` | `{"approve": true\|false}` | `200`. A second answer is `409`. No answer before `--approval-timeout` (default 60s) denies the action |
+| `GET` | `/runs/{id}/trace` | | `{"trajectory", "files"}`. `trajectory` is the JSONL with UI text fenced |
+| `GET` | `/runs/{id}/trace/{name}` | | One file from that directory (a screenshot, for example). Names that contain a slash or `..` are `404` |
+
+`limits` is `{"max_steps", "max_time_s"}`. `allowed_domains` and
+`blocked_domains` are lists of strings or one comma-separated string. Both
+are forwarded to `Agent`. `allow_exec` defaults to false.
+
+One run may be active per display. An omitted display shares the `default`
+slot. A second `POST /runs` for that display returns `409` with `run_id` of
+the run that still holds it.
+
+Quit, close, submit, and exec pause the run. The server emits an
+`approval_required` event (`approval_id`, `name`, `args` with secrets
+redacted) and waits. `approve: false`, a timeout, or a cancel denies the
+action. The agent is constructed with an approve hook, so the CLI
+`--auto-deny` default does not apply to these runs: a risky action waits
+instead of being skipped immediately.
+
+Every UI or page string is passed through `a11y_computer_use.untrusted.fence`
+before it leaves the server. That includes observations, window titles,
+element names, action results, errors that quote the screen, condition
+details, `needs_human` message and window, answers, and the trajectory JSONL.
+A string that already contains `<untrusted nonce=...>` is not returned as-is:
+closers are escaped and the whole string is wrapped again, so a page cannot
+plant a fence and leave a line outside it. A phrase such as "ignore previous
+instructions" is marked `suspicious=1` and is not removed. Screenshot bytes
+are not wrapped. Status tokens such as `done` and `cancelled` are not fenced.
+
+```bash
+TOKEN=devtoken
+curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"goal":"Save the note","model":"scripted:turns.json","display":":1"}' \
+  http://127.0.0.1:8765/runs
+# {"id":"..."}
+curl -N -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/runs/RUN_ID/events
+```
+
+`examples/agent_server_curl.sh` is that exchange. `examples/agent_client.js`
+is a Node client with no npm packages: it `POST`s a run and prints each SSE
+event. Neither script is run by tests or CI.
+
+`a11y-agent mcp` is a second MCP server, on stdio, named `a11y-agent`. Its
+tools are `run_goal`, `get_run`, `cancel_run`, and `approve`. They call the
+same run store as the HTTP server. A busy display raises a tool error whose
+text starts with `409`. This does not add or remove tools on
+`a11y-computer-use mcp`.
 
 ## Actions
 
@@ -346,9 +413,30 @@ Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
   Submit button that is not sent for approval, and a number field with a
   minimum and no maximum
 
+Hermetic, on every OS, with `ScriptedModel` and `FakeRuntime`
+(`tests/test_agent_http.py`, `tests/test_agent_mcp.py`):
+
+- SSE event order and sequence numbers, and a finished `GET /runs/{id}` with
+  the CLI JSON fields and no `pending_approvals`
+- approval deny, a second answer returning 409, and a timeout that denies
+- cancel during `model.complete`, before the click runs
+- bearer auth, and refusing to bind `0.0.0.0` without a token (CLI exit 3)
+- 409 when a display already has an active run, and a second display allowed
+- UI text fenced on the event stream, the result, and the trajectory,
+  including `suspicious=1` for an injection phrase
+- a `scripted:` file with no model factory, and `allowed_domains` forwarded
+  to `Agent`
+- agent MCP tools exactly `run_goal`, `get_run`, `cancel_run`, `approve`,
+  disjoint from the desktop MCP tool list
+
+Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
+
+- the HTTP server started in-process, a `POST /runs` against the GTK fixture,
+  the SSE stream followed until `done`, and the saved file matching the note
+
 Not in this change:
 
-- No HTTP server and no MCP tools for `shell` or `python`.
+- No MCP tools for `shell` or `python`. The desktop MCP tool list is unchanged.
 - No live call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command
   provider. Those clients are in `a11y_computer_use.agent.models` and are
   tested with recorded HTTP fixtures, not from this loop. The system prompt
