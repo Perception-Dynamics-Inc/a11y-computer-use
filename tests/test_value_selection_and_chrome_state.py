@@ -655,6 +655,43 @@ def test_empty_chrome_number_is_typed_and_zero_is_not_a_false_success(monkeypatc
     assert number.value == 0.0
 
 
+def test_chrome_number_without_editable_text_is_cleared_by_a_click_and_keys(monkeypatch) -> None:
+    """Chrome 154's number input has no EditableText. A click has to land first.
+
+    The generic clear sends ctrl+a and BackSpace after grab_focus and stops
+    after a few short reads. This field stays ``3`` until a click has been
+    recorded, which is the caret moving into the input, and then until
+    BackSpace follows ctrl+a.
+    """
+    number = _Node(
+        "spin button", "Seats", text="3", value=3.0, minimum=None, maximum=None,
+        attrs={"tag": "input", "text-input-type": "number"},
+    )
+    clicked: list[tuple[int, int]] = []
+    chords: list[str] = []
+
+    def click(x, y, **_kwargs):
+        clicked.append((x, y))
+
+    def press_chord(chord: str) -> None:
+        chords.append(chord)
+        if chord == "backspace" and clicked and "ctrl+a" in chords:
+            number.text = ""
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    from a11y_computer_use.drivers import _linux_input
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    assert _atspi.set_numeric_value(number, "") is True
+    assert number.text == ""
+    assert clicked
+    assert chords[:3] == ["ctrl+a", "backspace", "delete"]
+
+
 def test_slider_set_value_uses_the_value_interface(monkeypatch) -> None:
     slider = _Node("slider", "Volume", text=None, value=40.0, minimum=0.0, maximum=100.0)
     driver = _driver(monkeypatch, slider)

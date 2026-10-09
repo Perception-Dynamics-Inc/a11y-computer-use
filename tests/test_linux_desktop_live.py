@@ -290,7 +290,13 @@ def test_gated_runtime_coordinate_path(app, tmp_path, monkeypatch) -> None:
     assert "Save" in text
 
 
-def _until(predicate, timeout=3.0):
+def _until(predicate, timeout=8.0):
+    """Poll ``predicate`` until it is truthy.
+
+    Openbox applies iconify, activate, move, and resize asynchronously. On a
+    loaded runner each ``windows()`` probe is itself slow, and 3s expired
+    before a restored window's size had landed. The predicate is unchanged.
+    """
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:

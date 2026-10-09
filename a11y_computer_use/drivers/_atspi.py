@@ -2025,6 +2025,51 @@ def _fill_empty_number(acc, value: str) -> bool:
     return _number_text_matches(acc, value)
 
 
+# Chrome publishes a cleared number input after the key events, and a click
+# that just selected a list row can still own the caret when the clear starts.
+# Four 20ms reads (the generic text confirm) return before that DOM update.
+# These tries click the field and poll the text. A field that never empties
+# is still a failure.
+_NUMBER_CLEAR_TRIES = 3
+_NUMBER_CLEAR_WAIT_S = 0.8
+
+
+def _clear_number_input(acc) -> bool:
+    """Make an ``<input type=number>`` empty. True only when its text is ``""``.
+
+    A toolkit with EditableText is cleared through ``set_text``. Chrome's
+    spin button has no EditableText (probed on Chrome 154: role ``spin
+    button``, ``text-input-type=number``, no editable interface, text ``"3"``).
+    ``set_text`` then focuses and sends ctrl+a, BackSpace, and gives up after
+    about 80ms. Those keys miss the field when a list row still has the
+    caret, and a busy renderer can publish the empty value after that window.
+    A click at the field's center places the caret. ctrl+a, BackSpace, and
+    Delete are sent, and the text is polled until it is empty. A failed read
+    is not an empty field.
+    """
+    if _editable_iface(acc) is not None and set_text(acc, ""):
+        if _number_text(acc) == "":
+            return True
+    if not _x11_keys_available():
+        return False
+    from a11y_computer_use.drivers import _linux_input
+
+    for _attempt in range(_NUMBER_CLEAR_TRIES):
+        grab_focus(acc)
+        _click_center(acc)
+        _linux_input.press_chord("ctrl+a")
+        _linux_input.press_chord("backspace")
+        _linux_input.press_chord("delete")
+        deadline = time.monotonic() + _NUMBER_CLEAR_WAIT_S
+        while True:
+            if _number_text(acc) == "":
+                return True
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    return False
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -2032,14 +2077,17 @@ def set_numeric_value(acc, value: str) -> bool | str:
     the write. The message includes the minimum and maximum. The current value
     is read back and must match. False means ``value`` is a finite number and
     this control has no Value interface, so the caller may use ``set_text``.
-    An empty string on an ``<input type=number>`` clears the field. A GTK spin
+    An empty string on an ``<input type=number>`` clears the field. When the
+    control has EditableText, ``set_text`` clears it. Chrome's number input
+    has no EditableText: a click places the caret, then ctrl+a, BackSpace,
+    and Delete are sent, and the text is polled until it is empty. A GTK spin
     button is snapped to its step; the return value is that step's text when
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
     """
     if value == "" and _number_input(acc):
-        if set_text(acc, ""):
+        if _clear_number_input(acc):
             return True
         raise _text_mismatch(
             "text_mismatch",
