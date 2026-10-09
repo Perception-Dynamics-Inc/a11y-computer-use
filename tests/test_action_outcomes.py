@@ -125,6 +125,28 @@ class TreeDriver:
             elements=tuple(self.elements),
         )
 
+    def screenshot(self, display_id=None):
+        """A blank display capture. An empty tree asks for one on macOS.
+
+        Auto-OCR runs when a snapshot has no clickable or editable element.
+        The image covers the window rect the driver publishes (display 0,
+        800 by 600) so the crop is inside the picture.
+        """
+        from a11y_computer_use.capture import Screenshot
+
+        display = Display(0 if display_id is None else int(display_id), 800, 600, 1.0, True)
+        png = getattr(self, "_png", None)
+        if png is None:
+            import io
+
+            from PIL import Image
+
+            buffer = io.BytesIO()
+            Image.new("RGB", (display.width, display.height), "white").save(buffer, format="PNG")
+            png = buffer.getvalue()
+            self._png = png
+        return Screenshot(png=png, display=display)
+
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         del live
         return snap.element(ref)
@@ -701,6 +723,13 @@ def test_key_confirms_text_under_a_tab_group_and_the_selected_cell(tmp_path) -> 
         ),
     ]
     driver.key_effect = effect
+    # These cells are not clickable or editable, so the snapshot takes the
+    # vision handoff and captures the display. macOS has that engine; other
+    # platforms use a scripted one so the same capture runs here.
+    if runtime._ocr_engine is None:
+        from a11y_computer_use import ocr
+
+        runtime._ocr_engine = ocr.FakeOcr()
     runtime.desktop_snapshot(APP)
     moved = runtime.key("Down")
     assert moved.outcome == "confirmed", (moved.outcome, moved.evidence)
