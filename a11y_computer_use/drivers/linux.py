@@ -310,6 +310,133 @@ def _cdp_scroll_pixels(x: int, y: int, *, dx: int, dy: int) -> bool:
     return abs(after - before) >= 1.0
 
 
+def _merge_click_box(atspi_box, dom: dict | None) -> tuple[float, float, float, float] | None:
+    """Screen box for a canvas or image click.
+
+    A positive AT-SPI width and height is the whole box. A zero AT-SPI size
+    keeps that origin when it is away from the screen corner and takes the
+    DOM width and height. Otherwise the DOM rectangle is the screen box.
+    """
+    if atspi_box is not None and float(atspi_box[2]) > 0 and float(atspi_box[3]) > 0:
+        return (
+            float(atspi_box[0]), float(atspi_box[1]),
+            float(atspi_box[2]), float(atspi_box[3]),
+        )
+    if not isinstance(dom, dict):
+        return None
+    try:
+        width = float(dom["width"])
+        height = float(dom["height"])
+        screen_x = float(dom["screenX"])
+        screen_y = float(dom["screenY"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    if atspi_box is not None and (abs(float(atspi_box[0])) > 1 or abs(float(atspi_box[1])) > 1):
+        return (float(atspi_box[0]), float(atspi_box[1]), width, height)
+    return (screen_x, screen_y, width, height)
+
+
+def _dom_click_box(info: dict) -> dict | None:
+    """DOM box of a Chrome node, in physical pixels, or None.
+
+    Used when AT-SPI reports a zero size. The page is a DevTools target of
+    the process that owns the node. The node is the DOM id, then the
+    aria-label, then the only element of that tag.
+    """
+    pid = info.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    port = _debug_port_for_pid(pid)
+    if port is None:
+        return None
+    import json
+
+    spec = {
+        "id": str(info.get("element_id") or ""),
+        "label": str(info.get("label") or ""),
+        "tag": str(info.get("tag") or ""),
+    }
+    expression = (
+        "(() => {"
+        f" const spec = {json.dumps(spec)};"
+        " const find = () => {"
+        "  if (spec.id) { const byId = document.getElementById(spec.id); if (byId) return byId; }"
+        "  if (spec.label) {"
+        "   const nodes = document.querySelectorAll(spec.tag || '*');"
+        "   for (const node of nodes) {"
+        "    if ((node.getAttribute('aria-label') || '') === spec.label) return node;"
+        "   }"
+        "  }"
+        "  if (spec.tag) {"
+        "   const all = document.getElementsByTagName(spec.tag);"
+        "   if (all.length === 1) return all[0];"
+        "  }"
+        "  return null;"
+        " };"
+        " const el = find();"
+        " if (!el) return null;"
+        " const r = el.getBoundingClientRect();"
+        " const dpr = window.devicePixelRatio || 1;"
+        " const topInset = Math.max(0, window.outerHeight - window.innerHeight);"
+        " return {"
+        "  width: r.width * dpr,"
+        "  height: r.height * dpr,"
+        "  screenX: window.screenX * dpr + r.left * dpr,"
+        "  screenY: window.screenY * dpr + topInset * dpr + r.top * dpr"
+        " };"
+        "})()"
+    )
+    try:
+        from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+        pages = page_targets(f"http://127.0.0.1:{port}")
+    except Exception:
+        return None
+    for page in pages:
+        ws = page.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            transport = connect(str(ws), timeout=3.0)
+            session = CDPSession(transport, default_timeout=3.0)
+            try:
+                reply = session.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                )
+            finally:
+                transport.close()
+        except Exception:
+            continue
+        value = (reply.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            continue
+        try:
+            if float(value.get("width") or 0) > 0 and float(value.get("height") or 0) > 0:
+                return value
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _coordinate_click_box(info: dict, bounds: Bounds) -> tuple[float, float, float, float] | None:
+    """Full screen box. AT-SPI size wins; a zero size uses the DOM box."""
+    atspi_box = info.get("box")
+    if atspi_box is not None and float(atspi_box[2]) > 0 and float(atspi_box[3]) > 0:
+        return (
+            float(atspi_box[0]), float(atspi_box[1]),
+            float(atspi_box[2]), float(atspi_box[3]),
+        )
+    merged = _merge_click_box(atspi_box, _dom_click_box(info))
+    if merged is not None:
+        return merged
+    if bounds.width > 1 and bounds.height > 1:
+        return (float(bounds.x), float(bounds.y), float(bounds.width), float(bounds.height))
+    return None
+
+
 def _on_screen_name(node) -> str | None:
     """The node's name when its box meets the top of the screen, else None.
 
@@ -911,6 +1038,32 @@ class LinuxDriver:
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
             return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
+        # Chrome's click action on a canvas or image has no position, so the
+        # page sees offset 0,0. A pointer click uses the full AT-SPI box, or
+        # the DOM box when that size is 0, and lands on the center.
+        info = self._run(lambda: _atspi.coordinate_click_info(handle))
+        if info is not None:
+            box = _coordinate_click_box(info, element.bounds)
+            if box is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{element.ref} ({element.role}) has no on-screen size, so the click was not sent",
+                    detail={
+                        "ref": element.ref,
+                        "role": element.role,
+                        "reason": "click_without_coordinates",
+                        "hint": "AT-SPI reported no size and the DOM box was not available",
+                    },
+                )
+            if _on_wayland():
+                raise _wayland_input_error("click")
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.click(
+                int(round(box[0] + box[2] / 2)),
+                int(round(box[1] + box[3] / 2)),
+            )
+            return True
         # A Qt grid cell's Toggle action adds the cell and leaves currentItem
         # where it was. Selection.select_child does the same on Qt 6.11. A
         # pointer click at the cell center selects only that cell and makes
