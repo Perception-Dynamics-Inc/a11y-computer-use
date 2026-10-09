@@ -4123,7 +4123,8 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
     That desktop name used to start the suite binary with no module flag,
     so the first window was the Start Center. ``localc`` and ``soffice
     --calc`` open Calc. Writer and Impress take the same path in the
-    hermetic tests; this image has Calc.
+    hermetic tests; this image has Calc. A fresh profile may also open
+    the Tip of the Day; the Calc document window is still in the list.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -4148,8 +4149,8 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
         assert "first window:" in launched, launched
         assert "Calc" in launched, launched
         assert "first window: 'LibreOffice'" not in launched, launched
-        text = runtime.desktop_snapshot("soffice", mode="interactive")
-        assert "A1" in text, text[:800]
+        titles = [str(row.get("title") or "") for row in driver.windows()]
+        assert any("Calc" in title for title in titles), (launched, titles)
     finally:
         for key, value in previous.items():
             if value is None:
