@@ -874,11 +874,13 @@ def confirmation_prompt(
         return None
     verb, role, name, summary, match = described
     shown_window = _clip(window, _NAME_LIMIT)
+    # The question sees the raw title so a newline is escaped. ``shown_window``
+    # stays the collapsed, unfenced value on the prompt object.
     text = _confirmation_text(
         verb=verb,
         role=role,
         name=name,
-        window=shown_window,
+        window=window,
         app=target_app,
         summary=summary,
         match=match,
