@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 
 
@@ -555,6 +556,78 @@ def _send_active_window(d, win) -> None:
     _client_message(d, win, "_NET_ACTIVE_WINDOW", [1, X.CurrentTime, 0, 0, 0])
 
 
+# A second client's present() can land after one activation and leave the
+# previous window in _NET_ACTIVE_WINDOW. Poll that property and send again
+# until this window is what two reads in a row report. 5s is the same budget
+# the live app= focus wait uses. A display with no such property does not wait.
+_ACTIVATE_WAIT_S = 5.0
+_ACTIVATE_POLL_S = 0.05
+_ACTIVATE_SETTLE_HITS = 2
+_ACTIVATE_MAX_POLLS = 120
+
+
+def _active_window_property(d):
+    """The root ``_NET_ACTIVE_WINDOW`` property, or None when it is absent."""
+    try:
+        return d.screen().root.get_full_property(_atom(d, "_NET_ACTIVE_WINDOW"), 0)
+    except Exception:
+        return None
+
+
+def _active_window_id(d) -> int | None:
+    """The window id in ``_NET_ACTIVE_WINDOW``, or None when nothing is active."""
+    active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+    if not active:
+        return None
+    try:
+        value = int(active[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return value or None
+
+
+def _request_activation(d, win, *, restore: bool) -> None:
+    """Send ``_NET_ACTIVE_WINDOW``. ``restore`` uniconifies a minimized window first."""
+    if restore:
+        _restore_if_hidden(d, win)
+    _send_active_window(d, win)
+
+
+def _activate_and_settle(d, win, *, restore: bool) -> None:
+    """Activate ``win`` and wait until ``_NET_ACTIVE_WINDOW`` stays on it.
+
+    Openbox applies ``_NET_ACTIVE_WINDOW`` in ``client_activate``. Focus
+    stealing can drop that message when another client presents in the same
+    moment, and the previous window stays active. A minimized window is
+    uniconified first when ``restore`` is set, because that same path
+    uniconifies only when the focus change is allowed. The uniconify
+    messages do not depend on it.
+
+    Two consecutive reads of this window mean the activation settled. A
+    read of a different window sends the request again. A root that does
+    not answer ``_NET_ACTIVE_WINDOW`` (no window manager, or a caller that
+    only records the client message) gets the one request and does not wait.
+    """
+    if _active_window_property(d) is None:
+        _request_activation(d, win, restore=restore)
+        return
+    target = int(win.id)
+    hits = 0
+    deadline = time.monotonic() + _ACTIVATE_WAIT_S
+    for _ in range(_ACTIVATE_MAX_POLLS):
+        if hits == 0:
+            _request_activation(d, win, restore=restore)
+        if _active_window_id(d) == target:
+            hits += 1
+            if hits >= _ACTIVATE_SETTLE_HITS:
+                return
+        else:
+            hits = 0
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(_ACTIVATE_POLL_S)
+
+
 @contextmanager
 def _with_window(window_id: int):
     """Yield ``(display, window)``. The window is None when the id is not managed.
@@ -590,14 +663,15 @@ def _restore_if_hidden(d, win) -> None:
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
 
-    A minimized window is uniconified first. Returns False when no managed
-    window has that id.
+    A minimized window is uniconified first. The request is sent again until
+    ``_NET_ACTIVE_WINDOW`` stays on this window, so a present() from another
+    client in the same moment does not leave the previous window active.
+    Returns False when no managed window has that id.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _restore_if_hidden(d, win)
-        _send_active_window(d, win)
+        _activate_and_settle(d, win, restore=True)
         return True
 
 
@@ -607,6 +681,7 @@ def focus_window(window_id: int) -> bool:
     Under a standard EWMH window manager activation raises and focuses.
     Openbox does not uniconify when focus-stealing prevention refuses that
     message, so a minimized window is restored before the activate message.
+    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
     The verb is still distinct so the caller can say which one it asked for.
     Returns False when no managed window has that id.
     """
@@ -924,6 +999,7 @@ def activate_app(identifier: str) -> str:
     """Raise+focus a window whose comm/title matches ``identifier`` (EWMH
     _NET_ACTIVE_WINDOW client message). Returns the resolved app id.
 
+    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on that window.
     No matching window is ``app_not_found``. The call does not report that
     it activated an app that was never launched. That answer does not build
     an X client message, so a desktop with no matching window does not need
@@ -953,7 +1029,7 @@ def activate_app(identifier: str) -> str:
                 f"no running application matches {identifier!r}",
                 detail={"app": identifier},
             )
-        _send_active_window(d, matched)
+        _activate_and_settle(d, matched, restore=False)
         return resolved
 
 

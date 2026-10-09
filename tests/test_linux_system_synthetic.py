@@ -475,6 +475,78 @@ def test_absolute_path_matches_wm_class_when_the_comm_is_the_interpreter(monkeyp
     assert _linux_system.pids_matching(path) == set()
 
 
+def test_focus_retries_until_the_active_window_stays(monkeypatch) -> None:
+    """Synthetic X. Not a live window manager.
+
+    The first ``_NET_ACTIVE_WINDOW`` is ignored, the way a second client's
+    present() can leave the previous window active. The next request is
+    recorded as the active window, and focus returns once two reads agree.
+    A root with no such property still sends one message and does not poll.
+    """
+    other = _FakeXWin(4, 0, 0, 10, 10, pid=1)
+    target = _FakeXWin(7, 0, 0, 10, 10, pid=2)
+    state = {"active": other.id, "sends": 0, "sleeps": 0}
+
+    class _Root(_FakeXRoot):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[state["active"]])
+            return super().get_full_property(atom, kind)
+
+        def send_event(self, event, event_mask):
+            return None
+
+    root = _Root([other, target])
+    by_id = {win.id: win for win in (other, target)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "gedit" if pid == 2 else "other")
+    monkeypatch.setattr(_linux_system.time, "sleep", lambda _seconds: state.__setitem__("sleeps", state["sleeps"] + 1))
+
+    def send(_d, win):
+        state["sends"] += 1
+        if state["sends"] >= 2:
+            state["active"] = int(win.id)
+
+    monkeypatch.setattr(_linux_system, "_send_active_window", send)
+    assert _linux_system.focus_window(7) is True
+    assert state["sends"] == 2
+    assert state["active"] == 7
+    assert state["sleeps"] == 2
+
+    state["sends"] = 0
+    state["sleeps"] = 0
+    state["active"] = 7
+
+    def send_once(_d, win):
+        state["sends"] += 1
+        state["active"] = int(win.id)
+
+    monkeypatch.setattr(_linux_system, "_send_active_window", send_once)
+    assert _linux_system.raise_window(7) is True
+    assert state["sends"] == 1
+    assert state["sleeps"] == 1
+
+    bare = _FakeXRoot([target])
+    bare_display = _NS(
+        screen=lambda: _NS(root=bare),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: target,
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: bare_display)
+    state["sends"] = 0
+    state["sleeps"] = 0
+    assert _linux_system.focus_window(7) is True
+    assert state["sends"] == 1
+    assert state["sleeps"] == 0
+
+
 def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
     """A granted name with no window is not activated. Synthetic window list."""
     monkeypatch.setattr(_linux_system, "_display", lambda: object())

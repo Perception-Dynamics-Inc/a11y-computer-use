@@ -1661,11 +1661,17 @@ class LinuxDriver:
         return owner
 
     def raise_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
+
+        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        """
         self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
 
     def focus_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
+
+        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        """
         self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
 
     def minimize_window(self, window_id: int) -> None:
