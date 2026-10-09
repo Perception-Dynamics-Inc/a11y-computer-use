@@ -356,17 +356,37 @@ def test_firefox_background_ref_is_not_showing_not_stale(firefox_form, tmp_path)
         assert exc.value.detail["outcome"] == "refused"
         assert "re-observe" not in exc.value.message
     finally:
-        back = driver.snapshot(Scope.WINDOW, "firefox")
-        form_tab = next(
-            (el for el in back.elements if el.title == "Form Probe" and "tab" in el.role.lower()),
-            None,
-        )
+        # Firefox exposes the tab as a button, so a role that contains "tab"
+        # is not there. The ref has to come from the runtime snapshot: a
+        # driver snapshot ref is not in the epoch click resolves.
+        runtime.desktop_snapshot("firefox")
+        back = runtime._current
+        form_tab = None
+        if back is not None:
+            form_tab = next(
+                (
+                    el for el in back.elements
+                    if el.title == "Form Probe" and "tab" in el.role.lower()
+                ),
+                None,
+            )
+            if form_tab is None:
+                form_tab = next(
+                    (el for el in back.elements if el.title == "Form Probe" and el.clickable),
+                    None,
+                )
         if form_tab is not None:
-            runtime.desktop_snapshot("firefox")
             try:
                 runtime.click(form_tab.ref)
             except ComputerUseError:
                 pass
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            seen = driver.snapshot(Scope.WINDOW, "firefox")
+            titles = {el.title for el in seen.elements}
+            if "Name" in titles and "Editor A" in titles:
+                break
+            time.sleep(0.25)
 
 
 def _wait_values(driver, expected: dict[str, str], timeout_s: float = 4.0):
