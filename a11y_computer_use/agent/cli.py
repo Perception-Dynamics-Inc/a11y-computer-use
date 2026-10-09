@@ -18,6 +18,8 @@ from collections.abc import Sequence
 
 from a11y_computer_use.agent.actions import Action
 from a11y_computer_use.agent.result import RunResult
+from a11y_computer_use.agent.trace import summarize_args
+from a11y_computer_use.untrusted import fence_untrusted
 
 
 class _Parser(argparse.ArgumentParser):
@@ -196,12 +198,38 @@ def _mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_approval_prompt(action: Action) -> str:
+    """The ``--approve`` question.
+
+    The action name and role are the loop's own words. The target name, window
+    title, reason, and argument summary are page or argument text: each is
+    trimmed and wrapped with :func:`fence_untrusted`. ``summary`` is already
+    redacted; a missing summary is built from ``args`` the same way.
+    """
+    if action.name == "confirm":
+        raw = action.args.get("prompt")
+        if isinstance(raw, str) and raw.strip():
+            text = raw.rstrip()
+            if "[y/N]" not in text:
+                text += " [y/N]"
+            return text + " "
+    parts = [action.name]
+    if action.role:
+        parts.append(f"role={action.role}")
+    if action.target_name:
+        parts.append("name=" + fence_untrusted(action.target_name))
+    if action.window:
+        parts.append("window=" + fence_untrusted(action.window))
+    summary = action.summary if action.summary is not None else summarize_args(action.args)
+    if summary and summary != "{}":
+        parts.append("args=" + fence_untrusted(summary, limit=160))
+    if action.reason:
+        parts.append("reason=" + fence_untrusted(action.reason, limit=120))
+    return "Approve " + " ".join(parts) + "? [y/N] "
+
+
 def _stdin_approve(action: Action) -> bool:
-    rendered = action.name
-    if action.args:
-        rendered += " " + json.dumps(action.args, default=str)[:180]
-    prompt = f"Approve {rendered}? [y/N] "
-    _write_prompt(prompt)
+    _write_prompt(render_approval_prompt(action))
     answer = sys.stdin.readline()
     return answer.strip().lower() in {"y", "yes"}
 

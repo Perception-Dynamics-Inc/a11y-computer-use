@@ -10,7 +10,7 @@ and they are not MCP tools.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -67,16 +67,47 @@ class ReservedPermission(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Action:
-    """One tool call the loop can execute."""
+    """One tool call the loop can execute.
+
+    ``role``, ``target_name``, ``window``, ``summary``, and ``reason`` are set
+    on the copy passed to ``approve``. They are empty on the action the model
+    requested. ``target_name`` is the control's accessible name. ``summary``
+    is a short JSON summary of ``args`` with secrets removed. ``reason`` is
+    ``risk_reason`` (for example ``paying Pay now``).
+    """
 
     name: str
     args: dict
     id: str | None = None
+    role: str | None = None
+    target_name: str | None = None
+    window: str | None = None
+    summary: str | None = None
+    reason: str | None = None
 
     @classmethod
     def from_call(cls, call: ToolCall) -> Action:
         args = call.args if isinstance(call.args, dict) else {}
         return cls(name=str(call.name), args=dict(args), id=call.id)
+
+    def for_approval(
+        self,
+        *,
+        role: str | None,
+        target_name: str | None,
+        window: str | None,
+        summary: str | None,
+        reason: str | None,
+    ) -> Action:
+        """Copy this action with the fields a person needs in order to approve it."""
+        return replace(
+            self,
+            role=role,
+            target_name=target_name,
+            window=window,
+            summary=summary,
+            reason=reason,
+        )
 
 
 def tool_schemas(*, allow_exec: bool = False) -> list[dict]:

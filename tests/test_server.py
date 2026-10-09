@@ -801,6 +801,34 @@ async def test_destructive_click_blocked_when_declined(
     assert audit_entries(audit_dir)[-1]["result"] == "confirmation_declined"
 
 
+async def test_confirmation_elicitation_names_role_window_and_control(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    """The elicitation message is the server approval event a host shows."""
+    _use_destructive_snapshot(monkeypatch)
+    store.set_tier(APP, safety.Tier.FULL)
+    seen: list[str] = []
+
+    async def capture(_context, params):
+        seen.append(params.message)
+        return ElicitResult(action="decline")
+
+    result = await _snapshot_then_click_e2(mcp_server, capture)
+    assert result.isError
+    assert seen
+    message = seen[0]
+    assert "role=AXButton" in message
+    assert "Delete" in message
+    assert "Untitled" in message
+    assert "<untrusted nonce=" in message
+    assert "in com.apple.TextEdit" in message
+    assert mocked_driver["click"] == []
+    text = result.content[0].text
+    assert "confirmation_declined" in text
+    assert "role=AXButton" in text
+    assert "Untitled" in text
+
+
 async def test_destructive_click_fails_safe_without_elicitation(
     mcp_server, mocked_driver, store, monkeypatch
 ) -> None:

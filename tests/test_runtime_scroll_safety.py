@@ -123,7 +123,7 @@ def test_secure_scroll_target_is_refused_before_pointer_input(runtime, pinned: b
 def test_permission_revoked_during_confirmation_prevents_injection(runtime, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(server, "CONFIRMATION_GATE", True)
     clicked = []
-    monkeypatch.setattr(safety, "confirmation_prompt", lambda action, app: "Confirm?")
+    monkeypatch.setattr(safety, "confirmation_prompt", lambda action, app, window=None: "Confirm?")
 
     def confirm(_prompt: str) -> bool:
         runtime.store.set_tier("test-app", safety.Tier.READ)
@@ -134,3 +134,42 @@ def test_permission_revoked_during_confirmation_prevents_injection(runtime, monk
         runtime._run_gated(action, "test-app", lambda: clicked.append(True), confirm=confirm)
     assert clicked == []
     assert [row["result"] for row in audit_rows(tmp_path)] == ["deny"]
+
+
+def test_confirmation_from_the_gate_names_the_window(runtime, monkeypatch) -> None:
+    """The gate's prompt and confirmation_declined detail name the control."""
+    monkeypatch.setattr(server, "CONFIRMATION_GATE", True)
+    card = "4111111111111111"
+    window = Element(
+        "e1", "AXWindow", "Checkout", None, Bounds(0, 0, 0, 400, 300), "s-10",
+    )
+    button = Element(
+        "e2", "AXButton", "Delete", card, Bounds(0, 10, 10, 80, 24), "s-10",
+        parent="e1", clickable=True,
+    )
+    runtime._current = dataclasses.replace(runtime._current, elements=(window, button))
+    seen: list[str] = []
+
+    def confirm(prompt: str) -> bool:
+        seen.append(prompt)
+        return False
+
+    with pytest.raises(ComputerUseError) as refused:
+        runtime._run_gated(
+            server.Click(target=button), "test-app", lambda: None, confirm=confirm,
+        )
+    assert refused.value.code is ErrorCode.CONFIRMATION_DECLINED
+    assert seen
+    prompt = seen[0]
+    assert "role=AXButton" in prompt
+    assert "Delete" in prompt
+    assert "Checkout" in prompt
+    assert "<untrusted" in prompt
+    assert card not in prompt
+    assert safety.REDACTED in prompt
+    detail = refused.value.detail
+    assert detail["role"] == "AXButton"
+    assert detail["name"] == "Delete"
+    assert detail["window"] == "Checkout"
+    assert card not in detail["summary"]
+    assert safety.REDACTED in detail["summary"]

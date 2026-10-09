@@ -2075,6 +2075,13 @@ class Runtime:
             raise ActionRefused(decision)
         return decision
 
+    def _confirmation_window(self, action: object) -> str | None:
+        """Window title for a confirmation prompt, from the current snapshot."""
+        snap = getattr(self, "_current", None)
+        target = getattr(action, "target", None)
+        element = target if isinstance(target, Element) else None
+        return safety.window_title(snap, element)
+
     def _run_gated(
         self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
     ):
@@ -2097,8 +2104,12 @@ class Runtime:
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
-                prompt = safety.confirmation_prompt(action, app)
+                prompt = safety.confirmation_prompt(
+                    action, app, window=self._confirmation_window(action),
+                )
                 if prompt is not None and not (confirm is not None and confirm(prompt)):
+                    detail = {"app": app, "confirmable": confirm is not None}
+                    detail.update(safety.approval_detail(prompt))
                     raise ComputerUseError(
                         ErrorCode.CONFIRMATION_DECLINED,
                         prompt
@@ -2109,7 +2120,7 @@ class Runtime:
                             "Confirm via a host that supports elicitation, or set "
                             "A11Y_COMPUTER_USE_CONFIRM=0 to disable the gate."
                         ),
-                        detail={"app": app, "confirmable": confirm is not None},
+                        detail=detail,
                     )
                 if prompt is not None:
                     # The user can revoke a grant while confirmation is open.
@@ -5603,7 +5614,7 @@ def build_server(
         ``ctx`` is a ``mcp.server.fastmcp.Context`` (obtained via
         ``server.get_context()`` rather than an annotated tool param — see the
         note in the click tool)."""
-        result = await ctx.elicit(message=prompt, schema=_ConfirmResponse)
+        result = await ctx.elicit(message=str(prompt), schema=_ConfirmResponse)
         return getattr(result, "action", None) == "accept"
 
     def _ask_user(ctx, title: str, prompt: str, *, details: str | None = None,

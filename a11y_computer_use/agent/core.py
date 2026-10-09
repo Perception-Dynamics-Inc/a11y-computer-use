@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from a11y_computer_use import conditions, outcome
-from a11y_computer_use.untrusted import DomainPolicy, fence, looks_like_url, navigation_url
+from a11y_computer_use.untrusted import DomainPolicy, fence, looks_like_url, navigation_url, trim_untrusted
 from a11y_computer_use.agent.actions import (
     EXEC_ACTION_NAMES,
     Action,
@@ -49,6 +49,7 @@ from a11y_computer_use.agent.trace import (
     Trace,
     redact_args,
     redact_text,
+    summarize_args,
     truncate_observation,
 )
 from a11y_computer_use.schema import ComputerUseError, Snapshot
@@ -832,16 +833,38 @@ class Agent:
         if self.approve_policy == "allow-safe" and _operational_risk(reason):
             return True, None
         if self.approve is not None:
-            if self.approve(action):
+            if self.approve(self._approval_action(action, label, reason)):
                 return True, None
             return False, f"approval_denied: {reason}"
         if self.auto_deny:
             return False, f"approval_denied: {reason}"
         return True, None
 
+    def _approval_action(self, action: Action, label: str | None, reason: str | None) -> Action:
+        """The action ``approve`` sees: role, name, window, and a redacted summary."""
+        from a11y_computer_use.safety import window_title
+
+        snap = self._last_snap
+        element = _element_for(action, snap)
+        role = element.role if element is not None and element.role else None
+        target_name = label or (element.title if element is not None and element.title else None)
+        window = window_title(snap, element)
+        return action.for_approval(
+            role=_clip(role, 64),
+            target_name=_clip(target_name, 80),
+            window=_clip(window, 80),
+            summary=summarize_args(action.args),
+            reason=_clip(reason, 120),
+        )
+
     def _safety_confirm(self, prompt: str) -> bool:
         if self.approve is not None:
-            return bool(self.approve(Action("confirm", {"prompt": prompt})))
+            fields: dict[str, str] = {}
+            for attr in ("role", "target_name", "window", "summary", "reason"):
+                value = getattr(prompt, attr, None)
+                if isinstance(value, str) and value:
+                    fields[attr] = value
+            return bool(self.approve(Action("confirm", {"prompt": str(prompt)}, **fields)))
         return not self.auto_deny
 
     def _observe(self) -> tuple[str, Snapshot | None]:
@@ -1636,6 +1659,13 @@ def _roles_match(actual: str, wanted: str) -> bool:
         text = value.casefold().strip()
         return text[2:] if text.startswith("ax") else text
     return norm(actual) == norm(wanted)
+
+
+def _clip(text: str | None, limit: int) -> str | None:
+    if text is None:
+        return None
+    trimmed = trim_untrusted(str(text), limit=limit)
+    return trimmed or None
 
 
 def _window_title(snap: Snapshot | None) -> str | None:

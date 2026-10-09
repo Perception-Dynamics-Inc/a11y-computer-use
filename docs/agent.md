@@ -108,9 +108,19 @@ window close and still skips pay, send, delete, and exec.
 `--approve-policy allow-all` runs those actions. `--approve` prompts on
 stderr when it is a terminal, otherwise on the controlling tty, and reads
 the answer from stdin. The prompt is never written to stdout, so `--json`
-stays one JSON object. Do not combine `--approve` with `--auto-deny` or with
-a policy other than `deny`. `--allow-exec` exposes `shell` and `python`. It
-is off by default, and it does not bypass the approval policy.
+stays one JSON object. The prompt names the action, the target's role,
+accessible name, and window title, why the loop asked (`paying Pay now`,
+`deleting Delete`, `app quit`), and a short JSON summary of the arguments.
+A card number or other secret in that summary is `[REDACTED]` before the
+prompt is written. The name, window title, reason, and summary are trimmed
+and wrapped with the same `<untrusted nonce=…>` fence as an observation.
+The `Action` passed to `approve` carries the same role, name (`target_name`),
+window, summary, and reason, unfenced, so a callback can read them. The
+server confirmation question (MCP elicitation, and the
+`confirmation_declined` detail) names the role, name, window, and a redacted
+argument summary the same way. Do not combine `--approve` with `--auto-deny`
+or with a policy other than `deny`. `--allow-exec` exposes `shell` and
+`python`. It is off by default, and it does not bypass the approval policy.
 
 `--json` writes exactly one JSON object to stdout:
 
