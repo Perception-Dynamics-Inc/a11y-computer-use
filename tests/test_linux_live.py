@@ -4118,13 +4118,14 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
 
 
 def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path) -> None:
-    """Live. ``app launch libreoffice-calc`` opens a Calc document.
+    """Live. ``app launch libreoffice-calc`` opens a usable Calc document.
 
     That desktop name used to start the suite binary with no module flag,
     so the first window was the Start Center. ``localc`` and ``soffice
-    --calc`` open Calc. Writer and Impress take the same path in the
-    hermetic tests; this image has Calc. A fresh profile may also open
-    the Tip of the Day; the Calc document window is still in the list.
+    --calc`` open Calc. A fresh profile also opens the Tip of the Day on
+    top of the sheet. Launch dismisses that dialog and says so. The
+    snapshot then contains cell A1. Writer and Impress take the same
+    launch path in the hermetic tests; this image has Calc.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -4134,13 +4135,19 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
     assert found.stdout.strip(), "libreoffice-calc is not installed"
     _kill_libreoffice()
     time.sleep(0.4)
-    previous = {
-        key: os.environ.get(key)
-        for key in ("SAL_USE_VCLPLUGIN", "GTK_MODULES", "NO_AT_BRIDGE")
-    }
+    home = tmp_path / "lo-home"
+    (home / ".config").mkdir(parents=True)
+    keys = ("SAL_USE_VCLPLUGIN", "GTK_MODULES", "NO_AT_BRIDGE", "HOME", "XDG_CONFIG_HOME", "XAUTHORITY")
+    previous = {key: os.environ.get(key) for key in keys}
     os.environ["SAL_USE_VCLPLUGIN"] = "gtk3"
     os.environ["GTK_MODULES"] = "gail:atk-bridge"
     os.environ["NO_AT_BRIDGE"] = "0"
+    if not previous.get("XAUTHORITY"):
+        auth = os.path.join(previous.get("HOME") or "", ".Xauthority")
+        if os.path.isfile(auth):
+            os.environ["XAUTHORITY"] = auth
+    os.environ["HOME"] = str(home)
+    os.environ["XDG_CONFIG_HOME"] = str(home / ".config")
     runtime = _runtime_for(
         tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "localc",
     )
@@ -4149,8 +4156,10 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
         assert "first window:" in launched, launched
         assert "Calc" in launched, launched
         assert "first window: 'LibreOffice'" not in launched, launched
-        titles = [str(row.get("title") or "") for row in driver.windows()]
-        assert any("Calc" in title for title in titles), (launched, titles)
+        assert "dismissed 'Tip of the Day" in launched, launched
+        text = runtime.desktop_snapshot("soffice", mode="interactive")
+        assert "A1" in text, text[:800]
+        assert "Tip of the Day" not in text
     finally:
         for key, value in previous.items():
             if value is None:

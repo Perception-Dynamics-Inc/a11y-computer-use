@@ -219,6 +219,92 @@ def test_launch_passes_office_module_argv_to_a_linux_driver(tmp_path, monkeypatc
     assert "LibreOffice Writer" in written
 
 
+def test_launch_dismisses_the_tip_of_the_day_and_reports_it(tmp_path, monkeypatch) -> None:
+    """Synthetic. The OK press is the driver's. No LibreOffice process."""
+    from a11y_computer_use import server
+
+    class _El:
+        def __init__(self, role, title, focused=False):
+            self.role = role
+            self.title = title
+            self.focused = focused
+
+    class _Snap:
+        def __init__(self, elements):
+            self.elements = elements
+
+    pressed: list[str] = []
+    shots = {"n": 0}
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident, *, argv=None):
+            return {
+                "pid": 9, "proc": None, "identifier": ident,
+                "names": ["soffice", "soffice.bin"], "is_launcher": False,
+            }
+
+        def windows(self):
+            return [{
+                "window_id": 4, "app": "soffice.bin",
+                "title": "Untitled 1 — LibreOffice Calc", "pid": 9,
+            }]
+
+        def snapshot(self, _scope, _app):
+            shots["n"] += 1
+            if shots["n"] == 1:
+                return _Snap([
+                    _El("AXDialog", "Tip of the Day: 1/225"),
+                    _El("AXButton", "Next Tip"),
+                    _El("AXButton", "OK", focused=True),
+                ])
+            return _Snap([_El("AXCell", "A1")])
+
+        def press_element(self, el):
+            pressed.append(el.title)
+            return True
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/localc" if name == "localc" else None)
+    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: [])
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda _ident: None)
+    monkeypatch.setattr(
+        server, "_running_app",
+        lambda _ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("soffice", Tier.CLICK)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    runtime.APP_LAUNCH_WAIT_S = 1
+    text = runtime.app("launch", "libreoffice-calc")
+    assert pressed == ["OK"]
+    assert "LibreOffice Calc" in text
+    assert "dismissed 'Tip of the Day: 1/225'" in text
+
+    quiet = {"pressed": False}
+
+    class _Quiet(_D):
+        def snapshot(self, _scope, _app):
+            return _Snap([_El("AXCell", "A1")])
+
+        def press_element(self, _el):
+            quiet["pressed"] = True
+            return True
+
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_Quiet())
+    runtime.APP_LAUNCH_WAIT_S = 1
+    plain = runtime.app("launch", "libreoffice-calc")
+    assert "dismissed" not in plain
+    assert quiet["pressed"] is False
+
+
 def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_errors(
     tmp_path, monkeypatch,
 ) -> None:
