@@ -2021,10 +2021,12 @@ class LinuxDriver:
 
         return _linux_system.running_apps()
 
-    def launch_app(self, identifier: str) -> dict:
+    def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system
 
         self._focused_editable = None
+        if argv:
+            return _linux_system.launch_app(identifier, argv=argv)
         return _linux_system.launch_app(identifier)
 
     def activate_app(self, identifier: str) -> str:

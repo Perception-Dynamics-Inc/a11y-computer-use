@@ -3992,7 +3992,6 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
         _kill_libreoffice()
 
 
-
 def _soffice_displays() -> set[str]:
     found: set[str] = set()
     try:
@@ -4051,6 +4050,7 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
 
     driver = LinuxDriver()
     _require_bus(driver)
+<<<<<<< HEAD
     binary = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True).stdout.strip()
     assert binary, "libreoffice-calc is not installed"
     assert subprocess.run(["bash", "-lc", "command -v Xvfb"], capture_output=True, text=True).stdout.strip()
@@ -4114,6 +4114,48 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
         if xvfb.poll() is None:
             xvfb.kill()
             xvfb.wait(timeout=5)
+        _kill_libreoffice()
+
+
+def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path) -> None:
+    """Live. ``app launch libreoffice-calc`` opens a Calc document.
+
+    That desktop name used to start the suite binary with no module flag,
+    so the first window was the Start Center. ``localc`` and ``soffice
+    --calc`` open Calc. Writer and Impress take the same path in the
+    hermetic tests; this image has Calc.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    assert found.stdout.strip(), "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    previous = {
+        key: os.environ.get(key)
+        for key in ("SAL_USE_VCLPLUGIN", "GTK_MODULES", "NO_AT_BRIDGE")
+    }
+    os.environ["SAL_USE_VCLPLUGIN"] = "gtk3"
+    os.environ["GTK_MODULES"] = "gail:atk-bridge"
+    os.environ["NO_AT_BRIDGE"] = "0"
+    runtime = _runtime_for(
+        tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "localc",
+    )
+    try:
+        launched = runtime.app("launch", "libreoffice-calc", activate=False)
+        assert "first window:" in launched, launched
+        assert "Calc" in launched, launched
+        assert "first window: 'LibreOffice'" not in launched, launched
+        text = runtime.desktop_snapshot("soffice", mode="interactive")
+        assert "A1" in text, text[:800]
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         _kill_libreoffice()
 
 

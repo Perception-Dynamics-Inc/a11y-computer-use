@@ -4987,13 +4987,16 @@ class Runtime:
                 return False
             time.sleep(self.FOCUS_POLL_S)
 
-    def _prepare_launch(self, name: str) -> tuple[str, str]:
-        """``(launch_name, gate_key)`` for an OS ``app launch``.
+    def _prepare_launch(self, name: str) -> tuple[str, str, tuple[str, ...] | None]:
+        """``(launch_name, gate_key, argv)`` for an OS ``app launch``.
 
         A grant for ``thunar`` covers ``Files``, and the process started is
-        ``thunar``. A name that is not installed, not running, and not granted
-        is ``app_not_found`` listing the granted names. It is not a permission
-        refusal for the raw string.
+        ``thunar``. A Calc, Writer, or Impress label starts that module
+        (``localc`` or ``soffice --calc``, and the same for writer and
+        impress) while the grant stays the soffice alias. A name that is not
+        installed, not running, and not granted is ``app_not_found`` listing
+        the granted names. It is not a permission refusal for the raw string.
+        ``argv`` is None when the launch is the program name alone.
         """
         from a11y_computer_use.app_identity import normalize, resolve_launch
 
@@ -5038,7 +5041,7 @@ class Runtime:
                 f"no application matches {name!r}; granted apps: {shown}",
                 detail={"app": name, "granted": list(granted)},
             )
-        return resolved.launch_name, resolved.gate_key
+        return resolved.launch_name, resolved.gate_key, resolved.argv
 
     @_serialized
     def app(self, action: str, name: str | None = None, activate: bool | None = None) -> str:
@@ -5061,8 +5064,9 @@ class Runtime:
             if self._resolves_apps():
                 gate_key = self._frontmost()  # browser: launch == navigate the bound tab
                 launch_name = name
+                launch_argv = None
             else:
-                launch_name, gate_key = self._prepare_launch(name)
+                launch_name, gate_key, launch_argv = self._prepare_launch(name)
 
             def launch() -> str | None:
                 before: list = []
@@ -5079,11 +5083,21 @@ class Runtime:
                         row.get("window_id"): str(row.get("title") or "")
                         for row in rows if isinstance(row, dict)
                     }
+                extra: dict = {}
+                if launch_argv:
+                    import inspect
+
+                    try:
+                        accepts_argv = "argv" in inspect.signature(self.driver.launch_app).parameters
+                    except (TypeError, ValueError):
+                        accepts_argv = False
+                    if accepts_argv:
+                        extra["argv"] = launch_argv
                 if getattr(self.driver, "background_input", False):
                     handle = self.driver.launch_app(launch_name, activate=activate if activate is not None
-                                           else FOCUS_MODE != "background")
+                                           else FOCUS_MODE != "background", **extra)
                 else:
-                    handle = self.driver.launch_app(launch_name)
+                    handle = self.driver.launch_app(launch_name, **extra)
                 # A Linux launch returns a process handle. macOS and Windows
                 # return None, and the wait keeps its previous success string
                 # when no window appears. The ids from before the spawn keep a
