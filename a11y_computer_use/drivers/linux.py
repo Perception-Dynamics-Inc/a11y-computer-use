@@ -257,13 +257,35 @@ class LinuxDriver:
                         "--force-renderer-accessibility. See docs/linux-port.md."},
             )
 
+    def _root_for_snapshot(self, app: str, scope: Scope):
+        """(name, accessible) for a snapshot.
+
+        The given name wins when it already selects an application. The
+        comm from app list is the fallback, which is how ``LibreOffice``
+        becomes ``soffice.bin``.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        root = self._run(lambda name=app: _atspi.find_root(name, scope))
+        if root is not None:
+            return app, root
+        resolved = _resolved_app(app)
+        if resolved != app:
+            root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+            return resolved, root
+        return app, None
+
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        resolved = _resolved_app(app)
-        root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+        # A name find_root already answers is the AT-SPI application. Two
+        # Python windows share the comm python3; resolving that name to the
+        # comm first would snapshot the other window. LibreOffice is the
+        # other case: the caller says LibreOffice and the bus says
+        # soffice.bin, so the comm is used only after the given name misses.
+        resolved, root = self._root_for_snapshot(app, scope)
         # The X window is in app list and window list before the application
         # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
         # the list still shows the app, or a LibreOffice process is up, and
@@ -279,12 +301,13 @@ class LinuxDriver:
                 if remaining <= 0:
                     break
                 time.sleep(min(_atspi.ATSPI_REGISTER_POLL_S, remaining))
-                resolved = _resolved_app(app)
+                resolved, root = self._root_for_snapshot(app, scope)
+                if root is not None:
+                    break
                 if not (
                     _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
                 ):
                     break
-                root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
         # An empty tree is a running app with nothing to show. No AT-SPI
         # application at all is the same answer menu list already gives:
         # the app is not running. An empty snapshot there told the agent

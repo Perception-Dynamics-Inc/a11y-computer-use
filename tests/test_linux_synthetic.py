@@ -4930,8 +4930,9 @@ def test_app_listed_matches_the_app_list_and_the_window_list(monkeypatch) -> Non
 def test_snapshot_resolves_like_the_app_list_and_waits_for_atspi(fake_atspi, monkeypatch) -> None:
     """Synthetic. The clock is fake, so the wait does not take 15 seconds.
 
-    The first two lookups miss. The third finds the app under the comm the
-    app list would have shown.
+    The caller's name is tried first and misses. The comm the app list
+    would show is tried next and misses once. After one poll that comm
+    is on the bus.
     """
     from a11y_computer_use.drivers import _linux_system
 
@@ -4948,7 +4949,7 @@ def test_snapshot_resolves_like_the_app_list_and_waits_for_atspi(fake_atspi, mon
 
     def find_root(app, _scope):
         seen.append(app)
-        if len(seen) >= 3 and app == "soffice.bin":
+        if app == "soffice.bin" and seen.count("soffice.bin") >= 2:
             return window
         return None
 
@@ -4972,8 +4973,42 @@ def test_snapshot_resolves_like_the_app_list_and_waits_for_atspi(fake_atspi, mon
     monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
     snap = LinuxDriver().snapshot(Scope.WINDOW, "LibreOffice")
     assert snap.app == "soffice.bin"
-    assert seen[:3] == ["soffice.bin", "soffice.bin", "soffice.bin"]
-    assert clock["t"] == pytest.approx(50.5)
+    assert seen == ["LibreOffice", "soffice.bin", "LibreOffice", "soffice.bin"]
+    assert clock["t"] == pytest.approx(50.25)
+
+
+def test_snapshot_keeps_an_atspi_name_that_already_matches(fake_atspi, monkeypatch) -> None:
+    """Synthetic. A name find_root already has is not replaced by the comm.
+
+    Two Python windows share the comm python3. resolve_app would return
+    that comm for cuakeyother. The snapshot stays on cuakeyother.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    class _App:
+        def get_toolkit_name(self):
+            return "gtk"
+
+        def get_name(self):
+            return "cuakeyother"
+
+    window = _Acc("frame", name="cuakeyother", width=420, height=140)
+    window.get_application = lambda: _App()
+    seen: list[str] = []
+
+    def find_root(app, _scope):
+        seen.append(app)
+        if app == "cuakeyother":
+            return window
+        return None
+
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda _identifier: "python3")
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "cuakeyother")
+    assert snap.app == "cuakeyother"
+    assert seen == ["cuakeyother"]
 
 
 def test_snapshot_stops_when_the_listed_app_goes_away(fake_atspi, monkeypatch) -> None:
