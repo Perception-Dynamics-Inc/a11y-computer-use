@@ -2155,28 +2155,18 @@ class Runtime:
     # quits on the next main-loop turn is still alive when the call returns.
     _PROCESS_SETTLE_S = 0.3
 
-    def _capture(self) -> dict | None:
-        """The current snapshot, and whether its pid is a live Linux process.
-
-        Taken before the action. A later snapshot is compared with it. The
-        pid check is Linux-only: hermetic snapshots stamp a fake pid, and a
-        pid that was not alive before the action is not a crash.
-        A Runtime built with ``__new__`` in a test has no snapshot yet.
-        """
-        snap = getattr(self, "_current", None)
-        if snap is None:
-            return None
+    def _freeze(self, snap: "Snapshot") -> dict:
+        """Fingerprints of ``snap``, taken now so a later in-place edit cannot move them."""
         pid = snap.pid
         alive = False
+        driver = getattr(self, "driver", None)
         if (
-            getattr(self.driver, "name", None) == "linux"
+            getattr(driver, "name", None) == "linux"
             and isinstance(pid, int)
             and not isinstance(pid, bool)
             and pid > 0
         ):
             alive = outcome.pid_alive(pid)
-        # Fingerprints are taken now. A driver that mutates the same element
-        # objects would otherwise make the before and after trees look alike.
         return {
             "snap": snap,
             "state": outcome.state_fingerprint(snap),
@@ -2184,20 +2174,89 @@ class Runtime:
             "pid": pid,
             "app": snap.app,
             "pid_alive": alive,
+            "scope": getattr(snap, "scope", None) or Scope.WINDOW,
         }
 
-    def _reread(self, app: str | None) -> "Snapshot | None":
-        """A fresh snapshot used only to judge the action. The ref epoch stays.
+    def _probe_snapshot(self, scope: Scope, app: str) -> "Snapshot | None":
+        """A snapshot used only to judge an action. Not installed as ``_current``."""
+        from unittest.mock import Mock
 
-        With no snapshot yet there is nothing to compare, so this does not
-        observe. A click that never took a tree stays on that path.
-        """
-        if not app or getattr(self, "_current", None) is None:
+        driver = getattr(self, "driver", None)
+        probe = getattr(driver, "snapshot", None) if driver is not None else None
+        if not callable(probe) or isinstance(probe, Mock):
             return None
         try:
-            return self.driver.snapshot(Scope.WINDOW, app)
+            snapped = probe(scope, app)
         except Exception:
             return None
+        if not isinstance(snapped, Snapshot):
+            return None
+        current = getattr(self, "_current", None)
+        epoch = getattr(current, "snapshot_id", None)
+        if epoch:
+            observe.touch_epoch(epoch)
+        return snapped
+
+    def _capture(self, app: str | None = None) -> dict | None:
+        """The tree immediately before this action, and whether its pid is alive.
+
+        When the caller has not snapshotted since the previous action, the
+        before-state is the tree that action already read back. A second click
+        is then compared with the state after the first click, not with the
+        snapshot from before it. A fresh ``desktop_snapshot`` replaces
+        ``_current`` and that record no longer applies. The pid check is
+        Linux-only. A Runtime built with ``__new__`` in a test has no snapshot yet.
+        """
+        current = getattr(self, "_current", None)
+        baseline = getattr(self, "_action_baseline", None)
+        target = app or getattr(current, "app", None)
+        if (
+            isinstance(baseline, dict)
+            and current is not None
+            and baseline.get("token") == id(current)
+            and (not target or not baseline.get("app") or baseline.get("app") == target)
+        ):
+            return baseline.get("capture")
+        if current is None:
+            if not target:
+                return None
+            probed = self._probe_snapshot(Scope.WINDOW, target)
+            return self._freeze(probed) if probed is not None else None
+        if target and current.app and target != current.app:
+            probed = self._probe_snapshot(getattr(current, "scope", None) or Scope.WINDOW, target)
+            if probed is not None:
+                return self._freeze(probed)
+        return self._freeze(current)
+
+    def _remember_baseline(self, after: "Snapshot | None") -> None:
+        """Remember ``after`` as the before-state of the next action on this epoch."""
+        current = getattr(self, "_current", None)
+        if current is None or not isinstance(after, Snapshot):
+            return
+        self._action_baseline = {
+            "token": id(current),
+            "app": after.app,
+            "capture": self._freeze(after),
+        }
+
+    def _reread(self, app: str | None, scope: Scope | None = None) -> "Snapshot | None":
+        """A fresh snapshot used only to judge the action. The ref epoch stays.
+
+        With no app, or no snapshot and no scope from the before-state, there
+        is nothing to compare, so this does not observe.
+        """
+        current = getattr(self, "_current", None)
+        if not app or (current is None and scope is None):
+            return None
+        chosen = scope or getattr(current, "scope", None) or Scope.WINDOW
+        try:
+            snap = self.driver.snapshot(chosen, app)
+        except Exception:
+            return None
+        epoch = getattr(current, "snapshot_id", None)
+        if epoch:
+            observe.touch_epoch(epoch)
+        return snap if isinstance(snap, Snapshot) else None
 
     def _process_died(self, before: dict | None) -> bool:
         if not before or not before.get("pid_alive"):
@@ -2246,7 +2305,8 @@ class Runtime:
         previous: str | None = None,
     ) -> tuple[str, str]:
         died = self._process_died(before)
-        after = self._reread(app)
+        scope = before.get("scope") if before else None
+        after = self._reread(app, scope)
         readable = after is not None and before is not None
         changed: bool | None = None
         if readable and before is not None and after is not None:
@@ -2283,6 +2343,7 @@ class Runtime:
                         readback = better
             if readback is None:
                 readable = False
+        self._remember_baseline(after)
         return outcome.judge(
             changed=changed,
             requested=requested,
@@ -3851,11 +3912,18 @@ class Runtime:
                 return typed
             return len(text)
 
+        before = self._capture(bundle)
+        base = before["snap"] if before else None
+        focused_field = self._focused_editable(base)
+        previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
         count = self._run_gated(action, bundle, execute)
         where = f" into {bundle}"
         if focused:
             where += " (focused its window first)"
-        return f"typed {count} characters{where}{''.join(note)}"
+        return self._conclude(
+            f"typed {count} characters{where}{''.join(note)}",
+            tool="type", app=bundle, before=before, requested=text, previous=previous,
+        )
 
     def _linux_key(self, chord: str, identifier: str) -> str:
         bundle, chosen, candidates = self._linux_keyboard_window(identifier)
@@ -3870,9 +3938,13 @@ class Runtime:
             if not self._open_mnemonic_menu(target, chord):
                 self.driver.key_chord(chord)
 
+        before = self._capture(bundle)
         self._run_gated(action, bundle, execute)
         note = " (focused its window first)" if focused else ""
-        return f"pressed {chord} in {bundle}{note}"
+        return self._conclude(
+            f"pressed {chord} in {bundle}{note}",
+            tool="key", app=bundle, before=before,
+        )
 
     @_serialized
     def type_text(self, text: str, app: str | None = None) -> str:
@@ -3884,7 +3956,8 @@ class Runtime:
         target = self._background_target(app)
         note: list[str] = []
         before = self._capture()
-        focused = self._focused_editable(self._current)
+        base = before["snap"] if before else self._current
+        focused = self._focused_editable(base)
         previous = None if focused is None or focused.value is None else str(focused.value)
         if target is not None:
             bundle, pid = target
@@ -4321,7 +4394,28 @@ class Runtime:
         snap, live = self._resolve(ref, "typetext")
         app = snap.app or self._frontmost()
         before = self._capture()
+        # The ref was issued against ``snap``. Read the value back at that
+        # scope. A window-only reread misses a field in another window of the
+        # same app and reports unverifiable even though the write landed and
+        # find(scope='app') can see it. A remembered baseline must not narrow
+        # this read. Confirmation still requires the read-back to match.
+        if before is not None and getattr(snap, "scope", None) is not None:
+            before = {**before, "scope": snap.scope}
         previous = "" if live.value is None else str(live.value)
+        cover = self._cover_owner(live, app)
+        if cover and cover != "off_screen":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{ref} is covered by {cover}",
+                detail={
+                    "ref": ref,
+                    "role": live.role,
+                    "reason": "covered",
+                    "outcome": "refused",
+                    "next": ["foreground", "ref"],
+                    "evidence": f"the window is covered by {cover}",
+                },
+            )
         if live.secure:
             self._record_failure(
                 "typetext", app=app, params={"ref": ref, "role": live.role},
