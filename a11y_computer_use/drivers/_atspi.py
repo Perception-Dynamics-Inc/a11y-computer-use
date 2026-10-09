@@ -2932,34 +2932,62 @@ def _focus_lost_error(message: str):
     )
 
 
-def _descendant_focused(acc, depth: int = 0, budget: list | None = None) -> bool:
-    """True when a descendant editor, not ``acc`` itself, has FOCUSED."""
+def _focus_candidates(acc, *, embedded: bool) -> list:
+    """Children that can hold the caret for ``acc``.
+
+    Indexed children cover a paragraph or static text under a contenteditable
+    section. Hypertext covers a text node Chrome embeds as U+FFFC and does
+    not also return from ``get_child_at_index``. Only the top of the walk
+    asks for those embeds; a nested call already came from one.
+    """
+    found = []
+    count = _child_count(acc)
+    if count > 0:
+        for index in range(min(count, 16)):
+            found.append(_child_at(acc, index))
+    if embedded:
+        for obj in _hypertext_objects(acc):
+            found.append(obj)
+    return found
+
+
+def _descendant_focused(
+    acc, depth: int = 0, budget: list | None = None, seen: set | None = None,
+) -> bool:
+    """True when a descendant, not ``acc`` itself, has ``FOCUSED``.
+
+    A roleless contenteditable is a section. Chrome reports ``FOCUSED`` on
+    that section or on a child text node: an indexed paragraph or static
+    text, or a hypertext embed. A focused node inside this subtree counts.
+    A focused node outside it does not.
+    """
     if depth > 3:
         return False
     if budget is None:
         budget = [24]
-    count = _child_count(acc)
-    if count <= 0:
-        return False
-    for index in range(min(count, 16)):
+    if seen is None:
+        seen = set()
+    for child in _focus_candidates(acc, embedded=(depth == 0)):
         if budget[0] <= 0:
             return False
         budget[0] -= 1
-        child = _child_at(acc, index)
-        if child is None:
+        if child is None or id(child) in seen:
             continue
+        seen.add(id(child))
         _call_first(child, ("clear_cache", "clearCache"))
         if _state_has(child, "FOCUSED"):
             return True
-        if _descendant_focused(child, depth + 1, budget):
+        if _descendant_focused(child, depth + 1, budget, seen):
             return True
     return False
 
 
 def _focus_on_target(acc) -> bool | None:
-    """Whether keyboard focus is on ``acc`` or a descendant editor.
+    """Whether keyboard focus is on ``acc`` or a descendant inside it.
 
-    True: the target (or an editor inside it) has ``FOCUSED``.
+    True: the target has ``FOCUSED``, or a descendant does. A roleless
+    contenteditable section counts when focus is on the section itself or
+    on a child text node.
     False: the node can report focus and it is elsewhere or absent.
     None: the node has no state set, so focus cannot be read. That is a
     test double. A live control has a state set; unknown focus there is
