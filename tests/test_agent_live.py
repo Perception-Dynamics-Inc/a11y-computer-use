@@ -1,20 +1,18 @@
 """Live M1 agent runs against the GTK fixture and the local HTML pages.
 
 The fixture smoke test launches the GTK app and the pages and snapshots them
-with the Linux and browser drivers. It does not import the agent package.
+with the Linux and browser drivers.
 
 The agent tests call ``Agent(...).run(goal)`` with a ``ScriptedModel`` callable.
 That callable is scripted, not an LLM: it reads element refs out of the
-snapshot text in the messages. They are skipped with
-``pytest.importorskip("a11y_computer_use.agent.core")`` until that module
-lands. Nothing else skips them.
+snapshot text in the messages. They run whenever this process has a Linux
+display (the Linux live job). Hermetic jobs have no display and skip them.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -41,18 +39,21 @@ from tests.agent_fixtures.harness import (
     wait_gtk_snapshot,
 )
 
-# Collection-time gate for the smoke test only. The Linux live job exports
-# DISPLAY (xvfb-run). Hermetic jobs do not, and they skip this one test the
-# same way the other GTK live tests do. It is not an agent-package skip.
+# The Linux live job exports DISPLAY (xvfb-run). Hermetic jobs do not, and
+# they skip the display tests the same way the other GTK live tests do.
 _LINUX_DISPLAY = sys.platform.startswith("linux") and bool(
     os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
 )
+requires_display = pytest.mark.skipif(
+    not _LINUX_DISPLAY,
+    reason="GTK and Chrome fixtures need a Linux display; the linux live job provides Xvfb",
+)
 
-_STRATEGY = re.compile(
-    r"change strategy|strategy change|new strategy|you are stuck|seem stuck|"
-    r"try a different|different approach|different action|stop repeating|"
-    r"same action|no progress|not making progress|repeating the same",
-    re.I,
+# The sentence core._note_screen appends. The stuck script switches only when
+# this exact text is the latest message, after the Ping clicks that caused it.
+_REPLAN = (
+    "The screen is stuck: this snapshot has already repeated. "
+    "Choose a different strategy. Do not repeat the last action."
 )
 
 
@@ -65,17 +66,24 @@ def _linux_driver():
 
 
 def _focus_app() -> None:
-    """Best-effort: ask the window manager to put the fixture in front."""
-    subprocess.run(
-        ["xdotool", "search", "--name", APP_NAME, "windowactivate", "--sync"],
-        check=False,
-        timeout=5,
-        capture_output=True,
-    )
+    """Best-effort: ask the window manager to put the fixture in front.
+
+    ``windowactivate --sync`` can wait forever under Xvfb when the active-window
+    property never settles. The agent still focuses ``cuagentfix`` itself.
+    """
+    try:
+        subprocess.run(
+            ["xdotool", "search", "--name", APP_NAME, "windowactivate"],
+            check=False,
+            timeout=3,
+            capture_output=True,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return
 
 
 # ---------------------------------------------------------------------------
-# Fixture smoke (no agent import, no importorskip)
+# Fixture smoke. No agent run; the parser case is hermetic.
 # ---------------------------------------------------------------------------
 
 
@@ -102,10 +110,7 @@ def test_snapshot_text_parser_matches_rendered_lines() -> None:
     assert status is not None and status.value == "idle"
 
 
-@pytest.mark.skipif(
-    not _LINUX_DISPLAY,
-    reason="GTK and Chrome fixtures need a Linux display; the linux live job provides Xvfb",
-)
+@requires_display
 def test_fixtures_snapshot_gtk_app_and_pages(tmp_path: Path) -> None:
     """Launch the fixture app and the pages and snapshot them with the library."""
     from a11y_computer_use.drivers.browser import BrowserDriver
@@ -232,7 +237,7 @@ def _assert_pages(browser, site: PageSite) -> None:
 
     browser.navigate(site.url("otp.html"))
     snap = browser.snapshot(Scope.WINDOW, browser._target_id)
-    otp = element(snap, role="AXTextField", title="Authentication code")
+    otp = element(snap, role="AXTextField", title="One-time code")
     assert otp is not None and otp.editable, render_text(snap)
     assert not any(el.secure for el in snap.elements)
     assert any("2fa" in (el.title or "") for el in snap.elements), render_text(snap)
@@ -273,27 +278,48 @@ def _eval(browser, expression: str):
 
 
 # ---------------------------------------------------------------------------
-# Agent runs. importorskip until a11y_computer_use.agent.core exists.
+# Agent runs. ScriptedModel only. Display-gated, same as the GTK live tests.
 # ---------------------------------------------------------------------------
 
 
 def _agent_api():
-    pytest.importorskip("a11y_computer_use.agent.core")
     from a11y_computer_use.agent.core import Agent
     from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
 
-    try:
-        from a11y_computer_use.agent.models.scripted import ScriptedModel
-    except ImportError:
-        from a11y_computer_use.agent.models import ScriptedModel  # type: ignore
     return Agent, ScriptedModel, ModelTurn, ToolCall
 
 
 def _scripted(scripted_cls, fn):
+    return scripted_cls(fn)
+
+
+def _grant(*app_ids: str) -> None:
+    """FULL tier in the temp-HOME store. The agent does not grant by itself."""
+    from a11y_computer_use.safety import PermissionStore, Tier
+
+    store = PermissionStore()
+    for app_id in app_ids:
+        if app_id and app_id != "unknown":
+            store.set_tier(app_id, Tier.FULL)
+
+
+def _grant_linux_desktop(*extra: str) -> None:
+    """Grant the live Linux comm names the runtime will key a snapshot on."""
+    names = ["python3", "python", "chrome", "chromium", "google-chrome", "chromium-browser", APP_NAME, *extra]
     try:
-        return scripted_cls(fn)
-    except TypeError:
-        return scripted_cls(script=fn)
+        from a11y_computer_use.drivers import _linux_system
+
+        front = _linux_system.frontmost_app_id()
+        if front:
+            names.append(front)
+        for row in _linux_system.running_apps():
+            comm = row.get("name") or row.get("bundle_id")
+            if comm:
+                names.append(str(comm))
+    except Exception:
+        pass
+    _grant(*names)
 
 
 def _run_agent(agent_cls, model, goal: str, trace: Path, **kwargs):
@@ -397,61 +423,39 @@ class _Cues:
     def on_event(self, event) -> None:
         self.events.append(event)
 
-    def hit(self, since: int = 0) -> str:
-        for event in self.events[since:]:
-            kind = ""
-            if isinstance(event, dict):
-                kind = str(event.get("type") or event.get("kind") or event.get("name") or "")
-            else:
-                for attr in ("type", "kind", "name"):
-                    if hasattr(event, attr):
-                        kind = str(getattr(event, attr))
-                        break
-            blob = f"{kind} {event!r}"
-            if kind.lower() in {"strategy", "strategy_change", "stuck"} or "strategy" in kind.lower():
-                return blob
-            match = _STRATEGY.search(blob)
-            if match:
-                return match.group(0)
-        return ""
+    def stuck(self) -> bool:
+        for event in self.events:
+            kind = event.get("type") if isinstance(event, dict) else getattr(event, "type", "")
+            if str(kind) == "stuck":
+                return True
+        return False
 
 
 class _StuckThenSave(_SaveScript):
-    """Clicks Ping, which changes nothing, until the agent asks for a new strategy."""
+    """Clicks Ping, which changes nothing, until the agent asks for a new strategy.
+
+    The cue is the loop's exact replan sentence. Three identical snapshots
+    produce it. The script keeps pinging until that sentence arrives after at
+    least three pings, then saves. Switching earlier would hide a miss.
+    """
 
     def __init__(self, dest: Path, turn_cls, call_cls, cues: _Cues) -> None:
         super().__init__(dest, turn_cls, call_cls)
         self.cues = cues
         self.pings = 0
         self.cue = ""
-        self.baseline = None
-        self.event_mark: int | None = None
 
     def __call__(self, messages):
         self.calls += 1
         text = message_text(messages)
         last = message_text(messages[-1:]) if messages else ""
-        if self.baseline is None:
-            self.baseline = last
-        found = ""
-        if self.event_mark is not None:
-            found = self.cues.hit(self.event_mark)
-        match = _STRATEGY.search(last)
-        # A sentence that was already in the first observation is the prompt,
-        # not a strategy change after the repeated Ping clicks.
-        if (
-            match
-            and self.pings >= 3
-            and match.group(0).lower() not in (self.baseline or "").lower()
-        ):
-            found = found or match.group(0)
-        if self.pings >= 3 and found:
-            self.cue = found
+        # The replan sentence is one message. Later turns are ordinary
+        # observations again, so the cue has to stick or the script goes
+        # back to Ping and the run fails stuck.
+        if self.cue or (self.pings >= 3 and _REPLAN in last):
+            self.cue = _REPLAN
             return _save_turn(text, self.dest, self.Turn, self.Call)
         self.pings += 1
-        if self.pings == 3:
-            # Events and text that arrive after this click are the stuck signal.
-            self.event_mark = len(self.cues.events)
         ping = pick(parse_snapshot(text), role="button", name="Ping")
         ref = ping.ref if ping is not None else "e999"
         return self.Turn(calls=[self.Call(name="click", args={"ref": ref})])
@@ -481,11 +485,13 @@ class _FormScript:
             return self.Turn(calls=[self.Call(name="click", args={"ref": subscribe.ref})])
         if FORM_RESULT not in text:
             return self.Turn(calls=[self.Call(name="click", args={"ref": submit.ref})])
+        # The browser snapshot's window title is the CDP target id. The result
+        # is the static text and the web area whose document title was set to it.
         return self.Turn(calls=[self.Call(name="done", args={
             "answer": FORM_RESULT,
             "conditions": [
-                {"window_title_contains": FORM_RESULT},
                 {"element": {"role": "AXStaticText", "name": FORM_RESULT}},
+                {"element": {"role": "AXWebArea", "name": FORM_RESULT}},
             ],
         })])
 
@@ -588,6 +594,7 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
+@requires_display
 def test_agent_saves_note_and_records_trace(tmp_path, isolated_home) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     dest = _short_dest()
@@ -599,6 +606,7 @@ def test_agent_saves_note_and_records_trace(tmp_path, isolated_home) -> None:
         driver = _linux_driver()
         assert wait_gtk_snapshot(driver) is not None
         _focus_app()
+        _grant_linux_desktop()
         script = _SaveScript(dest, ModelTurn, ToolCall)
         result = _run_agent(
             Agent,
@@ -617,6 +625,7 @@ def test_agent_saves_note_and_records_trace(tmp_path, isolated_home) -> None:
         dest.unlink(missing_ok=True)
 
 
+@requires_display
 def test_agent_recovers_when_verification_rejects_a_wrong_step(tmp_path, isolated_home) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     dest = _short_dest()
@@ -628,6 +637,7 @@ def test_agent_recovers_when_verification_rejects_a_wrong_step(tmp_path, isolate
         driver = _linux_driver()
         assert wait_gtk_snapshot(driver) is not None
         _focus_app()
+        _grant_linux_desktop()
         script = _WrongThenSave(dest, ModelTurn, ToolCall)
         result = _run_agent(
             Agent,
@@ -650,6 +660,7 @@ def test_agent_recovers_when_verification_rejects_a_wrong_step(tmp_path, isolate
         dest.unlink(missing_ok=True)
 
 
+@requires_display
 def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     dest = _short_dest()
@@ -662,6 +673,7 @@ def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> N
         driver = _linux_driver()
         assert wait_gtk_snapshot(driver) is not None
         _focus_app()
+        _grant_linux_desktop()
         script = _StuckThenSave(dest, ModelTurn, ToolCall, cues)
         result = _run_agent(
             Agent,
@@ -672,7 +684,10 @@ def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> N
             on_event=cues.on_event,
         )
         assert script.pings >= 3, script.pings
-        assert script.cue, f"no strategy-change cue after {script.pings} identical Ping clicks; events={cues.events!r}"
+        assert script.cue == _REPLAN, (
+            f"no strategy-change cue after {script.pings} identical Ping clicks; events={cues.events!r}"
+        )
+        assert cues.stuck(), cues.events
         assert result.status == "success", result
         assert dest.read_text() == NOTE
         _assert_trace(result, trace)
@@ -682,28 +697,26 @@ def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> N
 
 
 @pytest.fixture
-def pages(tmp_path, isolated_home):
-    pytest.importorskip("a11y_computer_use.agent.core")
+def pages(tmp_path, isolated_home, monkeypatch):
     assert isolated_home.is_dir()
-    assert chrome_binary()
+    assert chrome_binary(), "google-chrome or chromium is required for the page agent tests"
     profile = tmp_path / "chrome"
     proc = None
     try:
         proc, endpoint = launch_chrome(profile)
         wait_cdp(endpoint)
-        os.environ["A11Y_COMPUTER_USE_DRIVER"] = "browser"
-        os.environ["A11Y_COMPUTER_USE_CDP_ENDPOINT"] = endpoint
+        monkeypatch.setenv("A11Y_COMPUTER_USE_DRIVER", "browser")
+        monkeypatch.setenv("A11Y_COMPUTER_USE_CDP_ENDPOINT", endpoint)
         from a11y_computer_use.drivers.browser import BrowserDriver
 
         browser = BrowserDriver(endpoint=endpoint)
         with PageSite() as site:
             yield browser, site, endpoint
     finally:
-        os.environ.pop("A11Y_COMPUTER_USE_DRIVER", None)
-        os.environ.pop("A11Y_COMPUTER_USE_CDP_ENDPOINT", None)
         stop_process(proc)
 
 
+@requires_display
 def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     browser, site, _endpoint = pages
@@ -711,6 +724,7 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
 
     browser.navigate(site.url("form.html"))
     browser.snapshot(Scope.WINDOW, browser._target_id)
+    _grant(browser._target_id)
     trace = tmp_path / "trace"
     trace.mkdir()
     result = _run_agent(
@@ -729,11 +743,12 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
     ("page", "kind", "marker", "empty_js"),
     [
         ("login.html", "login", "Password", "document.getElementById('password').value"),
-        ("otp.html", "2fa", "Authentication code", "document.getElementById('otp').value"),
+        ("otp.html", "2fa", "One-time code", "document.getElementById('otp').value"),
         ("card.html", "payment", "Card number", "document.getElementById('card').value"),
         ("captcha.html", "captcha", "captcha", None),
     ],
 )
+@requires_display
 def test_agent_needs_human(tmp_path, isolated_home, pages, page, kind, marker, empty_js) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     browser, site, _endpoint = pages
@@ -741,6 +756,7 @@ def test_agent_needs_human(tmp_path, isolated_home, pages, page, kind, marker, e
 
     browser.navigate(site.url(page))
     browser.snapshot(Scope.WINDOW, browser._target_id)
+    _grant(browser._target_id)
     trace = tmp_path / "trace" / kind
     trace.mkdir(parents=True)
     result = _run_agent(
@@ -808,9 +824,11 @@ def _stdout_json(proc: subprocess.CompletedProcess) -> dict:
         return json.loads(text[start : end + 1])
 
 
+@requires_display
 def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
     _agent_api()
     home = isolated_home
+    _grant_linux_desktop()
     good = Path(f"/tmp/cuagent-cli-{uuid.uuid4().hex[:8]}.txt")
     good.write_text("cli-ok", encoding="utf-8")
     missing = Path(f"/tmp/cuagent-missing-{uuid.uuid4().hex[:8]}.txt")
@@ -848,20 +866,25 @@ def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
         assert human.returncode == 2, human.stderr
         assert _stdout_json(human).get("status") == "needs_human"
 
+        # A finite script that runs out is ModelError and exits 3. Exit 1 is a
+        # failed run that still had turns left: evidence keeps failing, then
+        # max_steps stops the loop before the script is exhausted.
         failed_script = tmp_path / "failed.json"
         failed_turn = {"calls": [{"name": "done", "args": {
             "answer": "not saved",
             "conditions": [{"file_exists": str(missing), "contains": "nope"}],
         }, "id": "f1"}], "text": "scripted"}
-        _write_script(failed_script, [failed_turn, failed_turn])
+        _write_script(failed_script, [failed_turn, failed_turn, failed_turn])
         failed = _run_cli(
             home,
-            ["--json", "--model", f"scripted:{failed_script}", "--max-steps", "4",
+            ["--json", "--model", f"scripted:{failed_script}", "--max-steps", "2",
              "Save a file that is not there."],
             tmp_path / "trace-failed",
         )
-        assert failed.returncode == 1, failed.stderr
-        assert _stdout_json(failed).get("status") == "failed"
+        assert failed.returncode == 1, failed.stderr + failed.stdout
+        failed_body = _stdout_json(failed)
+        assert failed_body.get("status") == "failed", failed_body
+        assert failed_body.get("reason") == "max_steps", failed_body
 
         broken = _run_cli(
             home,

@@ -69,8 +69,8 @@ def main() -> int:
     except ImportError as exc:
         print(
             textwrap.fill(
-                "This example needs a11y_computer_use.agent (Agent, the scripted "
-                f"model, and the a11y-agent CLI). Those modules are not importable yet: {exc}"
+                "This example needs a11y_computer_use.agent (Agent and ScriptedModel). "
+                f"Import failed: {exc}"
             ),
             file=sys.stderr,
         )
@@ -80,12 +80,29 @@ def main() -> int:
         print("Set DISPLAY to a Linux session (xvfb-run works) and launch again.", file=sys.stderr)
         return 3
 
+    # file_exists refuses paths outside $HOME unless this is set. The note is
+    # written under the system temp dir, and the agent does not grant tiers.
+    os.environ["A11Y_COMPUTER_USE_ALLOW_ANY_PATH"] = "1"
+    home = Path(tempfile.mkdtemp(prefix="cuagent-home-"))
+    os.environ["HOME"] = str(home)
+    from a11y_computer_use.safety import PermissionStore, Tier
+
+    store = PermissionStore()
+    for app_id in ("python3", "python", "cuagentfix"):
+        store.set_tier(app_id, Tier.FULL)
+
     dest = Path(tempfile.gettempdir()) / "cuagent-quickstart.txt"
     dest.unlink(missing_ok=True)
     env = os.environ.copy()
     env["GTK_MODULES"] = "gail:atk-bridge"
     env["NO_AT_BRIDGE"] = "0"
     app = subprocess.Popen([sys.executable, str(GTK_APP)], env=env)
+    try:
+        comm = Path(f"/proc/{app.pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        comm = ""
+    if comm:
+        store.set_tier(comm, Tier.FULL)
 
     def script(messages):
         """Scripted planner. Not an LLM. Refs come from the snapshot text."""

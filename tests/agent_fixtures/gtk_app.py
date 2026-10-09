@@ -157,6 +157,10 @@ def _build() -> Gtk.Window:
     window.connect("destroy", Gtk.main_quit)
     window.show_all()
     window.present()
+    # Ping is the stuck control: it changes nothing, including when a repeated
+    # no-op is retried as a coordinate click or as Return. Keeping it focused
+    # means that keyboard fallback activates Ping instead of typing into Notes.
+    ping.grab_focus()
     _accessible_name(notes, "Notes")
     _accessible_name(path_entry, "Save path")
     _accessible_name(combo, "Format")
