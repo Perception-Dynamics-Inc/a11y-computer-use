@@ -720,6 +720,178 @@ def test_linux_combo_spin_slider_and_tree_selection(tmp_path) -> None:
             proc.kill()
 
 
+_TREE_APP = "cutreeprobe"
+
+_GTK_TREE_APP = textwrap.dedent(
+    """
+    import sys
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cutreeprobe")
+    end = "--end" in sys.argv
+    store = Gtk.ListStore(str, str)
+    for index in range(300):
+        store.append(["ROW-%05d" % index, "val%d" % index])
+    win = Gtk.Window(title="cutreeprobe")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Value")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    probe = Gtk.Label(label="row=")
+    probe.get_accessible().set_name("RowProbe")
+    def on_select(selection):
+        model, iterator = selection.get_selected()
+        text = model.get_value(iterator, 0) if iterator is not None else ""
+        probe.set_text("row=%s" % text)
+    tree.get_selection().connect("changed", on_select)
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_size_request(600, 500)
+    scrolled.add(tree)
+    box.pack_start(scrolled, True, True, 0)
+    box.pack_start(probe, False, False, 0)
+    win.add(box)
+    win.set_default_size(640, 560)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    def reveal():
+        adj = scrolled.get_vadjustment()
+        span = adj.get_upper() - adj.get_page_size()
+        if span <= 1:
+            return True
+        # scroll_to_cell is a no-op until the tree has painted; the
+        # adjustment is already the content height, so set it directly.
+        adj.set_value(span * (293 / 299.0))
+        return False
+    if end:
+        GLib.timeout_add(50, reveal)
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_tree_app(tmp_path, *, end: bool) -> subprocess.Popen:
+    script = tmp_path / ("cutree-end.py" if end else "cutree-top.py")
+    script.write_text(_GTK_TREE_APP)
+    args = [sys.executable, str(script)]
+    if end:
+        args.append("--end")
+    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _tree_row_numbers(snap) -> list[int]:
+    numbers = []
+    for el in snap.elements:
+        title = el.title
+        if title.startswith("ROW-") and title[4:].isdigit():
+            numbers.append(int(title[4:]))
+    return numbers
+
+
+def _wait_tree_rows(driver, predicate, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, _TREE_APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if predicate(last):
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_scrolled_gtk_tree_rows_stay_in_the_snapshot(tmp_path) -> None:
+    """Live GTK3 TreeView, 300 rows. Not a synthetic tree.
+
+    At the top the painted rows are in the snapshot, and find reaches
+    ROW-00293 while it is still off screen. Scrolled to that row, the
+    snapshot lists it (the cells are past the first 250 children) and the
+    custom-drawn note is absent. scroll_to_find matches it with no further
+    wheel.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _TREE_APP, "python3")
+    top = _launch_tree_app(tmp_path, end=False)
+    try:
+        snap = _wait_tree_rows(
+            driver, lambda shot: 0 in _tree_row_numbers(shot) and len(set(_tree_row_numbers(shot))) > 6,
+        )
+        assert snap is not None, "the tree never listed its on-screen rows"
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 293 not in numbers
+        listed = runtime.desktop_snapshot(_TREE_APP)
+        assert "custom-drawn" not in listed
+        assert "ROW-00000" in listed
+        found = runtime.find(_TREE_APP, text="ROW-00293")
+        assert "no elements match" not in found
+        assert "ROW-00293" in found
+        shot = runtime._current
+        row = next(el for el in shot.elements if el.title == "ROW-00293" and el.clickable)
+        clicked = runtime.click(row.ref)
+        assert "clicked" in clicked, clicked
+        deadline = time.monotonic() + 3
+        shot = driver.snapshot(Scope.WINDOW, _TREE_APP)
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, _TREE_APP)
+            runtime._current = shot
+            probe = next(
+                (
+                    f"{el.title} {el.value or ''}"
+                    for el in shot.elements
+                    if "row=" in f"{el.title} {el.value or ''}"
+                ),
+                "",
+            )
+            selected = any(el.title == "ROW-00293" and el.selected for el in shot.elements)
+            if "row=ROW-00293" in probe or selected:
+                break
+            time.sleep(0.2)
+        assert "row=ROW-00293" in probe or any(
+            el.title == "ROW-00293" and el.selected for el in shot.elements
+        ), [(el.role, el.title, el.value, el.selected) for el in shot.elements if "row" in f"{el.title} {el.value or ''}".lower() or el.title.startswith("ROW-0029")]
+    finally:
+        top.terminate()
+        try:
+            top.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            top.kill()
+
+    end = _launch_tree_app(tmp_path, end=True)
+    try:
+        snap = _wait_tree_rows(driver, lambda shot: 293 in _tree_row_numbers(shot))
+        assert snap is not None, "the scrolled tree never listed ROW-00293"
+        numbers = _tree_row_numbers(snap)
+        assert 293 in numbers
+        assert 0 not in numbers
+        assert len(set(numbers)) > 6
+        listed = runtime.desktop_snapshot(_TREE_APP)
+        assert "custom-drawn" not in listed
+        assert "ROW-00293" in listed
+        landed = runtime.scroll_to_find(_TREE_APP, text="ROW-00293", max_scrolls=0)
+        assert landed.startswith("found after 0 scroll"), landed
+        assert "ROW-00293" in landed
+    finally:
+        end.terminate()
+        try:
+            end.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            end.kill()
+
+
 def _chrome_binary() -> str | None:
     import shutil
 

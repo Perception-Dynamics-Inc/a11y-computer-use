@@ -3256,7 +3256,9 @@ class Runtime:
         Takes a fresh snapshot (so the returned refs are live and actionable, and
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
-        `desktop_snapshot`."""
+        `desktop_snapshot`. On Linux, a GTK table row whose name matches
+        ``text`` is scrolled into that snapshot when it is not already on
+        screen, and the ref is that on-screen cell."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -3270,7 +3272,19 @@ class Runtime:
         _running, bundle = self._resolve_app(app)
 
         def execute() -> str:
-            snap = self.driver.snapshot(Scope(scope), bundle)
+            # The Linux snapshot reads this once. A table row that matches
+            # ``text`` and is still off screen is scrolled into the tree
+            # before the pruner runs. Other drivers ignore the attribute.
+            seek = text.strip() if isinstance(text, str) and text.strip() else None
+            armed = hasattr(self.driver, "_table_seek")
+            previous = getattr(self.driver, "_table_seek", None) if armed else None
+            if armed:
+                self.driver._table_seek = seek
+            try:
+                snap = self.driver.snapshot(Scope(scope), bundle)
+            finally:
+                if armed:
+                    self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
             matches = observe.find_elements(
                 snap, text=text, role=role, editable=editable, clickable=clickable

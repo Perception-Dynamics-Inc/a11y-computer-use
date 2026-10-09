@@ -1086,13 +1086,20 @@ class ATSPIAccessor:
     A saved head from a different Python wrapper is not that list: a live
     walk wraps a new object each time, and the 0.4.16 retest still showed
     the pre-scroll row at y=-2. ``scroll_to_find`` searches this snapshot.
-    A non-Chromium tree is read from ``get_child_at_index`` as before.
+    A GTK table whose rows do not fit the child cap lists the cells that
+    overlap the screen, grouped so the cap keeps that whole run. ``find``
+    scrolls a named Table cell into the run when the name is not already
+    on screen. A short table, a Qt grid, and a Calc sheet keep the walks
+    they already had.
     """
 
     def __init__(self) -> None:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
+        # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
+        # snapshot, so listing the window does not scroll the tree.
+        self._table_seek: str | None = None
         # Set by the Linux snapshot when the tree is LibreOffice. Screen
         # extents on that tree ignore the window-manager title bar.
         self.libreoffice = False
@@ -1191,6 +1198,17 @@ class ATSPIAccessor:
         visible = self._visible_children.get(id(node))
         if visible is not None:
             return _cached_rows_for_snapshot(self._visible_bounds, visible)
+        # A GTK TreeView keeps every cell as a child and parks the ones
+        # outside the scrolled window at the G_MININT sentinel. Reading
+        # child 0..249 after End never reaches the painted rows (they sit
+        # near the end of the child list), and a few hundred rows also
+        # matches the Calc shortcut that only samples the first rows.
+        # The on-screen span is what snapshot and scroll_to_find list.
+        painted = _gtk_table_rows_for_snapshot(node, self._table_seek)
+        if painted:
+            for acc, pos, size in painted:
+                self._visible_bounds[id(acc)] = (pos, size)
+            return _bands_for_snapshot(painted)
         # -1 is a wedged D-Bus read. Revive once, then treat a still-negative
         # count as empty so range() does not walk nothing and hide the dialog.
         count = _child_count(node)
@@ -4988,6 +5006,336 @@ def _child_count(acc) -> int:
             # app: keep the block long enough to cover the rest of the walk.
             _revive_block_until[key] = time.monotonic() + (2.0 if count < 0 else 0.05)
     return count
+
+
+# A GTK tree of a few hundred rows is not a Calc grid. Calc's sheet is a
+# million rows, or it sits under a spreadsheet document. Past this size the
+# index walk and the sheet sampler stay in charge.
+_GTK_TABLE_MAX_ROWS = 100_000
+_GTK_TABLE_MAX_COLS = 256
+# ``find`` looks up a name through Table.get_accessible_at. The window is
+# enough for a scrolled tree of a few hundred rows and stays short of a
+# sheet-sized scan.
+_GTK_SEEK_MAX_ROWS = 4096
+_GTK_SEEK_MAX_COLS = 8
+_OFFSCREEN_SENTINEL = -2_000_000_000
+
+
+def _plain_table_size(node) -> tuple[int | None, int | None]:
+    """``(rows, columns)`` from the accessible, then the Table interface."""
+
+    def _as_int(value) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return int(value)
+
+    rows = _as_int(_call_first(node, ("get_n_rows",)))
+    cols = _as_int(_call_first(node, ("get_n_columns", "get_n_cols")))
+    if rows is not None and cols is not None:
+        return rows, cols
+    return _table_dimensions(node)
+
+
+def _table_cell_at(node, row: int, col: int):
+    """The cell at ``(row, col)``, from the accessible or the Table interface."""
+    cell = _call_first(node, ("get_accessible_at",), row, col)
+    if cell is not None:
+        return cell
+    try:
+        table = getattr(_atspi(), "Table", None)
+    except ImportError:
+        return None
+    if table is None:
+        return None
+    return _safe(lambda: table.get_accessible_at(node, row, col))
+
+
+def _row_at_child_index(node, index: int) -> int | None:
+    """Table row for a child index. None for a header (row -1) or a miss."""
+    row = _call_first(node, ("get_row_at_index",), index)
+    if row is None:
+        try:
+            table = getattr(_atspi(), "Table", None)
+        except ImportError:
+            table = None
+        if table is not None:
+            row = _safe(lambda: table.get_row_at_index(node, index))
+    if isinstance(row, bool) or not isinstance(row, int) or row < 0:
+        return None
+    return int(row)
+
+
+def _gtk_row_table(node) -> bool:
+    """True for a GTK-sized data table whose cells do not fit the child cap.
+
+    A short tree stays on the index walk. Qt, Chromium, Firefox, and a Calc
+    sheet stay on the walks they already had. A few hundred GTK rows would
+    otherwise be read as a spreadsheet (the first rows only) or from child 0.
+    """
+    if _role_name(node) not in {"table", "tree table"}:
+        return False
+    if _qt_app(node) or _chromium_app(node) or _gecko_app(node):
+        return False
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and "spreadsheet" in _role_name(parent):
+        return False
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        return False
+    if rows >= _GTK_TABLE_MAX_ROWS or cols >= _GTK_TABLE_MAX_COLS:
+        return False
+    return rows * cols > MAX_CHILDREN
+
+
+def _overlaps_screen(pos, size, screen: tuple[int, int]) -> bool:
+    """True when the rect meets the screen and is not the GTK off-screen sentinel."""
+    if pos is None or size is None:
+        return False
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    if width <= 0 or height <= 0 or x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return False
+    screen_w, screen_h = screen
+    if screen_w <= 0 or screen_h <= 0:
+        return False
+    return x < screen_w and y < screen_h and x + width > 0 and y + height > 0
+
+
+def _on_screen_item(acc, screen: tuple[int, int]):
+    """``(accessible, position, size)`` when ``acc`` overlaps the screen."""
+    pos, size = _extents(acc)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    return (acc, pos, size)
+
+
+def _hit_at(comp, x: float, y: float):
+    try:
+        coord = getattr(getattr(_atspi(), "CoordType", None), "SCREEN", 0)
+    except ImportError:
+        coord = 0
+    return _call_first(
+        comp, ("get_accessible_at_point", "getAccessibleAtPoint"), int(x), int(y), coord,
+    )
+
+
+def _row_for_hit(table, hit) -> int | None:
+    """Table row of a hit-test result. None when the hit is a header or a miss.
+
+    The row index is the child index of the node whose parent is the table.
+    A text child inside a cell is not that node: its own index is not a row.
+    """
+    node = hit
+    for _depth in range(4):
+        if node is None:
+            return None
+        parent = _parent_of(node)
+        if parent is table:
+            index = _call_first(node, ("get_index_in_parent", "getIndexInParent"))
+            if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+                return None
+            return _row_at_child_index(table, int(index))
+        node = parent
+    return None
+
+
+def _row_from_edge(table, comp, x: float, start: float, stop: float, step: float) -> int | None:
+    """First table row hit walking from ``start`` toward ``stop``.
+
+    Column headers occupy the top of the box and answer no row. A short
+    walk covers that band and the empty padding under the last painted row.
+    """
+    yy = float(start)
+    limit = float(stop)
+    for _step in range(48):
+        if step > 0 and yy >= limit:
+            return None
+        if step < 0 and yy <= limit:
+            return None
+        row = _row_for_hit(table, _hit_at(comp, x, yy))
+        if row is not None:
+            return row
+        yy += step
+    return None
+
+
+def _gtk_visible_span(table, pos, size, rows: int) -> tuple[int, int] | None:
+    """Inclusive row range whose cells overlap the table's on-screen box."""
+    comp = _component(table)
+    if comp is None or pos is None or size is None:
+        return None
+    x = float(pos[0])
+    y = float(pos[1])
+    width = float(size[0])
+    height = float(size[1])
+    if width <= 1 or height <= 1:
+        return None
+    inset = min(40.0, max(8.0, width / 4.0))
+    if width > 48:
+        inset = min(inset, width - 20.0)
+    sample_x = x + max(1.0, inset)
+    first = _row_from_edge(table, comp, sample_x, y + 1, y + height, 4)
+    if first is None:
+        return None
+    last = _row_from_edge(table, comp, sample_x, y + height - 2, y, -4)
+    if last is None:
+        last = first
+    if last < first:
+        first, last = last, first
+    return first, min(last, rows - 1)
+
+
+def _gtk_column_headers(table, cols: int) -> list:
+    """Column headers, from the Table interface or the leading header children."""
+    found = []
+    seen: set[int] = set()
+    for col in range(max(0, cols)):
+        header = _call_first(table, ("get_column_header",), col)
+        if header is None or id(header) in seen:
+            continue
+        seen.add(id(header))
+        found.append(header)
+    if found:
+        return found
+    for index in range(min(_raw_child_count(table), max(cols, 0) + 2)):
+        child = _child_at(table, index)
+        if child is None or id(child) in seen:
+            continue
+        if "header" not in _role_name(child):
+            break
+        seen.add(id(child))
+        found.append(child)
+    return found
+
+
+def _matches_seek(acc, needle: str) -> bool:
+    """Case-insensitive substring of the accessible name, as ``find`` matches a title."""
+    name = str(_call_first(acc, ("get_name",), default="") or "")
+    if not name.strip():
+        name = str(_call_first(acc, ("get_description",), default="") or "")
+    haystack = name.replace("\u00a0", " ").casefold()
+    return needle.replace("\u00a0", " ").casefold() in haystack
+
+
+def _gtk_rows_match(rows, needle: str) -> bool:
+    return any(_matches_seek(acc, needle) for acc, _pos, _size in rows)
+
+
+def _scroll_vertical_bar_to_row(cell, row: int, rows: int) -> bool:
+    """Move an ancestor's vertical bar so ``row`` is in the scrolled window.
+
+    GTK tree cells report ``scroll_to`` as unsupported, including cells that
+    are already on screen. The scroll pane's bar is a Value in pixels. A
+    fraction of that range puts the row in the window. A bar with no range
+    is left alone.
+    """
+    if rows <= 1:
+        return False
+    fraction = max(0.0, min(1.0, float(row) / float(rows - 1)))
+    for bar in _collect_scrollbars(cell):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), 0.0)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), 0.0)
+        if maximum <= minimum:
+            continue
+        _write_value(bar, minimum + (maximum - minimum) * fraction)
+        return True
+    return False
+
+
+def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
+    """Scroll ``cell`` into view. True when its box then overlaps the screen."""
+    scroll_to(cell)
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    scroll_to_edge(cell, "TOP_EDGE")
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    _scroll_vertical_bar_to_row(cell, row, rows)
+    for _attempt in range(8):
+        if _on_screen_item(cell, screen) is not None:
+            return True
+        time.sleep(0.05)
+    return _on_screen_item(cell, screen) is not None
+
+
+def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
+    """The Table cell named ``needle``, scrolled on screen. None when no cell matches."""
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None:
+        return None
+    for row in range(min(rows, _GTK_SEEK_MAX_ROWS)):
+        for col in range(min(cols, _GTK_SEEK_MAX_COLS)):
+            cell = _table_cell_at(node, row, col)
+            if cell is None or not _matches_seek(cell, needle):
+                continue
+            if _on_screen_item(cell, screen) is None:
+                _bring_cell_on_screen(cell, screen, row, rows)
+                refreshed = _table_cell_at(node, row, col)
+                if refreshed is not None:
+                    cell = refreshed
+            return cell
+    return None
+
+
+def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
+    """On-screen headers and body cells, or None when the span cannot be read.
+
+    None keeps the index walk, which is how a header-only file chooser still
+    gains its body through ``_with_table_body``.
+    """
+    pos, size = _extents(node)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None:
+        return None
+    span = _gtk_visible_span(node, pos, size, rows)
+    if span is None:
+        return None
+    first, last = span
+    out = []
+    for header in _gtk_column_headers(node, cols):
+        item = _on_screen_item(header, screen)
+        if item is not None:
+            out.append(item)
+    for row in range(first, last + 1):
+        for col in range(cols):
+            cell = _table_cell_at(node, row, col)
+            if cell is None:
+                continue
+            item = _on_screen_item(cell, screen)
+            if item is not None:
+                out.append(item)
+    return out or None
+
+
+def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
+    """On-screen cells of a large GTK table, or None to keep the index walk.
+
+    ``seek`` is the ``find`` text. When no painted cell contains it, the
+    matching Table cell is scrolled into view and the span is read again.
+    A snapshot with no seek does not move the tree.
+    """
+    if not _gtk_row_table(node):
+        return None
+    screen = _screen_size()
+    painted = _visible_gtk_table_cells(node, screen)
+    if not painted:
+        return None
+    needle = seek.strip() if isinstance(seek, str) else ""
+    if needle and not _gtk_rows_match(painted, needle):
+        match = _reveal_gtk_table_match(node, needle, screen)
+        if match is not None:
+            refreshed = _visible_gtk_table_cells(node, screen)
+            if refreshed:
+                painted = refreshed
+            if not _gtk_rows_match(painted, needle):
+                item = _on_screen_item(match, screen)
+                if item is not None:
+                    painted = [*painted, item]
+    return painted
 
 
 def _with_table_body(node, kids: list) -> list:
