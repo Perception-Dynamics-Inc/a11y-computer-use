@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from a11y_computer_use.untrusted import fence_untrusted
+from a11y_computer_use.untrusted import render_untrusted
 from a11y_computer_use.schema import (
     Action,
     AppOp,
@@ -746,7 +746,7 @@ class ApprovalPrompt(str):
 
     It is a ``str``, so elicitation and ``prompt in text`` checks keep
     working. ``role``, ``target_name``, ``window``, and ``summary`` are the
-    trimmed, unfenced values. The string itself fences page text.
+    trimmed, unfenced values. The string quotes page text for a person.
     """
 
     role: str | None
@@ -830,16 +830,18 @@ def _confirmation_text(
     parts = [f"Confirm a potentially irreversible action: {verb}"]
     if role:
         parts.append(f"role={role}")
-    fenced_name = fence_untrusted(name, limit=_NAME_LIMIT)
-    if fenced_name:
-        parts.append("name=" + fenced_name)
+    shown_name = render_untrusted(name, limit=_NAME_LIMIT)
+    if shown_name:
+        parts.append("name=" + shown_name)
     if window:
-        fenced_window = fence_untrusted(window, limit=_NAME_LIMIT)
-        if fenced_window:
-            parts.append("window=" + fenced_window)
+        shown_window = render_untrusted(window, limit=_NAME_LIMIT)
+        if shown_window:
+            parts.append("window=" + shown_window)
     parts.append(f"in {app}")
     if summary:
-        parts.append("args=" + fence_untrusted(summary, limit=_SUMMARY_LIMIT))
+        shown_summary = render_untrusted(summary, limit=_SUMMARY_LIMIT)
+        if shown_summary:
+            parts.append("args=" + shown_summary)
     return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
 
 
@@ -859,7 +861,7 @@ def confirmation_prompt(
     The question names the control's role, its accessible name, the window
     title when ``window`` is passed, and a short argument summary. A click
     summary redacts the element's value. WebMCP arguments are redacted. Page
-    text in the question is trimmed and wrapped by ``fence``. The return value
+    text in the question is quoted with ``render_untrusted``. The return value
     is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
     is warranted.
 

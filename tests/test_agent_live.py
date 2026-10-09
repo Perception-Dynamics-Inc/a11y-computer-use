@@ -1558,9 +1558,9 @@ def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
         assert action.reason_kind == "payment"
         assert "role=" in prompt
         assert "reason=payment" in prompt
-        assert "Pay now" in prompt
+        assert 'name=untrusted:"Pay now"' in prompt
         assert "cuagentpay" in prompt.casefold()
-        assert "<untrusted nonce=" in prompt
+        assert "<untrusted" not in prompt
         assert "4111111111111111" not in prompt
         assert "[REDACTED]" in prompt
         assert result.step_log and str(result.step_log[0].error).startswith("approval_denied")

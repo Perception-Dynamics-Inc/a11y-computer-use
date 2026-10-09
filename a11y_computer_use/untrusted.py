@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import unicodedata
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -147,12 +148,78 @@ def fence_untrusted(text: str, *, limit: int = 80) -> str:
 
     Empty text stays empty. ``fence`` escapes openers and closers and wraps a
     page-supplied fence again unless this process issued its nonce. The
-    returned string is the fence text, including the nonce tags.
+    returned string is the fence text, including the nonce tags. This is the
+    form sent to a model. A prompt a person reads uses :func:`render_untrusted`.
     """
     trimmed = trim_untrusted(text, limit=limit)
     if not trimmed:
         return ""
     return fence(trimmed).text
+
+
+def render_untrusted(text: str, *, limit: int = 80) -> str:
+    """Quote UI text for a person, without nonce tags.
+
+    The result is ``untrusted:"..."``, or ``untrusted suspicious:"..."`` when
+    the text reads like an instruction. A cut string ends with an ellipsis
+    inside the quotes. Backslash, double quotes, newlines, and other control
+    and format characters are escaped. A page-supplied ``<untrusted`` opener
+    is escaped the same way :func:`fence` escapes it, so a quote, a newline,
+    or a forged fence cannot close the field or start a second prompt.
+    Empty text stays empty.
+    """
+    clipped = _clip_for_person(str(text), limit=limit)
+    if not clipped:
+        return ""
+    fenced = fence(clipped)
+    match = _FENCED.match(fenced.text)
+    # Keep fence's ``&lt;`` escapes. Unwrapping would put a raw ``<untrusted``
+    # tag back in front of the person.
+    body = clipped if match is None else match.group(3)
+    shown = _escape_for_person(body)
+    if fenced.suspicious:
+        return f'untrusted suspicious:"{shown}"'
+    return f'untrusted:"{shown}"'
+
+
+def _clip_for_person(text: str, *, limit: int) -> str:
+    """Keep at most ``limit`` characters, including controls and newlines.
+
+    A plain space stays a space. A newline stays a newline so
+    :func:`_escape_for_person` can escape it. A string of only spaces is empty.
+    """
+    if limit < 1 or not _worth_showing(text):
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit == 1:
+        return "…"
+    return text[: limit - 1] + "…"
+
+
+def _worth_showing(text: str) -> bool:
+    return any(char != " " for char in text)
+
+
+def _escape_for_person(text: str) -> str:
+    """Escape characters that could close a quote or redraw the line."""
+    parts: list[str] = []
+    for char in text:
+        if char == "\\":
+            parts.append("\\\\")
+        elif char == '"':
+            parts.append('\\"')
+        elif char == "\n":
+            parts.append("\\n")
+        elif char == "\r":
+            parts.append("\\r")
+        elif char == "\t":
+            parts.append("\\t")
+        elif char != " " and (char.isspace() or unicodedata.category(char) in {"Cc", "Cf"}):
+            parts.append("\\u%04x" % ord(char))
+        else:
+            parts.append(char)
+    return "".join(parts)
 
 
 def fence(text: str, *, nonce: str | None = None) -> Fenced:
@@ -357,6 +424,7 @@ __all__ = [
     "env_flag",
     "fence",
     "fence_untrusted",
+    "render_untrusted",
     "is_browser_chrome_url",
     "looks_like_injection",
     "trim_untrusted",

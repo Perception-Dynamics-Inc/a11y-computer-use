@@ -16,10 +16,10 @@ import json
 import sys
 from collections.abc import Sequence
 
-from a11y_computer_use.agent.actions import Action, approval_target
+from a11y_computer_use.agent.actions import Action, risk_category
 from a11y_computer_use.agent.result import RunResult
 from a11y_computer_use.agent.trace import summarize_args
-from a11y_computer_use.untrusted import fence_untrusted
+from a11y_computer_use.untrusted import render_untrusted
 
 
 class _Parser(argparse.ArgumentParser):
@@ -217,13 +217,14 @@ def _mcp(args: argparse.Namespace) -> int:
 
 
 def render_approval_prompt(action: Action) -> str:
-    """The ``--approve`` question.
+    """The ``--approve`` question a person reads.
 
-    The same labelled target as the server approval event and the MCP approve
-    flow: role, name, window, page URL when there is one, and the reason
+    Role, name, window, page URL when there is one, and the reason
     (``payment``, ``send``, ``delete``, ``quit``, or ``exec``). Role and
     reason are the loop's tokens. The name, window, URL, and argument summary
-    are trimmed and wrapped with :func:`fence_untrusted`.
+    are quoted with :func:`render_untrusted`. The HTTP and MCP approval
+    payloads still use :func:`approval_target`, which keeps ``fence`` tags for
+    a model.
     """
     if action.name == "confirm":
         raw = action.args.get("prompt")
@@ -232,14 +233,26 @@ def render_approval_prompt(action: Action) -> str:
             if "[y/N]" not in text:
                 text += " [y/N]"
             return text + " "
-    target = approval_target(action)
     parts = [action.name]
-    for key in ("role", "name", "window", "url", "reason"):
-        if target.get(key):
-            parts.append(f"{key}={target[key]}")
+    if action.role:
+        parts.append(f"role={action.role}")
+    for key, value, limit in (
+        ("name", action.target_name, 80),
+        ("window", action.window, 80),
+        ("url", action.url, 160),
+    ):
+        if isinstance(value, str) and value:
+            shown = render_untrusted(value, limit=limit)
+            if shown:
+                parts.append(f"{key}={shown}")
+    kind = action.reason_kind or risk_category(action.reason)
+    if kind:
+        parts.append(f"reason={kind}")
     summary = action.summary if action.summary is not None else summarize_args(action.args)
     if summary and summary != "{}":
-        parts.append("args=" + fence_untrusted(summary, limit=160))
+        shown = render_untrusted(summary, limit=160)
+        if shown:
+            parts.append("args=" + shown)
     return "Approve " + " ".join(parts) + "? [y/N] "
 
 
