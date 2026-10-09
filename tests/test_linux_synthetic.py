@@ -6005,6 +6005,9 @@ def test_sheet_formula_match_folds_case_whitespace_and_separators(fake_atspi) ->
     ``;`` and ``,`` are the same argument separator. A space inside a
     quoted string is still a difference. The computed number is not the formula.
     """
+    assert _atspi.formulas_match("=AVERAGE(B2:B5)", "=average( B2:B5 )") is True
+    assert _atspi.formulas_match("AVERAGE(B2\\", "=AVERAGE(B2:B5)") is False
+    assert _atspi.formulas_match("=AVERAGE(B", "=AVERAGE(B2:B5)") is False
     assert _atspi.formulas_match("SUM(A1:A3)", "=sum( A1:A3 )") is True
     assert _atspi.formulas_match("SUM(A1\\:A3)", "=SUM(A1:A3)") is True
     assert _atspi.formulas_match("SUM(A1;A2)", "=SUM(A1,A2)") is True
@@ -6026,8 +6029,10 @@ def test_sheet_number_match_accepts_calc_display_and_rejects_a_different_number(
 ) -> None:
     """Synthetic cell text. ``1.50``, ``1e3``, and ``1,200`` match the display."""
     cell = _Acc("table cell", name="D1")
-    cell.text = "1.5"
+    cell.text = "14.6"
     cell.get_attributes = lambda: {}
+    assert _atspi.sheet_cell_matches(cell, "14.60") is True
+    cell.text = "1.5"
     assert _atspi.sheet_cell_matches(cell, "1.50") is True
     assert _atspi.sheet_cell_matches(cell, "14.60") is False
     cell.text = "1000"

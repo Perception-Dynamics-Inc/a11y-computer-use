@@ -3793,9 +3793,12 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
 def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> None:
     """Live Calc. A range formula and a normalised number are not mismatches.
 
-    ``=SUM(A1:A3)`` commits even though the Formula attribute is cut at the
-    colon. ``1.50`` reads back as ``1.5``, ``1e3`` as ``1000``, and ``1,200``
-    as ``1200``. The sum of 1, 2, and 3 is 6, so the formula stayed in the cell.
+    The Formula attribute is cut at the colon (``AVERAGE(B2\\`` for
+    ``=AVERAGE(B2:B5)``). Confirmation uses the cell editor's formula, so
+    the read-back is the whole range, not ``=AVERAGE(B``. ``14.60`` reads
+    back as ``14.6``. ``1.50``, ``1e3``, and ``1,200`` do the same for
+    ``1.5``, ``1000``, and ``1200``. The average of 10, 20, 30, and 40 is
+    25, so the formula stayed in the cell.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -3834,7 +3837,7 @@ def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> No
                 shot = None
             else:
                 last = observe.render_text(shot)[:500]
-                if all(_cell(shot, name) is not None for name in ("A1", "A2", "A3", "C1", "D1", "E1")):
+                if all(_cell(shot, name) is not None for name in ("B2", "B3", "B4", "B5", "C1", "D1", "G1")):
                     snap = shot
                     break
             time.sleep(0.5)
@@ -3846,7 +3849,7 @@ def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> No
         runtime.desktop_snapshot("soffice")
         current = runtime._current
         assert current is not None
-        for address, seed in (("A1", "1"), ("A2", "2"), ("A3", "3")):
+        for address, seed in (("B2", "10"), ("B3", "20"), ("B4", "30"), ("B5", "40")):
             cell = _cell(current, address)
             assert cell is not None
             seeded = runtime.set_value(cell.ref, seed)
@@ -3856,19 +3859,21 @@ def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> No
             assert current is not None
         target = _cell(current, "C1")
         assert target is not None
-        formula = runtime.set_value(target.ref, "=SUM(A1:A3)")
+        formula = runtime.set_value(target.ref, "=AVERAGE(B2:B5)")
         assert formula.outcome == "confirmed", (formula, formula.evidence)
-        assert "=SUM(A1:A3)" in formula.evidence
+        assert "=AVERAGE(B2:B5)" in formula.evidence
+        assert "AVERAGE(B\\" not in formula.evidence
         assert "text_mismatch" not in formula.evidence
         shot = driver.snapshot(Scope.WINDOW, "soffice")
         held = _cell(shot, "C1")
         assert held is not None
-        assert held.value in {"6", "6.0", "=SUM(A1:A3)", "SUM(A1:A3)"}, held.value
+        assert held.value in {"25", "25.0", "25.00", "=AVERAGE(B2:B5)", "AVERAGE(B2:B5)"}, held.value
         current = shot
         for address, request, shown in (
-            ("D1", "1.50", {"1.5", "1.50"}),
-            ("E1", "1e3", {"1000", "1,000", "1e3"}),
-            ("F1", "1,200", {"1200", "1,200", "1200.0"}),
+            ("D1", "14.60", {"14.6", "14.60"}),
+            ("E1", "1.50", {"1.5", "1.50"}),
+            ("F1", "1e3", {"1000", "1,000", "1e3"}),
+            ("G1", "1,200", {"1200", "1,200"}),
         ):
             runtime.desktop_snapshot("soffice")
             current = runtime._current
