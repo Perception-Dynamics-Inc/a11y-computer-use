@@ -125,11 +125,8 @@ def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object
     finalization cannot turn the exit into that signal death.
     """
     del frame
-    try:
-        signal.signal(signum, lambda sig, frm: _on_cancel_signal(agent, hits, sig, frm))
-    except (OSError, ValueError):
-        pass
-    hits[0] += 1
+    # Ask to stop before re-arming. signal.signal checks pending signals, and
+    # the cancel has to be visible even if that re-enters this handler.
     flag = getattr(agent, "_signal_cancel", None)
     if flag is not None and hasattr(flag, "set"):
         try:
@@ -142,6 +139,11 @@ def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object
             cancel()
         except Exception:  # noqa: BLE001 - a signal handler must not raise
             pass
+    hits[0] += 1
+    try:
+        signal.signal(signum, lambda sig, frm: _on_cancel_signal(agent, hits, sig, frm))
+    except (OSError, ValueError):
+        pass
     if hits[0] >= 2:
         os._exit(3)
 

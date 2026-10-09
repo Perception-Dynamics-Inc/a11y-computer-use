@@ -5569,10 +5569,18 @@ class Runtime:
             _running, app = self._resolve_app(app)
         gated_app = app or self._context_app()
         checker = self._checker()
+        stop = getattr(self, "_agent_stop", None)
+        on_interrupt = getattr(self, "_agent_interrupt", None)
         return self._run_gated(
             ObserveOp(verb=ObserveVerb.WAIT_UNTIL, app=gated_app),
             gated_app,
-            lambda: json.dumps(checker.wait(condition, timeout_s=timeout_s, poll_s=poll_s)),
+            lambda: json.dumps(checker.wait(
+                condition,
+                timeout_s=timeout_s,
+                poll_s=poll_s,
+                stop=stop if callable(stop) else None,
+                on_interrupt=on_interrupt if callable(on_interrupt) else None,
+            )),
         )
 
     # -- named dispatch (the agent loop, CLI `run-once`) ------------------------

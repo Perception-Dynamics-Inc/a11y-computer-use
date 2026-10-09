@@ -53,6 +53,31 @@ def test_settle_retries_when_sleep_is_interrupted(monkeypatch) -> None:
     assert calls["n"] >= 2
 
 
+def test_interrupted_sleep_stops_the_wait_when_cancel_is_set(monkeypatch) -> None:
+    """A signal during the slice must not keep the settle running."""
+    clock = [0.0]
+
+    def sleep(_seconds: float) -> None:
+        raise InterruptedError("interrupted system call")
+
+    monkeypatch.setattr(conditions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(conditions.time, "sleep", sleep)
+    flag = {"stop": False}
+
+    def on_interrupt() -> None:
+        flag["stop"] = True
+
+    result = conditions.Checker().wait(
+        {"settle": 30},
+        timeout_s=60,
+        poll_s=1,
+        stop=lambda: flag["stop"],
+        on_interrupt=on_interrupt,
+    )
+    assert result["matched"] == "cancelled"
+    assert flag["stop"] is True
+
+
 def test_settle_rejects_negative_or_absurd_seconds() -> None:
     with pytest.raises(ValueError):
         conditions.Checker().probe({"settle": -1}, {})

@@ -586,15 +586,14 @@ def _url_status(url: object, timeout_s: float) -> int | None:
     return status
 
 
-def _sleep(seconds: float) -> None:
-    """Sleep for ``seconds``, retrying when a signal interrupts the syscall.
+def _sleep(seconds: float, on_interrupt: Callable[[], None] | None = None) -> None:
+    """Sleep for ``seconds``. An interrupted syscall notifies ``on_interrupt``.
 
     ``time.sleep`` retries ``EINTR`` when the Python handler does not raise
-    (PEP 475). On macOS a ``SIGTERM`` during that sleep can still surface as
-    ``InterruptedError``. Retrying keeps the wait on the current step so the
-    agent can finish it and then honour cancel, instead of recording a failed
-    run. A syscall that keeps failing ends the slice so the wait can poll
-    again instead of spinning.
+    (PEP 475). On macOS a signal during that sleep can still surface as
+    ``InterruptedError`` before the handler runs. The callback runs first so
+    the caller can record cancel, then the error propagates and the wait
+    stops instead of starting another step.
     """
     if seconds <= 0:
         return
@@ -613,10 +612,11 @@ def _sleep(seconds: float) -> None:
             if exc.errno != errno.EINTR:
                 raise
             interruptions += 1
+        if on_interrupt is not None:
+            on_interrupt()
+            raise InterruptedError("interrupted system call")
         if interruptions >= 3:
-            while time.monotonic() < deadline:
-                pass
-            return
+            raise InterruptedError("interrupted system call")
 
 
 class Checker:
@@ -724,10 +724,20 @@ class Checker:
             return f"screen shows {needle!r}" if found else None
         raise ValueError(kind)
 
-    def wait(self, condition: dict, *, timeout_s: float = 600.0, poll_s: float = 2.0) -> dict:
+    def wait(
+        self,
+        condition: dict,
+        *,
+        timeout_s: float = 600.0,
+        poll_s: float = 2.0,
+        stop: Callable[[], bool] | None = None,
+        on_interrupt: Callable[[], None] | None = None,
+    ) -> dict:
         """Poll until the condition holds; raise ``timeout`` otherwise.
 
         Returns ``{"matched": description, "waited_s": seconds, "polls": n}``.
+        ``stop`` ends the wait on the next poll (a cancel). ``on_interrupt``
+        runs when the sleep is interrupted, before that cancel is observed.
         """
         kind_of(condition)  # validate before waiting
         if not (0 <= timeout_s <= MAX_WAIT_UNTIL_S):
@@ -738,7 +748,17 @@ class Checker:
         deadline = started + timeout_s
         state: dict = {"deadline": deadline}
         polls = 0
+
+        def _stopped() -> dict:
+            return {
+                "matched": "cancelled",
+                "waited_s": round(time.monotonic() - started, 2),
+                "polls": polls,
+            }
+
         while True:
+            if stop is not None and stop():
+                return _stopped()
             # A probe that starts after the deadline can run past timeout_s.
             # file_exists, file_stable, and settle only block in the sleep
             # below, which is clipped to the time still left.
@@ -755,7 +775,12 @@ class Checker:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._raise_timeout(condition, started, polls, state, timeout_s)
-            _sleep(min(poll_s, remaining))
+            try:
+                _sleep(min(poll_s, remaining), on_interrupt)
+            except InterruptedError:
+                if stop is not None and stop():
+                    return _stopped()
+                raise
 
     def _raise_timeout(self, condition: dict, started: float, polls: int, state: dict, timeout_s: float) -> None:
         detail: dict[str, object] = {

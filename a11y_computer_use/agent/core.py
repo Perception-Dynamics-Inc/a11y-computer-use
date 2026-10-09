@@ -270,6 +270,13 @@ class Agent:
         self._restore_signal_cancel()
         return self._cancel.is_set()
 
+    def _mark_signal_cancel(self) -> None:
+        """Record a cancel from a signal, including one seen as ``InterruptedError``."""
+        flag = self._signal_cancel
+        if flag is not None:
+            flag.set()
+        self._cancel.set()
+
     def run(self, goal: str) -> RunResult:
         """Execute ``goal`` and return the final result."""
         for _event in self.stream(goal):
@@ -356,6 +363,14 @@ class Agent:
             elif isinstance(existing, DomainPolicy):
                 self.domain_policy = existing
         self._require_linux_bindings()
+        # The wait loop polls these so a signal during time.sleep stops this
+        # step instead of running the next turn. Missing attributes on a test
+        # double are ignored.
+        try:
+            self.runtime._agent_stop = self._stop_requested  # type: ignore[attr-defined]
+            self.runtime._agent_interrupt = self._mark_signal_cancel  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
+            pass
         self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         self.trace = Trace(self._trace_dir)
         prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
@@ -899,6 +914,19 @@ class Agent:
         except (TypeError, ValueError, KeyError) as exc:
             text = self._fence_tool_text(f"invalid_arguments: {exc}")
             marker = outcome.ActionResult(text, outcome="refused", next=(), evidence=text)
+            return "", text, marker
+        except InterruptedError as exc:
+            # A signal during sleep, select, or a subprocess. On macOS this
+            # can surface before the Python handler runs. Record the cancel
+            # now so the loop does not start another step.
+            if self._signal_cancel is not None:
+                self._mark_signal_cancel()
+            text = self._fence_tool_text(f"error: {type(exc).__name__}: {exc}")
+            marker = outcome.ActionResult(
+                text, outcome="refused",
+                next=("ref", "coordinates", "keyboard", "foreground"),
+                evidence=text,
+            )
             return "", text, marker
         except Exception as exc:  # noqa: BLE001 - one tool must not kill the run
             text = self._fence_tool_text(f"error: {type(exc).__name__}: {exc}")

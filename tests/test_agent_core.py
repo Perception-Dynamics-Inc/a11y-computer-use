@@ -452,6 +452,37 @@ def test_interrupted_blocking_call_after_cancel_is_cancelled():
     assert result.reason == "cancelled"
 
 
+def test_interrupted_wait_does_not_start_the_next_turn():
+    """The step in progress is recorded. The following turn does not run."""
+    import threading
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    seen: list[str] = []
+
+    class _Runtime(FakeRuntime):
+        def call_tool(self, name, params, confirm=None):
+            seen.append(name)
+            if name == "wait_until" and seen.count("wait_until") >= 2:
+                raise InterruptedError("interrupted system call")
+            return super().call_tool(name, params, confirm)
+
+    runtime = _Runtime(elements)
+    agent = Agent(
+        ScriptedModel([
+            turn(ToolCall("wait", {"seconds": 0.3})),
+            turn(ToolCall("wait", {"seconds": 3})),
+            turn(ToolCall("wait", {"seconds": 30})),
+        ]),
+        runtime=runtime,
+    )
+    agent._signal_cancel = threading.Event()
+    result = agent.run("wait a lot")
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+    assert [step.action for step in result.step_log] == ["wait", "wait"]
+    assert seen.count("wait_until") == 2
+
+
 def test_interrupted_error_without_cancel_is_still_failed():
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
 
