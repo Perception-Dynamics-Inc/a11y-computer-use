@@ -4968,6 +4968,45 @@ def accessible_gone(acc) -> bool:
     return not bool(role)
 
 
+def _misses_primary_screen(pos, size) -> bool:
+    """True when a SCREEN box has no overlap with the primary display.
+
+    The pruner drops that box, so a scrolled-off control leaves the snapshot
+    while its accessible is still alive. A partial overlap stays.
+    """
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    if width <= 0 or height <= 0:
+        return True
+    screen_w, screen_h = _screen_size()
+    right = min(x + width, float(screen_w))
+    bottom = min(y + height, float(screen_h))
+    return right <= max(x, 0.0) or bottom <= max(y, 0.0)
+
+
+def offscreen_extents(acc):
+    """SCREEN box of an alive accessible that misses the display.
+
+    ``None`` when the node is gone, sits in a hidden Firefox document, or
+    its box still intersects the primary screen. A scrolled-off button is
+    this case: not DEFUNCT, and the pruner dropped it because the box misses
+    every display. A control that is still on screen is not, even when its
+    title no longer matches. A node with no box is off-screen only when it
+    is also not SHOWING; a SHOWING node whose component failed to answer
+    stays ``None`` so a real stale ref is not reported as off-screen.
+    """
+    if accessible_gone(acc) or hidden_web_target(acc):
+        return None
+    pos, size = _extents(acc)
+    if pos is None or size is None:
+        if _state_has(acc, "SHOWING"):
+            return None
+        return (0.0, 0.0), (0.0, 0.0)
+    if not _misses_primary_screen(pos, size):
+        return None
+    return pos, size
+
+
 def hidden_named_target(root, ax_role: str, title: str) -> bool:
     """True when a live node of ``ax_role`` and ``title`` sits in a hidden document.
 

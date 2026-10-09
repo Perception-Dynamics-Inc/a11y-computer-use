@@ -2406,6 +2406,76 @@ class Runtime:
             raise
         return snap, live
 
+    def _alive_offscreen(self, ref: str) -> Bounds | None:
+        """Bounds when ``ref`` is still a live node that misses the display.
+
+        None on a backend that does not distinguish that case, and when the
+        node is gone or still on screen. Crop and ``scroll(into_view=true)``
+        use it. Click does not.
+        """
+        snap = getattr(self, "_current", None)
+        fn = getattr(self.driver, "alive_offscreen", None)
+        if snap is None or not callable(fn):
+            return None
+        try:
+            found = fn(snap, ref)
+        except Exception:  # noqa: BLE001 - a failed extents read is not off-screen
+            return None
+        return found if isinstance(found, Bounds) else None
+
+    def _offscreen_error(self, ref: str, bounds: Bounds) -> ComputerUseError:
+        """``not_visible`` for a ref that scrolled away and is still valid."""
+        hint = f"scroll(ref={ref!r}, into_view=true)"
+        err = _not_visible(
+            ref,
+            "off_screen",
+            bounds,
+            "the ref is still valid and has scrolled off the display; "
+            f"{hint} reveals it",
+        )
+        err.detail["hint"] = hint
+        return err
+
+    def _resolve_crop(self, ref: str) -> tuple[Snapshot, Element]:
+        """Resolve ``ref`` for crop.
+
+        A ``stale_ref`` whose handle is still alive and off the display is
+        ``not_visible`` with reason ``off_screen``. A gone ref, and a ref
+        whose title changed while it stayed on screen, stay ``stale_ref``.
+        """
+        try:
+            snap, _anchor = self._anchor(ref)
+            live = self.driver.resolve_ref(snap, ref)
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.STALE_REF:
+                bounds = self._alive_offscreen(ref)
+                if bounds is not None:
+                    visible = self._offscreen_error(ref, bounds)
+                    self._audit_stale("crop", ref, visible)
+                    raise visible from exc
+            self._audit_stale("crop", ref, exc)
+            raise
+        return snap, live
+
+    def _scrolled_off_anchor(self, ref: str) -> tuple[Element, str, Bounds] | None:
+        """The issuing element when ``ref`` has scrolled off and is still valid.
+
+        ``scroll(into_view=true)`` reveals that element through its handle.
+        A wheel scroll does not use this: the old point now belongs to
+        whatever scrolled into the slot. The bounds are the live off-screen
+        box, not the position the ref was issued at.
+        """
+        if ocr.is_ocr_ref(ref):
+            return None
+        bounds = self._alive_offscreen(ref)
+        if bounds is None:
+            return None
+        try:
+            snap, anchor = self._anchor(ref)
+        except ComputerUseError:
+            return None
+        return anchor, snap.app or self._frontmost(), bounds
+
     def _target(
         self,
         ref: str | None,
@@ -3215,11 +3285,15 @@ class Runtime:
         ``padding`` grows the rect on every side before it is clipped to the
         display. ``scale`` sizes the PNG (1 keeps the cropped pixels). The
         pixels are not read. An element that misses the display, or whose
-        center belongs to another window, raises ``not_visible``.
+        center belongs to another window, raises ``not_visible``. A ref the
+        page has scrolled off screen is the same outcome (reason
+        ``off_screen``): the node is still valid, and the error names
+        ``scroll(ref, into_view=true)``. A ref that is gone stays
+        ``stale_ref``.
         """
         pad = _crop_padding(padding)
         factor = _crop_scale(scale)
-        _snap, live = self._resolve(ref, "crop")
+        _snap, live = self._resolve_crop(ref)
         app = _snap.app or self._frontmost()
 
         def execute() -> tuple[str, "capture.ScaledImage"]:
@@ -3928,7 +4002,16 @@ class Runtime:
     ) -> str:
         parsed_unit = ScrollUnit(unit)
         self._reject_coordinate(ref, x, y, display_id)
-        target, app = self._target(ref, x, y, display_id, kind="scroll")
+        # A scrolled-off ref fails rematch (the slot now holds something else)
+        # even though the accessible is still valid. into_view reveals that
+        # handle. A wheel scroll keeps stale_ref so it does not land on the
+        # element that slid into the old point.
+        scrolled_off = self._scrolled_off_anchor(ref) if into_view and ref else None
+        if scrolled_off is not None:
+            target, app, off_bounds = scrolled_off
+        else:
+            target, app = self._target(ref, x, y, display_id, kind="scroll")
+            off_bounds = None
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
         before = self._capture()
 
@@ -3944,6 +4027,8 @@ class Runtime:
                 and self.driver.scroll_into_view(target)
             ):
                 return
+            if scrolled_off is not None and off_bounds is not None:
+                raise self._offscreen_error(ref or target.ref, off_bounds)
             self._refuse_secure(target)  # the wheel path moves the pointer onto the target
             self._guard_user(app)
             self.driver.scroll(target, dx=dx, dy=dy, unit=parsed_unit)
@@ -5786,6 +5871,9 @@ def build_server(
         refs, including a control inside a cross-origin iframe whose box is in
         the top document. An element that misses the display, or whose center
         is covered by another window, is not_visible and no image is returned.
+        A ref the page has scrolled off screen is not_visible with reason
+        off_screen (the ref is still valid); the error names
+        scroll(ref, into_view=true). A ref that is gone stays stale_ref.
         Take a desktop_snapshot first. Tier 'read' against that snapshot's app.
         Needs the Screen Recording permission on the OS backends."""
         text, image = await run(runtime.crop, ref, padding, scale)
@@ -5939,8 +6027,11 @@ def build_server(
         content up, positive dx scrolls content left; unit is 'lines' or
         'pixels'. Gated at tier 'click'. Pass
         into_view=true with a ref to reveal that element via the accessibility
-        API WITHOUT moving the pointer (dx/dy ignored); a wheel scroll instead
-        moves the cursor to the scroll point. The text is unchanged.
+        API WITHOUT moving the pointer (dx/dy ignored). A ref that has
+        scrolled off screen is still valid: into_view=true reveals that
+        accessible. A wheel scroll instead moves the cursor to the scroll
+        point and keeps stale_ref when the ref has left the tree. The text
+        is unchanged.
         Structured content adds outcome, next, and evidence."""
         return _publish(await run(
             runtime.scroll, ref, x, y, display_id, dx, dy, unit, into_view,
