@@ -240,6 +240,90 @@ def test_approval_round_trip_and_sse(tmp_path: Path) -> None:
         httpd.shutdown()
 
 
+def test_payment_stops_unless_opted_out_and_approval_names_the_target(tmp_path: Path) -> None:
+    """A Pay now click is needs_human until allow_payments, then the event matches."""
+    elements = window(
+        el("e2", "AXButton", "Pay now", parent="e1", clickable=True),
+        title="Checkout - Google Chrome",
+    )
+    turns = [
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        _done_turn(),
+    ]
+    store, runtime = _store(tmp_path, ScriptedModel(turns), elements=elements)
+    runtime.current_document_url = lambda: "http://127.0.0.1:9/checkout"  # type: ignore[attr-defined]
+    httpd, port = _serve(store)
+    try:
+        status, started = _post_run(port, display=":9")
+        assert status == 202
+        result = _wait(port, started["id"])
+        assert result["status"] == "needs_human"
+        human = result["needs_human"]
+        assert human["kind"] == "payment"
+        assert human["reason"] == "payment"
+        assert "Pay now" in _plain(human["message"])
+        assert "http://127.0.0.1:9/checkout" in _plain(human["message"])
+        assert "reason=payment" in _plain(human["message"])
+        assert runtime.calls == []
+    finally:
+        httpd.shutdown()
+
+    opted_turns = [
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        ModelTurn(calls=[ToolCall(
+            "done",
+            {"answer": "held", "conditions": [{"element": {"role": "AXButton", "name": "Pay now"}}]},
+        )]),
+    ]
+    opted, opted_runtime = _store(
+        tmp_path / "opt", ScriptedModel(opted_turns), elements=elements, approval_timeout_s=8,
+    )
+    opted_runtime.current_document_url = lambda: "http://127.0.0.1:9/checkout"  # type: ignore[attr-defined]
+    httpd, port = _serve(opted)
+    try:
+        status, started = _post_run(port, display=":8", extra={"allow_payments": True})
+        assert status == 202
+        box: dict = {}
+
+        def _read() -> None:
+            box["events"] = _events(port, started["id"])
+
+        reader = threading.Thread(target=_read, daemon=True)
+        reader.start()
+        pending = []
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            code, view = _request(port, "GET", f"/runs/{started['id']}")
+            assert code == 200
+            pending = view.get("pending_approvals") or []
+            if pending:
+                break
+            time.sleep(0.02)
+        assert pending, view
+        target = pending[0]["target"]
+        assert pending[0]["reason"] == "payment"
+        assert target["role"] == "AXButton"
+        assert target["reason"] == "payment"
+        assert _plain(target["name"]) == "Pay now"
+        assert "Checkout - Google Chrome" in _plain(target["window"])
+        assert _plain(target["url"]) == "http://127.0.0.1:9/checkout"
+        assert "<untrusted nonce=" in target["name"]
+        assert "4111111111111111" not in json.dumps(pending[0])
+        assert "[REDACTED]" in pending[0]["summary"]
+        _request(
+            port, "POST", f"/runs/{started['id']}/approvals/{pending[0]['approval_id']}",
+            {"approve": False},
+        )
+        assert _wait(port, started["id"])["status"] == "success"
+        reader.join(timeout=10)
+        required = next(event for event in box["events"] if event["type"] == "approval_required")
+        assert required["data"]["target"] == target
+        assert required["data"]["reason"] == "payment"
+        assert opted_runtime.calls == []
+    finally:
+        httpd.shutdown()
+
+
 def test_approval_timeout_denies(tmp_path: Path) -> None:
     turns = [
         ModelTurn(calls=[ToolCall("app", {"action": "quit", "name": "Demo"})]),

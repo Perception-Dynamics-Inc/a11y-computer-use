@@ -38,8 +38,13 @@ def build_agent_mcp(store: RunStore | None = None):
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
+        allow_payments: bool = False,
     ) -> dict:
-        """Start one goal. Returns ``{"id": ...}``. 409 when that display is busy."""
+        """Start one goal. Returns ``{"id": ...}``. 409 when that display is busy.
+
+        ``allow_payments`` lets a payment click wait for ``approve`` instead of
+        stopping as ``needs_human``. It is off by default.
+        """
         body = {
             "goal": goal,
             "model": model,
@@ -50,6 +55,7 @@ def build_agent_mcp(store: RunStore | None = None):
                 "model_timeout_s": model_timeout_s,
             },
             "allow_exec": allow_exec,
+            "allow_payments": allow_payments,
         }
         if allowed_domains is not None:
             body["allowed_domains"] = allowed_domains
@@ -83,7 +89,13 @@ def build_agent_mcp(store: RunStore | None = None):
 
     @server.tool()
     def approve(run_id: str, approval_id: str, approve: bool) -> dict:
-        """Answer one pending approval. True allows the action; false denies it."""
+        """Answer one pending approval. True allows the action; false denies it.
+
+        ``get_run`` lists each waiting approval with the same ``target`` as the
+        HTTP ``approval_required`` event: role, fenced name, fenced window,
+        fenced page URL when the target is in a browser, and reason
+        (payment, send, delete, quit, or exec).
+        """
         outcome = shared.resolve_approval(run_id, approval_id, approve)
         if outcome == "missing":
             raise ToolError(f"404 approval not found: {approval_id}")

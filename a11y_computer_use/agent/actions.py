@@ -10,7 +10,8 @@ and they are not MCP tools.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -38,13 +39,35 @@ ACTION_NAMES = frozenset({
 EXEC_ACTION_NAMES = frozenset({"shell", "python"})
 
 _SEND_WORDS = ("send",)
-_PAYMENT_WORDS = (
-    "pay now",
-    "purchase",
-    "place order",
-    "buy now",
-    "confirm purchase",
-    "confirm payment",
+# Buttons and links. A checkbox or toggle is never one of these, even when
+# its label contains "send" ("Send usage statistics").
+_PAYMENT_LABEL = re.compile(
+    r"\b(?:"
+    r"pay(?:ment|\s+now|\s+with)?"
+    r"|place\s+(?:your\s+)?order"
+    r"|buy(?:\s+now)?"
+    r"|purchase"
+    r"|check\s*out"
+    r"|confirm\s+payment"
+    r"|complete\s+order"
+    r"|confirm\s+(?:purchase|order)"
+    r")\b",
+    re.IGNORECASE,
+)
+# A path segment or host label, not a substring of another word.
+_PAYMENT_URL = re.compile(
+    r"(?:^|[/?#&=])(?:checkout|check-out|payment|billing|purchase)(?:$|[/?#&=.])",
+    re.IGNORECASE,
+)
+_PAYMENT_WINDOW = re.compile(r"\b(?:checkout|payment|billing)\b", re.IGNORECASE)
+_PAYMENT_FIELD = (
+    "card number",
+    "credit card",
+    "debit card",
+    "cvv",
+    "cvc",
+    "payment card",
+    "cardholder",
 )
 _DELETE_WORDS = (
     "delete",
@@ -52,6 +75,23 @@ _DELETE_WORDS = (
     "empty trash",
     "trash",
 )
+_TOGGLE_ROLES = frozenset({
+    "checkbox",
+    "toggle",
+    "switch",
+    "togglebutton",
+    "checkbutton",
+})
+_TEXT_ROLES = frozenset({
+    "statictext",
+    "text",
+    "textfield",
+    "textarea",
+    "image",
+    "group",
+    "window",
+    "webarea",
+})
 
 
 class ReservedPermission(str, Enum):
@@ -67,16 +107,55 @@ class ReservedPermission(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class Action:
-    """One tool call the loop can execute."""
+    """One tool call the loop can execute.
+
+    ``role``, ``target_name``, ``window``, ``url``, ``summary``, ``reason``,
+    and ``reason_kind`` are set on the copy passed to ``approve``. They are
+    empty on the action the model requested. ``target_name`` is the control's
+    accessible name. ``url`` is the page URL when the target is in a browser.
+    ``summary`` is a short JSON summary of ``args`` with secrets removed.
+    ``reason`` is ``risk_reason`` (for example ``paying Pay now``).
+    ``reason_kind`` is ``payment``, ``send``, ``delete``, ``quit``, or ``exec``.
+    """
 
     name: str
     args: dict
     id: str | None = None
+    role: str | None = None
+    target_name: str | None = None
+    window: str | None = None
+    url: str | None = None
+    summary: str | None = None
+    reason: str | None = None
+    reason_kind: str | None = None
 
     @classmethod
     def from_call(cls, call: ToolCall) -> Action:
         args = call.args if isinstance(call.args, dict) else {}
         return cls(name=str(call.name), args=dict(args), id=call.id)
+
+    def for_approval(
+        self,
+        *,
+        role: str | None,
+        target_name: str | None,
+        window: str | None,
+        summary: str | None,
+        reason: str | None,
+        url: str | None = None,
+        reason_kind: str | None = None,
+    ) -> Action:
+        """Copy this action with the fields a person needs in order to approve it."""
+        return replace(
+            self,
+            role=role,
+            target_name=target_name,
+            window=window,
+            url=url,
+            summary=summary,
+            reason=reason,
+            reason_kind=reason_kind if reason_kind is not None else risk_category(reason),
+        )
 
 
 def tool_schemas(*, allow_exec: bool = False) -> list[dict]:
@@ -128,21 +207,138 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     return None
 
 
-def risk_reason(action: Action, label: str | None) -> str | None:
+def _role_key(role: str | None) -> str:
+    if not role:
+        return ""
+    return "".join(str(role).casefold().split()).removeprefix("ax")
+
+
+def is_toggle_control(role: str | None) -> bool:
+    """Checkboxes, switches, and toggles. These are never a send action."""
+    key = _role_key(role)
+    return key in _TOGGLE_ROLES or "checkbox" in key
+
+
+def _is_button_or_link(role: str | None) -> bool:
+    """A clickable control a person could use to submit a payment.
+
+    An unknown role still counts, so a payment label is not dropped when the
+    tree omitted the role. Checkboxes, toggles, and static text do not.
+    """
+    if is_toggle_control(role):
+        return False
+    key = _role_key(role)
+    if not key:
+        return True
+    if key in _TEXT_ROLES:
+        return False
+    return True
+
+
+def looks_like_payment_form(
+    *,
+    url: str | None = None,
+    window: str | None = None,
+    texts: object = (),
+) -> bool:
+    """True when the page is a checkout or payment form.
+
+    ``url`` matches a checkout, payment, billing, or purchase segment.
+    ``window`` matches those words in the title. ``texts`` are accessible
+    names and placeholders; a card field marks the form even when the button
+    itself is labelled Submit.
+    """
+    if isinstance(url, str) and _PAYMENT_URL.search(url):
+        return True
+    if isinstance(window, str) and _PAYMENT_WINDOW.search(window):
+        return True
+    for text in texts:  # type: ignore[union-attr]
+        blob = str(text or "").casefold()
+        if any(token in blob for token in _PAYMENT_FIELD):
+            return True
+    return False
+
+
+def risk_category(reason: str | None) -> str | None:
+    """``payment``, ``send``, ``delete``, ``quit``, or ``exec`` for ``reason``."""
+    if not reason:
+        return None
+    text = reason.casefold()
+    if text.startswith("paying"):
+        return "payment"
+    if text.startswith("sending"):
+        return "send"
+    if text.startswith("deleting"):
+        return "delete"
+    if text.startswith("app quit") or text.startswith("closing") or text.startswith("menu "):
+        return "quit"
+    if text.startswith("running"):
+        return "exec"
+    return None
+
+
+def approval_target(action: Action) -> dict[str, str]:
+    """Role, name, window, URL, and reason, as every approval surface shows them.
+
+    ``role`` and ``reason`` are the loop's own tokens (``payment``, ``send``,
+    ``delete``, ``quit``, ``exec``). The name, window, and page URL are page
+    text: each is trimmed and wrapped with ``fence``.
+    """
+    from a11y_computer_use.untrusted import fence_untrusted
+
+    target: dict[str, str] = {}
+    if action.role:
+        target["role"] = action.role
+    if action.target_name:
+        fenced = fence_untrusted(action.target_name)
+        if fenced:
+            target["name"] = fenced
+    if action.window:
+        fenced = fence_untrusted(action.window)
+        if fenced:
+            target["window"] = fenced
+    if action.url:
+        fenced = fence_untrusted(action.url, limit=160)
+        if fenced:
+            target["url"] = fenced
+    kind = action.reason_kind or risk_category(action.reason)
+    if kind:
+        target["reason"] = kind
+    return target
+
+
+def risk_reason(
+    action: Action,
+    label: str | None,
+    *,
+    role: str | None = None,
+    url: str | None = None,
+    window: str | None = None,
+    payment_form: bool = False,
+) -> str | None:
     """Why this action needs ``approve``, or None when it does not.
 
     Typing into a password, OTP, or card field is not approved: the loop
-    pauses with ``needs_human`` and does not type it.
+    pauses with ``needs_human`` and does not type it. A payment-like button
+    or link, or a button or link on a payment form, is ``paying``. A
+    checkbox or toggle is never ``sending``, including a usage-stats checkbox
+    whose label contains "send". ``url``, ``window``, and ``payment_form``
+    are accepted so callers can pass the page context; the form flag is what
+    marks a generic submit on a checkout page.
     """
+    del url, window
     verb = str(action.args.get("action") or "").lower()
     if action.name == "app" and verb == "quit":
         return "app quit"
     if action.name == "window" and verb == "close":
         return "closing a window"
     text = (label or "").casefold()
-    if action.name in {"click", "menu"} and any(word in text for word in _PAYMENT_WORDS):
-        return f"paying {label}"
-    if action.name in {"click", "menu"} and any(word in text for word in _SEND_WORDS):
+    if action.name in {"click", "menu"} and not is_toggle_control(role):
+        named = bool(label) and _PAYMENT_LABEL.search(label) is not None and _is_button_or_link(role)
+        on_form = payment_form and _is_button_or_link(role)
+        if named or on_form:
+            return f"paying {label or 'payment'}"
+    if action.name in {"click", "menu"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
         return f"sending {label}"
     if action.name in {"click", "menu"} and any(word in text for word in _DELETE_WORDS):
         return f"deleting {label}"
@@ -338,6 +534,10 @@ __all__ = [
     "EXEC_ACTION_NAMES",
     "Action",
     "ReservedPermission",
+    "approval_target",
+    "is_toggle_control",
+    "looks_like_payment_form",
+    "risk_category",
     "risk_reason",
     "tool_schemas",
     "validate_action",

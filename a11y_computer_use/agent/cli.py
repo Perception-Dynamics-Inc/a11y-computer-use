@@ -16,8 +16,10 @@ import json
 import sys
 from collections.abc import Sequence
 
-from a11y_computer_use.agent.actions import Action
+from a11y_computer_use.agent.actions import Action, approval_target
 from a11y_computer_use.agent.result import RunResult
+from a11y_computer_use.agent.trace import summarize_args
+from a11y_computer_use.untrusted import fence_untrusted
 
 
 class _Parser(argparse.ArgumentParser):
@@ -77,6 +79,7 @@ def build_agent(args: argparse.Namespace):
         auto_deny=auto_deny,
         approve_policy=policy,
         allow_exec=bool(getattr(args, "allow_exec", False)),
+        allow_payments=bool(getattr(args, "allow_payments", False)),
         trace_dir=args.trace_dir,
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,
@@ -133,6 +136,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="allow_exec",
         help="expose shell and python tools; each call is still approved or auto-denied",
+    )
+    run.add_argument(
+        "--allow-payments",
+        action="store_true",
+        dest="allow_payments",
+        help=(
+            "let a payment click go through approval instead of stopping as "
+            "needs_human. allow-all does not include payments"
+        ),
     )
     run.add_argument(
         "--allowed-domains",
@@ -204,12 +216,35 @@ def _mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_approval_prompt(action: Action) -> str:
+    """The ``--approve`` question.
+
+    The same labelled target as the server approval event and the MCP approve
+    flow: role, name, window, page URL when there is one, and the reason
+    (``payment``, ``send``, ``delete``, ``quit``, or ``exec``). Role and
+    reason are the loop's tokens. The name, window, URL, and argument summary
+    are trimmed and wrapped with :func:`fence_untrusted`.
+    """
+    if action.name == "confirm":
+        raw = action.args.get("prompt")
+        if isinstance(raw, str) and raw.strip():
+            text = raw.rstrip()
+            if "[y/N]" not in text:
+                text += " [y/N]"
+            return text + " "
+    target = approval_target(action)
+    parts = [action.name]
+    for key in ("role", "name", "window", "url", "reason"):
+        if target.get(key):
+            parts.append(f"{key}={target[key]}")
+    summary = action.summary if action.summary is not None else summarize_args(action.args)
+    if summary and summary != "{}":
+        parts.append("args=" + fence_untrusted(summary, limit=160))
+    return "Approve " + " ".join(parts) + "? [y/N] "
+
+
 def _stdin_approve(action: Action) -> bool:
-    rendered = action.name
-    if action.args:
-        rendered += " " + json.dumps(action.args, default=str)[:180]
-    prompt = f"Approve {rendered}? [y/N] "
-    _write_prompt(prompt)
+    _write_prompt(render_approval_prompt(action))
     answer = sys.stdin.readline()
     return answer.strip().lower() in {"y", "yes"}
 

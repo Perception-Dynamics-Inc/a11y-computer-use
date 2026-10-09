@@ -128,6 +128,33 @@ class Fenced:
     nonce: str
 
 
+def trim_untrusted(text: str, *, limit: int = 80) -> str:
+    """Collapse whitespace and keep at most ``limit`` characters.
+
+    A cut string ends with an ellipsis. The fence is applied after this, so
+    the nonce tags stay intact.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    if limit < 1:
+        return ""
+    return collapsed[: limit - 1] + "…"
+
+
+def fence_untrusted(text: str, *, limit: int = 80) -> str:
+    """Trim UI-derived text and wrap it with the hardened :func:`fence`.
+
+    Empty text stays empty. ``fence`` escapes openers and closers and wraps a
+    page-supplied fence again unless this process issued its nonce. The
+    returned string is the fence text, including the nonce tags.
+    """
+    trimmed = trim_untrusted(text, limit=limit)
+    if not trimmed:
+        return ""
+    return fence(trimmed).text
+
+
 def fence(text: str, *, nonce: str | None = None) -> Fenced:
     """Wrap ``text`` in ``<untrusted nonce=…>…</untrusted nonce=…>``.
 
@@ -329,8 +356,10 @@ __all__ = [
     "escape_untrusted",
     "env_flag",
     "fence",
+    "fence_untrusted",
     "is_browser_chrome_url",
     "looks_like_injection",
+    "trim_untrusted",
     "looks_like_url",
     "navigation_url",
     "parse_domain_list",

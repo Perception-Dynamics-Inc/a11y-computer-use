@@ -19,9 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from a11y_computer_use.agent.actions import approval_target
 from a11y_computer_use.agent.result import RunResult
-from a11y_computer_use.agent.trace import redact_args
+from a11y_computer_use.agent.trace import redact_args, summarize_args
 from a11y_computer_use.agent.ui_text import fence_ui
+from a11y_computer_use.untrusted import fence_untrusted
 
 
 class DisplayBusy(Exception):
@@ -123,7 +125,7 @@ def _fence_payload(kind: str, data: dict) -> dict:
     if kind == "observation" and "text" in payload:
         payload["text"] = _fence_text(payload.get("text"))
     if kind == "needs_human":
-        for key in ("message", "window"):
+        for key in ("message", "window", "url", "name"):
             if key in payload:
                 payload[key] = _fence_text(payload.get(key))
     if kind == "action" and "target" in payload:
@@ -163,7 +165,7 @@ def _fence_result(body: dict) -> dict:
     human = copied.get("needs_human")
     if isinstance(human, dict):
         fenced = dict(human)
-        for key in ("message", "window"):
+        for key in ("message", "window", "url", "name"):
             if key in fenced:
                 fenced[key] = _fence_text(fenced.get(key))
         copied["needs_human"] = fenced
@@ -215,8 +217,7 @@ class RunRecord:
             if item.get("answer") is None and not item["ready"].is_set():
                 waiting.append({
                     "approval_id": item["id"],
-                    "name": item["name"],
-                    "args": item["args"],
+                    **item["public"],
                 })
         return waiting
 
@@ -243,7 +244,7 @@ class RunStore:
 
     def start(self, body: dict) -> RunRecord:
         """Validate ``body`` and start a run. Raises `DisplayBusy` or ValueError."""
-        goal, spec, display, limits, allow_exec, domains, blocked = _parse_run_body(body)
+        goal, spec, display, limits, allow_exec, allow_payments, domains, blocked = _parse_run_body(body)
         key = display_key(display)
         run_id = uuid.uuid4().hex
         trace_dir = self._trace_dir(run_id)
@@ -260,7 +261,7 @@ class RunStore:
             self._runs[run_id] = record
         worker = threading.Thread(
             target=self._worker,
-            args=(record, goal, spec, display, limits, allow_exec, domains, blocked),
+            args=(record, goal, spec, display, limits, allow_exec, allow_payments, domains, blocked),
             name=f"a11y-agent-{run_id[:8]}",
             daemon=True,
         )
@@ -364,11 +365,14 @@ class RunStore:
         display: str | None,
         limits: dict,
         allow_exec: bool,
+        allow_payments: bool,
         domains: list[str] | None,
         blocked: list[str] | None,
     ) -> None:
         try:
-            agent = self._make_agent(record, spec, display, limits, allow_exec, domains, blocked)
+            agent = self._make_agent(
+                record, spec, display, limits, allow_exec, allow_payments, domains, blocked,
+            )
             record.agent = agent
             if record.cancel_requested:
                 agent.cancel()
@@ -398,6 +402,7 @@ class RunStore:
         display: str | None,
         limits: dict,
         allow_exec: bool,
+        allow_payments: bool,
         domains: list[str] | None,
         blocked: list[str] | None,
     ):
@@ -414,6 +419,7 @@ class RunStore:
             "approve": lambda action, record=record: self._approve(record, action),
             "auto_deny": False,
             "allow_exec": allow_exec,
+            "allow_payments": allow_payments,
             "trace_dir": record.trace_dir,
         }
         if self.runtime_factory is not None:
@@ -429,21 +435,18 @@ class RunStore:
         if record.cancel_requested:
             return False
         approval_id = uuid.uuid4().hex
-        args, _secrets = redact_args(dict(getattr(action, "args", {}) or {}))
+        public = approval_public(action)
         ready = threading.Event()
         item = {
             "id": approval_id,
-            "name": str(getattr(action, "name", "")),
-            "args": args,
+            "name": public["name"],
+            "args": public["args"],
+            "public": public,
             "answer": None,
             "ready": ready,
         }
         record.approvals[approval_id] = item
-        record.append("approval_required", {
-            "approval_id": approval_id,
-            "name": item["name"],
-            "args": args,
-        })
+        record.append("approval_required", {"approval_id": approval_id, **public})
         ready.wait(timeout=self.approval_timeout_s)
         with record.cond:
             if item.get("answer") is None:
@@ -454,7 +457,33 @@ class RunStore:
         return approved
 
 
-def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, list[str] | None, list[str] | None]:
+def approval_public(action: object) -> dict:
+    """The labelled target shared by the SSE event and ``pending_approvals``.
+
+    ``name`` stays the action name. ``target`` is role, accessible name,
+    window, page URL, and reason. Name, window, URL, and the argument summary
+    are trimmed and fenced. Role and reason are loop tokens.
+    """
+    args, _secrets = redact_args(dict(getattr(action, "args", {}) or {}))
+    target = approval_target(action)  # type: ignore[arg-type]
+    body: dict = {
+        "name": str(getattr(action, "name", "")),
+        "args": args,
+        "target": target,
+    }
+    if target.get("reason"):
+        body["reason"] = target["reason"]
+    summary = getattr(action, "summary", None)
+    if not isinstance(summary, str) or not summary:
+        summary = summarize_args(args)
+    if summary and summary != "{}":
+        fenced = fence_untrusted(summary, limit=160)
+        if fenced:
+            body["summary"] = fenced
+    return body
+
+
+def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool, list[str] | None, list[str] | None]:
     if not isinstance(body, dict):
         raise ValueError("body must be a JSON object")
     goal = body.get("goal")
@@ -484,7 +513,10 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, list[
         raise ValueError("limits.model_timeout_s must be a positive number")
     if "allow_exec" in body and not isinstance(body.get("allow_exec"), bool):
         raise ValueError("allow_exec must be a boolean")
+    if "allow_payments" in body and not isinstance(body.get("allow_payments"), bool):
+        raise ValueError("allow_payments must be a boolean")
     allow_exec = bool(body.get("allow_exec", False))
+    allow_payments = bool(body.get("allow_payments", False))
     domains = _domains(body.get("allowed_domains", None), "allowed_domains")
     blocked = _domains(body.get("blocked_domains", None), "blocked_domains")
     return (
@@ -497,6 +529,7 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, list[
             "model_timeout_s": float(model_timeout_s),
         },
         allow_exec,
+        allow_payments,
         domains,
         blocked,
     )

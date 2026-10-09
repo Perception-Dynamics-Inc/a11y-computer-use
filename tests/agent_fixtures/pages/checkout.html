@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Checkout - cuagent</title>
+</head>
+<body>
+  <h1>Checkout</h1>
+  <p>Noise-cancelling headphones</p>
+  <p id="price">$249.00</p>
+  <p>Visa ending 4242. No card number is collected on this page.</p>
+  <button id="pay" type="button">Pay now</button>
+  <p id="result">unpaid</p>
+  <script>
+    document.getElementById("pay").addEventListener("click", function () {
+      document.getElementById("result").textContent = "paid";
+    });
+  </script>
+</body>
+</html>

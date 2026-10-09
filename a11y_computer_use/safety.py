@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from a11y_computer_use.untrusted import fence_untrusted
 from a11y_computer_use.schema import (
     Action,
     AppOp,
@@ -706,7 +707,145 @@ _DESTRUCTIVE_LABEL_SUBSTRINGS: tuple[str, ...] = (
 )
 
 
-def confirmation_prompt(action: Action, target_app: str) -> str | None:
+_WINDOW_ROLES = frozenset({"window", "dialog", "sheet", "frame"})
+_NAME_LIMIT = 80
+_SUMMARY_LIMIT = 160
+
+
+def window_title(snap: object, element: Element | None = None) -> str | None:
+    """Title of the window that contains ``element``, or the first window.
+
+    Roles compared are ``window``, ``dialog``, ``sheet``, and ``frame``, with
+    an ``AX`` prefix ignored. When no window has a title, the snapshot's app
+    name is returned. ``None`` when ``snap`` has neither.
+    """
+    if snap is None:
+        return None
+    elements = tuple(getattr(snap, "elements", ()) or ())
+    if element is not None:
+        by_ref = {item.ref: item for item in elements}
+        current: Element | None = element
+        seen: set[str] = set()
+        while current is not None and current.ref not in seen:
+            seen.add(current.ref)
+            role = str(current.role).casefold().removeprefix("ax")
+            if role in _WINDOW_ROLES and current.title:
+                return str(current.title)
+            parent = current.parent
+            current = by_ref.get(parent) if parent else None
+    for item in elements:
+        role = str(item.role).casefold().removeprefix("ax")
+        if role in _WINDOW_ROLES and item.title:
+            return str(item.title)
+    app = getattr(snap, "app", None)
+    return str(app) if app else None
+
+
+class ApprovalPrompt(str):
+    """A confirmation question that also carries the fields a person needs.
+
+    It is a ``str``, so elicitation and ``prompt in text`` checks keep
+    working. ``role``, ``target_name``, ``window``, and ``summary`` are the
+    trimmed, unfenced values. The string itself fences page text.
+    """
+
+    role: str | None
+    target_name: str | None
+    window: str | None
+    summary: str | None
+    reason: str | None
+
+    def __new__(
+        cls,
+        text: str,
+        *,
+        role: str | None,
+        target_name: str | None,
+        window: str | None,
+        summary: str | None,
+        reason: str | None,
+    ) -> ApprovalPrompt:
+        obj = str.__new__(cls, text)
+        obj.role = role
+        obj.target_name = target_name
+        obj.window = window
+        obj.summary = summary
+        obj.reason = reason
+        return obj
+
+
+def approval_detail(prompt: str) -> dict[str, str]:
+    """Role, name, window, and summary from an :class:`ApprovalPrompt`."""
+    detail: dict[str, str] = {}
+    for key, attr in (
+        ("role", "role"),
+        ("name", "target_name"),
+        ("window", "window"),
+        ("summary", "summary"),
+    ):
+        value = getattr(prompt, attr, None)
+        if isinstance(value, str) and value:
+            detail[key] = value
+    return detail
+
+
+def _clip(text: str | None, limit: int) -> str | None:
+    if text is None:
+        return None
+    collapsed = " ".join(str(text).split())
+    if not collapsed:
+        return None
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "…"
+
+
+def _summary_json(payload: dict[str, object]) -> str:
+    text = json.dumps(payload, default=str, ensure_ascii=False, sort_keys=True)
+    if len(text) <= _SUMMARY_LIMIT:
+        return text
+    return text[: _SUMMARY_LIMIT - 1] + "…"
+
+
+def _click_summary(action: Click) -> str:
+    button = action.button.value if isinstance(action.button, Enum) else str(action.button)
+    payload: dict[str, object] = {"button": button, "count": action.count}
+    if action.modifiers:
+        payload["modifiers"] = list(action.modifiers)
+    if isinstance(action.target, Element) and action.target.value:
+        payload["value"] = REDACTED
+    return _summary_json(payload)
+
+
+def _confirmation_text(
+    *,
+    verb: str,
+    role: str | None,
+    name: str,
+    window: str | None,
+    app: str,
+    summary: str,
+    match: str,
+) -> str:
+    parts = [f"Confirm a potentially irreversible action: {verb}"]
+    if role:
+        parts.append(f"role={role}")
+    fenced_name = fence_untrusted(name, limit=_NAME_LIMIT)
+    if fenced_name:
+        parts.append("name=" + fenced_name)
+    if window:
+        fenced_window = fence_untrusted(window, limit=_NAME_LIMIT)
+        if fenced_window:
+            parts.append("window=" + fenced_window)
+    parts.append(f"in {app}")
+    if summary:
+        parts.append("args=" + fence_untrusted(summary, limit=_SUMMARY_LIMIT))
+    return " ".join(parts) + f"? (matched \u201c{match}\u201d)"
+
+
+def confirmation_prompt(
+    action: Action, target_app: str, *, window: str | None = None,
+) -> str | None:
     """One human-readable confirmation question, or None if none is warranted.
 
     The tier gate answers "is this app allowed to click?"; this answers the
@@ -717,10 +856,45 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
     `Click`s carry a label; coordinate clicks and every non-click action return
     None (nothing to key the heuristic on).
 
+    The question names the control's role, its accessible name, the window
+    title when ``window`` is passed, and a short argument summary. A click
+    summary redacts the element's value. WebMCP arguments are redacted. Page
+    text in the question is trimmed and wrapped by ``fence``. The return value
+    is an :class:`ApprovalPrompt` (a ``str`` with those fields) when a prompt
+    is warranted.
+
     Returns:
         A confirmation question to route to the host (e.g. via MCP
         elicitation), or None when the action needs no extra confirmation.
     """
+    described = _irreversible_target(action)
+    if described is None:
+        return None
+    verb, role, name, summary, match = described
+    shown_window = _clip(window, _NAME_LIMIT)
+    text = _confirmation_text(
+        verb=verb,
+        role=role,
+        name=name,
+        window=shown_window,
+        app=target_app,
+        summary=summary,
+        match=match,
+    )
+    return ApprovalPrompt(
+        text,
+        role=role,
+        target_name=_clip(name, _NAME_LIMIT),
+        window=shown_window,
+        summary=summary,
+        reason=f"matched {match}",
+    )
+
+
+def _irreversible_target(
+    action: Action,
+) -> tuple[str, str | None, str, str, str] | None:
+    """``(verb, role, name, summary, match)`` or None when no prompt is due."""
     if isinstance(action, MenuOp) and action.verb is MenuVerb.PRESS:
         # The last path component is the label the user would read.
         title = action.path.split(">")[-1].strip()
@@ -728,10 +902,8 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
         match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
         if match is None:
             return None
-        return (
-            f'Confirm a potentially irreversible action: choose the menu item "{title}" in '
-            f"{target_app}? (matched \u201c{match}\u201d)"
-        )
+        summary = _summary_json({"verb": "press"})
+        return ("choose the menu item", "menu item", title, summary, match)
     if isinstance(action, WebMcpOp) and action.verb is WebMcpVerb.CALL:
         # A tool named delete_order or remove_item is the page's own word for
         # an irreversible step; the same keyword rule as a button label.
@@ -740,10 +912,8 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
         match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
         if match is None:
             return None
-        return (
-            f'Confirm a potentially irreversible action: call the WebMCP tool "{name}" in '
-            f"{target_app}? (matched \u201c{match}\u201d)"
-        )
+        summary = _summary_json({"arguments": REDACTED}) if action.arguments else "{}"
+        return ("call the WebMCP tool", "webmcp tool", name, summary, match)
     if not isinstance(action, Click) or not isinstance(action.target, Element):
         return None
     title = action.target.title.strip()
@@ -751,10 +921,8 @@ def confirmation_prompt(action: Action, target_app: str) -> str | None:
     match = next((kw for kw in _DESTRUCTIVE_LABEL_SUBSTRINGS if kw in lowered), None)
     if match is None:
         return None
-    return (
-        f'Confirm a potentially irreversible action: click "{title}" in '
-        f"{target_app}? (matched “{match}”)"
-    )
+    role = action.target.role or None
+    return ("click", role, title, _click_summary(action), match)
 
 
 #: An action that would take the app away from the human is refused while

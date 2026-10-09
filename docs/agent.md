@@ -106,15 +106,37 @@ the window screenshot.
 a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
 ```
 
-`--approve-policy deny` is the default: quit, close, pay, send, delete, and
+`--approve-policy deny` is the default: quit, close, send, delete, and
 exec are skipped with no prompt. `--approve-policy allow-safe` runs quit and
-window close and still skips pay, send, delete, and exec.
-`--approve-policy allow-all` runs those actions. `--approve` prompts on
-stderr when it is a terminal, otherwise on the controlling tty, and reads
-the answer from stdin. The prompt is never written to stdout, so `--json`
-stays one JSON object. Do not combine `--approve` with `--auto-deny` or with
-a policy other than `deny`. `--allow-exec` exposes `shell` and `python`. It
-is off by default, and it does not bypass the approval policy.
+window close and still skips send, delete, and exec.
+`--approve-policy allow-all` runs those actions. A payment does not follow
+that policy. A button or link named Pay, Place order, Buy, Purchase,
+Checkout, Confirm payment, Complete order, and the like, or any button or
+link on a checkout or payment page, stops the run as `needs_human` with
+`kind` `payment`. `--allow-payments` is the opt-out: the click then goes
+through `approve` (or `auto_deny`, or `allow-all`) instead of that stop.
+`allow-all` alone does not submit a payment. A checkbox or toggle is never
+a send action, including one labelled "Send usage statistics". `--approve`
+prompts on stderr when it is a terminal, otherwise on the controlling tty,
+and reads the answer from stdin. The prompt is never written to stdout, so
+`--json` stays one JSON object. The prompt names the action, the target's
+role, accessible name, window title, the page URL when the target is in a
+browser, the reason (`payment`, `send`, `delete`, `quit`, or `exec`), and a
+short JSON summary of the arguments. A card number or other secret in that
+summary is `[REDACTED]` before the prompt is written. The name, window
+title, URL, and summary are trimmed and wrapped with `fence`, the same
+hardened helper as an observation: openers and closers are escaped, and a
+page-supplied `<untrusted nonce=…>` block is wrapped again. Role and reason
+are the loop's tokens and are not fenced. The `Action` passed to `approve` carries
+the same fields unfenced (`role`, `target_name`, `window`, `url`,
+`summary`, `reason`, `reason_kind`), trimmed, so a callback can read them.
+The HTTP `approval_required` event and the agent MCP `pending_approvals`
+entry (what `approve` answers) use that same target, with the page text
+fenced. The desktop confirmation question (MCP elicitation, and the
+`confirmation_declined` detail) names the role, name, window, and a redacted
+argument summary the same way. Do not combine `--approve` with `--auto-deny`
+or with a policy other than `deny`. `--allow-exec` exposes `shell` and
+`python`. It is off by default, and it does not bypass the approval policy.
 
 `--json` writes exactly one JSON object to stdout:
 
@@ -223,10 +245,18 @@ One run may be active per display. An omitted display shares the `default`
 slot. A second `POST /runs` for that display returns `409` with `run_id` of
 the run that still holds it.
 
-Quit, close, submit, and exec pause the run. The server emits an
-`approval_required` event (`approval_id`, `name`, `args` with secrets
-redacted) and waits. `approve: false`, a timeout, or a cancel denies the
-action. The agent is constructed with an approve hook, so the CLI
+Quit, close, send, delete, and exec pause the run. The server emits an
+`approval_required` event and waits. The event and each `pending_approvals`
+item carry `approval_id`, the action `name`, `args` with secrets redacted,
+`reason` (`payment`, `send`, `delete`, `quit`, or `exec`), and `target`.
+`target` is `role`, `name`, `window`, `url` when the page has one, and
+`reason`. The name, window, URL, and argument `summary` are trimmed and
+fenced. Role and reason are not. `POST /runs` accepts `allow_payments`
+(default false). While it is false, a payment click finishes the run as
+`needs_human` and does not emit `approval_required`. The agent MCP
+`run_goal` takes the same flag, and `get_run`'s `pending_approvals` is the
+object `approve` answers. `approve: false`, a timeout, or a cancel denies
+the action. The agent is constructed with an approve hook, so the CLI
 `--auto-deny` default does not apply to these runs: a risky action waits
 instead of being skipped immediately.
 
@@ -428,7 +458,9 @@ Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 - exec with `allow_exec` writing a file, and the same command denied by the
   approve hook
 - an empty desktop's first observation, Files/Terminal grant aliases, a
-  Submit button that is not sent for approval, and a number field with a
+  Submit button that is not sent for approval, a Pay now button named on the
+  approve callback when `--allow-payments` is set, a checkout page that
+  stops as `needs_human` payment by default, and a number field with a
   minimum and no maximum
 
 Hermetic, on every OS, with `ScriptedModel` and `FakeRuntime`

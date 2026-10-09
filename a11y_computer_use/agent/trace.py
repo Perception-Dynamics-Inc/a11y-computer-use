@@ -52,6 +52,27 @@ def redact_args(args: dict, *, sensitive: bool = False) -> tuple[dict, list[str]
     return redacted, secrets
 
 
+def summarize_args(args: dict, *, limit: int = 160) -> str:
+    """A short JSON summary of ``args`` with secrets removed.
+
+    Keys that start with ``_`` are dropped. A card-shaped string and a
+    secret-shaped key become ``[REDACTED]``. Long strings are cut before the
+    JSON is cut, so the summary stays one short line.
+    """
+    public = {key: value for key, value in args.items() if not str(key).startswith("_")}
+    redacted, _secrets = redact_args(public)
+    compact: dict = {}
+    for key, value in redacted.items():
+        if isinstance(value, str) and value != "[REDACTED]" and len(value) > 80:
+            compact[key] = value[:79] + "…"
+        else:
+            compact[key] = value
+    text = json.dumps(compact, default=str, ensure_ascii=False, sort_keys=True)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def redact_text(text: str, secrets: list[str]) -> str:
     """Replace known secret strings and card-number-shaped runs."""
     out = text
@@ -96,4 +117,4 @@ class Trace:
                 handle.write(line_step + "\n")
 
 
-__all__ = ["Trace", "redact_args", "redact_text", "truncate_observation"]
+__all__ = ["Trace", "redact_args", "redact_text", "summarize_args", "truncate_observation"]

@@ -940,6 +940,48 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
     _assert_trace(result, trace)
 
 
+@requires_display
+def test_agent_checkout_stops_for_a_human_payment(tmp_path, isolated_home, pages) -> None:
+    """A saved-card Pay now click stops. The prompt names the button, URL, and reason."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    page = site.url("checkout.html")
+    browser.navigate(page)
+    browser.snapshot(Scope.WINDOW, browser._target_id)
+    _grant(browser._target_id)
+    trace = tmp_path / "trace-checkout"
+    trace.mkdir()
+
+    def script(messages):
+        text = message_text(messages)
+        elements = parse_snapshot(text)
+        button = next((item for item in elements if item.name == "Pay now"), None)
+        if button is None:
+            return ModelTurn(calls=[ToolCall(name="wait", args={"seconds": 0.2})])
+        return ModelTurn(calls=[ToolCall(name="click", args={"ref": button.ref})])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Buy the noise-cancelling headphones.",
+        trace,
+        max_steps=6,
+        approve=lambda _action: True,
+        auto_deny=False,
+    )
+    assert result.status == "needs_human", result
+    human = result.needs_human
+    assert human["kind"] == "payment"
+    assert human["reason"] == "payment"
+    prompt = human["message"]
+    assert "Pay now" in prompt
+    assert page in prompt
+    assert "reason=payment" in prompt
+    assert _eval(browser, "document.getElementById('result').textContent") == "unpaid"
+
+
 @pytest.mark.parametrize(
     ("page", "kind", "marker", "empty_js"),
     [
@@ -1420,6 +1462,108 @@ def test_agent_submit_button_does_not_need_approval(tmp_path, isolated_home) -> 
             str(getattr(step, "error", "") or "").startswith("approval_denied")
             for step in result.step_log
         )
+    finally:
+        stop_process(proc)
+
+
+@requires_display
+def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
+    """A live GTK Pay now button is named in the approve callback and prompt."""
+    from a11y_computer_use.agent.cli import render_approval_prompt
+    from a11y_computer_use.schema import Scope
+
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    script_path = tmp_path / "pay.py"
+    script_path.write_text(
+        "import gi\n"
+        "gi.require_version('Gtk', '3.0')\n"
+        "from gi.repository import GLib, Gtk\n"
+        "GLib.set_prgname('cuagentpay')\n"
+        "window = Gtk.Window(title='cuagentpay')\n"
+        "window.set_default_size(320, 120)\n"
+        "box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)\n"
+        "button = Gtk.Button(label='Pay now')\n"
+        "box.pack_start(button, False, False, 0)\n"
+        "window.add(box)\n"
+        "window.connect('destroy', Gtk.main_quit)\n"
+        "window.show_all()\n"
+        "Gtk.main()\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen([sys.executable, str(script_path)], env=env)
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuagentpay")
+            except Exception:
+                snap = None
+            if snap is not None and any(el.title == "Pay now" for el in snap.elements):
+                break
+            time.sleep(0.2)
+        assert snap is not None and any(el.title == "Pay now" for el in snap.elements)
+        _grant("cuagentpay", "python3", "python")
+        seen: list = []
+
+        def approve(action):
+            seen.append(action)
+            return False
+
+        def script(messages):
+            text = message_text(messages)
+            if "approval_denied" in text:
+                marker = isolated_home / "held.txt"
+                marker.write_text("held", encoding="utf-8")
+                return ModelTurn(calls=[ToolCall(
+                    name="done",
+                    args={
+                        "answer": "held",
+                        "conditions": [{"file_exists": str(marker), "contains": "held"}],
+                    },
+                )])
+            elements = parse_snapshot(text)
+            button = next((item for item in elements if item.name == "Pay now"), None)
+            assert button is not None, text
+            return ModelTurn(calls=[ToolCall(
+                name="click",
+                args={"ref": button.ref, "note": "4111111111111111"},
+            )])
+
+        result = _run_agent(
+            Agent,
+            ScriptedModel(script),
+            "Buy the headphones.",
+            trace,
+            approve=approve,
+            auto_deny=False,
+            allow_payments=True,
+            max_steps=4,
+        )
+        assert seen, result
+        action = seen[0]
+        assert action.role and "button" in action.role.casefold()
+        assert action.target_name == "Pay now"
+        assert action.window and "cuagentpay" in action.window.casefold(), action.window
+        assert action.summary is not None
+        assert "4111111111111111" not in action.summary
+        assert "[REDACTED]" in action.summary
+        prompt = render_approval_prompt(action)
+        assert action.reason_kind == "payment"
+        assert "role=" in prompt
+        assert "reason=payment" in prompt
+        assert "Pay now" in prompt
+        assert "cuagentpay" in prompt.casefold()
+        assert "<untrusted nonce=" in prompt
+        assert "4111111111111111" not in prompt
+        assert "[REDACTED]" in prompt
+        assert result.step_log and str(result.step_log[0].error).startswith("approval_denied")
     finally:
         stop_process(proc)
 
