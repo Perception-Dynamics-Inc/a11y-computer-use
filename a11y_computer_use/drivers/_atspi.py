@@ -2344,10 +2344,12 @@ def set_text(acc, text: str) -> bool:
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
     A field with no EditableText is cleared and typed on X11; that also
-    returns True only when the snapshot read equals ``text``. When
-    EditableText returns success and the snapshot read is still not
+    returns True only when the snapshot read equals ``text``. On Firefox,
+    when EditableText returns success and the snapshot read is still not
     ``text``, the field is focused and the value is typed, and success is
-    still that read-back.
+    still that read-back. Chromium and GTK keep the previous tail: keys are
+    sent only when the snapshot read is already empty, because focusing a
+    Chrome number input can make an empty field read back as 0.
     """
     eti = _editable_iface(acc)
     if eti is None:
@@ -2374,10 +2376,15 @@ def set_text(acc, text: str) -> bool:
                 return False
     if _confirm_text(acc, text):
         return True
-    # EditableText did not leave ``text`` in the field. Firefox returns true
-    # from set_text_contents and insert_text and the DOM stays empty; key
-    # events land after the field is focused. The read-back has to match.
-    return _focus_and_replace(acc, text)
+    # Firefox returns true from set_text_contents and insert_text and the DOM
+    # stays empty. Key events land after the field is focused. Chromium is
+    # not this path: focusing an empty number input can make the read-back 0.
+    if _gecko_app(acc):
+        return _focus_and_replace(acc, text)
+    if _text_is_gone(acc) and _x11_keys_available():
+        _type_string(text)
+        return _confirm_text(acc, text)
+    return False
 
 
 def scroll_to(acc) -> bool:

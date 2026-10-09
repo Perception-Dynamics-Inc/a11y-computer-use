@@ -1471,9 +1471,17 @@ class _NoopWebField(_KeyClearedWebField):
         return True
 
 
+def _mark_toolkit(field, toolkit: str, name: str) -> None:
+    app = _GeckoNode("application", name)
+    app.toolkit = toolkit
+    field.get_application = lambda: app
+    field.application = app
+
+
 def test_set_text_focuses_and_types_when_editable_text_is_a_noop(fake_atspi, monkeypatch) -> None:
-    """Fake transport. The DOM changes only because the test applies the keys."""
+    """Fake Firefox field. The DOM changes only because the test applies the keys."""
     field = _NoopWebField("")
+    _mark_toolkit(field, "Gecko", "Firefox")
     typed: list[str] = []
 
     def type_string(text: str) -> None:
@@ -1488,6 +1496,42 @@ def test_set_text_focuses_and_types_when_editable_text_is_a_noop(fake_atspi, mon
     assert field.focused is True
     assert typed == ["Ann Lee"]
     assert field.writes  # EditableText was tried before the keys
+
+
+def test_chromium_clear_does_not_focus_when_editable_text_puts_zero_back(fake_atspi, monkeypatch) -> None:
+    """Fake Chromium number. Focusing it would make the empty read-back 0.
+
+    EditableText reports success and then the snapshot read is 0, which is
+    not a clear. The Firefox focus fallback must not run. This is not a browser.
+    """
+    field = _NoopWebField("3")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+
+    def set_text_contents(text):
+        field.writes.append(text)
+        if field.text == "":
+            field.text = "0"
+        return True
+
+    def delete_text(start, end):
+        field.deletes += 1
+        field.text = ""
+        return True
+
+    field.set_text_contents = set_text_contents
+    field.delete_text = delete_text
+
+    def grab_focus():
+        field.focused = True
+        field.text = "0"
+        return True
+
+    field.grab_focus = grab_focus
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: None)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "") is False
+    assert getattr(field, "focused", False) is not True
 
 
 class _GeckoNode:
