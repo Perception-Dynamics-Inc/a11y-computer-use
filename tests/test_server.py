@@ -819,8 +819,8 @@ async def test_confirmation_elicitation_names_role_window_and_control(
     message = seen[0]
     assert "role=AXButton" in message
     assert "Delete" in message
-    assert "Untitled" in message
-    assert "<untrusted nonce=" in message
+    assert 'window=untrusted:"Untitled"' in message
+    assert "<untrusted" not in message
     assert "in com.apple.TextEdit" in message
     assert mocked_driver["click"] == []
     text = result.content[0].text

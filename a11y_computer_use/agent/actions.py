@@ -278,11 +278,12 @@ def risk_category(reason: str | None) -> str | None:
 
 
 def approval_target(action: Action) -> dict[str, str]:
-    """Role, name, window, URL, and reason, as every approval surface shows them.
+    """Role, name, window, URL, and reason for a model or an API client.
 
     ``role`` and ``reason`` are the loop's own tokens (``payment``, ``send``,
     ``delete``, ``quit``, ``exec``). The name, window, and page URL are page
-    text: each is trimmed and wrapped with ``fence``.
+    text: each is trimmed and wrapped with ``fence``. The CLI prompt a person
+    reads uses ``render_untrusted`` instead of these tags.
     """
     from a11y_computer_use.untrusted import fence_untrusted
 

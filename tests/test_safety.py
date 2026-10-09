@@ -535,14 +535,14 @@ def test_confirmation_prompt_names_role_window_and_redacts() -> None:
     assert card not in prompt.summary  # type: ignore[attr-defined]
     assert REDACTED in prompt.summary  # type: ignore[attr-defined]
     assert "role=AXButton" in prompt
-    assert "Checkout - Google Chrome" in prompt
+    assert 'window=untrusted:"Checkout - Google Chrome"' in prompt
     assert APP in prompt
-    assert "<untrusted nonce=" in prompt
-    assert "suspicious=1" in prompt
+    assert "<untrusted" not in prompt
+    assert 'name=untrusted suspicious:"' in prompt
     assert "&lt;/untrusted" in prompt
     assert "TAIL" not in prompt
     assert card not in prompt
-    assert prompt.count("<untrusted") == prompt.count("</untrusted")
+    assert "\n" not in prompt
     from a11y_computer_use.safety import approval_detail
 
     detail = approval_detail(prompt)

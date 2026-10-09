@@ -127,17 +127,20 @@ role, accessible name, window title, the page URL when the target is in a
 browser, the reason (`payment`, `send`, `delete`, `quit`, or `exec`), and a
 short JSON summary of the arguments. A card number or other secret in that
 summary is `[REDACTED]` before the prompt is written. The name, window
-title, URL, and summary are trimmed and wrapped with `fence`, the same
-hardened helper as an observation: openers and closers are escaped, and a
-page-supplied `<untrusted nonce=…>` block is wrapped again. Role and reason
-are the loop's tokens and are not fenced. The `Action` passed to `approve` carries
+title, URL, and summary are shown to the person as `untrusted:"..."` (or
+`untrusted suspicious:"..."` when the text reads like an instruction).
+Quotes, backslashes, newlines, and other control and format characters are
+escaped, and a page-supplied `<untrusted` opener is escaped, so the page
+cannot close the quote or insert another line. Role and reason are the
+loop's tokens and are not marked untrusted. The `Action` passed to `approve` carries
 the same fields unfenced (`role`, `target_name`, `window`, `url`,
 `summary`, `reason`, `reason_kind`), trimmed, so a callback can read them.
 The HTTP `approval_required` event and the agent MCP `pending_approvals`
-entry (what `approve` answers) use that same target, with the page text
-fenced. The desktop confirmation question (MCP elicitation, and the
-`confirmation_declined` detail) names the role, name, window, and a redacted
-argument summary the same way. Do not combine `--approve` with `--auto-deny`
+entry (what `approve` answers) keep that page text inside `fence`
+(`<untrusted nonce=…>`), which is what a model is shown. The desktop
+confirmation question (MCP elicitation) uses the same quoted form. The
+`confirmation_declined` detail carries the unfenced role, name, window, and
+summary. Do not combine `--approve` with `--auto-deny`
 or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 `python`. It is off by default, and it does not bypass the approval policy.
 
