@@ -209,6 +209,69 @@ def test_google_chrome_resolves_to_the_running_chrome_process(monkeypatch) -> No
     assert _linux_system.pids_matching("gnome-terminal-server") == {8}
 
 
+class _ClassWin(_FakeXWin):
+    def __init__(self, wid: int, pid: int, instance: str = "", klass: str = "", title: str = ""):
+        super().__init__(wid, 10, 10, 200, 100, pid)
+        self.instance = instance
+        self.klass = klass
+        self.title = title
+
+    def get_full_property(self, atom, kind):
+        if atom == "_NET_WM_PID":
+            return _NS(value=[self.pid]) if self.pid else None
+        if atom == "WM_CLASS" and (self.instance or self.klass):
+            return _NS(value=f"{self.instance}\x00{self.klass}\x00".encode())
+        if atom == "_NET_WM_NAME" and self.title:
+            return _NS(value=self.title.encode())
+        return None
+
+
+def _active_display(monkeypatch, wins: list, active_id: int) -> None:
+    class _Root(_FakeXRoot):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[active_id])
+            return super().get_full_property(atom, kind)
+
+    root = _Root(wins)
+    by_id = {win.id: win for win in wins}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(
+        _linux_system, "_comm_for_pid",
+        lambda pid: {200: "python3"}.get(int(pid or 0)) or None,
+    )
+
+
+def test_active_window_names_the_ewmh_window_and_its_comm(monkeypatch) -> None:
+    win = _ClassWin(0x20, pid=200, instance="cuakeytarget", klass="Cuakeytarget", title="cuakeytarget")
+    _active_display(monkeypatch, [win], 0x20)
+    assert _linux_system.active_window() == {
+        "window_id": 0x20, "app": "python3", "pid": 200, "title": "cuakeytarget",
+    }
+    assert _linux_system.frontmost_app_id() == "python3"
+
+
+def test_active_window_uses_wm_class_when_the_window_has_no_pid(monkeypatch) -> None:
+    """``frontmost_app_id`` stays empty: permission identity is the comm only."""
+    win = _ClassWin(0x21, pid=0, instance="xmessage", klass="Xmessage", title="note")
+    _active_display(monkeypatch, [win], 0x21)
+    assert _linux_system.active_window() == {
+        "window_id": 0x21, "app": "xmessage", "pid": 0, "title": "note",
+    }
+    assert _linux_system.frontmost_app_id() == ""
+
+
+def test_active_window_id_zero_is_none(monkeypatch) -> None:
+    win = _ClassWin(0x22, pid=200, title="idle")
+    _active_display(monkeypatch, [win], 0)
+    assert _linux_system.active_window() is None
+
+
 def _isolate_desktop_dirs(tmp_path, monkeypatch) -> None:
     home = tmp_path / "xdg-home"
     system = tmp_path / "xdg-dirs"

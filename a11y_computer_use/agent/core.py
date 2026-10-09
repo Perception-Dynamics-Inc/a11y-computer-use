@@ -869,8 +869,8 @@ def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
             params["count"] = int(args["count"])
         return "click", params
     if name == "type":
-        # Pass app only when the model named one. The tracked app is not a
-        # background-typing address: on Linux that argument is unsupported.
+        # Pass app only when the model named one. The tracked app is not implied.
+        # On Linux, an explicit app= focuses that app's window and then types.
         params = {"text": str(args.get("text", ""))}
         if args.get("app"):
             params["app"] = args["app"]

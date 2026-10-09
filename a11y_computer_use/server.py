@@ -138,6 +138,30 @@ _ACT_STEP_FIELDS: dict[str, frozenset[str]] = {
 }
 
 
+def _optional_app_arg(app: object, tool: str) -> str | None:
+    """None means the caller omitted ``app``. A blank value is not an app id.
+
+    Whitespace-only is blank. The permission check used to treat ``""`` as an
+    app with no grant, and the message named that empty app. Callers map
+    ``ValueError`` to ``invalid_arguments``.
+    """
+    if app is None:
+        return None
+    if not isinstance(app, str):
+        raise ValueError(f"{tool} app must be a non-empty app id")
+    text = app.strip()
+    if not text:
+        raise ValueError(f"{tool} app must be a non-empty app id")
+    return text
+
+
+def _required_app_arg(app: object, tool: str) -> str:
+    text = _optional_app_arg(app, tool)
+    if text is None:
+        raise ValueError(f"{tool} app must be a non-empty app id")
+    return text
+
+
 def _act_argument_error(step_type: str, index: int, message: str) -> str:
     """Same shape as a standalone tool: ``invalid_arguments: {tool}: {detail}``.
 
@@ -998,6 +1022,125 @@ def _same_window_app(requested: str, resolved: str) -> bool:
     if req.lower().endswith("-" + res.lower()):
         return True
     return len(res) == 15 and len(req) > 15 and req.lower().startswith(res.lower())
+
+
+def _row_pid(row: dict) -> int | None:
+    try:
+        pid = int(row.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    return pid or None
+
+
+def _linux_name_matches(identifier: str, *names: str) -> bool:
+    """Whether any ``names`` entry is the app ``identifier`` names.
+
+    Exact app id, a bundle-id tail, a launcher alias (``google-chrome`` and
+    ``chrome``), or an equal WM_CLASS instance/class. A title is not a name,
+    and a name is not a substring of another app. An empty identifier matches
+    nothing.
+    """
+    if not str(identifier or "").strip():
+        return False
+    from a11y_computer_use.drivers import _linux_system
+
+    for name in names:
+        text = str(name or "").strip()
+        if not text:
+            continue
+        if _window_app_exact({"app": text}, identifier) or _same_window_app(identifier, text):
+            return True
+        if _linux_system._class_matches_identifier(identifier, text, ""):
+            return True
+    return False
+
+
+def linux_windows_for_app(
+    rows: list[dict], identifier: str, bundle: str, pids: set[int],
+) -> list[dict]:
+    """Windows of ``identifier`` from the EWMH list, joined with AT-SPI pids.
+
+    A non-empty pid set wins: a GTK script is ``python3`` on the window list
+    and ``cuatestapp`` on the accessibility bus, and the bus pid is what ties
+    them. WM_CLASS is next, then the window's app id. The resolved comm is
+    the last resort, and only when it is a launcher alias of the name the
+    caller used (``google-chrome`` and ``chrome``). A specific name that
+    resolved to a shared comm is not widened onto every window of that comm.
+    """
+    if pids:
+        matched = [row for row in rows if _row_pid(row) in pids]
+        if matched:
+            return matched
+    class_hits: list[dict] = []
+    name_hits: list[dict] = []
+    for row in rows:
+        instance = str(row.get("wm_class") or "")
+        klass = str(row.get("wm_class_class") or "")
+        if _linux_name_matches(identifier, instance, klass):
+            class_hits.append(row)
+            continue
+        if _linux_name_matches(identifier, str(row.get("app") or row.get("bundle") or "")):
+            name_hits.append(row)
+    if class_hits:
+        return class_hits
+    if name_hits:
+        return name_hits
+    if bundle and _same_window_app(identifier, bundle):
+        return [
+            row for row in rows
+            if _linux_name_matches(
+                bundle,
+                str(row.get("app") or row.get("bundle") or ""),
+                str(row.get("wm_class") or ""),
+                str(row.get("wm_class_class") or ""),
+            )
+        ]
+    return []
+
+
+def pick_linux_input_window(candidates: list[dict], active: dict | None) -> dict:
+    """The window keystrokes should land in.
+
+    The active candidate wins, so a call does not raise a different window of
+    the same app. Otherwise the top on-screen window (the list is bottom to
+    top). A minimized window is used only when nothing is on screen; focusing
+    it asks the window manager to restore it.
+    """
+    if active and active.get("window_id") is not None:
+        try:
+            active_id = int(active["window_id"])
+        except (TypeError, ValueError):
+            active_id = -1
+        for row in candidates:
+            try:
+                if int(row["window_id"]) == active_id:
+                    return row
+            except (KeyError, TypeError, ValueError):
+                continue
+    visible = [row for row in candidates if row.get("on_screen", True)]
+    return (visible or candidates)[-1]
+
+
+def _atspi_pids_for(app: str) -> set[int]:
+    """PIDs of the AT-SPI application ``app`` names, or an empty set.
+
+    An unreachable bus is an empty set. The EWMH list is still consulted.
+    """
+    if not app:
+        return set()
+    try:
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Scope
+
+        root = _atspi.find_root(app, Scope.APP)
+        pid = _atspi.pid_of(root) if root is not None else None
+    except Exception:  # noqa: BLE001 - no bus, no bindings, or a walk that failed
+        return set()
+    try:
+        number = int(pid) if pid else 0
+    except (TypeError, ValueError):
+        return set()
+    return {number} if number else set()
 
 
 def _window_app_exact(row: dict, bundle: str) -> bool:
@@ -2005,6 +2148,7 @@ class Runtime:
         pixels, or ``app``'s windows) and publish the text lines as refs
         ``o1..oN``. Gated at READ against the frontmost app with the screenshot
         verb, since it is a capture. The result becomes the current OCR epoch."""
+        app = _optional_app_arg(app, "screen_text")
         if not 0.0 <= float(min_confidence) <= 1.0:
             raise ValueError("min_confidence must be between 0 and 1")
         if app is not None and region is not None:
@@ -2321,6 +2465,7 @@ class Runtime:
         budget: int | None = None,
         include_bounds: bool = False,
     ) -> str:
+        app = _required_app_arg(app, "desktop_snapshot")
         if scope not in (Scope.WINDOW.value, Scope.APP.value):
             raise ValueError("scope must be 'window' or 'app' (display/element land later)")
         if mode not in observe.SNAPSHOT_MODES:
@@ -2376,6 +2521,7 @@ class Runtime:
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
         `desktop_snapshot`."""
+        app = _required_app_arg(app, "find")
         if ocr:
             if not text:
                 raise ValueError("find(ocr=True) needs text to search the screen for")
@@ -2465,6 +2611,7 @@ class Runtime:
 
         Gated + audited at READ like any observation; raises UNSUPPORTED on a
         backend that has no such feed."""
+        app = _required_app_arg(app, what)
         fn = getattr(self.driver, method, None)
         if fn is None:
             raise ComputerUseError(
@@ -2571,8 +2718,9 @@ class Runtime:
         browser ``desktop_snapshot`` does the same). ``action='call'`` runs the
         tool ``name`` (a ``w`` ref or a name from the current listing) with
         ``arguments`` (a JSON object) through the gate: CLICK tier, or FULL when
-        `safety.webmcp_sensitive` says the tool takes free text or names a
+        `safety.webmcp_sensitive` says         the tool takes free text or names a
         payment or submission. The audit row never carries the arguments."""
+        app = _required_app_arg(app, "webmcp")
         if action not in ("list", "call"):
             raise ValueError("action must be 'list' or 'call'")
         if getattr(self.driver, "webmcp_tools", None) is None or getattr(self.driver, "webmcp_call", None) is None:
@@ -2771,8 +2919,185 @@ class Runtime:
                 )
         return recheck
 
+    def _linux_addressed_app(self, app: str | None) -> str | None:
+        """The app Linux keystrokes should be aimed at, or None for frontmost.
+
+        An explicit ``app`` always wins. Background focus mode uses the app of
+        the latest snapshot, the same default the macOS addressed path uses.
+        Other drivers return None so they keep the macOS addressed path.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        if app is not None:
+            return app
+        if FOCUS_MODE != "background" or self._current is None or not self._current.app:
+            return None
+        return self._current.app
+
+    def _linux_active_window(self) -> dict | None:
+        fn = getattr(self.driver, "active_window", None)
+        if callable(fn):
+            try:
+                row = fn()
+            except (ComputerUseError, OSError, AttributeError):
+                return None
+            return row if isinstance(row, dict) else None
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use.drivers import _linux_system
+
+        return _linux_system.active_window()
+
+    def _linux_candidates_active(self, candidates: list[dict]) -> bool:
+        active = self._linux_active_window()
+        if not active or active.get("window_id") is None:
+            return False
+        try:
+            active_id = int(active["window_id"])
+        except (TypeError, ValueError):
+            return False
+        for row in candidates:
+            try:
+                if int(row["window_id"]) == active_id:
+                    return True
+            except (KeyError, TypeError, ValueError):
+                continue
+        return False
+
+    def _wait_linux_active(self, candidates: list[dict], timeout_s: float) -> bool:
+        """True once a candidate is the active window on two consecutive polls."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        hits = 0
+        while True:
+            if self._linux_candidates_active(candidates):
+                hits += 1
+                if hits >= 2:
+                    return True
+            else:
+                hits = 0
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self.FOCUS_POLL_S)
+
+    def _linux_keyboard_window(self, identifier: str) -> tuple[str, dict, list[dict]]:
+        """``(grant id, window, candidates)`` for Linux ``type``/``key`` with ``app``.
+
+        The grant id is the resolved app id. The window comes from the EWMH
+        list joined with the AT-SPI application. No window is ``app_not_found``.
+        """
+        _running, bundle = self._resolve_app(identifier)
+        try:
+            rows = list(self.driver.windows() or [])
+        except (ComputerUseError, AttributeError, OSError):
+            rows = []
+        pids = _atspi_pids_for(identifier)
+        # A launcher alias (google-chrome → chrome) may be the name on the bus.
+        # A specific name that only resolved to a shared comm (cuakeytarget →
+        # python3) must not pick up every process that shares that comm.
+        if (
+            not pids
+            and bundle
+            and bundle.strip().lower() != identifier.strip().lower()
+            and _same_window_app(identifier, bundle)
+        ):
+            pids = _atspi_pids_for(bundle)
+        candidates = linux_windows_for_app(rows, identifier, bundle, pids)
+        if not candidates:
+            if pids:
+                message = (
+                    f"{identifier!r} is on the accessibility bus but has no window to focus"
+                )
+            else:
+                message = f"no window for {identifier!r} to focus"
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                message,
+                detail={"app": identifier, "driver": "linux", "reason": "no_window"},
+            )
+        chosen = pick_linux_input_window(candidates, self._linux_active_window())
+        return bundle, chosen, candidates
+
+    def _ensure_linux_window(
+        self, chosen: dict, candidates: list[dict], bundle: str, identifier: str,
+    ) -> bool:
+        """Focus ``chosen`` unless one of ``candidates`` is already active.
+
+        True when this call focused the window. A window that does not become
+        active is ``focus_changed`` and names the window that stayed active.
+        """
+        if self._linux_candidates_active(candidates):
+            return False
+        focus = getattr(self.driver, "focus_window", None)
+        if not callable(focus):
+            platform = str(getattr(self.driver, "name", None) or "this driver")
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"focusing a window to send input to {identifier!r} is not supported on {platform}",
+                detail={"app": identifier, "driver": platform},
+            )
+        focus(int(chosen["window_id"]))
+        if self._wait_linux_active(candidates, self.APP_FOCUS_WAIT_S):
+            return True
+        active = self._linux_active_window() or {}
+        front = active.get("app") or "another window"
+        raise ComputerUseError(
+            ErrorCode.FOCUS_CHANGED,
+            f"could not focus {identifier!r}; {front} is still the active window",
+            detail={
+                "app": bundle,
+                "requested": identifier,
+                "window_id": int(chosen["window_id"]),
+                "frontmost_app": active.get("app"),
+                "active_window_id": active.get("window_id"),
+                "driver": "linux",
+            },
+        )
+
+    def _linux_type_text(self, text: str, identifier: str) -> str:
+        bundle, chosen, candidates = self._linux_keyboard_window(identifier)
+        action = TypeText(text=text)
+        note: list[str] = []
+        focused: list[bool] = []
+
+        def execute() -> int:
+            self._guard_user(bundle)
+            if self._ensure_linux_window(chosen, candidates, bundle, identifier):
+                focused.append(True)
+            note.append(self._dismiss_open_menu(bundle))
+            typed = self.driver.type_text(text)
+            if isinstance(typed, int) and not isinstance(typed, bool):
+                return typed
+            return len(text)
+
+        count = self._run_gated(action, bundle, execute)
+        where = f" into {bundle}"
+        if focused:
+            where += " (focused its window first)"
+        return f"typed {count} characters{where}{''.join(note)}"
+
+    def _linux_key(self, chord: str, identifier: str) -> str:
+        bundle, chosen, candidates = self._linux_keyboard_window(identifier)
+        action = KeyChord(chord=chord)
+        focused: list[bool] = []
+
+        def execute() -> None:
+            self._guard_user(bundle)
+            if self._ensure_linux_window(chosen, candidates, bundle, identifier):
+                focused.append(True)
+            target = self._open_menu_app(bundle) or bundle
+            if not self._open_mnemonic_menu(target, chord):
+                self.driver.key_chord(chord)
+
+        self._run_gated(action, bundle, execute)
+        note = " (focused its window first)" if focused else ""
+        return f"pressed {chord} in {bundle}{note}"
+
     @_serialized
     def type_text(self, text: str, app: str | None = None) -> str:
+        app = _optional_app_arg(app, "type")
+        addressed = self._linux_addressed_app(app)
+        if addressed is not None:
+            return self._linux_type_text(text, addressed)
         action = TypeText(text=text)
         target = self._background_target(app)
         note: list[str] = []
@@ -2833,7 +3158,11 @@ class Runtime:
 
     @_serialized
     def key(self, chord: str, app: str | None = None) -> str:
+        app = _optional_app_arg(app, "key")
         self._validate_chord(chord)  # before the gate, so a bad chord is not audited
+        addressed = self._linux_addressed_app(app)
+        if addressed is not None:
+            return self._linux_key(chord, addressed)
         action = KeyChord(chord=chord)
         target = self._background_target(app)
         note: list[str] = []
@@ -3236,6 +3565,7 @@ class Runtime:
         direction has not been tried: the search comes back one line at a
         time. If that direction does not move either, the still-page error
         stands. The still grab does not install a new head."""
+        app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
         if direction not in ("down", "up"):
@@ -3752,6 +4082,7 @@ class Runtime:
     def menu(self, app: str, path: str | None = None, action: str = "press",
              *, confirm: "Confirmer | None" = None) -> str:
         """List or press a menu item by path through the accessibility menu bar."""
+        app = _required_app_arg(app, "menu")
         verb = MenuVerb(action)
         _running, bundle = self._resolve_app(app)
         if verb is MenuVerb.LIST:
@@ -3786,6 +4117,7 @@ class Runtime:
         Type, key, click, and every other driver's ``file_dialog`` keep
         the recheck.
         """
+        app = _optional_app_arg(app, "file_dialog")
         verb = FileDialogVerb(action)
         bundle = self._frontmost() if app is None else self._resolve_app(app)[1]
         recheck = self._recheck_frontmost_app
@@ -3807,6 +4139,7 @@ class Runtime:
         except ValueError:
             names = ", ".join(item.value for item in WindowVerb)
             raise ValueError(f"window action must be one of: {names}") from None
+        app = _optional_app_arg(app, "window")
         if verb is WindowVerb.LIST:
             if app is not None:
                 # Listing X's windows is an observation of X: gate against X's
@@ -3814,11 +4147,9 @@ class Runtime:
                 # exactly, case-insensitive. An empty app name (a window whose
                 # owner could not be read) is not a match for any filter, and a
                 # name that is only a substring of another app is not a match.
-                # An empty filter is a bad call: resolving "" used to ask for a
-                # grant of the empty name.
-                requested = str(app).strip()
-                if not requested:
-                    raise ValueError("window list app must be a non-empty app id")
+                # An empty filter is rejected before this point. Resolving ""
+                # used to ask for a grant of the empty name.
+                requested = app
                 _running, resolved = self._resolve_app(app)
                 # A substring hit inside resolve (``mouse`` → ``mousepad``) is
                 # not this filter. Gate and match the caller's name unless it
@@ -4013,8 +4344,9 @@ class Runtime:
         if not math.isfinite(timeout_s) or timeout_s < 0:
             raise ValueError("timeout_s must be finite and nonnegative")
         timeout_s = min(float(timeout_s), conditions.MAX_WAIT_UNTIL_S)
-        app = str(condition.get("app")) if kind == "snapshot_text" and condition.get("app") else None
-        if app is not None:
+        app = None
+        if kind == "snapshot_text" and "app" in condition and condition.get("app") is not None:
+            app = _required_app_arg(condition.get("app"), "wait_until")
             _running, app = self._resolve_app(app)
         gated_app = app or self._context_app()
         checker = self._checker()
@@ -4509,18 +4841,22 @@ def build_server(
     @server.tool(name="type")
     async def type_text(text: str, app: str | None = None) -> str:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). With app=<bundle id or name> (macOS) the keystrokes are
-        addressed to that app's process: it need not be frontmost, nothing is
-        activated, and the user's screen stays where it is; prefer this over
-        `app focus` + type.         Without app: the frontmost app. On Linux, text
-        goes in at the caret and replaces a selection, including after a
-        coordinate click that did not remember a ref: the focused editable is
-        looked up and inserted with the same helper. A CRLF is one newline;
-        the reported count is the number of characters the field read back,
-        and a mismatch is an error rather than success. Gated at tier
-        'full' against the target app; refuses with secure_field when a
-        password field has focus — secrets are typed by the human, never by
-        this tool."""
+        for long text). With app=<bundle id or name> on macOS the keystrokes
+        are addressed to that app's process: it need not be frontmost, nothing
+        is activated, and the user's screen stays where it is. On Linux, app=
+        resolves that app's window from the EWMH list and the AT-SPI
+        application, focuses it when it is not already active, checks that it
+        became the active window, and then types. A window that cannot be
+        focused is focus_changed. An app with no window is app_not_found. The
+        call is not reported as macOS-only. Without app: the frontmost app.
+        On Linux, text goes in at the caret and replaces a selection, including
+        after a coordinate click that did not remember a ref: the focused
+        editable is looked up and inserted with the same helper. A CRLF is one
+        newline; the reported count is the number of characters the field read
+        back, and a mismatch is an error rather than success. An empty app is
+        invalid_arguments. Gated at tier 'full' against the target app; refuses
+        with secure_field when a password field has focus — secrets are typed
+        by the human, never by this tool."""
         return await run(runtime.type_text, text, app)
 
     @server.tool(name="key")
@@ -4528,15 +4864,21 @@ def build_server(
         """Press one key chord, e.g. 'cmd+s', 'cmd+shift+t', 'escape':
         lowercase names joined by '+', modifiers first, one regular key last.
         An unknown key is invalid_arguments and is rejected before any input.
-        With app=<bundle id or name> (macOS) the chord is addressed to that
-        app's process without activating it (the user's screen stays put);
-        without app it goes to the frontmost app. An open menu of that app
-        receives the chord and is not closed first: arrows and Return
-        navigate and activate the menu, and Return does not reach the
-        document. alt+letter while a different top-level menu is open
-        switches to the menu with that mnemonic. A different frontmost app is still focus_changed. The
-        app's own open menu counts as the key target, including when the
-        frontmost name is empty. Gated at tier 'full'."""
+        With app=<bundle id or name> on macOS the chord is addressed to that
+        app's process without activating it (the user's screen stays put).
+        On Linux, app= resolves that app's window from the EWMH list and the
+        AT-SPI application, focuses it when it is not already active, checks
+        that it became the active window, and then sends the chord. A window
+        that cannot be focused is focus_changed. An app with no window is
+        app_not_found. The call is not reported as macOS-only. Without app
+        the chord goes to the frontmost app. An empty app is invalid_arguments.
+        An open menu of that app receives the chord and is not closed first:
+        arrows and Return navigate and activate the menu, and Return does not
+        reach the document. alt+letter while a different top-level menu is
+        open switches to the menu with that mnemonic. A different frontmost
+        app is still focus_changed. The app's own open menu counts as the key
+        target, including when the frontmost name is empty. Gated at tier
+        'full'."""
         return await run(runtime.key, chord, app)
 
     @server.tool(name="scroll")
@@ -4835,6 +5177,7 @@ def build_server(
         ctx = server.get_context()
 
         def execute() -> str:
+            _required_app_arg(app, "grant_app")
             try:
                 wanted = safety.Tier(tier)
             except ValueError as exc:

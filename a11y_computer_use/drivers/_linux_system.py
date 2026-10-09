@@ -237,7 +237,11 @@ def _geometry_on_root(win, d):
 
 
 def frontmost_app_id() -> str:
-    """comm name of the active window's owner (e.g. "gedit"); "" if undetectable."""
+    """comm name of the active window's owner (e.g. "gedit"); "" if undetectable.
+
+    This is the process comm only. A window with no pid is not a frontmost
+    app here, even when ``active_window`` can still name it by WM_CLASS.
+    """
     try:
         with _open_display() as d:
             active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
@@ -247,6 +251,31 @@ def frontmost_app_id() -> str:
             return _comm_for_pid(_pid_of(win, d)) or ""
     except Exception:
         return ""
+
+
+def active_window() -> dict | None:
+    """The EWMH ``_NET_ACTIVE_WINDOW``, or None when there is no active window.
+
+    ``window_id`` is the X id. ``app`` is the process comm, or the WM_CLASS
+    instance when the window has no pid. ``pid`` is 0 when ``_NET_WM_PID`` is
+    missing. A window id of 0 is None: that is how a window manager reports
+    that nothing is active.
+    """
+    try:
+        with _open_display() as d:
+            active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+            if not active or not int(active[0]):
+                return None
+            win = d.create_resource_object("window", int(active[0]))
+            pid = _pid_of(win, d)
+            return {
+                "window_id": int(win.id),
+                "app": _app_id(win, d),
+                "pid": pid,
+                "title": _win_title(win, d),
+            }
+    except Exception:
+        return None
 
 
 def app_at_point_id(x: float, y: float) -> str | None:

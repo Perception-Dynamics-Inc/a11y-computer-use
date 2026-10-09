@@ -997,6 +997,18 @@ class LinuxDriver:
         app_id = _linux_system.frontmost_app_id() or None
         return app_id, None
 
+    def active_window(self) -> dict | None:
+        """The EWMH active window (``window_id``, ``app``, ``pid``, ``title``).
+
+        None on Wayland, where there is no EWMH window id, and when no window
+        is active.
+        """
+        if _on_wayland():
+            return None
+        from a11y_computer_use.drivers import _linux_system
+
+        return _linux_system.active_window()
+
     def app_at_point(self, point: Point) -> str | None:
         from a11y_computer_use.drivers import _linux_system
 

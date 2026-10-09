@@ -1427,3 +1427,168 @@ def test_linux_caps_lock_does_not_invert_keystroke_typing(tmp_path) -> None:
             except Exception:
                 pass
         _stop(proc)
+
+
+def _require_ewmh() -> None:
+    """Skip unless an EWMH window manager owns this display.
+
+    Plain Xvfb has no ``_NET_ACTIVE_WINDOW`` focus. The Linux CI job starts
+    openbox, which does. This does not change the Chrome form or EWMH verb tests.
+    """
+    if not os.environ.get("DISPLAY"):
+        pytest.skip("no DISPLAY")
+    display = None
+    try:
+        from Xlib import display as xdisplay
+
+        display = xdisplay.Display()
+        root = display.screen().root
+        atom = display.intern_atom("_NET_SUPPORTING_WM_CHECK")
+        if root.get_full_property(atom, 0) is None:
+            pytest.skip("no EWMH window manager on this display")
+    except Exception as exc:  # noqa: BLE001 - no X, or Xlib is not installed
+        pytest.skip(f"cannot check for an EWMH window manager: {exc}")
+    finally:
+        if display is not None:
+            try:
+                display.close()
+            except Exception:
+                pass
+
+
+def _key_target_source(name: str, initial: str) -> str:
+    return textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("Gdk", "3.0")
+        from gi.repository import Gdk, Gtk, GLib
+        NAME = {name!r}
+        GLib.set_prgname(NAME)
+        Gdk.set_program_class(NAME)
+        win = Gtk.Window(title=NAME)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        entry = Gtk.Entry()
+        entry.set_text({initial!r})
+        label = Gtk.Label(label="got=" + entry.get_text())
+        def on_changed(widget):
+            label.set_text("got=" + widget.get_text())
+        entry.connect("changed", on_changed)
+        def on_focus_in(*_args):
+            entry.grab_focus()
+            return False
+        win.connect("focus-in-event", on_focus_in)
+        box.pack_start(label, False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 140)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        entry.grab_focus()
+        win.present()
+        Gtk.main()
+        """
+    )
+
+
+def _wait_named_window(driver, name: str, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            shot = driver.snapshot(Scope.WINDOW, name)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            shot = None
+        else:
+            ready = any(
+                str(el.title or "").startswith("got=") or str(el.value or "").startswith("got=")
+                for el in shot.elements
+            )
+            if shot.elements and ready:
+                for row in driver.windows() or []:
+                    if row.get("wm_class") == name or row.get("title") == name:
+                        return row
+        time.sleep(0.2)
+    return None
+
+
+def _focus_window(driver, window_id: int, timeout_s: float = 5.0) -> dict:
+    driver.focus_window(int(window_id))
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        last = driver.active_window()
+        if last and int(last.get("window_id") or 0) == int(window_id):
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"window {window_id} did not become active; last={last}")
+
+
+def _visible_text(driver, app: str) -> str:
+    shot = driver.snapshot(Scope.WINDOW, app)
+    return " ".join(f"{el.title or ''} {el.value or ''}" for el in shot.elements)
+
+
+def _wait_text(driver, app: str, needle: str, timeout_s: float = 4.0) -> str:
+    deadline = time.monotonic() + timeout_s
+    shown = ""
+    while time.monotonic() < deadline:
+        shown = _visible_text(driver, app)
+        if needle in shown:
+            return shown
+        time.sleep(0.15)
+    return shown
+
+
+def test_linux_type_and_key_with_app_land_in_that_app(tmp_path) -> None:
+    """``type`` and ``key`` with ``app=`` focus that app when another window is in front.
+
+    Both clients are Python, so the window comm is ``python3``. The name on
+    AT-SPI and WM_CLASS is what selects the window. The text has to show up
+    in the named entry and stay out of the window that was in front.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    target_name = "cuakeytarget"
+    other_name = "cuakeyother"
+    target_script = tmp_path / "cuakeytarget.py"
+    other_script = tmp_path / "cuakeyother.py"
+    target_script.write_text(_key_target_source(target_name, ""))
+    other_script.write_text(_key_target_source(other_name, "other-kept"))
+    target_proc = subprocess.Popen([sys.executable, str(target_script)])
+    other_proc = subprocess.Popen([sys.executable, str(other_script)])
+    try:
+        target = _wait_named_window(driver, target_name)
+        other = _wait_named_window(driver, other_name)
+        assert target is not None, "cuakeytarget never registered a window"
+        assert other is not None, "cuakeyother never registered a window"
+        assert int(target["window_id"]) != int(other["window_id"])
+        _focus_window(driver, int(other["window_id"]))
+        runtime = _runtime_for(tmp_path, driver, target_name, other_name, "python3")
+        typed = runtime.type_text("landed-type", app=target_name)
+        assert "macOS" not in typed, typed
+        assert "focused its window first" in typed, typed
+        target_text = _wait_text(driver, target_name, "landed-type")
+        other_text = _visible_text(driver, other_name)
+        assert "landed-type" in target_text, target_text
+        assert "landed-type" not in other_text, other_text
+        assert "other-kept" in other_text, other_text
+        _focus_window(driver, int(other["window_id"]))
+        pressed = runtime.key("z", app=target_name)
+        assert "macOS" not in pressed, pressed
+        assert "focused its window first" in pressed, pressed
+        target_text = _wait_text(driver, target_name, "z")
+        other_text = _visible_text(driver, other_name)
+        # A selected field replaces its text with the chord. Either the
+        # earlier type is still there or the chord replaced it; both mean
+        # the key reached this entry.
+        assert "z" in target_text, target_text
+        assert "z" not in other_text, other_text
+        assert "other-kept" in other_text, other_text
+    finally:
+        _stop(target_proc)
+        _stop(other_proc)
