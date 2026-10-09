@@ -122,6 +122,95 @@ def test_approve_and_auto_deny_together_exit_3(capsys):
     assert isinstance(payload["step_log"], list)
 
 
+def test_json_approve_prompt_is_not_on_stdout(monkeypatch, capsys) -> None:
+    import io
+
+    class _Prompts:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def write(self, data: str) -> int:
+            self.text += data
+            return len(data)
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    prompts = _Prompts()
+    monkeypatch.setattr(cli, "_prompt_stream", lambda: prompts)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("n\n"))
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    def script(_messages):
+        if not script.asked:  # type: ignore[attr-defined]
+            script.asked = True  # type: ignore[attr-defined]
+            return turn(ToolCall("app", {"action": "quit", "name": "demo"}))
+        return turn(done("left open", [{"element": {"role": "AXButton", "name": "Save"}}]))
+
+    script.asked = False  # type: ignore[attr-defined]
+    model = ScriptedModel(script)
+
+    def build(args):
+        del args
+        return Agent(
+            model,
+            runtime=FakeRuntime(elements),
+            approve=cli._stdin_approve,
+            auto_deny=False,
+            max_steps=2,
+        )
+
+    monkeypatch.setattr(cli, "build_agent", build)
+    code = cli.main(["run", "quit", "--model", "scripted:ignored.json", "--json", "--approve"])
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert out.count("\n") == 1
+    assert "Approve" not in out
+    assert "Approve" in prompts.text
+    assert code == 0
+    assert payload["status"] == "success"
+    assert payload["step_log"][0]["error"].startswith("approval_denied")
+
+
+def test_approve_policy_allow_safe_and_conflicts(capsys, tmp_path) -> None:
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    safe = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}", "--approve-policy", "allow-safe",
+    ])
+    agent = cli.build_agent(safe)
+    assert agent.approve_policy == "allow-safe"
+    assert agent.auto_deny is True
+    assert agent.approve is None
+    opened = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}", "--approve-policy", "allow-all",
+    ])
+    opened_agent = cli.build_agent(opened)
+    assert opened_agent.approve_policy == "allow-all"
+    assert opened_agent.auto_deny is False
+    assert opened_agent.approve is None
+
+    code = cli.main([
+        "run", "quit", "--model", f"scripted:{script}", "--json",
+        "--approve", "--approve-policy", "allow-all",
+    ])
+    payload, _raw = _loads(capsys)
+    assert code == 3
+    assert "approve-policy" in payload["reason"]
+
+    code = cli.main([
+        "run", "quit", "--model", f"scripted:{script}", "--json",
+        "--auto-deny", "--approve-policy", "allow-safe",
+    ])
+    payload, _raw = _loads(capsys)
+    assert code == 3
+    assert "approve-policy" in payload["reason"]
+
+
 def test_allow_exec_flag_is_off_unless_passed(tmp_path):
     script = tmp_path / "turns.json"
     script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")

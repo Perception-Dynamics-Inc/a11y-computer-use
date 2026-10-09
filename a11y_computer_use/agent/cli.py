@@ -2,8 +2,8 @@
 
 ``a11y-agent run`` prints one JSON object on stdout when ``--json`` is set.
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
-``--auto-deny`` is the default. ``--approve`` is the only mode that reads a
-prompt from the terminal.
+``--approve-policy deny`` is the default for risky actions. ``--approve``
+prompts on the terminal (stderr or the tty, never stdout).
 """
 
 from __future__ import annotations
@@ -26,8 +26,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the agent CLI. Returns a process exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    policy = getattr(args, "approve_policy", "deny")
     if args.approve and args.auto_deny:
         return _emit(args, _error_body("error: pass only one of --approve and --auto-deny"), 3)
+    if args.approve and policy != "deny":
+        return _emit(
+            args,
+            _error_body("error: pass only one of --approve and --approve-policy"),
+            3,
+        )
+    if args.auto_deny and policy != "deny":
+        return _emit(
+            args,
+            _error_body("error: pass only one of --auto-deny and --approve-policy"),
+            3,
+        )
     try:
         agent = build_agent(args)
         result = agent.run(args.goal)
@@ -40,8 +53,13 @@ def build_agent(args: argparse.Namespace):
     """Construct the agent a parsed ``run`` command describes."""
     from a11y_computer_use.agent.core import Agent
 
-    approve = _stdin_approve if args.approve else None
-    auto_deny = not args.approve
+    policy = getattr(args, "approve_policy", "deny")
+    if policy == "allow-all":
+        approve = None
+        auto_deny = False
+    else:
+        approve = _stdin_approve if args.approve else None
+        auto_deny = not args.approve
     return Agent(
         model=args.model,
         display=args.display,
@@ -49,6 +67,7 @@ def build_agent(args: argparse.Namespace):
         max_time_s=args.max_time_s,
         approve=approve,
         auto_deny=auto_deny,
+        approve_policy=policy,
         allow_exec=bool(getattr(args, "allow_exec", False)),
         trace_dir=args.trace_dir,
         allowed_domains=args.allowed_domains,
@@ -78,8 +97,22 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-time", type=float, default=900.0, dest="max_time_s", help="wall-clock budget in seconds")
     run.add_argument("--trace-dir", default=None, dest="trace_dir", help="directory for trajectory.jsonl and screenshots")
     run.add_argument("--json", action="store_true", help="print the result as one JSON object on stdout")
-    run.add_argument("--approve", action="store_true", help="prompt before quit, close, submit, and exec")
-    run.add_argument("--auto-deny", action="store_true", help="skip quit, close, submit, and exec (this is the default)")
+    run.add_argument("--approve", action="store_true", help="prompt before quit, close, pay, send, delete, and exec")
+    run.add_argument(
+        "--auto-deny",
+        action="store_true",
+        help="skip quit, close, pay, send, delete, and exec (this is the default)",
+    )
+    run.add_argument(
+        "--approve-policy",
+        choices=("deny", "allow-safe", "allow-all"),
+        default="deny",
+        dest="approve_policy",
+        help=(
+            "unattended approval for risky actions: deny (default), "
+            "allow-safe (quit and window close only), or allow-all"
+        ),
+    )
     run.add_argument(
         "--allow-exec",
         action="store_true",
@@ -105,8 +138,37 @@ def _stdin_approve(action: Action) -> bool:
     rendered = action.name
     if action.args:
         rendered += " " + json.dumps(action.args, default=str)[:180]
-    answer = input(f"Approve {rendered}? [y/N] ")
+    prompt = f"Approve {rendered}? [y/N] "
+    _write_prompt(prompt)
+    answer = sys.stdin.readline()
     return answer.strip().lower() in {"y", "yes"}
+
+
+def _write_prompt(prompt: str) -> None:
+    """Write ``prompt`` to stderr or the tty. Never to stdout."""
+    stream = _prompt_stream()
+    try:
+        stream.write(prompt)
+        stream.flush()
+    finally:
+        if stream is not sys.stderr and stream is not sys.stdout:
+            stream.close()
+
+
+def _prompt_stream():
+    """Where an approval prompt is written. Never stdout.
+
+    A terminal stderr gets the prompt. Otherwise the controlling tty, so a
+    redirected stdout (``--json``) stays a single JSON object. When neither
+    is available the prompt is still written to stderr.
+    """
+    err = sys.stderr
+    if err is not None and getattr(err, "isatty", lambda: False)():
+        return err
+    try:
+        return open("/dev/tty", "w", encoding="utf-8")
+    except OSError:
+        return err
 
 
 def _error_body(reason: str) -> dict:

@@ -493,8 +493,8 @@ def refusal_text(decision: safety.Decision) -> str:
     text = f"{decision.verdict.value}: {decision.reason}"
     if decision.verdict is safety.Verdict.NEEDS_PERMISSION and decision.app:
         need = decision.required.value if decision.required else "click"
-        text += (f" | hint: ask the user, then grant_app(app='{decision.app}', tier='{need}') "
-                 f"asks them to confirm in this host and records the grant; or they run "
+        text += (f" | hint: grant_app(app='{decision.app}', tier='{need}') "
+                 f"records the grant in this host, or run "
                  f"`a11y-computer-use grant {decision.app} {need}`.")
     return text
 
@@ -3775,10 +3775,13 @@ class Runtime:
             rows = self.driver.running_apps()
         except ComputerUseError:
             rows = []
+        from a11y_computer_use.app_identity import matching_stored_key
+
         for row in rows:
             ident = str(row.get("bundle_id") or row.get("id") or row.get("app") or row.get("name") or "")
-            if ident in trusted:
-                return ident
+            matched = matching_stored_key(ident, trusted)
+            if matched:
+                return matched
         return trusted[0]
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
@@ -4029,6 +4032,59 @@ class Runtime:
                 return False
             time.sleep(self.FOCUS_POLL_S)
 
+    def _prepare_launch(self, name: str) -> tuple[str, str]:
+        """``(launch_name, gate_key)`` for an OS ``app launch``.
+
+        A grant for ``thunar`` covers ``Files``, and the process started is
+        ``thunar``. A name that is not installed, not running, and not granted
+        is ``app_not_found`` listing the granted names. It is not a permission
+        refusal for the raw string.
+        """
+        from a11y_computer_use.app_identity import normalize, resolve_launch
+
+        granted = self.store.granted_apps()
+        mapped = None
+        try:
+            _running, mapped = self._resolve_app(name)
+        except ComputerUseError:
+            mapped = None
+        running = None
+        if mapped and normalize(mapped) != normalize(name):
+            running = mapped
+        elif mapped:
+            # The same string is either an echo of an unknown name or the
+            # comm of an app that is actually running. Only the latter counts.
+            listing = getattr(self.driver, "running_apps", None)
+            rows: list = []
+            if callable(listing):
+                try:
+                    rows = list(listing() or [])
+                except ComputerUseError:
+                    rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ident = str(
+                    row.get("bundle_id") or row.get("id") or row.get("app") or row.get("name") or ""
+                )
+                if ident and normalize(ident) == normalize(mapped):
+                    running = mapped
+                    break
+        resolved = resolve_launch(
+            name,
+            granted=granted,
+            installed_bundle=_installed_bundle_id(name),
+            running=running,
+        )
+        if not resolved.resolved or not resolved.gate_key:
+            shown = ", ".join(granted) if granted else "(none)"
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"no application matches {name!r}; granted apps: {shown}",
+                detail={"app": name, "granted": list(granted)},
+            )
+        return resolved.launch_name, resolved.gate_key
+
     @_serialized
     def app(self, action: str, name: str | None = None, activate: bool | None = None) -> str:
         # Routed through the driver (running_apps/launch_app/activate_app), so the
@@ -4046,14 +4102,9 @@ class Runtime:
                 self._reject_domain(destination=name)
             if self._resolves_apps():
                 gate_key = self._frontmost()  # browser: launch == navigate the bound tab
+                launch_name = name
             else:
-                try:  # gate by resolved id when possible, so grant keys stay unified
-                    _, gate_key = self._resolve_app(name)
-                except ComputerUseError:
-                    # Not running yet: key the gate by the installed app's bundle
-                    # id when the name resolves to one, so a grant for
-                    # "org.krita" also covers `app launch Krita`.
-                    gate_key = _installed_bundle_id(name) or name
+                launch_name, gate_key = self._prepare_launch(name)
 
             def launch() -> str | None:
                 before: list = []
@@ -4071,10 +4122,10 @@ class Runtime:
                         for row in rows if isinstance(row, dict)
                     }
                 if getattr(self.driver, "background_input", False):
-                    handle = self.driver.launch_app(name, activate=activate if activate is not None
+                    handle = self.driver.launch_app(launch_name, activate=activate if activate is not None
                                            else FOCUS_MODE != "background")
                 else:
-                    handle = self.driver.launch_app(name)
+                    handle = self.driver.launch_app(launch_name)
                 # A Linux launch returns a process handle. macOS and Windows
                 # return None, and the wait keeps its previous success string
                 # when no window appears. The ids from before the spawn keep a
@@ -4084,7 +4135,7 @@ class Runtime:
                 self._launch_before_titles = before_titles
                 if self._resolves_apps():
                     return None
-                return self._wait_first_window(name, self.APP_LAUNCH_WAIT_S)
+                return self._wait_first_window(launch_name, self.APP_LAUNCH_WAIT_S)
 
             title = self._run_gated(AppOp(verb=verb, app=gate_key), gate_key, launch)
             if self._resolves_apps():

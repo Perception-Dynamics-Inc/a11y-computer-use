@@ -8,6 +8,14 @@ HTTP providers speak to OpenAI-compatible chat completions (OpenAI, xAI, Ollama,
 pip install 'a11y-computer-use[agent]'
 ```
 
+On Linux, install the desktop backend in the same command. `gi` (PyGObject)
+and `Xlib` (python-xlib) are not pulled in by `[agent]` alone:
+
+```bash
+pip install 'a11y-computer-use[agent,linux]'
+sudo apt install gir1.2-atspi-2.0 at-spi2-core python3-gi
+```
+
 The core install does not depend on `httpx`. `ScriptedModel` and `CommandModel` use only the standard library.
 
 Nothing in the test suite calls a live model. Provider tests replay recorded request and response fixtures through `httpx.MockTransport`. No API key is stored in the repo.

@@ -339,6 +339,10 @@ def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     folded = (comm or "").lower()
     if not folded:
         return False
+    from a11y_computer_use.app_identity import shares_alias
+
+    if shares_alias(identifier, folded):
+        return True
     for needle in _identity_needles(identifier):
         if needle in folded or _launcher_comm(needle, folded):
             return True
@@ -349,6 +353,10 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
     """True when WM_CLASS instance or class is one of ``identifier``'s names."""
     inst = (instance or "").lower()
     cls = (klass or "").lower()
+    from a11y_computer_use.app_identity import shares_alias
+
+    if shares_alias(identifier, inst) or shares_alias(identifier, cls):
+        return True
     for needle in _identity_needles(identifier):
         if not needle:
             continue

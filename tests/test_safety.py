@@ -156,6 +156,7 @@ def test_unknown_app_needs_permission(home: Path) -> None:
     # actionable for the host: names the app and the tier to approve
     assert "com.example.unknown" in decision.reason
     assert "click" in decision.reason
+    assert "ask the user" not in decision.reason
     assert decision.to_dict() == {
         "verdict": "needs_permission",
         "app": "com.example.unknown",

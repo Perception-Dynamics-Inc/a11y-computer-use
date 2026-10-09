@@ -72,8 +72,10 @@ agent = ["httpx>=0.27"]
 windows = ["uiautomation; sys_platform == 'win32'"]
 # Linux a11y-first backend: PyGObject exposes the AT-SPI2 client (gi.repository
 # .Atspi) for observe + XTEST event generation; python-xlib (pure Python) covers
-# window/frontmost/clipboard. Both need the system AT-SPI2 typelib + bus at
-# runtime: apt install gir1.2-atspi-2.0 at-spi2-core. A source build of
+# window/frontmost/clipboard. Install with the agent extra as
+# pip install 'a11y-computer-use[agent,linux]'. Both need the system AT-SPI2
+# typelib + bus at runtime: apt install gir1.2-atspi-2.0 at-spi2-core python3-gi.
+# A source build of
 # PyGObject (sdist-only on PyPI as of 3.58.0) also needs the Debian/Ubuntu
 # -dev packages in docs/linux-port.md. This project does not publish those
 # wheels.

@@ -99,10 +99,15 @@ opaque-region markers are not implemented. The library does not OCR.
 a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --trace-dir /tmp/trace --json
 ```
 
-`--auto-deny` is the default: quit, close, submit, and exec are skipped with
-no prompt. `--approve` prompts on stdin and is the only interactive mode. Do
-not pass both. `--allow-exec` exposes `shell` and `python`. It is off by
-default, and it does not bypass `--auto-deny` or the approve hook.
+`--approve-policy deny` is the default: quit, close, pay, send, delete, and
+exec are skipped with no prompt. `--approve-policy allow-safe` runs quit and
+window close and still skips pay, send, delete, and exec.
+`--approve-policy allow-all` runs those actions. `--approve` prompts on
+stderr when it is a terminal, otherwise on the controlling tty, and reads
+the answer from stdin. The prompt is never written to stdout, so `--json`
+stays one JSON object. Do not combine `--approve` with `--auto-deny` or with
+a policy other than `deny`. `--allow-exec` exposes `shell` and `python`. It
+is off by default, and it does not bypass the approval policy.
 
 `--json` writes exactly one JSON object to stdout:
 
@@ -118,10 +123,11 @@ default, and it does not bypass `--auto-deny` or the approve hook.
 | `trace_dir` | Directory of the trace |
 | `step_log` | One object per action |
 
-Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`),
-`args` (secrets redacted), `result`, `error`, `verified`, `duration_s`,
-`skipped` (later calls in that turn that did not run), and `turn_stop`
-(`failure`, `refusal`, `needs_human`, or null).
+Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`
+from the snapshot the model acted on, before the action renumbered refs),
+`args` (secrets redacted from that same pre-action element), `result`,
+`error`, `verified`, `duration_s`, `skipped` (later calls in that turn that
+did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 
 Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
@@ -192,11 +198,16 @@ a captcha iframe. It does not guess credentials or submit payments.
 
 ## Approval and secrets
 
-Risky actions are app quit, window close, menu items whose label is quit or
-exit, clicks or menu items whose label is submit, send, or pay, and every
-`shell` or `python` call. Typing into a password, OTP, or card field is not
-sent to `approve`. The run stops with `needs_human` and the characters are
-not typed.
+Risky actions are app quit, window close, menu items whose label is quit,
+exit, log out, or sign out, clicks or menu items whose label pays, sends a
+message, or deletes, and every `shell` or `python` call. An ordinary form
+submit, a save, or a button such as Update cart is not risky: the loop runs
+it. Typing into a password, OTP, or card field is not sent to `approve`.
+The run stops with `needs_human` and the characters are not typed.
+
+When no application is focused, the observation is a desktop overview: open
+windows, running apps, and how to launch or focus one. It is not a permission
+error, and permission errors do not tell the model to ask the user.
 
 Exec has two gates. `allow_exec` defaults to false: the tools are omitted
 from the schema, a call the model emits anyway is not run, and the audit
@@ -247,7 +258,18 @@ request replays the tool calls the model just made.
 `make_model` lives in `a11y_computer_use.agent.models`. Specs, endpoints, and
 environment variables are in `docs/agent-models.md`. A bad spec or a missing
 key raises `ModelError`. HTTP clients are an optional extra
-(`pip install 'a11y-computer-use[agent]'`). This package's tests do not call
+(`pip install 'a11y-computer-use[agent]'`). On Linux the desktop backend also
+needs PyGObject and python-xlib, which the `linux` extra names, plus the
+system AT-SPI packages:
+
+```bash
+pip install 'a11y-computer-use[agent,linux]'
+sudo apt install gir1.2-atspi-2.0 at-spi2-core python3-gi
+```
+
+`a11y-agent` checks those imports before the first model call when the
+driver is Linux. A missing binding is status `failed`, reason `error: ...`,
+exit code 3, not `needs_human`. This package's tests do not call
 them: they construct `ScriptedModel` directly. No API key is stored in the
 repo.
 
@@ -271,7 +293,8 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   `cancel`
 - stop-on-failure, stop-on-refusal, and a no-op that does not run the later
   calls in the turn
-- approve deny and the auto-deny default
+- approve deny, `--approve-policy`, and the auto-deny default
+- a desktop overview when nothing is focused, and a plain Submit that runs
 - exec permission gating, audit-log fields, `exec_disabled`, `auto_denied`,
   hook denial, argument rejection, timeout, nonzero exit, and the output cap
 - `--allow-exec` reaching `Agent`
@@ -311,6 +334,9 @@ Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 - one GTK turn that sets the note, the path, and the format, then saves
 - exec with `allow_exec` writing a file, and the same command denied by the
   approve hook
+- an empty desktop's first observation, Files/Terminal grant aliases, a
+  Submit button that is not sent for approval, and a number field with a
+  minimum and no maximum
 
 Not in this change:
 

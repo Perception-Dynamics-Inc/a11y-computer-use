@@ -426,14 +426,43 @@ class PermissionStore:
         """
         with self._lock:
             self._refresh()
-            if bundle_id in self._deny:
+            keys = self._identity_keys(bundle_id)
+            if any(key in self._deny for key in keys):
                 block: str | None = "deny"
-            elif self._allow and bundle_id not in self._allow:
+            elif self._allow and not any(key in self._allow for key in keys):
                 block = "allow"
             else:
                 block = None
             denied = self._load_error is not None or block is not None
-            return self._tiers.get(bundle_id), denied, self._load_error, block
+            granted = None
+            for key in keys:
+                if key in self._tiers:
+                    granted = self._tiers[key]
+                    break
+            return granted, denied, self._load_error, block
+
+    def _identity_keys(self, bundle_id: str) -> list[str]:
+        """Stored keys that name ``bundle_id``, exact string first.
+
+        Case, a desktop id, and alias groups (Files/nautilus, Terminal/xterm,
+        libreoffice calc/soffice) share a grant. The caller's own string is
+        always included so an unknown app stays a miss.
+        """
+        from a11y_computer_use.app_identity import identity_keys
+
+        ordered: list[str] = []
+        if bundle_id in self._tiers or bundle_id in self._deny or bundle_id in self._allow:
+            ordered.append(bundle_id)
+        wanted = identity_keys(bundle_id)
+        if wanted:
+            for key in list(self._tiers) + list(self._deny) + list(self._allow):
+                if key in ordered:
+                    continue
+                if identity_keys(key) & wanted:
+                    ordered.append(key)
+        if bundle_id not in ordered:
+            ordered.append(bundle_id)
+        return ordered
 
     def get_tier(self, bundle_id: str) -> Tier | None:
         """Granted tier for ``bundle_id``; None means ungranted ("ask")."""
@@ -633,8 +662,8 @@ def check_action(action: Action, target_app: str, *, store: PermissionStore | No
             required=required,
             granted=None,
             reason=(
-                f"{target_app} has no permission grant; ask the user to approve "
-                f"tier '{required.value}' (or higher) for this app, then retry"
+                f"{target_app} has no permission grant for tier "
+                f"'{required.value}' (or higher)"
             ),
         )
     if _TIER_RANK[granted] < _TIER_RANK[required]:

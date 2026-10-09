@@ -1972,6 +1972,7 @@ async def test_needs_permission_refusal_names_the_grant_step(mcp_server, monkeyp
     text = result.content[0].text
     assert "needs_permission: com.test.front" in text and "grant_app(app='com.test.front', tier='read')" in text
     assert "a11y-computer-use grant com.test.front read" in text
+    assert "ask the user" not in text
 
 
 async def test_report_issue_without_gh_returns_a_prefilled_link(mcp_server, audit_dir, monkeypatch) -> None:

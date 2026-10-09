@@ -1986,6 +1986,19 @@ def _format_bound(number: float) -> str:
     return format(number, "g")
 
 
+def _outside_range(number: float, low: float, high: float, *, open_upper: bool) -> bool:
+    """True when ``number`` is below the minimum or above a real maximum."""
+    if number < low:
+        return True
+    return not open_upper and number > high
+
+
+def _range_message(value: str, low: float, high: float, *, open_upper: bool) -> str:
+    if open_upper:
+        return f"value {value!r} is below the minimum {_format_bound(low)}"
+    return f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
+
+
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 
@@ -2707,28 +2720,31 @@ def set_numeric_value(acc, value: str) -> bool | str:
         )
     span = _value_range(acc)
     low = high = None
+    open_upper = False
     if span is not None:
         low, high = span
+        # Chrome reports maximum 0 on <input type=number min=0> with no max.
+        # A maximum that is not above the minimum is not a bound.
+        open_upper = high <= low
     try:
         number = _parse_number(value)
     except ValueError:
         if low is None or high is None:
             raise ValueError(f"value {value!r} is not a number") from None
+        if open_upper:
+            raise ValueError(
+                f"value {value!r} is not a number; minimum is {_format_bound(low)}"
+            ) from None
         raise ValueError(
             f"value {value!r} is not a number; valid range is {_format_bound(low)}..{_format_bound(high)}"
         ) from None
     if span is None:
         return False
-    low, high = span
-    if number < low or number > high:
-        raise ValueError(
-            f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
-        )
+    if _outside_range(number, low, high, open_upper=open_upper):
+        raise ValueError(_range_message(value, low, high, open_upper=open_upper))
     number = _snap_spin(acc, number, low)
-    if number < low or number > high:
-        raise ValueError(
-            f"value {value!r} is outside {_format_bound(low)}..{_format_bound(high)}"
-        )
+    if _outside_range(number, low, high, open_upper=open_upper):
+        raise ValueError(_range_message(value, low, high, open_upper=open_upper))
     if _number_field_is_empty(acc):
         if _fill_empty_number(acc, value):
             return True
