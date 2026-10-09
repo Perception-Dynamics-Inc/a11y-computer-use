@@ -695,3 +695,91 @@ def _hidden_link(driver):
 
     driver._run(lambda: walk(root, 0))
     return found[0] if found else None
+
+
+_CROP_SCROLL_PAGE = (
+    "<!doctype html><meta charset=utf-8><title>cuacropscroll</title>"
+    "<style>body{margin:0;font:16px/24px sans-serif}"
+    "#swatch{display:block;width:200px;height:60px;margin:8px;background:#c00;"
+    "color:#fff;border:0}.pad{height:240px}</style>"
+    "<p>Lead paragraph</p><button id=swatch type=button>Red swatch</button>"
+    + "".join("<div class=pad>pad</div>" for _ in range(40))
+    + "<p id=tail>Tail marker</p>"
+)
+
+
+def test_linux_firefox_crop_of_a_scrolled_off_button_is_off_screen(tmp_path) -> None:
+    """crop of a button End scrolled off the page is not_visible, not stale_ref.
+
+    Live Firefox on a local page. The ref stays the one from before the scroll.
+    The error reason is off_screen and the hint is scroll(ref, into_view=true).
+    A missing Firefox binary fails. Padding does not turn the miss into a crop.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ScrollUnit
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    if _firefox_binary() is None:
+        pytest.fail("Firefox is not installed; the Linux live job installs it when it is missing")
+    page = tmp_path / "cuacropscroll.html"
+    page.write_text(_CROP_SCROLL_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "firefox")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(el.title == "Red swatch" and el.bounds.height >= 40 for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Firefox did not expose Red swatch"
+        runtime = _runtime(tmp_path, driver)
+        runtime._current = snap
+        lead = next((el for el in snap.elements if el.title == "Lead paragraph"), None)
+        if lead is not None:
+            runtime.click(lead.ref)
+            snap = runtime._current or snap
+        swatch = next(el for el in snap.elements if el.title == "Red swatch" and el.bounds.height >= 40)
+        runtime._current = snap
+        ref = swatch.ref
+        fresh = snap
+        for _ in range(12):
+            fresh = driver.snapshot(Scope.WINDOW, "firefox")
+            if not any(el.title == "Red swatch" for el in fresh.elements):
+                break
+            runtime.key("end", app="firefox")
+            runtime.key("ctrl+end", app="firefox")
+            runtime.key("pagedown", app="firefox")
+            try:
+                driver.scroll(swatch, dy=1200, unit=ScrollUnit.PIXELS)
+            except ComputerUseError:
+                pass
+            time.sleep(0.25)
+        else:
+            titles = sorted({el.title for el in fresh.elements if el.title})
+            raise AssertionError(f"Red swatch stayed in the Firefox tree: {titles[:40]}")
+        assert runtime._current.element(ref).title == "Red swatch"
+        try:
+            runtime.crop(ref, padding=512)
+        except ComputerUseError as exc:
+            assert exc.code is ErrorCode.NOT_VISIBLE, exc
+            assert exc.detail["reason"] == "off_screen"
+            assert "still valid" in exc.message
+            assert exc.detail["hint"] == f"scroll(ref={ref!r}, into_view=true)"
+            assert "Reload" not in exc.message
+            assert "stale" not in exc.message
+        else:
+            raise AssertionError("crop of a scrolled-off button must be not_visible")
+    finally:
+        _stop(proc)

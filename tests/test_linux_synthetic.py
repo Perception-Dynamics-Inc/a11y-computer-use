@@ -28,6 +28,7 @@ from a11y_computer_use.schema import (
     Point,
     Scope,
     ScrollUnit,
+    Snapshot,
 )
 
 
@@ -134,6 +135,80 @@ def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypa
     assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30))) == (None, None)
     assert _atspi._extents(_Comp(_Rect(5, 5, 0, 30)), keep_zero=True) == ((5.0, 5.0), (0.0, 30.0))
     assert _atspi._extents(_Comp(_Rect(5, 6, 70, 30))) == ((5.0, 6.0), (70.0, 30.0))
+
+
+def test_offscreen_extents_distinguish_a_scrolled_box_from_zero_and_on_screen(monkeypatch) -> None:
+    """A box that misses the screen is off-screen. An overlapping box is not.
+
+    DEFUNCT is gone. A positive box that still overlaps the screen is on
+    screen, including a partial clip. A box fully above the screen is the
+    scrolled-off case. Zero size is off-screen only when the node is not
+    SHOWING, so a failed extents read of a showing control stays absent.
+    """
+
+    class _Rect:
+        def __init__(self, x, y, w, h):
+            self.x, self.y, self.width, self.height = x, y, w, h
+
+    class _Node:
+        def __init__(self, role, states, rect):
+            self.role = role
+            self.states = set(states)
+            self.rect = rect
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return ""
+
+        def get_toolkit_name(self):
+            return ""
+
+        def get_application(self):
+            return None
+
+        def get_state_set(self):
+            return _NS(names=set(self.states), contains=lambda member: str(member) in self.states)
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, _coord):
+            return self.rect
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0)))
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (100, 80))
+    assert _atspi.offscreen_extents(_Node("push button", {"DEFUNCT"}, _Rect(-40, 10, 20, 10))) is None
+    assert _atspi.offscreen_extents(_Node("push button", {"SHOWING"}, _Rect(10, 12, 20, 16))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(-10, 5, 30, 10))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(8, -80, 200, 60))) == (
+        (8.0, -80.0),
+        (200.0, 60.0),
+    )
+    assert _atspi.offscreen_extents(_Node("push button", {"SHOWING"}, _Rect(5, 5, 0, 30))) is None
+    assert _atspi.offscreen_extents(_Node("push button", set(), _Rect(5, 5, 0, 30))) == (
+        (0.0, 0.0),
+        (0.0, 0.0),
+    )
+
+    element = Element(
+        "e3", "AXButton", "Red swatch", None, Bounds(0, 8, 40, 200, 60), "snap-off",
+    )
+    issued = Snapshot(
+        "snap-off", Scope.WINDOW, "chrome", 1, 0.0, (), (element,),
+    )
+    handle = object()
+    observe._register_epoch(issued.snapshot_id, {}, {"e3": handle})
+    monkeypatch.setattr(
+        _atspi, "offscreen_extents",
+        lambda acc: ((8.0, -80.0), (200.0, 60.0)) if acc is handle else None,
+    )
+    driver = LinuxDriver()
+    assert driver.alive_offscreen(issued, "e3") == Bounds(0, 8, -80, 200, 60)
+    monkeypatch.setattr(_atspi, "offscreen_extents", lambda acc: None)
+    assert driver.alive_offscreen(issued, "e3") is None
+    assert driver.alive_offscreen(issued, "e9") is None
 
 
 def test_hollow_page_tab_keeps_the_document_below_it() -> None:

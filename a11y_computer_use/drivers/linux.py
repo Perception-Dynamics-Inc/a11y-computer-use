@@ -712,7 +712,9 @@ class LinuxDriver:
 
         A node the pruned tree dropped because its document is not showing is
         ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
-        the node is gone.
+        the node is gone. A node that is still alive and has scrolled off the
+        display stays ``stale_ref`` here; crop asks `alive_offscreen` and
+        reports ``not_visible`` instead. Click keeps this ``stale_ref``.
         """
         from a11y_computer_use import observe
 
@@ -776,6 +778,39 @@ class LinuxDriver:
             return
         if found:
             raise self._not_showing_error(element.ref, element.role, element.title)
+
+    def alive_offscreen(self, snap: Snapshot, ref: str) -> Bounds | None:
+        """Bounds when ``ref`` is still alive and misses the display.
+
+        None when the handle is missing, DEFUNCT, in a hidden document, or
+        still intersects the screen. Crop uses this so a scrolled-off control
+        is ``not_visible`` (the ref is still valid). Click does not call it,
+        so a reordered list stays ``stale_ref``.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            element = snap.element(ref)
+        except KeyError:
+            return None
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is None:
+            return None
+        try:
+            found = self._run(lambda: _atspi.offscreen_extents(handle))
+        except Exception:
+            return None
+        if found is None:
+            return None
+        pos, size = found
+        return Bounds(
+            element.bounds.display_id,
+            int(pos[0]),
+            int(pos[1]),
+            max(0, int(size[0])),
+            max(0, int(size[1])),
+        )
 
     def _refuse_hidden(self, element: Element, handle) -> None:
         """Raise when ``handle`` is in a Firefox document that is not showing.
