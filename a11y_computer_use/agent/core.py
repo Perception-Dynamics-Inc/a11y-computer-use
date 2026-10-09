@@ -39,6 +39,7 @@ from a11y_computer_use.agent.exec import (
 from a11y_computer_use.agent.events import Event
 from a11y_computer_use.agent.models.base import (
     Message,
+    ModelError,
     ModelTurn,
     ToolCall,
     assistant_message,
@@ -96,6 +97,14 @@ or type a password, one-time code, or card number.
 
 _HUMAN_KINDS = ("captcha", "payment", "2fa", "login")
 _FIELD_ROLES = ("textfield", "textarea", "securetextfield", "passwordfield", "combobox", "text", "password", "secure")
+
+#: Per-call model limit. This is not the run's ``--max-time`` budget.
+DEFAULT_MODEL_TIMEOUT_S = 120.0
+
+
+def _model_call_timed_out(exc: ModelError) -> bool:
+    """True when the model backend stopped because its own call timed out."""
+    return "timed out" in str(exc).casefold()
 
 _LINUX_INSTALL = (
     "Install with pip install 'a11y-computer-use[agent,linux]' "
@@ -157,7 +166,10 @@ class Agent:
     denies pay, send, delete, and exec. ``allow-all`` runs them.
     ``allow_exec`` exposes
     ``shell`` and ``python``; it is off by default, and each exec call is
-    still approved and audited. ``cancel`` is safe to call from another thread.
+    still approved and audited. ``model_timeout_s`` is the limit for one model
+    call (default 120 seconds). It is not the remaining run budget. The budget
+    is checked between steps, and a model timeout after that budget is spent
+    ends as ``max_time``. ``cancel`` is safe to call from another thread.
     Observations are wrapped in ``<untrusted>`` fences (``fence_untrusted``,
     default on). ``allowed_domains`` and ``blocked_domains`` reject browser
     navigation and actions with ``domain_blocked``.
@@ -170,6 +182,7 @@ class Agent:
         display: str | None = None,
         max_steps: int = 50,
         max_time_s: float = 900,
+        model_timeout_s: float = DEFAULT_MODEL_TIMEOUT_S,
         approve: Callable[[Action], bool] | None = None,
         auto_deny: bool = True,
         approve_policy: str = "deny",
@@ -188,6 +201,11 @@ class Agent:
         self.display = display
         self.max_steps = max_steps
         self.max_time_s = max_time_s
+        if isinstance(model_timeout_s, bool) or not isinstance(model_timeout_s, (int, float)):
+            raise ValueError("model_timeout_s must be a positive number")
+        if float(model_timeout_s) <= 0:
+            raise ValueError("model_timeout_s must be a positive number")
+        self.model_timeout_s = float(model_timeout_s)
         if approve_policy not in {"deny", "allow-safe", "allow-all"}:
             raise ValueError("approve_policy must be deny, allow-safe, or allow-all")
         self.approve = approve
@@ -331,12 +349,20 @@ class Agent:
             if screen == "replan":
                 yield Event("stuck", {"digest": digest, "replans": self._replans, "terminal": False})
 
-            remaining = self.max_time_s - (time.perf_counter() - started)
-            turn = self.model.complete(  # type: ignore[union-attr]
-                self._messages,
-                tool_schemas(allow_exec=self.allow_exec),
-                timeout=max(0.0, remaining),
-            )
+            if self._timed_out(started):
+                self._finish("failed", "", "max_time", started)
+                return
+            try:
+                turn = self.model.complete(  # type: ignore[union-attr]
+                    self._messages,
+                    tool_schemas(allow_exec=self.allow_exec),
+                    timeout=self.model_timeout_s,
+                )
+            except ModelError as exc:
+                if self._timed_out(started) and _model_call_timed_out(exc):
+                    self._finish("failed", "", "max_time", started)
+                    return
+                raise
             yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
             self._messages.append(assistant_message(turn))
             if not turn.calls:

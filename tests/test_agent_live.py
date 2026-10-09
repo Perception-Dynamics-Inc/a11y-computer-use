@@ -1207,6 +1207,52 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
 
 
 @requires_display
+def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, isolated_home) -> None:
+    """Live. A command model is not given the 1s left in the run.
+
+    The script sleeps longer than that remainder and writes a marker when it
+    finishes. The run ends failed with reason max_time (exit 1). A ModelError
+    from killing the process is the bug.
+    """
+    from a11y_computer_use.agent.cli import exit_code
+    from a11y_computer_use.agent.models.command import CommandModel
+
+    _clear_focus()
+    _grant_linux_desktop()
+    started_flag = tmp_path / "model-started"
+    finished_flag = tmp_path / "model-finished"
+    script = tmp_path / "slow_model.py"
+    script.write_text(
+        "import json, sys, time\n"
+        f"open({str(started_flag)!r}, 'w').write('started')\n"
+        "json.load(sys.stdin)\n"
+        "time.sleep(1.5)\n"
+        f"open({str(finished_flag)!r}, 'w').write('finished')\n"
+        "json.dump({'calls': [], 'text': 'slow'}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    Agent, _ScriptedModel, _ModelTurn, _ToolCall = _agent_api()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    result = _run_agent(
+        Agent,
+        CommandModel([sys.executable, str(script)]),
+        "Look at the desktop and stop.",
+        trace,
+        approve=None,
+        auto_deny=True,
+        max_steps=4,
+        max_time_s=1.0,
+        model_timeout_s=30,
+    )
+    assert result.status == "failed", result
+    assert result.reason == "max_time", result.reason
+    assert exit_code(result) == 1
+    if started_flag.exists():
+        assert finished_flag.exists(), "the model call was killed before its own timeout"
+
+
+@requires_display
 def test_agent_submit_button_does_not_need_approval(tmp_path, isolated_home) -> None:
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
     script_path = tmp_path / "submit.py"

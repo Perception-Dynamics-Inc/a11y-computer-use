@@ -99,7 +99,7 @@ the window screenshot.
 ## CLI
 
 ```bash
-a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --trace-dir /tmp/trace --json
+a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
 ```
 
 `--approve-policy deny` is the default: quit, close, pay, send, delete, and
@@ -134,6 +134,13 @@ did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 
 Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
+
+`--model-timeout` is the limit for one model call, in seconds. The default is
+120. It is not the time left in `--max-time`. The loop checks the run budget
+before each step and again after the observation, before it calls the model.
+A model call that times out after that budget is already spent ends
+`reason` `max_time` (exit 1). A model timeout while the budget remains is
+`error: ModelError: ...` (exit 3).
 
 `--display :N` sets `$DISPLAY` for the process before the runtime is created.
 The SDK equivalent is `Agent(display=":N")`.

@@ -72,6 +72,7 @@ def build_agent(args: argparse.Namespace):
         display=args.display,
         max_steps=args.max_steps,
         max_time_s=args.max_time_s,
+        model_timeout_s=args.model_timeout_s,
         approve=approve,
         auto_deny=auto_deny,
         approve_policy=policy,
@@ -102,6 +103,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--display", default=None, help="X display, for example :1 (also sets $DISPLAY)")
     run.add_argument("--max-steps", type=int, default=50, dest="max_steps")
     run.add_argument("--max-time", type=float, default=900.0, dest="max_time_s", help="wall-clock budget in seconds")
+    run.add_argument(
+        "--model-timeout",
+        type=float,
+        default=120.0,
+        dest="model_timeout_s",
+        help="seconds for one model call (default 120); this is not the run budget",
+    )
     run.add_argument("--trace-dir", default=None, dest="trace_dir", help="directory for trajectory.jsonl and screenshots")
     run.add_argument("--json", action="store_true", help="print the result as one JSON object on stdout")
     run.add_argument("--approve", action="store_true", help="prompt before quit, close, pay, send, delete, and exec")

@@ -124,7 +124,7 @@ What goes on the wire:
 
 ## Retries, timeouts, and errors
 
-`complete(..., timeout=None)` uses a 120 second HTTP timeout. Pass `timeout` to override it for that call. The same argument is the subprocess timeout for `CommandModel` (default 30 seconds) and must be positive.
+`complete(..., timeout=None)` uses a 120 second HTTP timeout. Pass `timeout` to override it for that call. The same argument is the subprocess timeout for `CommandModel` (default 30 seconds) and must be positive. The agent loop passes its own per-call limit (`--model-timeout`, default 120 seconds), not the seconds left in the run budget.
 
 HTTP 408, 429, and every 5xx status are retried, as are timeouts (`httpx.TimeoutException`). Other connection errors and 4xx statuses (except 408) are not retried. The client makes up to 3 attempts. Between attempts it sleeps 0.25s, then 0.5s, capped at 8s. A numeric `Retry-After` header replaces that delay, still capped at 8s. The final failure is `ModelError`. `ModelError.status` is the HTTP status when there was a response, and `None` for a timeout, a missing key, a bad body, or a local command. The response text is included, truncated. The API key is not.
 
