@@ -203,13 +203,19 @@ class RawNode:
     focusable: bool = False
     #: Platform text-entry signal independent of role. AT-SPI sets this only
     #: when the node itself is an editable entry: an entry, text, or password
-    #: role that is not read-only, or a contenteditable section (a div or span
-    #: with ``STATE_EDITABLE``; Chromium may omit EditableText, Firefox must
-    #: expose it). A paragraph, panel, document, or combo is not an entry, even
-    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. Default
-    #: false, so macOS, Windows, and the browser stay editable only when the
-    #: role is a text field.
+    #: role that is not read-only and has ``STATE_EDITABLE``, or a
+    #: contenteditable section (a div or span with ``STATE_EDITABLE``).
+    #: EditableText support is not that signal. A paragraph, panel, document,
+    #: or combo is not an entry, even when Firefox reports ``STATE_EDITABLE``
+    #: or EditableText on it. Default false, so macOS, Windows, and the
+    #: browser stay editable only when the role is a text field.
     editable: bool = False
+    #: AT-SPI's own answer for ``editable``, or None when this tree did not
+    #: come from AT-SPI. False wins over a text-field role, so an address-bar
+    #: wrapper mapped to ``AXTextField`` without ``STATE_EDITABLE`` is not
+    #: edit. None keeps the role rule for macOS, Windows, and synthetic
+    #: snapshots.
+    platform_editable: bool | None = None
 
 
 class TreeAccessor(Protocol):
@@ -1409,13 +1415,18 @@ def _empty_text_container(raw: RawNode) -> bool:
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """Derive (clickable, editable, secure) from role/subrole/actions.
 
-    ``raw.editable`` is the platform signal that the node itself is an
-    editable entry. A contenteditable section can carry it. A combo does not
-    become editable from its role.
+    ``platform_editable`` is AT-SPI's answer for this node, from its own
+    ``STATE_EDITABLE``. It wins over a text-field role, so an address-bar
+    wrapper that maps to ``AXTextField`` without that state is not edit.
+    None means the platform did not say (macOS, Windows, a synthetic
+    snapshot): a text-field role or a secure field stays editable.
     """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES
-    editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
+    if raw.platform_editable is not None:
+        editable = raw.platform_editable
+    else:
+        editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
     return clickable, editable, secure
 
 

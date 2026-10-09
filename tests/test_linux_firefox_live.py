@@ -17,10 +17,12 @@ or in find. A click on a link in the hidden tab is an error, not "clicked".
 The key fallback's read-back treats NBSP as a space and U+FFFC as the child
 text, and set_value replaces Editor A instead of leaving it empty.
 
-#243: a static paragraph and a select are not edit. find(editable=true) does not
-return them. set_value on the paragraph is not_editable and does not select
-the page. A real input and a contenteditable stay editable and accept
-set_value. The select still changes through the combo path.
+#243: a static paragraph, a select, and address-bar wrappers are not edit.
+find(editable=true) does not return them. The edit flag is the element's
+own STATE_EDITABLE, not EditableText. set_value on the paragraph is
+not_editable and restores the previous caret and selection. A real input
+and a contenteditable stay editable and accept set_value. The select still
+changes through the combo path.
 """
 
 from __future__ import annotations
@@ -895,11 +897,12 @@ def _shown(element) -> str:
 
 
 def test_linux_firefox_paragraph_and_select_are_not_editable(tmp_path) -> None:
-    """Live Firefox. A paragraph and a select are not edit. An input and a contenteditable are.
+    """Live Firefox. A paragraph, a select, and address-bar wrappers are not edit.
 
-    set_value on the paragraph is not_editable and leaves no text selection.
-    set_value still writes the input, the select, and both contenteditables.
-    A missing Firefox binary fails. This test does not skip.
+    An input and a contenteditable are. set_value on the paragraph is
+    not_editable and restores the caret. set_value still writes the input,
+    the select, and both contenteditables. A missing Firefox binary fails.
+    This test does not skip.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -960,17 +963,49 @@ def test_linux_firefox_paragraph_and_select_are_not_editable(tmp_path) -> None:
         assert "Name" in found, found
         assert "Notes box" in found, found
         assert "Rich box" in found, found
+        editables = [(el.role, el.title, _shown(el)[:48]) for el in snap.elements if el.editable]
+        assert not any(
+            el.editable and el.role in {"AXStaticText", "AXComboBox"} for el in snap.elements
+        ), editables
+        assert not any(
+            el.editable and el.role == "AXGroup" and el.title not in {"Notes box", "Rich box"}
+            for el in snap.elements
+        ), editables
+        for el in snap.elements:
+            if not el.editable or el.title in {"Name", "Notes box", "Rich box"}:
+                continue
+            assert el.role in {"AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField"}, editables
+            assert (el.title or "").strip(), editables
 
         snap = runtime._current
         paragraph = next(
             el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
         )
+        name = next(el for el in snap.elements if el.title == "Name" and el.role == "AXTextField")
         runtime._current = snap
         before = _text_selections(driver)
+        name_handle = observe.ax_handle_for(name.snapshot_id, name.ref)
+        assert name_handle is not None
+
+        def _read_caret():
+            from a11y_computer_use.drivers import _atspi
+
+            Atspi = _atspi._atspi()
+            return _atspi._safe(lambda: Atspi.Text.get_caret_offset(name_handle))
+
+        def _place_caret():
+            from a11y_computer_use.drivers import _atspi
+
+            Atspi = _atspi._atspi()
+            _atspi._safe(lambda: Atspi.Text.set_caret_offset(name_handle, 0))
+            return _read_caret()
+
+        caret_before = driver._run(_place_caret)
         with pytest.raises(ComputerUseError) as exc:
             runtime.set_value(paragraph.ref, "nope")
         assert exc.value.detail.get("reason") == "not_editable", exc.value
         assert _text_selections(driver) == before
+        assert driver._run(_read_caret) == caret_before
         snap = driver.snapshot(Scope.WINDOW, "firefox")
         paragraph = next(
             el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
