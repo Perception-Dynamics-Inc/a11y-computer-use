@@ -1753,6 +1753,20 @@ def test_typed_visible_ignores_nbsp_and_one_trailing_newline() -> None:
     )
     assert _atspi._typed_visible("Hello", "Hello\n", "ZZ") is False
     assert _atspi._typed_visible("a", "a\n", "\n") is True
+    # Chrome drops a trailing space. An interior space still has to be there.
+    assert _atspi._typed_visible(
+        "ZZFirst paraSecond bold para",
+        "ZZFirst paraSecond bold para m0",
+        " m0 ",
+        chrome=True,
+    )
+    assert _atspi._typed_visible("Hello", "Hello", " m0 ", chrome=True) is False
+    assert _atspi._typed_visible("Hello", "Helloa b", "a  b", chrome=True) is False
+    assert _atspi._typed_visible(
+        "ZZFirst paraSecond bold para",
+        "ZZFirst paraSecond bold para m0",
+        " m0 ",
+    ) is False
 
 
 def test_chrome_contenteditable_type_waits_for_the_settled_text(fake_atspi, monkeypatch) -> None:

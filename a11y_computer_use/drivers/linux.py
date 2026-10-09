@@ -1006,7 +1006,10 @@ class LinuxDriver:
                     lambda: self._run(lambda: _atspi._readable_text(focused)),
                     before,
                     text,
+                    chrome=True,
                 )
+                if _atspi._typed_visible(before, after, text, chrome=True):
+                    return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
         if after is not None and not _atspi._typed_visible(before, after, text):

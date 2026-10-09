@@ -1462,26 +1462,46 @@ def _field_text_for_type(text: str | None, typed: str) -> str | None:
     return normalized
 
 
-def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
+def _type_needles(text: str, *, chrome: bool) -> tuple[str, ...]:
+    """Strings that count as ``text`` having landed.
+
+    NBSP is already a space in the caller. Chrome's contenteditable drops a
+    trailing space (the edge one is not kept once the read settles). The
+    needle without those trailing spaces counts. An interior space is part
+    of the needle, so ``a  b`` does not match ``a b``. A string of only
+    spaces is not trimmed down to empty.
+    """
+    needle = _norm_nbsp(text) or ""
+    if not chrome or not needle:
+        return (needle,)
+    trimmed = needle.rstrip(" ")
+    if not trimmed or trimmed == needle:
+        return (needle,)
+    return (needle, trimmed)
+
+
+def _typed_visible(before: str | None, after: str | None, text: str, *, chrome: bool = False) -> bool:
     """Whether ``text`` showed up in the focused text.
 
     A readable field that still shows the pre-type text, or that shows the
     case-inverted string, does not count. A suffix or an insertion does.
     NBSP compares as a space, and one trailing contenteditable newline is
-    not part of the value. A field that settled without the characters is
-    not a match.
+    not part of the value. ``chrome`` also accepts the typed text with its
+    trailing spaces removed, which is the string Chrome keeps. A field that
+    settled without the characters is not a match.
     """
     before_n = _field_text_for_type(before, text)
     after_n = _field_text_for_type(after, text)
-    text_n = _norm_nbsp(text) or ""
-    if after_n is None or text_n not in after_n:
+    needles = _type_needles(text, chrome=chrome)
+    if after_n is None or not any(needle and needle in after_n for needle in needles):
         return False
     if before_n is None:
         return True
     if after_n == before_n:
         return False
-    if after_n.endswith(text_n) or after_n == (before_n + text_n):
-        return True
+    for needle in needles:
+        if needle and (after_n.endswith(needle) or after_n == (before_n + needle)):
+            return True
     return before_n in after_n or len(after_n) > len(before_n)
 
 
@@ -1493,14 +1513,15 @@ _TYPE_SETTLE_PAUSE_S = 0.05
 _TYPE_SETTLE_STABLE = 2
 
 
-def _poll_typed_text(read, before: str | None, text: str) -> str | None:
+def _poll_typed_text(read, before: str | None, text: str, *, chrome: bool = False) -> str | None:
     """Poll ``read`` until ``text`` is visible or the field settles.
 
     ``read`` returns the current readable text. The first hit wins. A read
     that is still the pre-type text is not settled: the update can still be
     in flight. A read that changed to something else and stays there is
     settled, and the caller reports ``text_mismatch`` when the characters
-    are absent. The last read is what the caller shows.
+    are absent. ``chrome`` uses Chrome's trailing-space comparison. The
+    last read is what the caller shows.
     """
     last: str | None = None
     stable = 0
@@ -1508,7 +1529,7 @@ def _poll_typed_text(read, before: str | None, text: str) -> str | None:
     before_n = _field_text_for_type(before, text)
     for attempt in range(_TYPE_SETTLE_POLLS):
         seen = read()
-        if _typed_visible(before, seen, text):
+        if _typed_visible(before, seen, text, chrome=chrome):
             return seen
         norm = _field_text_for_type(seen, text)
         if norm is not None and norm == last and norm != before_n:
@@ -1749,8 +1770,12 @@ def insert_text(acc, text: str) -> int | None:
         # The first AT-SPI read can still be the pre-type text. Wait until
         # the field settles. A settled read that lacks the characters is
         # still a mismatch, and a Firefox field is not delayed here.
-        after_readable = _poll_typed_text(lambda: _readable_text(acc), before_readable, typed)
-    if _typed_visible(before_readable, after_readable, typed) and _qt_text_count_matches(acc, expected):
+        after_readable = _poll_typed_text(
+            lambda: _readable_text(acc), before_readable, typed, chrome=True
+        )
+    if _typed_visible(
+        before_readable, after_readable, typed, chrome=_chromium_contenteditable(acc)
+    ) and _qt_text_count_matches(acc, expected):
         return len(typed)
     actual = _full_text(acc)
     if actual == current and not wrote:
@@ -1902,8 +1927,8 @@ def chromium_contenteditable_type(acc, text: str) -> bool | None:
     grab_focus(acc)
     before = _readable_text(acc)
     _type_string(text)
-    after = _poll_typed_text(lambda: _readable_text(acc), before, text)
-    return bool(_typed_visible(before, after, text))
+    after = _poll_typed_text(lambda: _readable_text(acc), before, text, chrome=True)
+    return bool(_typed_visible(before, after, text, chrome=True))
 
 
 def focus_and_type_into(acc, text: str) -> bool:
