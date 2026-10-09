@@ -138,6 +138,16 @@ def test_snapshot_and_clipboard_are_fenced_only_when_enabled(tmp_path, monkeypat
         snapshot_id="snap",
         parent="e1",
     )
+    button = Element(
+        ref="e3",
+        role="AXButton",
+        title="Save",
+        value=None,
+        bounds=Bounds(0, 10, 30, 40, 16),
+        snapshot_id="snap",
+        parent="e1",
+        clickable=True,
+    )
     root = Element(
         ref="e1",
         role="AXWindow",
@@ -146,7 +156,9 @@ def test_snapshot_and_clipboard_are_fenced_only_when_enabled(tmp_path, monkeypat
         bounds=Bounds(0, 0, 0, 80, 40),
         snapshot_id="snap",
     )
-    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), (root, element))
+    # A clickable control keeps interactive_count above zero. An empty tree is
+    # the a11y→vision handoff, and macOS then OCRs via driver.screenshot.
+    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), (root, element, button))
     driver = SimpleNamespace(
         name="fake",
         resolves_apps=False,
