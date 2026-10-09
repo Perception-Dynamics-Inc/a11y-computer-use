@@ -5033,6 +5033,8 @@ def offscreen_extents(acc):
     if not _misses_primary_screen(pos, size):
         return None
     return pos, size
+
+
 def _chromium_document_hidden(acc) -> bool:
     """True when ``acc`` sits in a Chromium document that is not the selected tab.
 
