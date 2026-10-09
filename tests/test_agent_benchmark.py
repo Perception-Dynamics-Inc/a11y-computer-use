@@ -30,12 +30,22 @@ def test_risk_reason_lets_ordinary_submits_through() -> None:
     pay = Action("click", {"ref": "e4"})
     send = Action("click", {"ref": "e5"})
     delete = Action("click", {"ref": "e6"})
+    stats = Action("click", {"ref": "e7"})
     assert risk_reason(submit, "Submit") is None
     assert risk_reason(update, "Update cart") is None
-    assert risk_reason(pay, "Pay now") is not None
-    assert risk_reason(send, "Send") is not None
+    assert risk_reason(pay, "Pay now", role="AXButton") is not None
+    assert risk_reason(Action("click", {"ref": "e8"}), "Checkout", role="AXLink") is not None
+    assert risk_reason(Action("click", {"ref": "e9"}), "Place order", role="AXButton") is not None
+    assert risk_reason(send, "Send", role="AXButton") is not None
+    assert risk_reason(stats, "Send usage statistics", role="AXCheckBox") is None
+    assert risk_reason(stats, "Send usage statistics", role="AXSwitch") is None
+    assert risk_reason(stats, "Send usage statistics", role="toggle") is None
     assert risk_reason(delete, "Delete") is not None
     assert risk_reason(Action("app", {"action": "quit", "name": "demo"}), None) == "app quit"
+    on_checkout = risk_reason(
+        submit, "Submit", role="AXButton", payment_form=True,
+    )
+    assert on_checkout is not None and on_checkout.startswith("paying")
 
 
 def test_plain_submit_is_not_approval_and_not_needs_human(tmp_path) -> None:
@@ -63,20 +73,79 @@ def test_pay_send_and_delete_stay_denied_and_allow_safe_runs_quit(tmp_path) -> N
         el("e2", "AXButton", "Pay now", parent="e1", clickable=True),
         el("e3", "AXButton", "Send", parent="e1", clickable=True),
         el("e4", "AXButton", "Delete", parent="e1", clickable=True),
+        el("e5", "AXCheckBox", "Send usage statistics", parent="e1", clickable=True),
     )
-    result, _events, runtime, _agent = run(
+    stopped, stopped_events, runtime, _agent = run(
         ScriptedModel([
             turn(ToolCall("click", {"ref": "e2"})),
-            turn(ToolCall("click", {"ref": "e3"})),
-            turn(ToolCall("click", {"ref": "e4"})),
             turn(done("held", [{"element": {"role": "AXButton", "name": "Pay now"}}])),
         ]),
         elements,
-        trace_dir=tmp_path,
+        trace_dir=tmp_path / "pay",
     )
     assert runtime.calls == []
-    assert result.status == "success"
-    assert all(str(step.error).startswith("approval_denied") for step in result.step_log[:3])
+    assert stopped.status == "needs_human"
+    assert stopped.needs_human["kind"] == "payment"
+    assert stopped.needs_human["reason"] == "payment"
+    assert "Pay now" in stopped.needs_human["message"]
+    assert "reason=payment" in stopped.needs_human["message"]
+    assert any(event.type == "needs_human" for event in stopped_events)
+
+    send_delete, _events, send_runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e3"})),
+            turn(ToolCall("click", {"ref": "e4"})),
+            turn(ToolCall("click", {"ref": "e5"})),
+            turn(done("held", [{"element": {"role": "AXButton", "name": "Send"}}])),
+        ]),
+        elements,
+        trace_dir=tmp_path / "send",
+    )
+    assert send_runtime.calls == [("click", {"ref": "e5"})]
+    assert send_delete.status == "success"
+    assert all(str(step.error).startswith("approval_denied") for step in send_delete.step_log[:2])
+    assert send_delete.step_log[2].error is None
+
+    opted, _events, opted_runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(done("held", [{"element": {"role": "AXButton", "name": "Pay now"}}])),
+        ]),
+        elements,
+        allow_payments=True,
+        trace_dir=tmp_path / "opt",
+    )
+    assert opted_runtime.calls == []
+    assert opted.status == "success"
+    assert str(opted.step_log[0].error).startswith("approval_denied")
+
+    opened, _events, opened_runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(done("paid", [{"element": {"role": "AXButton", "name": "Pay now"}}])),
+        ]),
+        elements,
+        approve_policy="allow-all",
+        auto_deny=False,
+        trace_dir=tmp_path / "all",
+    )
+    assert opened_runtime.calls == []
+    assert opened.status == "needs_human"
+    assert opened.needs_human["kind"] == "payment"
+
+    allowed, _events, allowed_runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(done("paid", [{"element": {"role": "AXButton", "name": "Pay now"}}])),
+        ]),
+        elements,
+        approve_policy="allow-all",
+        allow_payments=True,
+        auto_deny=False,
+        trace_dir=tmp_path / "all-pay",
+    )
+    assert allowed_runtime.calls == [("click", {"ref": "e2"})]
+    assert allowed.status == "success"
 
     quit_elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     quit_result, _events, quit_runtime, _agent = run(

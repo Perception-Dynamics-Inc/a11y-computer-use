@@ -21,10 +21,19 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from a11y_computer_use import conditions, outcome
-from a11y_computer_use.untrusted import DomainPolicy, fence, looks_like_url, navigation_url, trim_untrusted
+from a11y_computer_use.untrusted import (
+    DomainPolicy,
+    fence,
+    fence_untrusted,
+    looks_like_url,
+    navigation_url,
+    trim_untrusted,
+)
 from a11y_computer_use.agent.actions import (
     EXEC_ACTION_NAMES,
     Action,
+    looks_like_payment_form,
+    risk_category,
     risk_reason,
     tool_schemas,
     validate_action,
@@ -71,6 +80,9 @@ for an unnamed image, a canvas, or any control whose title is missing. Request
 the action. The loop approves or denies app quit, closing a window, sending a
 message, paying, and deleting. An ordinary form submit, a save, or a button
 such as Update cart does not need approval. Do not call ask_human before those.
+A button or link named Pay, Place order, Buy, Purchase, Checkout, Confirm
+payment, or Complete order, and any button or link on a checkout or payment
+page, stops the run for a human. A checkbox or toggle is not a send action.
 
 Never type a password, one-time code, or card number. Call ask_human only for
 a login, a 2FA prompt, a captcha, a payment the agent must not complete, or
@@ -155,7 +167,8 @@ class Agent:
     ``approve`` is called for quit, close, pay, send, delete, and exec.
     When it is omitted, ``auto_deny`` skips those actions. ``approve_policy``
     ``allow-safe`` runs quit and window close without a prompt and still
-    denies pay, send, delete, and exec. ``allow-all`` runs them.
+    denies pay, send, delete, and exec. ``allow-all`` runs them except a
+    payment, which stops as ``needs_human`` unless ``allow_payments`` is set.
     ``allow_exec`` exposes
     ``shell`` and ``python``; it is off by default, and each exec call is
     still approved and audited. ``cancel`` is safe to call from another thread.
@@ -175,6 +188,7 @@ class Agent:
         auto_deny: bool = True,
         approve_policy: str = "deny",
         allow_exec: bool = False,
+        allow_payments: bool = False,
         on_event: Callable[[Event], None] | None = None,
         trace_dir: str | os.PathLike | None = None,
         vision: bool = False,
@@ -195,6 +209,9 @@ class Agent:
         self.auto_deny = auto_deny
         self.approve_policy = approve_policy
         self.allow_exec = allow_exec
+        #: Payment clicks stop as needs_human unless the caller opts out.
+        #: ``allow-all`` does not opt out.
+        self.allow_payments = allow_payments
         self.on_event = on_event
         self._trace_dir = trace_dir
         self.vision = vision
@@ -470,7 +487,19 @@ class Agent:
             return "stop_turn"
 
         label = _action_label(requested, self._last_snap)
-        allowed, denial = self._allowed(requested, label)
+        prepared = self._prepare_approval(requested, label)
+        if prepared[5] == "payment" and not self.allow_payments:
+            info = self._payment_info(requested, prepared)
+            info = {
+                **info,
+                "ran": prior,
+                "skipped": [_call_view(call), *remaining],
+                "turn_stop": "needs_human",
+            }
+            self._finish("needs_human", "", info["message"], started, needs_human=info)
+            yield Event("needs_human", info)
+            return "stop_run"
+        allowed, denial = self._allowed(requested, label, prepared)
         if not allowed:
             self._commit(
                 requested, requested, denial or "approval_denied", verified=False,
@@ -824,8 +853,15 @@ class Agent:
             return text
         return fence(text).text
 
-    def _allowed(self, action: Action, label: str | None) -> tuple[bool, str | None]:
-        reason = risk_reason(action, label)
+    def _allowed(
+        self,
+        action: Action,
+        label: str | None,
+        prepared: tuple | None = None,
+    ) -> tuple[bool, str | None]:
+        if prepared is None:
+            prepared = self._prepare_approval(action, label)
+        reason = prepared[4]
         if reason is None:
             return True, None
         if self.approve_policy == "allow-all":
@@ -833,15 +869,15 @@ class Agent:
         if self.approve_policy == "allow-safe" and _operational_risk(reason):
             return True, None
         if self.approve is not None:
-            if self.approve(self._approval_action(action, label, reason)):
+            if self.approve(self._approval_action(action, prepared)):
                 return True, None
             return False, f"approval_denied: {reason}"
         if self.auto_deny:
             return False, f"approval_denied: {reason}"
         return True, None
 
-    def _approval_action(self, action: Action, label: str | None, reason: str | None) -> Action:
-        """The action ``approve`` sees: role, name, window, and a redacted summary."""
+    def _prepare_approval(self, action: Action, label: str | None) -> tuple:
+        """Role, name, window, page URL, reason text, and reason kind."""
         from a11y_computer_use.safety import window_title
 
         snap = self._last_snap
@@ -849,18 +885,71 @@ class Agent:
         role = element.role if element is not None and element.role else None
         target_name = label or (element.title if element is not None and element.title else None)
         window = window_title(snap, element)
-        return action.for_approval(
-            role=_clip(role, 64),
-            target_name=_clip(target_name, 80),
-            window=_clip(window, 80),
-            summary=summarize_args(action.args),
-            reason=_clip(reason, 120),
+        document = _runtime_url(self.runtime, "current_document_url")
+        form = looks_like_payment_form(
+            url=document,
+            window=window,
+            texts=_payment_texts(snap),
         )
+        reason = risk_reason(
+            action,
+            label,
+            role=role,
+            url=document,
+            window=window,
+            payment_form=form,
+        )
+        return (
+            _clip(role, 64),
+            _clip(target_name, 80),
+            _clip(window, 80),
+            _clip(document, 160),
+            _clip(reason, 120),
+            risk_category(reason),
+        )
+
+    def _approval_action(self, action: Action, prepared: tuple) -> Action:
+        """The action ``approve`` sees: role, name, window, URL, and reason."""
+        role, target_name, window, url, reason, kind = prepared
+        return action.for_approval(
+            role=role,
+            target_name=target_name,
+            window=window,
+            url=url,
+            summary=summarize_args(action.args),
+            reason=reason,
+            reason_kind=kind,
+        )
+
+    def _payment_info(self, action: Action, prepared: tuple) -> dict:
+        """needs_human payload for a payment the caller did not opt out of."""
+        role, target_name, window, url, _reason, _kind = prepared
+        element = _element_for(action, self._last_snap)
+        ref = None if element is None else element.ref
+        parts = [f"Stopped for a human (payment): role={role or 'control'}"]
+        if target_name:
+            parts.append("name=" + fence_untrusted(target_name))
+        if window:
+            parts.append("window=" + fence_untrusted(window))
+        if url:
+            parts.append("url=" + fence_untrusted(url, limit=160))
+        parts.append("reason=payment.")
+        parts.append("Payments are not submitted.")
+        return {
+            "kind": "payment",
+            "message": " ".join(parts),
+            "ref": ref,
+            "window": window,
+            "url": url,
+            "role": role,
+            "name": target_name,
+            "reason": "payment",
+        }
 
     def _safety_confirm(self, prompt: str) -> bool:
         if self.approve is not None:
             fields: dict[str, str] = {}
-            for attr in ("role", "target_name", "window", "summary", "reason"):
+            for attr in ("role", "target_name", "window", "url", "summary", "reason", "reason_kind"):
                 value = getattr(prompt, attr, None)
                 if isinstance(value, str) and value:
                     fields[attr] = value
@@ -1659,6 +1748,20 @@ def _roles_match(actual: str, wanted: str) -> bool:
         text = value.casefold().strip()
         return text[2:] if text.startswith("ax") else text
     return norm(actual) == norm(wanted)
+
+
+def _payment_texts(snap: Snapshot | None) -> list[str]:
+    """Names and placeholders that can mark a payment form."""
+    if snap is None:
+        return []
+    texts: list[str] = []
+    for element in snap.elements:
+        if element.title:
+            texts.append(element.title)
+        placeholder = getattr(element, "placeholder", "") or ""
+        if placeholder:
+            texts.append(str(placeholder))
+    return texts
 
 
 def _clip(text: str | None, limit: int) -> str | None:

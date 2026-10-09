@@ -16,7 +16,7 @@ import json
 import sys
 from collections.abc import Sequence
 
-from a11y_computer_use.agent.actions import Action
+from a11y_computer_use.agent.actions import Action, approval_target
 from a11y_computer_use.agent.result import RunResult
 from a11y_computer_use.agent.trace import summarize_args
 from a11y_computer_use.untrusted import fence_untrusted
@@ -78,6 +78,7 @@ def build_agent(args: argparse.Namespace):
         auto_deny=auto_deny,
         approve_policy=policy,
         allow_exec=bool(getattr(args, "allow_exec", False)),
+        allow_payments=bool(getattr(args, "allow_payments", False)),
         trace_dir=args.trace_dir,
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,
@@ -127,6 +128,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="allow_exec",
         help="expose shell and python tools; each call is still approved or auto-denied",
+    )
+    run.add_argument(
+        "--allow-payments",
+        action="store_true",
+        dest="allow_payments",
+        help=(
+            "let a payment click go through approval instead of stopping as "
+            "needs_human. allow-all does not include payments"
+        ),
     )
     run.add_argument(
         "--allowed-domains",
@@ -201,10 +211,11 @@ def _mcp(args: argparse.Namespace) -> int:
 def render_approval_prompt(action: Action) -> str:
     """The ``--approve`` question.
 
-    The action name and role are the loop's own words. The target name, window
-    title, reason, and argument summary are page or argument text: each is
-    trimmed and wrapped with :func:`fence_untrusted`. ``summary`` is already
-    redacted; a missing summary is built from ``args`` the same way.
+    The same labelled target as the server approval event and the MCP approve
+    flow: role, name, window, page URL when there is one, and the reason
+    (``payment``, ``send``, ``delete``, ``quit``, or ``exec``). Role and
+    reason are the loop's tokens. The name, window, URL, and argument summary
+    are trimmed and wrapped with :func:`fence_untrusted`.
     """
     if action.name == "confirm":
         raw = action.args.get("prompt")
@@ -213,18 +224,14 @@ def render_approval_prompt(action: Action) -> str:
             if "[y/N]" not in text:
                 text += " [y/N]"
             return text + " "
+    target = approval_target(action)
     parts = [action.name]
-    if action.role:
-        parts.append(f"role={action.role}")
-    if action.target_name:
-        parts.append("name=" + fence_untrusted(action.target_name))
-    if action.window:
-        parts.append("window=" + fence_untrusted(action.window))
+    for key in ("role", "name", "window", "url", "reason"):
+        if target.get(key):
+            parts.append(f"{key}={target[key]}")
     summary = action.summary if action.summary is not None else summarize_args(action.args)
     if summary and summary != "{}":
         parts.append("args=" + fence_untrusted(summary, limit=160))
-    if action.reason:
-        parts.append("reason=" + fence_untrusted(action.reason, limit=120))
     return "Approve " + " ".join(parts) + "? [y/N] "
 
 

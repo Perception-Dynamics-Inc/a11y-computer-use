@@ -940,6 +940,48 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
     _assert_trace(result, trace)
 
 
+@requires_display
+def test_agent_checkout_stops_for_a_human_payment(tmp_path, isolated_home, pages) -> None:
+    """A saved-card Pay now click stops. The prompt names the button, URL, and reason."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    page = site.url("checkout.html")
+    browser.navigate(page)
+    browser.snapshot(Scope.WINDOW, browser._target_id)
+    _grant(browser._target_id)
+    trace = tmp_path / "trace-checkout"
+    trace.mkdir()
+
+    def script(messages):
+        text = message_text(messages)
+        elements = parse_snapshot(text)
+        button = next((item for item in elements if item.name == "Pay now"), None)
+        if button is None:
+            return ModelTurn(calls=[ToolCall(name="wait", args={"seconds": 0.2})])
+        return ModelTurn(calls=[ToolCall(name="click", args={"ref": button.ref})])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Buy the noise-cancelling headphones.",
+        trace,
+        max_steps=6,
+        approve=lambda _action: True,
+        auto_deny=False,
+    )
+    assert result.status == "needs_human", result
+    human = result.needs_human
+    assert human["kind"] == "payment"
+    assert human["reason"] == "payment"
+    prompt = human["message"]
+    assert "Pay now" in prompt
+    assert page in prompt
+    assert "reason=payment" in prompt
+    assert _eval(browser, "document.getElementById('result').textContent") == "unpaid"
+
+
 @pytest.mark.parametrize(
     ("page", "kind", "marker", "empty_js"),
     [
@@ -1366,6 +1408,7 @@ def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
             trace,
             approve=approve,
             auto_deny=False,
+            allow_payments=True,
             max_steps=4,
         )
         assert seen, result
@@ -1377,7 +1420,9 @@ def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
         assert "4111111111111111" not in action.summary
         assert "[REDACTED]" in action.summary
         prompt = render_approval_prompt(action)
+        assert action.reason_kind == "payment"
         assert "role=" in prompt
+        assert "reason=payment" in prompt
         assert "Pay now" in prompt
         assert "cuagentpay" in prompt.casefold()
         assert "<untrusted nonce=" in prompt
