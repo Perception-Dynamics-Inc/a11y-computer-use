@@ -962,6 +962,40 @@ class LinuxDriver:
             return False
         return self._run(lambda: _atspi.scroll_to(handle))
 
+    def _refuse_changed_peers(self, handle, peers: dict, element: Element, exc: ComputerUseError) -> None:
+        """After a failed set_value, another field's text must be unchanged.
+
+        A ``text_mismatch`` that also changed a different field is reported as
+        ``focus_lost``. A ``focus_lost`` that already stopped the keys records
+        the fields that did change.
+        """
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        if not changed:
+            return
+        if exc.detail.get("reason") == "focus_lost":
+            exc.detail["changed_fields"] = changed[:8]
+            return
+        raise ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            "set_value stopped because another field changed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "changed_fields": changed[:8],
+                "evidence": "another field changed during set_value",
+            },
+        ) from exc
+
     def set_value(self, element: Element, value: str) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -971,6 +1005,21 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        peers: dict = {}
+        if handle is not None:
+            try:
+                peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
+            except Exception:
+                peers = {}
+        try:
+            return self._apply_set_value(element, value, handle)
+        except ComputerUseError as exc:
+            self._refuse_changed_peers(handle, peers, element, exc)
+            raise
+
+    def _apply_set_value(self, element: Element, value: str, handle) -> bool:
+        from a11y_computer_use.drivers import _atspi
+
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
             # A Writer table cell is named like a Calc address, but typing
             # into it inserts a paragraph and the cell node reads back empty.

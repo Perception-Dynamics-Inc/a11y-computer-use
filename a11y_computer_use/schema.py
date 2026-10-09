@@ -316,6 +316,10 @@ class ErrorCode(str, Enum):
     """The app in front of / under the target changed between the permission
     decision and injection (same-window recheck, PLAN.md §6); re-observe."""
 
+    FOCUS_LOST = "focus_lost"
+    """Keyboard focus was not on the set_value target. No further keystrokes
+    were sent. The outcome is refused."""
+
     APP_NOT_FOUND = "app_not_found"
     """No running (or launchable) application matches the given identifier."""
 

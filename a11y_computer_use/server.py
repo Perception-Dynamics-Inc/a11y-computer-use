@@ -4545,6 +4545,22 @@ class Runtime:
                     f"the value {value!r} did not land on {ref}",
                     detail={"ref": ref, "role": live.role, "reason": "text_mismatch"},
                 )
+            # Linux set_value raises when the write fails. False means there
+            # is no accessible whose focus can be confirmed, so do not type
+            # into whatever currently has the caret.
+            if getattr(self.driver, "name", None) == "linux":
+                raise ComputerUseError(
+                    ErrorCode.FOCUS_LOST,
+                    f"focus is not confirmed on {ref}; nothing was typed",
+                    detail={
+                        "ref": ref,
+                        "role": live.role,
+                        "reason": "focus_lost",
+                        "outcome": "refused",
+                        "next": ["ref", "cdp"],
+                        "evidence": "the keyboard fallback did not run because focus was not on the target",
+                    },
+                )
             self.driver.press_element(live)  # fallback: focus then synthesize typing
             pid = observe.element_pid(live) if getattr(self.driver, "background_input", False) else None
             if pid:

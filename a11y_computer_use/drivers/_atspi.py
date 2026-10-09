@@ -2893,18 +2893,135 @@ def _wait_until_gone(acc) -> bool:
 
 
 def _x11_select_all_and_delete(acc) -> None:
-    """Focus the field and replace its selection with nothing. X11 only."""
-    grab_focus(acc)
-    from a11y_computer_use.drivers import _linux_input
+    """Focus the field and replace its selection with nothing. X11 only.
 
-    _linux_input.press_chord("ctrl+a")
-    _linux_input.press_chord("backspace")
+    Each chord is sent only after focus is on ``acc``. A field that does not
+    take focus raises ``focus_lost`` and the chord is not sent.
+    """
+    grab_focus(acc)
+    _chord_into_target(acc, "ctrl+a")
+    _chord_into_target(acc, "backspace")
 
 
 def _type_string(text: str) -> None:
     from a11y_computer_use.drivers import _linux_input
 
     _linux_input.type_string(text)
+
+
+# A click can move focus a beat after it returns. These polls wait for that
+# move and do not send keys. A node that never shows focus is not typed into.
+_FOCUS_CONFIRM_POLLS = 10
+_FOCUS_CONFIRM_PAUSE_S = 0.04
+
+
+def _focus_lost_error(message: str):
+    """Refused set_value: focus is not on the target, so no key was sent."""
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.FOCUS_LOST,
+        message,
+        detail={
+            "platform": "linux",
+            "reason": "focus_lost",
+            "outcome": "refused",
+            "next": ["ref", "cdp"],
+            "evidence": message,
+        },
+    )
+
+
+def _descendant_focused(acc, depth: int = 0, budget: list | None = None) -> bool:
+    """True when a descendant editor, not ``acc`` itself, has FOCUSED."""
+    if depth > 3:
+        return False
+    if budget is None:
+        budget = [24]
+    count = _child_count(acc)
+    if count <= 0:
+        return False
+    for index in range(min(count, 16)):
+        if budget[0] <= 0:
+            return False
+        budget[0] -= 1
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        _call_first(child, ("clear_cache", "clearCache"))
+        if _state_has(child, "FOCUSED"):
+            return True
+        if _descendant_focused(child, depth + 1, budget):
+            return True
+    return False
+
+
+def _focus_on_target(acc) -> bool | None:
+    """Whether keyboard focus is on ``acc`` or a descendant editor.
+
+    True: the target (or an editor inside it) has ``FOCUSED``.
+    False: the node can report focus and it is elsewhere or absent.
+    None: the node has no state set, so focus cannot be read. That is a
+    test double. A live control has a state set; unknown focus there is
+    False, and the caller does not type.
+    """
+    if _call_first(acc, ("get_state_set",)) is None:
+        return None
+    _call_first(acc, ("clear_cache", "clearCache"))
+    if _state_has(acc, "FOCUSED"):
+        return True
+    if _descendant_focused(acc):
+        return True
+    return False
+
+
+def _confirm_focus_on_target(acc) -> bool:
+    """Poll until ``acc`` is focused. True when focus cannot be read at all."""
+    for attempt in range(_FOCUS_CONFIRM_POLLS):
+        seen = _focus_on_target(acc)
+        if seen is None or seen is True:
+            return True
+        if attempt + 1 < _FOCUS_CONFIRM_POLLS:
+            time.sleep(_FOCUS_CONFIRM_PAUSE_S)
+    return False
+
+
+def _type_into_target(acc, text: str) -> None:
+    """Type ``text`` only while ``acc`` is focused. One character is one batch.
+
+    The first batch waits briefly for focus to arrive after a click. Each
+    later batch re-checks immediately and sends nothing when focus has moved.
+    A node that cannot report focus is typed as one batch, which is the
+    older test-double path.
+    """
+    if text == "":
+        return
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _focus_on_target(acc) is None:
+        _type_string(text)
+        return
+    sent = False
+    for ch in text:
+        if _focus_on_target(acc) is False:
+            if sent:
+                raise _focus_lost_error(
+                    "focus left the target; stopped before the next keystroke"
+                )
+            raise _focus_lost_error("focus is not on the target; nothing was typed")
+        _type_string(ch)
+        sent = True
+
+
+def _chord_into_target(acc, chord: str) -> None:
+    """Press ``chord`` only when ``acc`` is focused. One chord is one batch."""
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _focus_on_target(acc) is False:
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord(chord)
 
 
 def _shown_matches(acc, text: str) -> bool:
@@ -3009,7 +3126,7 @@ def _focus_and_replace(acc, text: str) -> bool:
         _x11_select_all_and_delete(acc)
         if not _wait_until_gone(acc):
             return False
-    _type_string(text)
+    _type_into_target(acc, text)
     return _confirm_text_landed(acc, text)
 
 
@@ -3039,7 +3156,7 @@ def _replace_with_keys(acc, text: str) -> bool:
             return False
     else:
         grab_focus(acc)
-    _type_string(text)
+    _type_into_target(acc, text)
     if _confirm_text(acc, text):
         return True
     _restore_text(acc, original)
@@ -3065,7 +3182,7 @@ def _restore_text(acc, original: str | None) -> None:
     else:
         grab_focus(acc)
     if not _text_is_blank(original):
-        _type_string(original)
+        _type_into_target(acc, original)
 
 
 def _clear_text(acc, eti, current: str) -> bool:
@@ -3243,13 +3360,11 @@ def _set_chrome_date_segment(acc, value: str) -> bool:
     grab_focus(acc)
     _click_center(acc)
     if value == "":
-        from a11y_computer_use.drivers import _linux_input
-
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
     else:
-        _type_string(value)
+        _type_into_target(acc, value)
     for attempt in range(_DATE_SEGMENT_POLLS):
         if _segment_matches(value, _date_segment_text(acc)):
             return True
@@ -4451,17 +4566,15 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
     labels = [item[0] for item in options if item[0]]
     current = _selected_option_text(combo)
     if current in labels and label in labels and current != label:
-        from a11y_computer_use.drivers import _linux_input
-
         delta = labels.index(label) - labels.index(current)
         chord = "Down" if delta > 0 else "Up"
         for _ in range(abs(delta)):
-            _linux_input.press_chord(chord)
+            _chord_into_target(combo, chord)
             if _selected_option_text(combo) == label:
                 return
     if _selected_option_text(combo) == label:
         return
-    _type_string(label)
+    _type_into_target(combo, label)
 
 
 def _activate_combo_option(combo, options, match) -> None:
@@ -4629,7 +4742,7 @@ def _fill_empty_number(acc, value: str) -> bool:
     _click_center(acc)
     if not _x11_keys_available():
         return False
-    _type_string(value)
+    _type_into_target(acc, value)
     return _number_text_matches(acc, value)
 
 
@@ -4660,14 +4773,13 @@ def _clear_number_input(acc) -> bool:
             return True
     if not _x11_keys_available():
         return False
-    from a11y_computer_use.drivers import _linux_input
 
     for _attempt in range(_NUMBER_CLEAR_TRIES):
         grab_focus(acc)
         _click_center(acc)
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
         deadline = time.monotonic() + _NUMBER_CLEAR_WAIT_S
         while True:
             if _number_text(acc) == "":
@@ -4676,6 +4788,126 @@ def _clear_number_input(acc) -> bool:
                 break
             time.sleep(0.05)
     return False
+
+
+_TRACKED_FIELD_ROLES = frozenset({
+    "entry", "password text", "combo box", "spin button",
+})
+
+
+def _is_tracked_field(acc) -> bool:
+    """An editable control whose text a leaked keystroke would change."""
+    role = _role_name(acc)
+    if role in _TRACKED_FIELD_ROLES:
+        return True
+    if role in {"text", "section", "paragraph"} and (
+        _state_has(acc, "EDITABLE") or _state_has(acc, "FOCUSABLE")
+    ):
+        return True
+    if _number_input(acc):
+        return True
+    tag = str(_get_attributes(acc).get("tag") or "").lower()
+    return tag in {"input", "textarea"}
+
+
+def _under_target(node, target) -> bool:
+    """True when ``node`` is ``target`` or sits inside it."""
+    current = node
+    target_sid = _stable_id(target) or ""
+    target_role = _role_name(target)
+    for _ in range(10):
+        if current is None:
+            return False
+        if current is target:
+            return True
+        sid = _stable_id(current) or ""
+        if target_sid and sid == target_sid and _role_name(current) == target_role:
+            return True
+        current = _parent_of(current)
+    return False
+
+
+def _field_walk_root(acc):
+    """The document or frame that holds ``acc`` and its sibling fields."""
+    node = acc
+    document = None
+    frame = acc
+    for _ in range(24):
+        parent = _parent_of(node)
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role == "application":
+            break
+        if role in {"document web", "document frame"}:
+            document = parent
+        if role in {"frame", "window", "dialog"}:
+            frame = parent
+        node = parent
+    return document or frame
+
+
+def _collect_peer_fields(acc) -> dict[str, str]:
+    """Text of editable fields in the same document, excluding ``acc``.
+
+    The walk is bounded. Keys are role, name, and id in tree order so a
+    later read of the same tree lines up. The target and its descendants
+    are not peers: a partial write there is not another field changing.
+    """
+    root = _field_walk_root(acc)
+    counts: dict[str, int] = {}
+    found: dict[str, str] = {}
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 250:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        if not _under_target(node, acc) and _is_tracked_field(node):
+            base = f"{_role_name(node)}|{_node_name(node)}|{_stable_id(node) or ''}"
+            index = counts.get(base, 0)
+            counts[base] = index + 1
+            text = _full_text(node)
+            if text is not None:
+                found[f"{base}#{index}"] = text
+        count = _child_count(node)
+        if count <= 0 or count > 5000:
+            continue
+        for index in range(min(count, 40)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
+def peer_field_texts(acc) -> dict[str, str]:
+    """Peer field text before a set_value. Empty when the tree cannot be read."""
+    try:
+        return _collect_peer_fields(acc)
+    except Exception:
+        return {}
+
+
+def changed_peer_fields(acc, before: dict) -> list[str]:
+    """Peers whose text differs from ``before``. A failed reread is not a leak."""
+    if not before:
+        return []
+    try:
+        after = _collect_peer_fields(acc)
+    except Exception:
+        return []
+    if not after:
+        return []
+    changed: list[str] = []
+    for key, old in before.items():
+        if key not in after or after[key] == old:
+            continue
+        new = after[key]
+        changed.append(f"{key}: {old!r} -> {new!r}"[:180])
+    return changed
 
 
 def set_numeric_value(acc, value: str) -> bool | str:
@@ -5120,14 +5352,13 @@ def _clear_contenteditable(acc) -> bool:
         return True
     if not _x11_keys_available():
         return False
-    from a11y_computer_use.drivers import _linux_input
 
     original = _full_text(acc)
     for _attempt in range(_CONTENT_CLEAR_TRIES):
         grab_focus(acc)
-        _linux_input.press_chord("ctrl+a")
-        _linux_input.press_chord("backspace")
-        _linux_input.press_chord("delete")
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
         for poll in range(_CONTENT_CLEAR_POLLS):
             if _content_is_blank(acc):
                 return True
@@ -5155,7 +5386,7 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     original = _full_text(acc)
     if not _clear_contenteditable(acc):
         return False
-    _type_string(text)
+    _type_into_target(acc, text)
     if _confirm_text_landed(acc, text):
         return True
     _restore_text(acc, original)
@@ -5230,7 +5461,7 @@ def set_text(acc, text: str) -> bool:
         length = _insert_length(insert, text, acc) if insert is not None else len(text)
         if not _call_first(eti, ("insert_text", "insertText"), 0, text, length, default=False):
             if _text_is_gone(acc) and _x11_keys_available():
-                _type_string(text)
+                _type_into_target(acc, text)
             else:
                 return False
     if _confirm_text(acc, text):
@@ -5246,7 +5477,7 @@ def set_text(acc, text: str) -> bool:
         _restore_text(acc, original)
         return False
     if _text_is_gone(acc) and _x11_keys_available():
-        _type_string(text)
+        _type_into_target(acc, text)
         if _confirm_text(acc, text):
             return True
     # Only a blank read is restored. A Chromium number input that reads 0

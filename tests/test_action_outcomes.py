@@ -314,6 +314,10 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     hidden = outcome.next_for_error("unsupported", {"reason": "not_showing"})
     assert hidden[0] == "foreground"
     assert outcome.next_for_error("secure_field", {}) == ()
+    assert outcome.next_for_error("focus_lost", {}) == ("ref", "cdp")
+    assert "keyboard" not in outcome.next_for_error(
+        "focus_lost", {"reason": "focus_lost", "outcome": "refused"},
+    )
     refused = outcome.refused_result(
         text="unsupported: e2 is not showing",
         code="unsupported",

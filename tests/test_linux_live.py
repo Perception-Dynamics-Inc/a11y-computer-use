@@ -1172,6 +1172,109 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
             proc.kill()
 
 
+def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
+    """Live Chrome. A page script steals focus during set_value.
+
+    Count's focus and keydown handlers move focus to Name. The digits must
+    not be appended to Name. Skips when Chrome or the accessibility bus is
+    missing.
+    """
+    from a11y_computer_use import observe, safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the focus-leak test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    original = "Ayşe café ₸"
+    page = tmp_path / "focus-leak.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuafocusleak</title>"
+        f"<label>Name <input id=name aria-label=Name value=\"{original}\"></label>"
+        "<label>Count <input id=count type=number min=0 max=100 aria-label=Count></label>"
+        "<div id=echo role=status aria-label=boot>boot</div>"
+        "<script>"
+        "var field = document.getElementById('name');"
+        "var count = document.getElementById('count');"
+        "var echo = document.getElementById('echo');"
+        "function steal() { field.focus(); echo.textContent = 'stole'; echo.setAttribute('aria-label', 'stole'); }"
+        "echo.textContent = 'booted'; echo.setAttribute('aria-label', 'booted');"
+        "count.addEventListener('focus', steal);"
+        "count.addEventListener('keydown', steal, true);"
+        "field.addEventListener('input', function () {"
+        "  echo.textContent = 'name=' + field.value;"
+        "  echo.setAttribute('aria-label', 'name=' + field.value);"
+        "});"
+        "</script>"
+    )
+    profile = tmp_path / "chrome-focus-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last_note = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the form was exposed"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last_note = exc.message
+                shot = None
+            else:
+                rendered = observe.render_text(shot)
+                last_note = rendered[:400]
+                if "Name" in rendered and "Count" in rendered and "booted" in rendered:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Chrome did not expose the form through AT-SPI\n{last_note}"
+        store = safety.PermissionStore(tmp_path / "focus-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != "chrome":
+            store.set_tier(front, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "focus-audit"), driver=driver,
+        )
+        runtime._current = snap
+        count = next(el for el in snap.elements if el.title == "Count")
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(count.ref, "12")
+        assert exc.value.code is ErrorCode.FOCUS_LOST
+        assert exc.value.detail.get("reason") == "focus_lost"
+        assert exc.value.detail.get("outcome") == "refused"
+        assert "keyboard" not in (exc.value.detail.get("next") or ())
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        rendered = observe.render_text(shot)
+        name = next(el for el in shot.elements if el.title == "Name")
+        shown = "" if name.value is None else str(name.value)
+        assert shown == original, rendered
+        assert "name=" + original + "1" not in rendered
+        assert "name=" + original + "12" not in rendered
+        assert "stole" in rendered, rendered
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 _MENU_APP = "cuamenuapp"
 
 _GTK_MENU_APP = textwrap.dedent(
