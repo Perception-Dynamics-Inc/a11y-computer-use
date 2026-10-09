@@ -5670,6 +5670,31 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_writer_cell_replace_writes_a_paragraph_set_text_refuses(fake_atspi) -> None:
+    """A Firefox paragraph stays blocked. A Writer cell paragraph is replaced.
+
+    set_text refuses the role so selecting a page paragraph does not select
+    the page. The cell write forces that same call.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    assert _atspi.set_text(paragraph, "nope") is False
+    assert paragraph.text == "Cell B2"
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+
+
 def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
     """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
 
@@ -5685,7 +5710,8 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     assert _atspi.writer_text_cell(cell) is True
     assert _atspi.writer_cell_text(cell) == "Cell B2"
 
-    def replace(acc, text):
+    def replace(acc, text, force=False):
+        assert force is True
         acc.text = text
         return True
 
@@ -5697,7 +5723,8 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     paragraph.text = "Cell B2"
     calls = {"n": 0}
 
-    def miss(acc, text):
+    def miss(acc, text, force=False):
+        assert force is True
         calls["n"] += 1
         if calls["n"] == 1:
             acc.text = "NEWB2-1\nCell B2"
@@ -6034,6 +6061,7 @@ def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypat
     monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
     assert driver.type_text("/tmp/notes/draft.txt") == len("/tmp/notes/draft.txt")
     assert driver._chooser_readback == "/tmp/notes/draft.txt"
+    assert driver._chooser_commit == "/tmp/notes/draft.txt"
     assert chords == ["ctrl+a", "ctrl+c", "right"]
     assert board["value"] == "keep-me"
 
@@ -6044,8 +6072,72 @@ def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypat
         driver.type_text("/tmp/notes/draft.txt")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] == ""
+    assert driver._chooser_commit is None
     assert chords == []
     assert board["value"] == "keep-me"
+
+
+def test_return_in_chromes_open_dialog_clicks_open_for_a_typed_file(tmp_path, monkeypatch) -> None:
+    """Return after a chooser commit clicks Open. It does not send the key.
+
+    GTK's location entry swallows Return, so the file input stays empty.
+    The outcome judge clears the read-back; the commit path is what Return
+    still has. A directory path still sends Return, so the dialog can enter
+    that folder. No X server.
+    """
+    from a11y_computer_use.drivers import _linux_input, _linux_system
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    driver = LinuxDriver()
+    driver._chooser_readback = None
+    driver._chooser_commit = str(target)
+    clicks: list[tuple[int, int]] = []
+    pressed: list[str] = []
+    window = {
+        "title": "Open File",
+        "app": "chrome",
+        "bounds": {"x": 40, "y": 57, "width": 720, "height": 480},
+    }
+    monkeypatch.setattr(_linux_system, "active_window", lambda: window)
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **_kwargs: clicks.append((x, y)))
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: pressed.append(chord))
+    driver.key_chord("Return")
+    assert clicks == [(720, 517)]
+    assert pressed == []
+    assert driver._chooser_readback is None
+    assert driver._chooser_commit is None
+
+    driver._chooser_commit = str(tmp_path)
+    driver.key_chord("Return")
+    assert clicks == [(720, 517)]
+    assert pressed == ["Return"]
+
+    # The live active window has an id and no rect. The click uses the
+    # matching window-list bounds.
+    driver._chooser_readback = None
+    driver._chooser_commit = str(target)
+    monkeypatch.setattr(
+        _linux_system,
+        "active_window",
+        lambda: {"window_id": 7, "title": "Open File", "app": "chrome"},
+    )
+    monkeypatch.setattr(
+        _linux_system,
+        "windows",
+        lambda: [{
+            "window_id": 7,
+            "title": "Open File",
+            "app": "chrome",
+            "bounds": {"x": 10, "y": 20, "width": 400, "height": 300},
+        }],
+    )
+    driver.key_chord("Return")
+    assert clicks == [(720, 517), (370, 300)]
+    assert pressed == ["Return"]
+    assert driver._chooser_commit is None
 
 
 def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) -> None:

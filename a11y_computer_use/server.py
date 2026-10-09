@@ -2344,6 +2344,8 @@ class Runtime:
                 copied = getattr(self.driver, "_chooser_readback", None)
                 if isinstance(copied, str) and copied and requested and requested in copied:
                     readback = copied
+                    # Cleared so a later action does not reuse this string.
+                    # _chooser_commit stays: Return still has to click Open.
                     self.driver._chooser_readback = None
                 if _atspi.libreoffice_app(app or ""):
                     handle = None
