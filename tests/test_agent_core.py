@@ -557,6 +557,126 @@ def test_file_exists_contains(tmp_path, monkeypatch):
     assert "hello" in result.conditions[0]["detail"]
 
 
+def _deflated_zip(path, members: dict[str, str]) -> None:
+    """A real zip. Members are stored deflated so document text is not raw bytes."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, xml in members.items():
+            archive.writestr(name, xml)
+
+
+def test_file_exists_contains_reads_office_document_text(tmp_path, monkeypatch):
+    """Hermetic. Office contains checks document XML, not the zip bytes.
+
+    The .odt, .ods, .docx, and .xlsx fixtures are built in the test and
+    deflated. The sentence is absent from the raw file. A plain file is
+    still matched as decoded bytes, including a .txt that happens to be a
+    zip. Not a LibreOffice process.
+    """
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    phrase = "Quarterly Update"
+    odt_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+        "<office:body><office:text>"
+        f'<text:h><text:span text:style-name="bold">{phrase}</text:span></text:h>'
+        "<text:p>First paragraph of the memo.</text:p>"
+        "<text:p>Second paragraph of the memo.</text:p>"
+        "</office:text></office:body></office:document-content>"
+    )
+    ods_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+        'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">'
+        "<office:body><office:spreadsheet><table:table><table:table-row>"
+        '<table:table-cell office:value-type="string">'
+        f"<text:p>{phrase}</text:p>"
+        "</table:table-cell></table:table-row></table:table>"
+        "</office:spreadsheet></office:body></office:document-content>"
+    )
+    docx_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r>"
+        f"<w:t>{phrase}</w:t>"
+        "</w:r></w:p></w:body></w:document>"
+    )
+    shared_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"<si><t>{phrase}</t></si></sst>"
+    )
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData>'
+        "</worksheet>"
+    )
+    sheet2_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        "<sheetData><row r=\"1\">"
+        '<c r="A1"><v>424242</v></c>'
+        '<c r="B1" t="inlineStr"><is><t>inline-cell-token</t></is></c>'
+        "</row></sheetData></worksheet>"
+    )
+    odt = tmp_path / "memo.odt"
+    ods = tmp_path / "grid.ods"
+    docx = tmp_path / "memo.docx"
+    xlsx = tmp_path / "grid.xlsx"
+    _deflated_zip(odt, {"content.xml": odt_xml, "mimetype": "application/vnd.oasis.opendocument.text"})
+    _deflated_zip(ods, {"content.xml": ods_xml})
+    _deflated_zip(docx, {"word/document.xml": docx_xml})
+    _deflated_zip(xlsx, {
+        "xl/sharedStrings.xml": shared_xml,
+        "xl/worksheets/sheet1.xml": sheet_xml,
+        "xl/worksheets/sheet2.xml": sheet2_xml,
+    })
+    for path in (odt, ods, docx, xlsx):
+        assert phrase.encode() not in path.read_bytes(), path.name
+
+    for path in (odt, ods, docx, xlsx):
+        checked = check_conditions([{"file_exists": str(path), "contains": phrase}], None)
+        assert checked[0]["ok"] is True, (path.name, checked[0])
+        assert phrase in checked[0]["detail"]
+
+    number = check_conditions([{"file_exists": str(xlsx), "contains": "424242"}], None)
+    inline = check_conditions([{"file_exists": str(xlsx), "contains": "inline-cell-token"}], None)
+    assert number[0]["ok"] is True, number[0]
+    assert inline[0]["ok"] is True, inline[0]
+    missing = check_conditions([{"file_exists": str(odt), "contains": "not in the memo"}], None)
+    assert missing[0]["ok"] is False
+    assert "does not contain" in missing[0]["detail"]
+
+    plain = tmp_path / "todo.txt"
+    plain.write_text("buy milk", encoding="utf-8")
+    assert check_conditions([{"file_exists": str(plain), "contains": "buy milk"}], None)[0]["ok"]
+    disguised = tmp_path / "notes.txt"
+    _deflated_zip(disguised, {"content.xml": odt_xml})
+    assert phrase.encode() not in disguised.read_bytes()
+    disguised_check = check_conditions([{"file_exists": str(disguised), "contains": phrase}], None)
+    assert disguised_check[0]["ok"] is False
+    literal = tmp_path / "plain.docx"
+    literal.write_text(f"not a zip, but it says {phrase}", encoding="utf-8")
+    assert check_conditions([{"file_exists": str(literal), "contains": phrase}], None)[0]["ok"]
+
+    goal = 'Save the memo as memo.odt with the heading "Quarterly Update"'
+    agent = Agent(
+        ScriptedModel([
+            turn(done("saved", [{"file_exists": str(odt), "contains": phrase}])),
+        ]),
+        runtime=FakeRuntime(window()),
+        trace_dir=tmp_path / "trace",
+    )
+    result = agent.run(goal)
+    assert result.status == "success", result
+    assert result.conditions[0]["ok"] is True
+    assert phrase in result.conditions[0]["detail"]
+
+
 def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkeypatch):
     """A saved-file goal is not proven by the window title. Not a named task."""
     from a11y_computer_use.agent.core import file_evidence_error, goal_writes_a_file, known_file_text

@@ -54,7 +54,10 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    When the goal saves or creates a file, one condition has to be
    `file_exists`, and `contains` when the goal names the text. A window
    title is not accepted as proof the file was written. The rule is the
-   wording of the goal, not a named benchmark task.
+   wording of the goal, not a named benchmark task. `contains` reads a
+   plain file as text. For `.odt` and `.ods` it reads `content.xml`; for
+   `.docx`, `word/document.xml`; for `.xlsx`, `xl/sharedStrings.xml` and
+   the sheet XML. Those are zip files, and the raw bytes are not the check.
 
 `stream` yields `observation`, `plan`, `step_started`, `action`,
 `step_finished`, `needs_human`, `done`, `error`, and `stuck`. `cancel()` is
@@ -310,7 +313,7 @@ at 120). Stored stdout and stderr are capped at 4000 characters and marked
 - `{"element": {"role": "AXButton", "name": "Save"}}`
 - `{"value": {"ref": "e3", "equals": "hello"}}` or `{"value": {"name": "Note", "equals": "hello"}}`
 - `{"window_title_contains": "Notes"}`
-- `{"file_exists": "~/note.txt", "contains": "hello"}` (`contains` is optional)
+- `{"file_exists": "~/note.txt", "contains": "hello"}` (`contains` is optional; `.odt`, `.ods`, `.docx`, and `.xlsx` match the document text inside the zip)
 
 `ask_human` takes `kind` and `message`. The agent also pauses on its own when
 the snapshot contains a password field, an OTP or 2FA field, a card field, or
