@@ -425,7 +425,7 @@ def test_cancel_before_the_click():
     agent.on_event = events.append
     result = agent.run("click save")
     assert result.reason == "cancelled"
-    assert result.status == "failed"
+    assert result.status == "cancelled"
     assert runtime.calls == []
     assert "error" in types(events)
 

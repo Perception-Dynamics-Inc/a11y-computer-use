@@ -81,7 +81,7 @@ def build_agent_mcp(store: RunStore | None = None):
 
     @server.tool()
     def cancel_run(run_id: str) -> dict:
-        """Ask a run to stop. The run ends with reason cancelled."""
+        """Ask a run to stop. The finished run has status cancelled and reason cancelled."""
         record = shared.cancel(run_id)
         if record is None:
             raise ToolError(f"404 run not found: {run_id}")

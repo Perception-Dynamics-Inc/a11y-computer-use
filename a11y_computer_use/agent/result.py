@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-Status = Literal["success", "failed", "needs_human"]
+Status = Literal["success", "failed", "needs_human", "cancelled"]
 
 
 @dataclass(slots=True)

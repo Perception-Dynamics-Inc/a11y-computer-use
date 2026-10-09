@@ -89,7 +89,7 @@ def test_json_cancel_exits_3(monkeypatch, capsys):
     payload, _raw = _loads(capsys)
     assert code == 3
     assert payload["reason"] == "cancelled"
-    assert payload["status"] == "failed"
+    assert payload["status"] == "cancelled"
 
 
 def test_json_max_steps_exits_1(monkeypatch, capsys):
