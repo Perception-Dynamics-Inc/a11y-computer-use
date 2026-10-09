@@ -3992,6 +3992,131 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
         _kill_libreoffice()
 
 
+
+def _soffice_displays() -> set[str]:
+    found: set[str] = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                comm = fh.read().strip()
+            with open(f"/proc/{entry}/environ", "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if comm not in {"soffice", "soffice.bin", "oosplash"}:
+            continue
+        for item in raw.split(b"\0"):
+            if item.startswith(b"DISPLAY="):
+                found.add(item.split(b"=", 1)[1].decode("utf-8", "replace"))
+    return found
+
+
+def _start_other_display():
+    """A second Xvfb the test's session does not use. ``(proc, display)``."""
+    for number in range(70, 90):
+        if os.path.exists(f"/tmp/.X{number}-lock") or os.path.exists(f"/tmp/.X11-unix/X{number}"):
+            continue
+        proc = subprocess.Popen(
+            ["Xvfb", f":{number}", "-screen", "0", "640x480x24", "-ac"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 5
+        sock = f"/tmp/.X11-unix/X{number}"
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            if os.path.exists(sock):
+                return proc, f":{number}"
+            time.sleep(0.05)
+        if proc.poll() is None:
+            proc.kill()
+    raise AssertionError("could not start a second Xvfb")
+
+
+def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None:
+    """Live. soffice on another X display is not this session.
+
+    A snapshot of LibreOffice here is app_not_found on the first look. It
+    does not wait out the registration deadline or report a missing gtk3
+    bridge. This session has no LibreOffice window.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True).stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    assert subprocess.run(["bash", "-lc", "command -v Xvfb"], capture_output=True, text=True).stdout.strip()
+    assert subprocess.run(
+        ["bash", "-lc", "command -v dbus-run-session"], capture_output=True, text=True,
+    ).stdout.strip()
+    _kill_libreoffice()
+    time.sleep(0.3)
+    xvfb, display = _start_other_display()
+    assert display != os.environ.get("DISPLAY")
+    home = tmp_path / "other-home"
+    profile = home / "lo-profile"
+    (profile / "user").mkdir(parents=True)
+    env = os.environ.copy()
+    env["DISPLAY"] = display
+    env["HOME"] = str(home)
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    for key in (
+        "XAUTHORITY", "AT_SPI_BUS_ADDRESS", "AT_SPI_BUS",
+        "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY",
+    ):
+        env.pop(key, None)
+    log = tmp_path / "other-soffice.log"
+    log_fh = open(log, "w", encoding="utf-8")
+    other = subprocess.Popen(
+        [
+            "dbus-run-session", "--", binary, "--calc", "--nologo", "--norestore",
+            "--nolockcheck", f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline:
+            if display in _soffice_displays():
+                break
+            if other.poll() is not None:
+                break
+            time.sleep(0.2)
+        assert display in _soffice_displays(), log.read_text(encoding="utf-8", errors="replace")[-2000:]
+        ours = os.environ.get("DISPLAY", "")
+        assert ours not in _soffice_displays()
+        started = time.monotonic()
+        with pytest.raises(ComputerUseError) as exc:
+            driver.snapshot(Scope.WINDOW, "LibreOffice")
+        elapsed = time.monotonic() - started
+        assert exc.value.code is ErrorCode.APP_NOT_FOUND, exc.value.message
+        assert "accessibility bridge" not in exc.value.message
+        assert elapsed < 3, f"snapshot waited {elapsed:.1f}s for another session's LibreOffice"
+        started = time.monotonic()
+        with pytest.raises(ComputerUseError) as again:
+            driver.snapshot(Scope.WINDOW, "soffice")
+        assert again.value.code is ErrorCode.APP_NOT_FOUND
+        assert time.monotonic() - started < 3
+    finally:
+        log_fh.close()
+        _stop_group(other)
+        if xvfb.poll() is None:
+            xvfb.kill()
+            xvfb.wait(timeout=5)
+        _kill_libreoffice()
+
+
 def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
 

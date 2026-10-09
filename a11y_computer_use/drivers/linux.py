@@ -583,10 +583,11 @@ class LinuxDriver:
         resolved, root = self._root_for_snapshot(app, scope)
         # The X window is in app list and window list before the application
         # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
-        # the list still shows the app, or a LibreOffice process is up, and
-        # stop at ATSPI_REGISTER_WAIT_S. A name that is not listed does not
-        # wait. The missing gtk3 bridge is reported after that deadline, not
-        # during the registration gap.
+        # the list still shows the app, or a LibreOffice process in this
+        # session is up, and stop at ATSPI_REGISTER_WAIT_S. A name that is
+        # not listed does not wait, including a soffice process on another
+        # display. The missing gtk3 bridge is reported after that deadline,
+        # not during the registration gap.
         if root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
         ):
