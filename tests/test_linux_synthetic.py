@@ -2135,6 +2135,87 @@ def test_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch)
     assert exc.value.detail["outcome"] == "refused"
 
 
+def _chrome_documents():
+    """Active form and a background tab. The background document is not SHOWING."""
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    name = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "FOCUSABLE", "EDITABLE"))
+    form = _GeckoNode("document web", "Form Probe", ("SHOWING", "VISIBLE"), [name])
+    hidden = _GeckoNode("entry", "Hidden", ("VISIBLE", "FOCUSABLE", "EDITABLE"))
+    background = _GeckoNode("document web", "Other Probe", ("VISIBLE",), [hidden])
+    frame = _GeckoNode(
+        "frame", "Form Probe - Google Chrome", ("SHOWING", "VISIBLE"), [form, background],
+    )
+    for node in (name, form, hidden, background, frame):
+        node.application = app
+    return {"name": name, "hidden": hidden, "form": form, "background": background, "frame": frame}
+
+
+def test_chrome_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch) -> None:
+    """Synthetic tree. A live node in a background Chrome tab is not_showing.
+
+    A DEFUNCT node stays stale_ref. Not a live Chrome.
+    """
+    from a11y_computer_use.schema import Bounds, Element, Scope, Snapshot
+
+    tree = _chrome_documents()
+    assert _atspi.hidden_web_target(tree["hidden"]) is True
+    assert _atspi.hidden_web_target(tree["name"]) is False
+    hidden = Element(
+        "e3", "AXTextField", "Hidden", None, Bounds(0, 8, 40, 120, 24), "snap-old",
+        editable=True,
+    )
+    showing = Element(
+        "e1", "AXTextField", "Name", None, Bounds(0, 8, 10, 120, 24), "snap-old",
+        editable=True,
+    )
+    old = Snapshot("snap-old", Scope.WINDOW, "chrome", 1, 0.0, (), (showing, hidden))
+    live = Snapshot("snap-live", Scope.WINDOW, "chrome", 1, 0.0, (), ())
+    observe._register_epoch("snap-old", {}, {"e3": tree["hidden"], "e1": tree["name"]})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "snapshot", lambda *_args, **_kwargs: live)
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e3")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["next"][0] == "foreground"
+    assert "re-observe" not in exc.value.message
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e1")
+    assert exc.value.code is ErrorCode.STALE_REF
+
+    tree["hidden"].states.add("DEFUNCT")
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: tree["frame"])
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e3")
+    assert exc.value.code is ErrorCode.STALE_REF
+
+    # Live Chrome leaves SHOWING set and detaches the background document
+    # from the frame. A document that is still SHOWING but is not the
+    # selected tab is the same refusal.
+    app = tree["frame"].application
+    orphan = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "EDITABLE"))
+    orphan_doc = _GeckoNode("document web", "Outcome Probe", ("SHOWING", "VISIBLE"), [orphan])
+    orphan.application = app
+    orphan_doc.application = app
+    assert _atspi.hidden_web_target(orphan) is True
+    tab = _GeckoNode("page tab", "Other Probe", ("SHOWING", "SELECTED"))
+    attached = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "EDITABLE"))
+    attached_doc = _GeckoNode(
+        "document web", "Outcome Probe", ("SHOWING", "VISIBLE"), [attached],
+    )
+    other = _GeckoNode(
+        "frame", "Other Probe - Google Chrome", ("SHOWING", "ACTIVE"), [attached_doc, tab],
+    )
+    for node in (attached, attached_doc, tab, other):
+        node.application = app
+    assert _atspi.hidden_web_target(attached) is True
+
+
 def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
     field = _KeyClearedWebField("bench-value-0")
     sent: list[str] = []

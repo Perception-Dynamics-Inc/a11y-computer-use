@@ -320,6 +320,184 @@ def test_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
     assert "coordinates" in result.next
 
 
+def test_second_inert_click_without_a_snapshot_is_suspected_noop(tmp_path) -> None:
+    """The second click is judged against the tree just before it.
+
+    The first click changes the tree. A second click with no snapshot in
+    between used to compare against that older tree and report confirmed.
+    """
+    driver = TreeDriver()
+    runtime = _runtime(tmp_path, driver)
+    first = runtime.click("e2")
+    assert first.outcome == "confirmed"
+    second = runtime.click("e2")
+    assert second == "clicked e2 (AXButton 'Save')"
+    assert second.outcome == "suspected_noop"
+    assert "did not change" in second.evidence
+
+
+def _chrome_page(*extra: Element) -> list[Element]:
+    """A window, a churning toolbar, and a titled page with a button."""
+    return [
+        _element("w", "AXWindow", "Outcome Probe - Google Chrome", path=("AXWindow",)),
+        _element("bar", "AXToolbar", "", parent="w", path=("AXWindow", "AXToolbar")),
+        _element(
+            "status", "AXStaticText", "tick", parent="bar",
+            path=("AXWindow", "AXToolbar", "AXStaticText"),
+        ),
+        _element(
+            "page", "AXGroup", "Outcome Probe", parent="w",
+            path=("AXWindow", "AXGroup"), focused=True,
+        ),
+        _element(
+            "btn", "AXButton", "Div button", parent="page",
+            path=("AXWindow", "AXGroup", "AXButton"), clickable=True,
+        ),
+        _element(
+            "label", "AXStaticText", "ready", parent="page",
+            path=("AXWindow", "AXGroup", "AXStaticText"),
+        ),
+        *extra,
+    ]
+
+
+def test_relevant_state_compares_mixed_none_and_text_values() -> None:
+    """Two controls can share a name while one value is missing and one is text.
+
+    Sorting those rows used to raise TypeError and abort the click.
+    """
+    elements = (
+        _element("w", "AXWindow", "Demo", path=("AXWindow",)),
+        _element("a", "AXButton", "Close", parent="w", path=("AXWindow", "AXButton")),
+        _element(
+            "b", "AXButton", "Close", parent="w",
+            path=("AXWindow", "AXGroup", "AXButton"), checked=False,
+        ),
+        _element(
+            "c", "AXStaticText", "Note", parent="w",
+            path=("AXWindow", "AXStaticText"), value="1",
+        ),
+        _element(
+            "d", "AXStaticText", "Note", parent="w",
+            path=("AXWindow", "AXGroup", "AXStaticText"),
+        ),
+    )
+    snap = Snapshot(
+        "snap", Scope.WINDOW, APP, 1, 0.0, (), elements,
+    )
+    assert outcome.relevant_state_changed(snap, snap, elements[1]) is False
+
+
+def test_chrome_churn_outside_the_page_does_not_confirm_a_click(tmp_path) -> None:
+    """Toolbar text and document focus are not proof a page button did nothing.
+
+    A label inside the page still confirms. The next click, with the toolbar
+    moving again, is suspected_noop.
+    """
+    driver = TreeDriver()
+    driver.elements = _chrome_page()
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        status = next(item for item in driver.elements if item.ref == "status")
+        driver._replace("status", title="tock" if status.title == "tick" else "tick")
+        page = next(item for item in driver.elements if item.ref == "page")
+        driver._replace("page", focused=not page.focused)
+        if getattr(driver, "save_page", False) and element.ref == "btn":
+            driver._replace("label", title="saved")
+        if getattr(driver, "focus_button", False) and element.ref == "btn":
+            driver._replace("btn", focused=True)
+        if getattr(driver, "retitle", False):
+            driver._replace("w", title="Other Probe - Google Chrome")
+        return True
+
+    driver.press_element = press  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    inert = runtime.click("btn")
+    assert inert.outcome == "suspected_noop", (inert.outcome, inert.evidence)
+    assert "did not change" in inert.evidence
+
+    driver.save_page = True
+    changed = runtime.click("btn")
+    assert changed.outcome == "confirmed", (changed.outcome, changed.evidence)
+    again = runtime.click("btn")
+    assert again.outcome == "suspected_noop", (again.outcome, again.evidence)
+
+    driver.save_page = False
+    driver.focus_button = True
+    runtime.desktop_snapshot(APP)
+    focused = runtime.click("btn")
+    assert focused.outcome == "confirmed", (focused.outcome, focused.evidence)
+
+    driver.focus_button = False
+    driver.retitle = True
+    runtime.desktop_snapshot(APP)
+    renamed = runtime.click("btn")
+    assert renamed.outcome == "confirmed", (renamed.outcome, renamed.evidence)
+
+
+def test_set_value_in_a_background_window_is_confirmed_from_app_scope(tmp_path) -> None:
+    """A field that window scope omits is confirmed from the app-scope read-back.
+
+    The ref comes from an app snapshot. A window-scope reread would not
+    contain the field and would report unverifiable. The write is confirmed
+    only when that wider read-back equals the request. A different read-back
+    is not confirmed. A cover is a separate refusal and does not reach this.
+    """
+    driver = TreeDriver()
+    driver.elements = [
+        *driver.elements,
+        _element(
+            "e9", "AXTextField", "Field A",
+            path=("Alpha", "AXTextField"),
+            value="", editable=True,
+        ),
+    ]
+    original = driver.snapshot
+
+    def snapshot(scope, app):
+        shot = original(scope, app)
+        kind = scope.value if isinstance(scope, Scope) else str(scope)
+        if kind == "window":
+            return dataclasses.replace(
+                shot, elements=tuple(el for el in shot.elements if el.ref != "e9"),
+            )
+        return shot
+
+    driver.snapshot = snapshot  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot(APP, scope="app")
+    written = runtime.set_value("e9", "alpha-ok")
+    assert written == "set e9 = 'alpha-ok'"
+    assert written.outcome == "confirmed", (written.outcome, written.evidence)
+    assert "alpha-ok" in written.evidence
+    field = next(item for item in driver.elements if item.ref == "e9")
+    assert field.value == "alpha-ok"
+    window = driver.snapshot(Scope.WINDOW, APP)
+    assert all(el.ref != "e9" for el in window.elements)
+
+    runtime.desktop_snapshot(APP, scope="app")
+    driver.landed = "nope"
+    missed = runtime.set_value("e9", "alpha-ok")
+    assert missed.outcome != "confirmed"
+    assert missed.outcome in {"partial", "suspected_noop"}
+    assert "alpha-ok" not in missed.evidence or "nope" in missed.evidence
+
+
+def test_set_value_on_a_covered_element_is_refused(tmp_path) -> None:
+    driver = TreeDriver()
+    driver.occlusion = lambda _element, _app: "other"  # type: ignore[attr-defined]
+    runtime = _runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.set_value("e3", "Ann")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "covered"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["next"][0] == "foreground"
+    field = next(item for item in driver.elements if item.ref == "e3")
+    assert field.value in (None, "")
+
+
 def test_click_that_kills_the_process_is_partial(tmp_path) -> None:
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     driver = TreeDriver()

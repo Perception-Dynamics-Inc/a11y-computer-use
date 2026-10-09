@@ -163,11 +163,23 @@ def refused_result(*, text: str, code: str, message: str, detail: dict | None) -
     )
 
 
+_WINDOW_ROLES = frozenset({"AXWindow", "AXDialog", "AXSheet", "AXDrawer"})
+# A titled group, web area, or scroll area above the target is the page.
+# The window is the page when the control has no narrower titled ancestor.
+_PAGE_ROLES = frozenset({"AXGroup", "AXWebArea", "AXScrollArea"})
+# Browser chrome. Its focus, selection, and status text move on their own.
+_CHROME_UI_ROLES = frozenset({
+    "AXToolbar", "AXTabGroup", "AXMenuBar", "AXMenu", "AXScrollBar",
+})
+
+
 def state_fingerprint(snap: object) -> str:
     """Digest of roles, names, values, and states. Refs and bounds are ignored.
 
     A fresh snapshot renumbers refs. A scroll moves bounds without editing a
     control. Neither of those, on its own, is evidence a click landed.
+    Action judgment uses `relevant_state_changed` instead: this digest also
+    moves when Chrome churns a toolbar or status node the click did not touch.
     """
     rows: list[str] = []
     for el in getattr(snap, "elements", ()) or ():
@@ -183,6 +195,169 @@ def state_fingerprint(snap: object) -> str:
         )))
     raw = "\n".join(rows)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _snap_elements(snap: object) -> tuple:
+    return tuple(getattr(snap, "elements", ()) or ())
+
+
+def _match_control(element: object, snap: object) -> object | None:
+    """The same control in ``snap``. Refs are not stable across reads."""
+    elements = _snap_elements(snap)
+    role = getattr(element, "role", "")
+    title = getattr(element, "title", "")
+    path = tuple(getattr(element, "path", ()) or ())
+    same_path = [
+        el for el in elements
+        if el.role == role and el.title == title and tuple(el.path or ()) == path
+    ]
+    if len(same_path) == 1:
+        return same_path[0]
+    same_name = [el for el in elements if el.role == role and el.title == title]
+    if len(same_name) == 1:
+        return same_name[0]
+    stable = getattr(element, "stable_id", None)
+    if stable:
+        for el in elements:
+            if el.stable_id == stable:
+                return el
+    if same_path:
+        return same_path[0]
+    return same_name[0] if same_name else None
+
+
+def _relevant_target_state(element: object) -> tuple:
+    """Focus, value, checked, and expanded. The rest of the target is not proof."""
+    return (
+        bool(getattr(element, "focused", False)),
+        getattr(element, "value", None),
+        getattr(element, "checked", None),
+        getattr(element, "expanded", None),
+    )
+
+
+def _by_ref(snap: object) -> dict:
+    return {
+        el.ref: el for el in _snap_elements(snap) if getattr(el, "ref", None)
+    }
+
+
+def _page_root(snap: object, target: object | None) -> object | None:
+    """The document that holds ``target``, or its window when it has none."""
+    if target is None:
+        return None
+    by_ref = _by_ref(snap)
+    current = by_ref.get(getattr(target, "parent", None))
+    titled = None
+    window = None
+    seen: set[str] = set()
+    while current is not None:
+        ref = getattr(current, "ref", "")
+        if ref in seen:
+            break
+        seen.add(ref)
+        role = getattr(current, "role", "")
+        if role in _WINDOW_ROLES:
+            window = current
+            break
+        if titled is None and getattr(current, "title", "") and role in _PAGE_ROLES:
+            titled = current
+        parent = getattr(current, "parent", None)
+        current = by_ref.get(parent) if parent else None
+    return titled or window
+
+
+def _subtree(snap: object, root: object) -> list:
+    children: dict[str, list] = {}
+    for el in _snap_elements(snap):
+        parent = getattr(el, "parent", None)
+        if parent:
+            children.setdefault(parent, []).append(el)
+    out = [root]
+    stack = list(children.get(getattr(root, "ref", None), []))
+    seen = {getattr(root, "ref", None)}
+    while stack:
+        el = stack.pop()
+        ref = getattr(el, "ref", None)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        out.append(el)
+        stack.extend(children.get(ref, []))
+    return out
+
+
+def _chrome_ui(element: object) -> bool:
+    return any(part in _CHROME_UI_ROLES for part in (getattr(element, "path", ()) or ()))
+
+
+def _page_row(element: object) -> tuple:
+    """Content that means the page changed. Focus and enabled are not included."""
+    return (
+        getattr(element, "role", ""),
+        getattr(element, "title", ""),
+        getattr(element, "value", None),
+        getattr(element, "checked", None),
+        getattr(element, "expanded", None),
+        tuple(getattr(element, "path", ()) or ()),
+    )
+
+
+def _sort_key(row: tuple) -> tuple:
+    """A key ``sorted`` can compare. Values mix None, bools, and strings."""
+    key = []
+    for part in row:
+        if part is None:
+            key.append((0, ""))
+        elif isinstance(part, bool):
+            key.append((1, part))
+        elif isinstance(part, tuple):
+            key.append((3, part))
+        else:
+            key.append((2, str(part)))
+    return tuple(key)
+
+
+def _page_rows(snap: object, target: object | None) -> tuple:
+    root = _page_root(snap, target)
+    if root is None:
+        elements = [el for el in _snap_elements(snap) if not _chrome_ui(el)]
+    else:
+        elements = _subtree(snap, root)
+    return tuple(sorted((_page_row(el) for el in elements), key=_sort_key))
+
+
+def _window_rows(snap: object) -> tuple:
+    rows = [
+        (el.role, el.title)
+        for el in _snap_elements(snap)
+        if getattr(el, "role", "") in _WINDOW_ROLES
+    ]
+    return tuple(sorted(rows))
+
+
+def relevant_state_changed(before: object, after: object, target: object | None = None) -> bool:
+    """Whether ``target`` or its window or page changed between two snapshots.
+
+    The target's focus, value, checked, and expanded count. So does a window
+    title (or a window appearing) and the page that holds the target: its
+    titles, values, checked state, and expanded state. Focus, selection, and
+    enabled bits elsewhere do not, and neither does Chrome's toolbar, tab
+    strip, or status text when the click was inside the page.
+    """
+    if target is not None:
+        before_target = _match_control(target, before)
+        after_target = _match_control(target, after)
+        if before_target is None or after_target is None:
+            return True
+        if _relevant_target_state(before_target) != _relevant_target_state(after_target):
+            return True
+    else:
+        before_target = None
+        after_target = None
+    if _window_rows(before) != _window_rows(after):
+        return True
+    return _page_rows(before, before_target) != _page_rows(after, after_target)
 
 
 def bounds_fingerprint(snap: object) -> str:

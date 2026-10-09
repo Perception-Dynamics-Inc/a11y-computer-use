@@ -2089,6 +2089,10 @@ def test_linux_type_and_key_with_app_land_in_that_app(tmp_path) -> None:
         assert "z" in target_text, target_text
         assert "z" not in other_text, other_text
         assert "other-kept" in other_text, other_text
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert typed.evidence
+        assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+        assert pressed.evidence
     finally:
         _stop(target_proc)
         _stop(other_proc)
@@ -2501,6 +2505,7 @@ _GTK_OUTCOME = textwrap.dedent(
     win.set_name("cuaoutcome")
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
     entry = Gtk.Entry()
+    entry.get_accessible().set_name("Outcome field")
     btn = Gtk.Button(label="Save")
     btn.connect("clicked", lambda _b: entry.set_text("SAVED"))
     idle = Gtk.Button(label="Idle label")
@@ -2634,6 +2639,207 @@ def test_linux_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
         assert not any((el.value or "") == "SAVED" for el in after.elements)
     finally:
         _stop(proc)
+
+
+def test_linux_second_click_without_a_snapshot_is_suspected_noop(tmp_path) -> None:
+    """Live GTK. Two Save clicks with no snapshot between them.
+
+    The first click writes SAVED. The second does not change the tree. It is
+    compared with the state after the first click, so the outcome is
+    suspected_noop.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.clickable and el.title == "Save" for el in shot.elements),
+        )
+        assert snap is not None, "the outcome window never appeared"
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP)
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.clickable and el.title == "Save")
+        first = runtime.click(button.ref)
+        assert first.outcome == "confirmed", (first.outcome, first.evidence)
+        second = runtime.click(button.ref)
+        assert str(second).startswith("clicked ")
+        assert second.outcome == "suspected_noop", (second.outcome, second.evidence)
+        assert "did not change" in second.evidence
+    finally:
+        _stop(proc)
+
+
+_COVER_APP = "cuacover"
+
+_GTK_COVER = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuacover")
+    win = Gtk.Window(title="cuacover")
+    win.set_name("cuacover")
+    win.set_default_size(1000, 800)
+    win.move(0, 0)
+    win.set_keep_above(True)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_set_value_on_a_covered_window_is_refused(tmp_path) -> None:
+    """Live GTK entry, the same EditableText path Mousepad uses.
+
+    A window of another process covers the entry. set_value must not report
+    confirmed. The entry text stays empty.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    target = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    cover = _launch_named(tmp_path, _GTK_COVER, "cuacover.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.editable and el.role in {"AXTextField", "AXTextArea"} for el in shot.elements),
+        )
+        assert snap is not None, "the entry never appeared"
+
+        def _row(name: str):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                for row in driver.windows() or []:
+                    if name in {row.get("wm_class"), row.get("title"), row.get("app")}:
+                        return row
+                time.sleep(0.2)
+            return None
+
+        cover_row = _row(_COVER_APP)
+        assert cover_row is not None, driver.windows()
+        target_row = _row(_OUTCOME_APP)
+        assert target_row is not None, driver.windows()
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP, _COVER_APP, "python3")
+        # Frame insets are subtracted from the request. An origin of (0, 0)
+        # becomes negative and X rejects it. These origins stay positive and
+        # the cover still contains the entry. The ref is taken after the move
+        # so it names the field where it sits under the cover.
+        runtime.window("move", window_id=int(target_row["window_id"]), x=80, y=140)
+        runtime.window("move", window_id=int(cover_row["window_id"]), x=40, y=80)
+        _focus_window(driver, int(cover_row["window_id"]))
+        covered = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+        runtime._current = covered
+        entry = next(el for el in covered.elements if el.editable and el.title == "Outcome field")
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(entry.ref, "covered-text")
+        assert exc.value.detail["reason"] == "covered", exc.value.detail
+        assert exc.value.detail["outcome"] == "refused"
+        after = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+        assert not any((el.value or "") == "covered-text" for el in after.elements)
+    finally:
+        _stop(cover)
+        _stop(target)
+
+
+_TWO_APP = "cuatwowin"
+
+_GTK_TWO = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuatwowin")
+    def mk(title, tag, x):
+        w = Gtk.Window(title=title)
+        w.move(x, 80)
+        w.set_default_size(420, 220)
+        b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        e = Gtk.Entry()
+        e.get_accessible().set_name("Field " + tag)
+        b.pack_start(e, False, False, 0)
+        b.pack_start(Gtk.Button(label="Press " + tag), False, False, 0)
+        w.add(b)
+        w.connect("destroy", Gtk.main_quit)
+        w.show_all()
+        return w
+    mk("Alpha Window", "A", 40)
+    beta = mk("Beta Window", "B", 520)
+    beta.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
+    """Two GTK windows in one process. Beta is in front.
+
+    set_value on Field A writes the text. A window-scope snapshot does not
+    contain that field, which used to make the outcome unverifiable. The ref
+    came from find(scope='app'), and that read-back matches, so the outcome
+    is confirmed. This is not the covered-window case: nothing is on top of
+    Alpha, and a read-back that did not match would not be confirmed.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    proc = _launch_named(tmp_path, _GTK_TWO, "cuatwowin.py")
+    try:
+        snap = _wait_app(
+            driver, _TWO_APP,
+            lambda shot: any(el.title == "Field B" for el in shot.elements),
+        )
+        assert snap is not None, "the two-window app never appeared"
+
+        def _row(title: str):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for row in driver.windows() or []:
+                    if row.get("title") == title:
+                        return row
+                time.sleep(0.2)
+            return None
+
+        beta = _row("Beta Window")
+        assert beta is not None, driver.windows()
+        _focus_window(driver, int(beta["window_id"]))
+        front = driver.snapshot(Scope.WINDOW, _TWO_APP)
+        assert any(el.title == "Field B" for el in front.elements), [
+            (el.role, el.title) for el in front.elements
+        ]
+        assert not any(el.title == "Field A" for el in front.elements), [
+            (el.role, el.title) for el in front.elements
+        ]
+        runtime = _runtime_for(tmp_path, driver, _TWO_APP, "python3")
+        runtime.find(_TWO_APP, text="Field A", scope="app")
+        current = runtime._current
+        assert current is not None and current.scope is Scope.APP
+        field = next(el for el in current.elements if el.title == "Field A" and el.editable)
+        result = runtime.set_value(field.ref, "alpha-ok")
+        assert str(result).startswith("set ")
+        assert result.outcome == "confirmed", (result.outcome, result.evidence)
+        assert "alpha-ok" in result.evidence
+        found = runtime.find(_TWO_APP, text="Field A", scope="app")
+        assert "alpha-ok" in found
+        runtime.find(_TWO_APP, text="Field B", scope="window")
+        current = runtime._current
+        assert current is not None
+        front_field = next(el for el in current.elements if el.title == "Field B" and el.editable)
+        front_result = runtime.set_value(front_field.ref, "bravo-set")
+        assert front_result.outcome == "confirmed", (front_result.outcome, front_result.evidence)
+        assert "bravo-set" in front_result.evidence
+    finally:
+        _stop(proc)
+
+
 
 
 def test_linux_click_that_exits_the_process_is_not_confirmed(tmp_path) -> None:
@@ -4392,3 +4598,161 @@ def test_linux_chrome_crop_of_a_scrolled_off_button_is_off_screen(tmp_path) -> N
         _stop_group(proc)
         import shutil
         shutil.rmtree(profile, ignore_errors=True)
+
+
+def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None:
+    """Live Chrome. The four retest gaps that show up in Chrome.
+
+    ``type`` and ``key`` with ``app=`` carry an outcome. A second click on an
+    inert button, with no snapshot between, is suspected_noop. A ref from the
+    page that was in front is not_showing once that tab is in the background,
+    not stale_ref. ``set_value`` on the page while another process covers the
+    window is refused, not confirmed.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the outcome-gap test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    form = tmp_path / "outcome.html"
+    other = tmp_path / "other.html"
+    form.write_text(
+        "<!doctype html><meta charset=utf-8><title>Outcome Probe</title>"
+        "<div contenteditable=true role=textbox aria-label=Name></div>"
+        "<button type=button>Div button</button>"
+    )
+    other.write_text(
+        "<!doctype html><meta charset=utf-8><title>Other Probe</title>"
+        "<p>Background page</p><a href='https://example.com/elsewhere'>Elsewhere</a>"
+    )
+    profile = tmp_path / "chrome-outcome"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=900,700",
+            form.resolve().as_uri(), other.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    cover = None
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last_titles: list[str] = []
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                last_titles = sorted(title for title in titles if title)[:40]
+                if "Name" in titles and "Div button" in titles:
+                    snap = shot
+                    break
+                # Two startup URLs can leave the second tab in front. The
+                # first page is still a tab in this window.
+                tab = next(
+                    (
+                        el for el in shot.elements
+                        if el.title == "Outcome Probe" and el.clickable
+                    ),
+                    None,
+                )
+                if tab is not None and "Name" not in titles:
+                    driver.press_element(tab)
+            time.sleep(0.4)
+        assert snap is not None, (
+            "Chrome did not expose Name and Div button; last titles: " + ", ".join(last_titles)
+        )
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", _COVER_APP, "python3")
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.title == "Div button" and el.clickable)
+        name = next(el for el in snap.elements if el.title == "Name" and el.editable)
+        first = runtime.click(button.ref)
+        second = runtime.click(button.ref)
+        assert second.outcome == "suspected_noop", (
+            first.outcome, second.outcome, getattr(second, "evidence", None),
+        )
+        runtime.click(name.ref)
+        runtime.key("ctrl+end")
+        typed = runtime.type_text("xy", app="chrome")
+        assert str(typed).startswith("typed ")
+        assert typed.outcome == "confirmed", (typed.outcome, getattr(typed, "evidence", None))
+        assert typed.evidence
+        pressed = runtime.key("BackSpace", app="chrome")
+        assert str(pressed).startswith("pressed ")
+        assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+
+        cover = _launch_named(tmp_path, _GTK_COVER, "cuacover.py")
+
+        def _row(predicate):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                for row in driver.windows() or []:
+                    if predicate(row):
+                        return row
+                time.sleep(0.2)
+            return None
+
+        def _blob(row: dict) -> str:
+            return " ".join(str(row.get(key) or "") for key in ("app", "title", "wm_class", "wm_class_class"))
+
+        chrome_row = _row(lambda row: "chrome" in _blob(row).casefold() or "Outcome Probe" in _blob(row))
+        cover_row = _row(lambda row: _COVER_APP in _blob(row))
+        assert chrome_row is not None, driver.windows()
+        assert cover_row is not None, driver.windows()
+        runtime.window("resize", window_id=int(cover_row["window_id"]), width=1200, height=900)
+        # Stay clear of the origin: frame insets are subtracted and a negative
+        # client-message coordinate is rejected.
+        runtime.window("move", window_id=int(cover_row["window_id"]), x=40, y=80)
+        runtime.window("move", window_id=int(chrome_row["window_id"]), x=100, y=160)
+        _focus_window(driver, int(cover_row["window_id"]))
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(name.ref, "covered-text")
+        assert exc.value.detail.get("reason") == "covered", exc.value.detail
+        assert exc.value.detail.get("outcome") == "refused"
+        shown = driver.snapshot(Scope.WINDOW, "chrome")
+        assert not any((el.value or "") == "covered-text" for el in shown.elements)
+        _stop(cover)
+        cover = None
+        _focus_window(driver, int(chrome_row["window_id"]))
+        runtime.desktop_snapshot("chrome")
+        current = runtime._current
+        assert current is not None
+        name = next(el for el in current.elements if el.title == "Name" and el.editable)
+        name_ref = name.ref
+        tab = next(
+            (el for el in current.elements if el.title == "Other Probe" and el.clickable),
+            None,
+        )
+        assert tab is not None, [(el.role, el.title, el.clickable) for el in current.elements]
+        runtime.click(tab.ref)
+        hidden = False
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            seen = driver.snapshot(Scope.WINDOW, "chrome")
+            if not any(el.title == "Name" for el in seen.elements):
+                hidden = True
+                break
+            time.sleep(0.25)
+        assert hidden, [(el.role, el.title) for el in seen.elements]
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click(name_ref)
+        assert exc.value.detail.get("reason") == "not_showing", (exc.value.code, exc.value.detail, exc.value.message)
+        assert exc.value.detail.get("outcome") == "refused"
+        assert exc.value.code is not ErrorCode.STALE_REF
+    finally:
+        if cover is not None:
+            _stop(cover)
+        _stop_group(proc)

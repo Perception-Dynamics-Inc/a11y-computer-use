@@ -5035,15 +5035,56 @@ def offscreen_extents(acc):
     return pos, size
 
 
+def _chromium_document_hidden(acc) -> bool:
+    """True when ``acc`` sits in a Chromium document that is not the selected tab.
+
+    The active tab's document is SHOWING and its title is the selected page
+    tab. Chrome also drops a background tab's document out of the frame and
+    leaves STATE_SHOWING set on that orphan, so a missing frame ancestor is
+    the same case. The tab strip sits outside the document, so a click on the
+    tab itself is not this case. An element scrolled out of the showing
+    document is not this case either: that document is still the selected tab.
+    """
+    node = acc
+    seen: set[int] = set()
+    document = None
+    reached_frame = False
+    for _ in range(32):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            document = node
+            if not _state_has(node, "SHOWING"):
+                return True
+        if role in {"frame", "window", "application"}:
+            reached_frame = True
+            break
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    if document is None:
+        return False
+    if not reached_frame:
+        return True
+    tab = _selected_tab_name(document)
+    title = _node_name(document)
+    if tab and title and not _names_match_tab(title, tab):
+        return True
+    return False
+
+
 def hidden_named_target(root, ax_role: str, title: str) -> bool:
     """True when a live node of ``ax_role`` and ``title`` sits in a hidden document.
 
     The snapshot prunes that document, so a ref into it fails to rematch and
     would otherwise be reported as stale. A match that is showing is not this
     case: the element really left the tree the ref was issued against. A
-    DEFUNCT node is skipped. GTK and Chromium trees are not walked.
+    DEFUNCT node is skipped. GTK trees are not walked. Firefox and Chromium are.
     """
-    if root is None or not ax_role or not title or not _gecko_app(root):
+    if root is None or not ax_role or not title or not (_gecko_app(root) or _chromium_app(root)):
         return False
     hidden = False
     showing = False
@@ -5073,13 +5114,18 @@ def hidden_named_target(root, ax_role: str, title: str) -> bool:
 
 
 def hidden_web_target(acc) -> bool:
-    """True when ``acc`` sits in a Firefox document that is not showing.
+    """True when ``acc`` sits in a browser document that is not showing.
 
-    False for GTK, Chromium, and Firefox chrome (the tab strip, the toolbar).
+    False for GTK, and for browser chrome (the tab strip, the toolbar).
     A click on a link in a background tab is this case: the link's document
-    is not the selected, showing one.
+    is not the selected, showing one. Firefox and Chromium both keep that
+    document alive.
     """
-    if acc is None or not _gecko_app(acc):
+    if acc is None:
+        return False
+    if _chromium_app(acc) and not _gecko_app(acc):
+        return _chromium_document_hidden(acc)
+    if not _gecko_app(acc):
         return False
     node = acc
     seen: set[int] = set()

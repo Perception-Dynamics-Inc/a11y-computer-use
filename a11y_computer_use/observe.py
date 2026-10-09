@@ -1597,6 +1597,17 @@ def _register_epoch(
         _FULL_VALUES.popitem(last=False)
 
 
+def touch_epoch(snapshot_id: str) -> None:
+    """Keep ``snapshot_id`` among the newest epochs.
+
+    A probe snapshot taken to judge an action must not evict the handles the
+    action's own ref still uses.
+    """
+    for store in (_EPOCHS, _HANDLES, _FULL_VALUES):
+        if snapshot_id in store:
+            store.move_to_end(snapshot_id)
+
+
 def ax_handle_for(snapshot_id: str, ref: str) -> object | None:
     """Return the live accessor handle for ``ref`` in ``snapshot_id``, or None.
 

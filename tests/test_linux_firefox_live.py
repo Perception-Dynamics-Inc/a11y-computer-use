@@ -47,6 +47,7 @@ _FORM = textwrap.dedent(
     <div><label>Count <input id="n" type="number"></label></div>
     <div><label>Notes <textarea id="ta"></textarea></label></div>
     <div><label>Color <select id="s"><option>Red</option><option>Green</option><option>Blue</option></select></label></div>
+    <button type="button">Div button</button>
     <div id="ed" contenteditable="true" role="textbox" aria-label="Editor A">Hello world</div>
     <div id="edb" contenteditable="true" aria-label="Editor B"><p>First para</p><p>Second <b>bold</b> para</p></div>
     <p id="log"></p>
@@ -550,6 +551,48 @@ def test_firefox_background_ref_is_not_showing_not_stale(firefox_form, tmp_path)
             if "Name" in titles and "Editor A" in titles:
                 break
             time.sleep(0.25)
+
+
+def test_firefox_type_and_key_with_app_carry_an_outcome(firefox_form, tmp_path) -> None:
+    """Live Firefox. ``type`` and ``key`` with ``app=`` carry outcome and evidence.
+
+    The sentence stays. The outcome is the same confirmed read-back the call
+    without ``app=`` already returns.
+    """
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot("firefox")
+    snap = runtime._current
+    assert snap is not None
+    name = _field(snap, "Name")
+    assert name is not None, _dump(driver)
+    runtime.click(name.ref)
+    typed = runtime.type_text("xy", app="firefox")
+    assert str(typed).startswith("typed ")
+    assert typed.outcome == "confirmed", (typed.outcome, getattr(typed, "evidence", None))
+    assert typed.evidence
+    pressed = runtime.key("BackSpace", app="firefox")
+    assert str(pressed).startswith("pressed BackSpace")
+    assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+    assert pressed.evidence
+
+
+def test_firefox_second_inert_click_without_a_snapshot_is_suspected_noop(firefox_form, tmp_path) -> None:
+    """Live Firefox. A second click on Div button, with no snapshot between, is a no-op."""
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot("firefox")
+    snap = runtime._current
+    assert snap is not None
+    button = next((el for el in snap.elements if el.title == "Div button" and el.clickable), None)
+    assert button is not None, _dump(driver)
+    first = runtime.click(button.ref)
+    second = runtime.click(button.ref)
+    assert str(second).startswith("clicked ")
+    assert second.outcome == "suspected_noop", (
+        first.outcome, second.outcome, getattr(second, "evidence", None),
+    )
+    assert "did not change" in second.evidence
 
 
 def _wait_values(driver, expected: dict[str, str], timeout_s: float = 4.0):
