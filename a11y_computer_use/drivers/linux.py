@@ -835,6 +835,21 @@ class LinuxDriver:
                 if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):
                     if self._run(lambda: _atspi.focus_and_type_into(handle, text)):
                         return len(text)
+                    # The pre-key error still says the field was unchanged.
+                    # Read it again. NBSP and U+FFFC are not the comparison.
+                    after = self._run(lambda: _atspi._readable_text(handle))
+                    before = detail.get("before")
+                    same = _atspi._norm_nbsp(after) == _atspi._norm_nbsp(
+                        before if isinstance(before, str) else None
+                    )
+                    raise _atspi._text_mismatch(
+                        "text_mismatch",
+                        "the field text after type does not match what was inserted",
+                        expected=text,
+                        actual=after,
+                        inserted_chars=len(text),
+                        unchanged=bool(same),
+                    )
                 raise
             if isinstance(inserted, int) and not isinstance(inserted, bool):
                 return inserted

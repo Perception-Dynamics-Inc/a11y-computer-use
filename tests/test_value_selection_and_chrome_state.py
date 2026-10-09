@@ -213,6 +213,20 @@ class _Atspi:
             acc.value = min(max(float(new), lower), upper)
             return True
 
+    class Hypertext:
+        @staticmethod
+        def get_n_links(acc):
+            return len(getattr(acc, "links", ()) or ())
+
+        @staticmethod
+        def get_link(acc, index):
+            return (getattr(acc, "links")[index],)
+
+    class Hyperlink:
+        @staticmethod
+        def get_object(link, index):
+            return link[0] if index == 0 else None
+
 
 def _element(ref, role, title, *, editable=False, clickable=False, x=10, y=10, w=120, h=24):
     return Element(
@@ -925,6 +939,35 @@ def test_chrome_snapshot_reports_selected_text_pressed_and_empty_number(monkeypa
     blob = "\n".join(rendered)
     assert "\ufffc" not in blob
     assert "value=0.0" not in blob and "value='0.0'" not in blob
+
+    link = _Node("link", "quick brown", text="quick brown", y=280)
+    lazy = _Node("static", "", text="lazy", y=280)
+    fox = _Node(
+        "paragraph", "", text="The \ufffc fox jumps over the \ufffc dog.", y=280, w=500,
+    )
+    fox.links = [link, lazy]
+    bravo = _Node("entry", "Bravo", text="", y=310)
+    named = _Node("label", "", text="Bravo \ufffc", y=310)
+    named.links = [bravo]
+    bare = _Node("entry", "Bare para input", text="", y=340)
+    bare_para = _Node("paragraph", "", text="\ufffc", y=340)
+    bare_para.links = [bare]
+    wrapped = _Node("combo box", "Country", text="\ufffc", y=370)
+    country_label = _Node("label", "Country", text="Country \ufffc", y=370)
+    country_label.links = [wrapped]
+    first = _Node("paragraph", "", text="ZZFirst para", y=400)
+    second = _Node("paragraph", "", text="Second bold para", y=420)
+    editor = _Node("section", "Editor B", text="\ufffc\ufffc", y=400)
+    editor.links = [first, second]
+    assert accessor.read(fox).value == "The quick brown fox jumps over the lazy dog."
+    assert accessor.read(named).value == "Bravo"
+    assert accessor.read(bare_para).value == "Bare para input"
+    assert accessor.read(country_label).value == "Country"
+    assert "ZZFirst para" in _atspi._readable_text(editor)
+    assert _atspi._typed_visible(
+        "Hello world", "Hello world\u00a0 two spaces end\u00a0", "  two spaces end ",
+    )
+    assert _atspi._typed_visible("", "\u00a0more", " more")
 
 
 def test_runtime_does_not_type_into_the_focused_field_when_a_combo_cannot_be_set() -> None:

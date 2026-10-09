@@ -76,6 +76,16 @@ _INTERACTIVE = frozenset(
 
 _SECURE_ROLE = "AXSecureTextField"
 
+#: Controls inside a paragraph are not spliced into the paragraph's sentence.
+#: A button paragraph stays empty and collapses onto the button. A text field
+#: keeps its own name instead of being copied into the surrounding words.
+_INLINE_SKIP = frozenset({
+    "textbox", "searchbox", "button", "checkbox", "switch", "radio",
+    "combobox", "listbox", "ListBox", "slider", "spinbutton", "option",
+    "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "treeitem",
+    "disclosuretriangle",
+})
+
 
 def _prop(node: dict) -> dict:
     """Flatten an AX node's ``properties`` list into ``{name: value}``."""
@@ -132,6 +142,10 @@ class CDPAccessor:
         value = node.get("value", {}).get("value")
         if isinstance(value, str) and "\ufffc" in value:
             value = value.replace("\ufffc", "").strip() or None
+        if raw_role == "paragraph":
+            sentence = self._inline_sentence(node).replace("\u00a0", " ").strip()
+            if sentence:
+                value = sentence
         if value in (None, "") and raw_role in {"combobox", "listbox", "ListBox"}:
             selected = self._selected_option_text(node)
             if selected:
@@ -164,6 +178,34 @@ class CDPAccessor:
 
     def children(self, node: dict) -> Sequence[dict]:
         return [self._by_id[cid] for cid in node.get("childIds", ()) if cid in self._by_id]
+
+    def _inline_sentence(self, node: dict, depth: int = 0) -> str:
+        """The paragraph text with each inline child's words in place.
+
+        Static text and link names are the words. Emphasis and other
+        non-controls are walked. A text field, button, or checkbox is left
+        out so ``<p><label>Bravo <input></label></p>`` does not read
+        "Bravo Bravo" and a paragraph that is only a button stays empty.
+        """
+        if depth > 6:
+            return ""
+        parts: list[str] = []
+        for child in self.children(node):
+            role = child.get("role", {}).get("value") or "generic"
+            if role in _INLINE_SKIP:
+                continue
+            name = child.get("name", {}).get("value") or ""
+            if not isinstance(name, str):
+                name = ""
+            name = name.replace("\ufffc", "")
+            if role in {"StaticText", "InlineTextBox", "text", "link"}:
+                if name:
+                    parts.append(name)
+                else:
+                    parts.append(self._inline_sentence(child, depth + 1))
+                continue
+            parts.append(self._inline_sentence(child, depth + 1))
+        return "".join(parts)
 
     def _selected_option_text(self, node: dict) -> str | None:
         labels: list[str] = []

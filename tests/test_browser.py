@@ -407,7 +407,7 @@ const fn = %s;
 function run(el, value) {
   const before = el.value;
   const result = fn.call(el, value);
-  return {result, value: el.value, before};
+  return {result, value: el.value, innerHTML: el.innerHTML, before};
 }
 const select = {
   tagName: 'SELECT', type: '', value: 'Kazakhstan', selectedIndex: 0,
@@ -436,6 +436,28 @@ const out = {
   high: run(range, '150'),
   mid: run(range, '55'),
   lima: run(text, 'Lima'),
+  editor: run({
+    tagName: 'DIV', isContentEditable: true, innerHTML: 'Hello world',
+    _text: 'Hello world',
+    get textContent(){ return this._text; },
+    set textContent(v){ this._text = String(v); },
+    get innerText(){ return this._text + '\\n'; },
+    dispatchEvent() {},
+  }, 'Set 0'),
+  nbsp: run({
+    tagName: 'DIV', isContentEditable: true, innerHTML: 'Hello world',
+    _text: 'Hello world',
+    get textContent(){ return this._text; },
+    set textContent(v){ this._text = String(v).replace(/ /g, '\\u00a0'); },
+    get innerText(){ return this._text; },
+    dispatchEvent() {},
+  }, 'Set 0'),
+  stuck: run({
+    tagName: 'DIV', isContentEditable: true, innerHTML: 'Hello world',
+    textContent: 'Hello world',
+    get innerText(){ return 'nope'; },
+    dispatchEvent() {},
+  }, 'Set 0'),
 };
 process.stdout.write(JSON.stringify(out));
 """ % browser._SET_VALUE_FN
@@ -451,6 +473,11 @@ process.stdout.write(JSON.stringify(out));
     assert got["high"]["result"]["code"] == "out_of_range" and got["high"]["value"] == "40"
     assert got["mid"]["result"]["ok"] is True and got["mid"]["value"] == "55"
     assert got["lima"]["result"]["ok"] is True and got["lima"]["value"] == "Lima"
+    assert got["editor"]["result"]["ok"] is True
+    assert got["editor"]["result"]["actual"].startswith("Set 0")
+    assert got["nbsp"]["result"]["ok"] is True
+    assert got["stuck"]["result"]["code"] == "mismatch"
+    assert got["stuck"]["innerHTML"] == "Hello world"
 
 
 def test_cdp_snapshot_shows_selected_text_pressed_and_blank_number() -> None:
@@ -481,6 +508,51 @@ def test_cdp_snapshot_shows_selected_text_pressed_and_blank_number() -> None:
     assert by_id["6"].value == "3"
     assert by_id["7"].title == "Country"
     assert "\ufffc" not in by_id["7"].title
+
+
+def test_cdp_paragraph_value_includes_inline_children() -> None:
+    """Synthetic AX tree. The paragraph's own value is empty; the words are children."""
+    nodes = [
+        _ax("1", "RootWebArea", "page", backend=1, children=["2", "3", "4"]),
+        _ax("2", "paragraph", "", backend=2, parent="1", children=["21", "22", "23", "24", "25"]),
+        _ax("21", "StaticText", "The ", backend=21, parent="2"),
+        _ax("22", "link", "quick brown", backend=22, parent="2"),
+        _ax("23", "StaticText", " fox ", backend=23, parent="2"),
+        _ax("24", "emphasis", "", backend=24, parent="2", children=["241"]),
+        _ax("241", "StaticText", "jumps", backend=241, parent="24"),
+        _ax("25", "StaticText", " over the lazy dog.", backend=25, parent="2"),
+        _ax("3", "paragraph", "", backend=3, parent="1", children=["31"]),
+        _ax("31", "button", "Para button", backend=31, parent="3"),
+        _ax("4", "StaticText", "", backend=4, parent="1", children=["41"]),
+        _ax("41", "checkbox", "Verify you are human", backend=41, parent="4"),
+    ]
+    acc = _cdp_ax.CDPAccessor(nodes, {}, frozenset())
+    assert acc.read(nodes[1]).value == "The quick brown fox jumps over the lazy dog."
+    assert acc.read(nodes[8]).value in (None, "")
+    from a11y_computer_use import observe
+    from tests.fixtures.trees import GEOMETRY
+
+    geometry = {
+        1: (0.0, 0.0, 800.0, 600.0),
+        2: (8.0, 8.0, 500.0, 24.0),
+        21: (8.0, 8.0, 40.0, 24.0),
+        22: (48.0, 8.0, 90.0, 24.0),
+        23: (138.0, 8.0, 40.0, 24.0),
+        24: (178.0, 8.0, 40.0, 24.0),
+        241: (178.0, 8.0, 40.0, 24.0),
+        25: (218.0, 8.0, 140.0, 24.0),
+        3: (8.0, 40.0, 120.0, 30.0),
+        31: (8.0, 40.0, 100.0, 30.0),
+        4: (8.0, 80.0, 220.0, 24.0),
+        41: (8.0, 80.0, 200.0, 24.0),
+    }
+    acc = _cdp_ax.CDPAccessor(nodes, geometry, frozenset())
+    snap = observe.build_snapshot(
+        acc.root(), acc, scope=Scope.WINDOW, app="tab", pid=1, geometry=GEOMETRY,
+    )
+    assert observe.find_elements(snap, text="quick brown fox")
+    assert any(el.title == "Para button" for el in snap.elements)
+    assert any(el.title == "Verify you are human" and el.role == "AXCheckBox" for el in snap.elements)
 
 
 def test_browser_type_dry_run_and_empty_are_noops() -> None:
@@ -989,3 +1061,90 @@ def test_after_a_reorder_the_ref_follows_the_title_when_the_row_is_still_rendere
     flip()
     live = d.resolve_ref(snap, target.ref)
     assert live.title == "email-router production" and live.stable_id == "315"
+
+
+_LIVE_PARA_HTML = (
+    "<!doctype html><meta charset=utf-8><title>cuapara</title>"
+    "<style>body{margin:8px;font:13px sans-serif}"
+    ".row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}</style>"
+    "<h1>Para variants</h1><div class=row>"
+    "<p><label>Bravo <input id=bravo></label></p>"
+    "<p>Read <a href='#x'>the docs link</a> now.</p>"
+    "<p><button type=button>Para button</button></p>"
+    "<p><input aria-label='Bare para input'></p>"
+    "<p><input type=checkbox id=k> <label for=k>Para checkbox</label></p>"
+    "<div><button type=button>Div button</button></div>"
+    "</div>"
+    "<p id=fox>The <a href='#a'>quick brown</a> fox <b>jumps</b> over the <em>lazy</em> dog.</p>"
+    "<div id=ed contenteditable=true role=textbox aria-label='Editor A'>Hello world</div>"
+    "<label><input id=human type=checkbox aria-label='Verify you are human'></label>"
+    "<label><input type=checkbox aria-label='Accept terms'></label>"
+    "<label><input type=radio name=r aria-label='Option one'></label>"
+    "<label><input aria-label='Your answer'></label>"
+    "<input type=checkbox aria-label='Bare checkbox'>"
+)
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_paragraph_controls_sentence_and_empty_label() -> None:
+    """Live headless Chrome. Controls in a paragraph and in an empty label are listed."""
+    import urllib.parse
+
+    from a11y_computer_use import observe
+
+    d = browser.BrowserDriver(endpoint=_live_endpoint())
+    d.navigate("data:text/html," + urllib.parse.quote(_LIVE_PARA_HTML))
+    snap = d.snapshot(Scope.WINDOW, d._target_id)
+    rendered = observe.render_text(snap)
+    for name in (
+        "Bravo", "the docs link", "Para button", "Bare para input", "Para checkbox",
+        "Div button", "Verify you are human", "Accept terms", "Option one",
+        "Your answer", "Bare checkbox",
+    ):
+        assert name in rendered, rendered
+    assert observe.find_elements(snap, text="quick brown fox")
+    assert observe.find_elements(snap, text="The quick")
+    human = next(el for el in snap.elements if el.title == "Verify you are human" and el.role == "AXCheckBox")
+    assert d.press_element(human) is True
+    sess = d._connect()
+    checked = sess.call(
+        "Runtime.evaluate",
+        {"expression": "document.getElementById('human').checked", "returnByValue": True},
+    )["result"]["value"]
+    assert checked is True
+    d._reset()
+
+
+@pytest.mark.skipif(_live_endpoint() is None,
+                    reason="no live CDP endpoint (set A11Y_COMPUTER_USE_CDP_ENDPOINT / run Chrome "
+                           "--remote-debugging-port=9222)")
+def test_live_contenteditable_set_value_and_type() -> None:
+    """Live headless Chrome. set_value replaces the editor, and type inserts."""
+    import urllib.parse
+
+    d = browser.BrowserDriver(endpoint=_live_endpoint())
+    sess = d._connect()
+    d.navigate("data:text/html," + urllib.parse.quote(_LIVE_PARA_HTML))
+    snap = d.snapshot(Scope.WINDOW, d._target_id)
+    editor = next(el for el in snap.elements if el.title == "Editor A" and el.editable)
+    before = sess.call(
+        "Runtime.evaluate",
+        {"expression": "document.getElementById('ed').innerText", "returnByValue": True},
+    )["result"]["value"]
+    assert "Hello world" in before
+    assert d.set_value(editor, "Set 0") is True
+    shown = sess.call(
+        "Runtime.evaluate",
+        {"expression": "document.getElementById('ed').innerText", "returnByValue": True},
+    )["result"]["value"]
+    assert shown.replace("\u00a0", " ").strip() == "Set 0"
+    assert d.press_element(editor) is True
+    d.type_text(" more")
+    shown = sess.call(
+        "Runtime.evaluate",
+        {"expression": "document.getElementById('ed').innerText", "returnByValue": True},
+    )["result"]["value"]
+    assert "more" in shown.replace("\u00a0", " ")
+    d._reset()

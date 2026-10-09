@@ -316,6 +316,139 @@ def _strip_objects(text: str) -> str:
     return text.replace(_OBJECT_REPLACEMENT, "").strip()
 
 
+def _is_choice_role(role: str, role_name: str) -> bool:
+    return role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES
+
+
+def _norm_nbsp(text: str | None) -> str | None:
+    """U+00A0 is a space. Chrome stores edge spaces in contenteditable as NBSP."""
+    if text is None:
+        return None
+    return text.replace("\u00a0", " ")
+
+
+def _texts_match(got: str | None, wanted: str | None) -> bool:
+    if got is None or wanted is None:
+        return False
+    return _norm_nbsp(got) == _norm_nbsp(wanted)
+
+
+def _text_is_blank(text: str | None) -> bool:
+    """True when the snapshot read is empty, unreadable, or only whitespace.
+
+    Chrome's empty contenteditable reads back as a newline (the ``<br>``) or a
+    single space, not ``""``. That leftover is not the user's text.
+    """
+    if text is None:
+        return True
+    return _norm_nbsp(text).strip() == ""
+
+
+def _direct_text(acc) -> str:
+    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    return got if isinstance(got, str) else ""
+
+
+def _hypertext_objects(acc) -> list:
+    """Accessibles Chromium embeds as U+FFFC, in text order.
+
+    ``Hypertext.get_link`` is that mapping. A node with no hypertext (or a
+    fake that does not implement it) returns an empty list so the caller can
+    fall back to the children whose text is not already in the parent string.
+    """
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return []
+    hyper = getattr(Atspi, "Hypertext", None)
+    link_cls = getattr(Atspi, "Hyperlink", None)
+    if hyper is None or link_cls is None:
+        return []
+    count = _safe(lambda: hyper.get_n_links(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return []
+    objects = []
+    for index in range(min(int(count), 64)):
+        link = _safe(lambda index=index: hyper.get_link(acc, index))
+        obj = None
+        if link is not None:
+            obj = _safe(lambda link=link: link_cls.get_object(link, 0))
+        objects.append(obj)
+    return objects
+
+
+def _embedded_targets(acc, text: str) -> list:
+    """The accessibles that stand in for each U+FFFC in ``text``, in order."""
+    needed = text.count(_OBJECT_REPLACEMENT)
+    objects = _hypertext_objects(acc)
+    if objects:
+        return objects[:needed]
+    plain = text.replace(_OBJECT_REPLACEMENT, "")
+    embedded = []
+    for index in range(min(_child_count(acc), 64)):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        visible = _direct_text(child).replace(_OBJECT_REPLACEMENT, "").strip()
+        if visible and visible in plain:
+            continue
+        embedded.append(child)
+    return embedded[:needed]
+
+
+def _object_text(obj, depth: int, surrounding: str) -> str:
+    """Text to splice in place of one embedded-object character.
+
+    A choice control is not spliced: its options are U+FFFC too, and the
+    selected option is already the control's own value. An empty text field
+    contributes its name when that name is not already in the surrounding
+    words, so ``<p><input aria-label="Bare para input"></p>`` is not blank.
+    """
+    if obj is None or depth > 6:
+        return ""
+    role_name = _role_name(obj)
+    role = _ROLE.get(role_name, "AXGroup")
+    if _is_choice_role(role, role_name):
+        return ""
+    raw = _direct_text(obj)
+    if _OBJECT_REPLACEMENT in raw:
+        expanded = _expand_embedded(obj, raw, depth + 1)
+        if expanded.strip():
+            return expanded
+        raw = raw.replace(_OBJECT_REPLACEMENT, "")
+    if raw.strip():
+        return raw
+    name = _node_name(obj)
+    if name and name not in surrounding:
+        return name
+    return ""
+
+
+def _expand_embedded(acc, text: str, depth: int = 0) -> str:
+    """Replace each U+FFFC with the embedded child's text.
+
+    ``"The \\ufffc fox jumps over the \\ufffc dog."`` with a link "quick brown"
+    and an emphasis "lazy" becomes "The quick brown fox jumps over the lazy
+    dog." A leftover object character with no child is dropped, which is what
+    a label around a select already did.
+    """
+    if not isinstance(text, str):
+        return ""
+    if depth > 6 or _OBJECT_REPLACEMENT not in text:
+        return text.replace(_OBJECT_REPLACEMENT, "").strip()
+    targets = _embedded_targets(acc, text)
+    parts = text.split(_OBJECT_REPLACEMENT)
+    surrounding = "".join(parts)
+    out: list[str] = []
+    for index, part in enumerate(parts):
+        out.append(part)
+        if index >= len(parts) - 1:
+            break
+        obj = targets[index] if index < len(targets) else None
+        out.append(_object_text(obj, depth + 1, surrounding))
+    return "".join(out).strip()
+
+
 def _option_label(node) -> str:
     label = _node_name(node)
     if label:
@@ -426,9 +559,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     the name collision. Non-Text accessibles make the call raise → None.
 
     Chromium's select and listbox text is U+FFFC once per option. The value is
-    the selected option's name instead. An empty number field exposes Value 0.0
-    with no text; that default is not shown. A slider has no text interface and
-    still reports its Value.
+    the selected option's name instead. Anywhere else, each U+FFFC is the
+    embedded child's text (a link, an emphasis, a control), not a character to
+    delete: a paragraph then reads as the sentence, and a paragraph whose only
+    content is a control is not an empty text leaf. An empty number field
+    exposes Value 0.0 with no text; that default is not shown. A slider has no
+    text interface and still reports its Value.
     """
     if role == "AXSecureTextField":
         return None
@@ -440,9 +576,14 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
         if isinstance(got, str) and got:
             if _OBJECT_REPLACEMENT in got:
-                cleaned = _strip_objects(got)
-                if cleaned:
-                    return cleaned
+                if _is_choice_role(role, role_name or ""):
+                    cleaned = _strip_objects(got)
+                    if cleaned:
+                        return cleaned
+                else:
+                    expanded = _expand_embedded(acc, got)
+                    if expanded:
+                        return expanded
             else:
                 return got
         handled, choice = _choice_value(acc, role, role_name)
@@ -979,9 +1120,30 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     if truncated or acc is None:
         return None
     try:
-        return _full_text(acc)
+        return _readable_text(acc)
     except Exception:
         return None
+
+
+def _readable_text(acc) -> str | None:
+    """Text a type read-back compares.
+
+    NBSP is a space. Each U+FFFC is the embedded child's text, so a
+    contenteditable whose paragraphs are object characters still contains the
+    words that were typed into them. A choice control is left as the snapshot
+    read it: expanding it would list every option.
+    """
+    raw = _full_text(acc)
+    if raw is None:
+        return None
+    if _OBJECT_REPLACEMENT in raw:
+        role_name = _role_name(acc)
+        role = _ROLE.get(role_name, "AXGroup")
+        if not _is_choice_role(role, role_name):
+            expanded = _expand_embedded(acc, raw)
+            if expanded:
+                raw = expanded
+    return raw.replace("\u00a0", " ")
 
 
 def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
@@ -989,16 +1151,21 @@ def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
 
     A readable field that still shows the pre-type text, or that shows the
     case-inverted string, does not count. A suffix or an insertion does.
+    NBSP compares as a space, so Chrome's contenteditable edge spaces match
+    the spaces that were typed.
     """
-    if after is None or text not in after:
+    before_n = _norm_nbsp(before)
+    after_n = _norm_nbsp(after)
+    text_n = _norm_nbsp(text) or ""
+    if after_n is None or text_n not in after_n:
         return False
-    if before is None:
+    if before_n is None:
         return True
-    if after == before:
+    if after_n == before_n:
         return False
-    if after.endswith(text) or after == before + text:
+    if after_n.endswith(text_n) or after_n == (before_n + text_n):
         return True
-    return before in after or len(after) > len(before)
+    return before_n in after_n or len(after_n) > len(before_n)
 
 
 def focused_editable(app: str, *, max_nodes: int = 400):
@@ -1167,6 +1334,10 @@ def insert_text(acc, text: str) -> int | None:
         return None
     typed = text.replace("\r\n", "\n")
     current = _full_text(acc)
+    # Read the words, not the U+FFFC placeholders, before the insert. A
+    # contenteditable's parent text can stay ``\ufffc`` while the child gains
+    # the characters. NBSP in that read is a space.
+    before_readable = _readable_text(acc) if current is not None else None
     if current is None:
         raise _text_mismatch(
             "text_unreadable",
@@ -1198,20 +1369,34 @@ def insert_text(acc, text: str) -> int | None:
     wrote = bool(_call_first(eti, ("insert_text", "insertText"), int(offset), typed, int(length), default=False))
     if _confirm_text(acc, expected):
         return len(typed)
+    # The raw string can still be U+FFFC, or spaces can come back as NBSP.
+    # Compare the expanded read so a successful insert is not a mismatch.
+    after_readable = _readable_text(acc)
+    if _typed_visible(before_readable, after_readable, typed):
+        return len(typed)
     actual = _full_text(acc)
     if actual == current and not wrote:
         return None
-    # Firefox web fields implement EditableText and return true while the DOM
-    # stays empty. ``unchanged`` tells the caller the insert was a no-op, so
-    # it can focus the field and send key events. A field that changed to
-    # something else is still a mismatch, with no key fallback.
+    # ``unchanged`` is the words, not the raw object-replacement string.
+    # A Firefox contenteditable can keep ``\ufffc\ufffc`` while a child
+    # paragraph gains the typed text. That is a change. A parent that still
+    # reads the same sentence did not change, and the caller may send keys.
+    # A field that changed to something else is still a mismatch, with no
+    # key fallback.
+    if before_readable is None:
+        unchanged = actual == current
+        shown = actual
+    else:
+        unchanged = _norm_nbsp(after_readable) == _norm_nbsp(before_readable)
+        shown = after_readable if after_readable is not None else actual
     raise _text_mismatch(
         "text_mismatch",
         "the field text after type does not match what was inserted",
         expected=_excerpt(expected),
-        actual=_excerpt(actual),
+        actual=_excerpt(shown),
         inserted_chars=len(typed),
-        unchanged=actual == current,
+        unchanged=unchanged,
+        before=_excerpt(before_readable if before_readable is not None else current),
     )
 
 
@@ -1254,14 +1439,16 @@ def _select_range(acc, end: int) -> None:
 
 
 def _text_is_gone(acc) -> bool:
-    """True when the snapshot read is empty or could not be read.
+    """True when the snapshot read is blank or could not be read.
 
     Chromium returns NULL from ``get_text(0, -1)`` on an empty field, because
-    the start offset is past the end. An unreadable field is treated as clear
-    here so the replacement can be written; ``set_text`` still returns True
-    only when a later snapshot read equals the new string.
+    the start offset is past the end. An empty contenteditable reads back as
+    a newline or a space (the ``<br>``), which is the same clear. An
+    unreadable field is treated as clear here so the replacement can be
+    written; ``set_text`` still returns True only when a later snapshot read
+    equals the new string.
     """
-    return not _full_text(acc)
+    return _text_is_blank(_full_text(acc))
 
 
 def _wait_until_gone(acc) -> bool:
@@ -1288,12 +1475,36 @@ def _type_string(text: str) -> None:
     _linux_input.type_string(text)
 
 
+def _shown_matches(acc, text: str) -> bool:
+    """True when the readable text is ``text``.
+
+    NBSP is a space. One trailing newline is the empty contenteditable's
+    ``<br>`` and is not part of the value. U+FFFC is expanded before the
+    comparison, so a paragraph child counts.
+    """
+    raw = _full_text(acc)
+    if _texts_match(raw, text):
+        return True
+    shown = _readable_text(acc)
+    if shown is None:
+        return False
+    if _texts_match(shown, text):
+        return True
+    if shown.endswith("\n") and _texts_match(shown[:-1], text):
+        return True
+    return False
+
+
 def _confirm_text_landed(acc, text: str) -> bool:
-    """Like ``_confirm_text``, with a longer wait for a key event to land."""
-    for attempt in range(8):
-        if _full_text(acc) == text:
+    """Like ``_confirm_text``, with a longer wait for a key event to land.
+
+    The comparison is the readable text: NBSP is a space, and U+FFFC is the
+    child text. A Firefox contenteditable updates a beat after the key.
+    """
+    for attempt in range(16):
+        if _shown_matches(acc, text):
             return True
-        if attempt + 1 < 8:
+        if attempt + 1 < 16:
             time.sleep(0.05)
     return False
 
@@ -1304,21 +1515,24 @@ def focus_and_type_into(acc, text: str) -> bool:
     True only when a later read of this field contains ``text``. A Firefox
     web entry's EditableText insert returns true and leaves the field empty;
     the same key events ``key`` already delivers do land once the entry has
-    focus. No EditableText is not this path: the caller types into whatever
-    is focused and uses that read-back.
+    focus. The read-back is the expanded text, so a NBSP is a space and a
+    contenteditable whose parent string stays U+FFFC still shows the words
+    in its children. The read is polled: Firefox applies the keys a beat
+    after they are sent. No EditableText is not this path: the caller types
+    into whatever is focused and uses that read-back.
     """
     if not _x11_keys_available():
         return False
     grab_focus(acc)
-    before = _full_text(acc)
+    before = _readable_text(acc)
     if before is None:
         return False
     _type_string(text)
-    for attempt in range(8):
-        after = _full_text(acc)
+    for attempt in range(16):
+        after = _readable_text(acc)
         if _typed_visible(before, after, text):
             return True
-        if attempt + 1 < 8:
+        if attempt + 1 < 16:
             time.sleep(0.05)
     return False
 
@@ -1326,19 +1540,21 @@ def focus_and_type_into(acc, text: str) -> bool:
 def _focus_and_replace(acc, text: str) -> bool:
     """Focus ``acc``, replace its text with key events, and read it back.
 
-    True only when the snapshot read equals ``text``. An empty field is
-    focused and typed. A field that still has other text is cleared first;
-    if that clear does not stick, nothing is typed on top of it.
+    True only when the readable text equals ``text``. An empty field,
+    including one whose snapshot read is a newline, is focused and typed.
+    A field that still has other text is cleared first; if that clear does
+    not stick, nothing is typed on top of it. The caller puts the original
+    text back when this returns False, so a contenteditable is not left empty.
     """
     if not _x11_keys_available():
         return False
     grab_focus(acc)
     current = _full_text(acc)
-    if current == text:
+    if _shown_matches(acc, text):
         return True
     if current is None:
         return False
-    if current:
+    if not _text_is_blank(current):
         _x11_select_all_and_delete(acc)
         if not _wait_until_gone(acc):
             return False
@@ -1354,20 +1570,51 @@ def _replace_with_keys(acc, text: str) -> bool:
     new string onto the old one and still report success. Returns True only
     when the snapshot read equals ``text``. An unreadable field is not typed
     into. Native Wayland has no XTEST, so this returns False there.
+
+    A contenteditable that fails the read-back is not left empty. The clear
+    is what erases "Hello world"; if the new text cannot be verified, the
+    original text is typed back.
     """
     current = _full_text(acc)
-    if current == text:
+    if _texts_match(current, text):
         return True
     if current is None or not _x11_keys_available():
         return False
-    if current:
+    original = current
+    if not _text_is_blank(current):
         _x11_select_all_and_delete(acc)
         if not _wait_until_gone(acc):
+            _restore_text(acc, original)
             return False
     else:
         grab_focus(acc)
     _type_string(text)
-    return _confirm_text(acc, text)
+    if _confirm_text(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
+def _restore_text(acc, original: str | None) -> None:
+    """Put ``original`` back when a write cannot be verified.
+
+    No-op when the field already shows that text, or when XTEST cannot reach
+    the session. A blank original stays blank. A field that still holds the
+    original is not cleared.
+    """
+    if original is None or not _x11_keys_available():
+        return
+    now = _full_text(acc)
+    if now == original or _texts_match(now, original):
+        return
+    if not _text_is_blank(now):
+        _x11_select_all_and_delete(acc)
+        if not _wait_until_gone(acc):
+            return
+    else:
+        grab_focus(acc)
+    if not _text_is_blank(original):
+        _type_string(original)
 
 
 def _clear_text(acc, eti, current: str) -> bool:
@@ -1393,7 +1640,7 @@ def _clear_text(acc, eti, current: str) -> bool:
 
 def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
-        if _full_text(acc) == text:
+        if _texts_match(_full_text(acc), text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -2397,14 +2644,19 @@ def set_text(acc, text: str) -> bool:
     ``text``, the field is focused and the value is typed, and success is
     still that read-back. Chromium and GTK keep the previous tail: keys are
     sent only when the snapshot read is already empty, because focusing a
-    Chrome number input can make an empty field read back as 0.
+    Chrome number input can make an empty field read back as 0. When the
+    snapshot read is left blank and the new text cannot be verified, the
+    text from before the call is put back, so a contenteditable is not left
+    empty. A Chromium field that still reads a value (an empty number input
+    reads 0) is not focused in order to restore it.
     """
     eti = _editable_iface(acc)
     if eti is None:
         return _replace_with_keys(acc, text)
+    original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
-    if current == text:
+    if current == text or _texts_match(current, text):
         return True
     if current is None:
         return wrote
@@ -2427,11 +2679,22 @@ def set_text(acc, text: str) -> bool:
     # Firefox returns true from set_text_contents and insert_text and the DOM
     # stays empty. Key events land after the field is focused. Chromium is
     # not this path: focusing an empty number input can make the read-back 0.
+    # A contenteditable that does not confirm is not left empty: the clear
+    # already removed "Hello world", so the original is typed back.
     if _gecko_app(acc):
-        return _focus_and_replace(acc, text)
+        if _focus_and_replace(acc, text):
+            return True
+        _restore_text(acc, original)
+        return False
     if _text_is_gone(acc) and _x11_keys_available():
         _type_string(text)
-        return _confirm_text(acc, text)
+        if _confirm_text(acc, text):
+            return True
+    # Only a blank read is restored. A Chromium number input that reads 0
+    # after a failed clear is not blank, and focusing it to put the old
+    # digits back is what makes the empty field read 0.
+    if _text_is_gone(acc):
+        _restore_text(acc, original)
     return False
 
 
