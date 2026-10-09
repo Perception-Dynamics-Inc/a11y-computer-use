@@ -182,7 +182,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
-            xvfb dbus dbus-x11 openbox xdotool x11-utils xclip
+            xvfb dbus dbus-x11 openbox xdotool x11-utils xclip \
+            curl xz-utils libdbus-glib-1-2 libxt6t64 libasound2t64
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;
@@ -216,6 +217,24 @@ jobs:
           srv = s.build_server();
           assert srv is not None and srv.name == 'a11y-computer-use', srv;
           print('MCP server built on Linux:', srv.name)"
+      # Firefox ESR from Mozilla's public linux64 tarball when the runner has
+      # no firefox binary. The form and hidden-tab tests launch it against
+      # local pages. No paid browser service.
+      - name: install Firefox ESR when it is missing
+        run: |
+          if command -v firefox >/dev/null 2>&1 || command -v firefox-esr >/dev/null 2>&1; then
+            echo "firefox already on PATH: $(command -v firefox || command -v firefox-esr)"
+            exit 0
+          fi
+          if [ -x /opt/firefox/firefox ]; then
+            sudo ln -sfn /opt/firefox/firefox /usr/local/bin/firefox
+            exit 0
+          fi
+          curl -fsSL -o /tmp/firefox.tar.xz \
+            "https://download.mozilla.org/?product=firefox-esr-latest-ssl&os=linux64&lang=en-US"
+          sudo tar -C /opt -xJf /tmp/firefox.tar.xz
+          sudo ln -sfn /opt/firefox/firefox /usr/local/bin/firefox
+          firefox --version
       # The live Linux backend on a real ubuntu-latest runner. Headless AT-SPI
       # needs three buses brought up in order: Xvfb (X server), dbus-run-session
       # (a session bus), and org.a11y.Bus (the a11y bus); at-spi-bus-launcher
@@ -242,7 +261,7 @@ jobs:
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
             ( openbox >/dev/null 2>&1 & )
             sleep 2
-            timeout -k 5 300 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py -q -rs -p no:cacheprovider
+            timeout -k 5 480 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py -q -rs -p no:cacheprovider
           '
 
   package:

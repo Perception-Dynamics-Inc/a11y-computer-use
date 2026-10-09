@@ -17,7 +17,7 @@ the workflow token is read-only (`permissions: contents: read`).
 | `macos` | `macos-latest` | full suite | The TCC-gated macOS tests (Finder AX walk, TextEdit ref click plus typing, CGEvent post, screenshot dimensions, doctor grant probes, MCP stdio snapshot) run when the runner image holds the Accessibility and Screen Recording grants and skip when it does not. The ungranted-path tests do the reverse. Read the skip list to know which happened. |
 | `windows` | `windows-latest` | full suite (`.[dev,windows,browser]`) | Driver selection resolves to `windows`; `build_server()` builds the MCP server; `tests/test_windows_live.py` drives Notepad through UI Automation: snapshot through the shared pruning engine, a11y press, SendInput typing, a `ctrl+a` chord, and the gated Runtime end to end. |
 | `browser` | `ubuntu-latest` | the browser stack (`test_browser`, `test_adapters`, `test_agent`, `test_providers`, `test_h2h`, `test_arena`) over a scripted CDP transport | Headless Chrome on `:9222`: observe, act, verify, iframe stitching, console and network capture (`test_browser -k live`); cu-arena observation cost (`test_arena -k live`); a pixel click through the Anthropic adapter snapping to a ref (`test_adapters -k live`); the reference agent loop with a scripted planner (`test_agent -k live`); the head-to-head harness in refs and pixels modes with page-counted misclicks (`test_h2h -k live`); and `a11y-computer-use bench desktop --rounds 2` on the bound tab, printed. |
-| `linux` | `ubuntu-latest` | full suite in a venv that sees apt's PyGObject (`--system-site-packages`), outside any X session | Driver selection resolves to `linux`; `build_server()` builds; then `tests/test_linux_live.py` and `tests/test_linux_desktop_live.py` run under Xvfb with a D-Bus session, `at-spi-bus-launcher`, and the openbox window manager. |
+| `linux` | `ubuntu-latest` | full suite in a venv that sees apt's PyGObject (`--system-site-packages`), outside any X session | Driver selection resolves to `linux`; `build_server()` builds; then `tests/test_linux_live.py`, `tests/test_linux_desktop_live.py`, and `tests/test_linux_firefox_live.py` run under Xvfb with a D-Bus session, `at-spi-bus-launcher`, and the openbox window manager. The Firefox file launches Firefox ESR (installed from Mozilla's public linux64 tarball when it is not already on the runner) against local `file://` pages. |
 | `package` | `ubuntu-latest` | none | `uv build` produces the wheel and sdist, the sdist is checked to contain no brand media, `uvx --from <wheel> a11y-computer-use --help` runs the console script from an isolated environment, and a fresh venv imports the wheel's modules. |
 
 ## Why the Linux job has a window manager
@@ -53,7 +53,7 @@ The hermetic step of the same job, run outside X on the same box, reported
 | Safety: tiers, rechecks, confirmation gate, audit, redaction | `test_safety`, `test_server` (macOS driver seams mocked, forced with `A11Y_COMPUTER_USE_DRIVER=macos`) | macOS live smoke when granted |
 | CGEvent executor | `test_act` (skips at collection off macOS) | macOS when granted |
 | Windows UIA | none | `windows` job |
-| Linux AT-SPI2 and XTEST | `test_linux_synthetic`, `test_linux_system_synthetic` (fake Xlib and fake Atspi) | `linux` job under openbox |
+| Linux AT-SPI2 and XTEST | `test_linux_synthetic`, `test_linux_system_synthetic` (fake Xlib and fake Atspi). Firefox form fallback and hidden-document pruning also have fakes in `test_type_and_disabled`, `test_linux_synthetic`, and `test_value_selection_and_chrome_state`. Those fakes are not a browser. | `linux` job under openbox: GTK3 (`test_linux_live.py`), X11 desktop (`test_linux_desktop_live.py`), and Firefox ESR on local pages (`test_linux_firefox_live.py`) |
 | Browser CDP | `test_browser` (scripted transport) | `browser` job |
 | Provider adapters | `test_adapters` (fake driver, scripted transport) | `browser` job, Anthropic adapter only |
 | Agent loop and planners | `test_agent`, `test_providers` (fake urlopen, scripted planner) | `browser` job with the scripted planner; `claude-cli` runs are manual (`docs/agent-loop.md`) |
@@ -97,16 +97,20 @@ Linux (the `linux` job), on Ubuntu 24.04:
 
 ```bash
 sudo apt-get install -y --no-install-recommends at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
-  xvfb dbus dbus-x11 openbox xdotool x11-utils xclip
+  xvfb dbus dbus-x11 openbox xdotool x11-utils xclip curl xz-utils \
+  libdbus-glib-1-2 libxt6t64 libasound2t64
 python3 -m venv --system-site-packages .venv
 .venv/bin/pip install -e ".[dev,browser]" python-xlib
 .venv/bin/pytest -q -rs -p no:cacheprovider                      # hermetic, outside X
+# Firefox ESR, only when no firefox binary is already installed:
+# curl -fsSL -o /tmp/firefox.tar.xz "https://download.mozilla.org/?product=firefox-esr-latest-ssl&os=linux64&lang=en-US"
+# sudo tar -C /opt -xJf /tmp/firefox.tar.xz && sudo ln -sfn /opt/firefox/firefox /usr/local/bin/firefox
 GTK_MODULES=gail:atk-bridge NO_AT_BRIDGE=0 \
 xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
   ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
   ( openbox >/dev/null 2>&1 & )
   sleep 2
-  timeout -k 5 300 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py -q -rs
+  timeout -k 5 480 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py -q -rs
 '
 ```
 

@@ -642,6 +642,7 @@ class ATSPIAccessor:
     def __init__(self) -> None:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
+        self._gecko: bool | None = None
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -730,7 +731,17 @@ class ATSPIAccessor:
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        if self._tree_is_gecko(node):
+            # Firefox keeps background tabs and the preloaded New Tab page in
+            # the tree with on-screen bounds. They are not SHOWING. Drop the
+            # document here so snapshot and find never offer it.
+            kids = [child for child in kids if not _hidden_gecko_browser(child)]
         return kids
+
+    def _tree_is_gecko(self, node: object) -> bool:
+        if self._gecko is None:
+            self._gecko = _gecko_app(node)
+        return self._gecko
 
 
 # ---------------------------------------------------------------------------
@@ -1190,12 +1201,17 @@ def insert_text(acc, text: str) -> int | None:
     actual = _full_text(acc)
     if actual == current and not wrote:
         return None
+    # Firefox web fields implement EditableText and return true while the DOM
+    # stays empty. ``unchanged`` tells the caller the insert was a no-op, so
+    # it can focus the field and send key events. A field that changed to
+    # something else is still a mismatch, with no key fallback.
     raise _text_mismatch(
         "text_mismatch",
         "the field text after type does not match what was inserted",
         expected=_excerpt(expected),
         actual=_excerpt(actual),
         inserted_chars=len(typed),
+        unchanged=actual == current,
     )
 
 
@@ -1270,6 +1286,64 @@ def _type_string(text: str) -> None:
     from a11y_computer_use.drivers import _linux_input
 
     _linux_input.type_string(text)
+
+
+def _confirm_text_landed(acc, text: str) -> bool:
+    """Like ``_confirm_text``, with a longer wait for a key event to land."""
+    for attempt in range(8):
+        if _full_text(acc) == text:
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def focus_and_type_into(acc, text: str) -> bool:
+    """Focus ``acc`` and insert ``text`` with key events.
+
+    True only when a later read of this field contains ``text``. A Firefox
+    web entry's EditableText insert returns true and leaves the field empty;
+    the same key events ``key`` already delivers do land once the entry has
+    focus. No EditableText is not this path: the caller types into whatever
+    is focused and uses that read-back.
+    """
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    before = _full_text(acc)
+    if before is None:
+        return False
+    _type_string(text)
+    for attempt in range(8):
+        after = _full_text(acc)
+        if _typed_visible(before, after, text):
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def _focus_and_replace(acc, text: str) -> bool:
+    """Focus ``acc``, replace its text with key events, and read it back.
+
+    True only when the snapshot read equals ``text``. An empty field is
+    focused and typed. A field that still has other text is cleared first;
+    if that clear does not stick, nothing is typed on top of it.
+    """
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    current = _full_text(acc)
+    if current == text:
+        return True
+    if current is None:
+        return False
+    if current:
+        _x11_select_all_and_delete(acc)
+        if not _wait_until_gone(acc):
+            return False
+    _type_string(text)
+    return _confirm_text_landed(acc, text)
 
 
 def _replace_with_keys(acc, text: str) -> bool:
@@ -1541,14 +1615,38 @@ def _popup_open(acc) -> bool:
     return False
 
 
+def _gecko_popup_open(acc) -> bool:
+    """Whether a Firefox select popup is actually open.
+
+    The option menu stays VISIBLE while the select is collapsed. Treating
+    that as open would send Escape and undo a selection that already landed.
+    EXPANDED on the combo, or SHOWING on the menu, is the open popup.
+    """
+    if _state_has(acc, "EXPANDED"):
+        return True
+    count = min(_child_count(acc), 8)
+    for index in range(count):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu", "popup menu"}:
+            continue
+        if _state_has(child, "SHOWING") or _state_has(child, "EXPANDED"):
+            return True
+    return False
+
+
 def _close_combo_popup(acc) -> None:
     """Close a popup this call opened. A combo that is not expanded is left alone.
 
     The close is repeated briefly. Chrome can mark the select EXPANDED after
     ``select_child`` returns, and one Escape is not always enough. Collapse
     is tried before Escape so a toolkit that has the action does not also
-    receive a key.
+    receive a key. A collapsed Firefox select is left alone: its menu stays
+    VISIBLE, and Escape would undo a selection that already landed.
     """
+    if _gecko_app(acc) and not _gecko_popup_open(acc):
+        return
     for attempt in range(4):
         if not _popup_open(acc):
             # Chrome can set EXPANDED after select_child has already returned.
@@ -1602,6 +1700,10 @@ def _combo_landed(acc, entry, value: str) -> bool:
         # keeps the combobox name as the aria-label and its text as U+FFFC.
         # The selected menu item is the value, and it can arrive a beat late.
         return _choice_shows(acc, value)
+    if _gecko_app(acc):
+        # Firefox's selected option is a menu item. The combo has no Selection
+        # child and its own text is empty. The selected item's name is the value.
+        return _gecko_choice_shows(acc, value)
     return _combo_active_label(acc) == value
 
 
@@ -1708,6 +1810,55 @@ def _activate_web_option(combo, label: str, node, index: int) -> None:
     _choice_shows(combo, label)
 
 
+def _gecko_choice_shows(combo, label: str, *, wait: bool = True) -> bool:
+    """Whether Firefox's selected option text is ``label``.
+
+    The selected menu item can update a beat after the key. The wait is
+    bounded and stops on the first match.
+    """
+    attempts = 6 if wait else 1
+    for attempt in range(attempts):
+        if _selected_option_text(combo) == label:
+            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.05)
+    return False
+
+
+def _activate_gecko_option(combo, label: str, node, options) -> None:
+    """Choose ``label`` on a Firefox ``<select>``.
+
+    The option's ``select`` action is tried first. On this toolkit that
+    action does not change a collapsed select. Focus plus Up or Down then
+    moves the selection by the option index, which is what a keyboard user
+    does, and the selected option is read back. The popup is not opened:
+    opening it and then sending Escape puts the previous value back.
+    """
+    if _selected_option_text(combo) == label:
+        return
+    target = _option_named(combo, label) or node
+    _do_action_named(target, frozenset({"select", "click", "press", "activate"}))
+    if _gecko_choice_shows(combo, label, wait=False):
+        return
+    if not _x11_keys_available():
+        return
+    grab_focus(combo)
+    labels = [item[0] for item in options if item[0]]
+    current = _selected_option_text(combo)
+    if current in labels and label in labels and current != label:
+        from a11y_computer_use.drivers import _linux_input
+
+        delta = labels.index(label) - labels.index(current)
+        chord = "Down" if delta > 0 else "Up"
+        for _ in range(abs(delta)):
+            _linux_input.press_chord(chord)
+            if _selected_option_text(combo) == label:
+                return
+    if _selected_option_text(combo) == label:
+        return
+    _type_string(label)
+
+
 def _activate_combo_option(combo, options, match) -> None:
     """Choose ``match`` on the combo, not on its popup menu.
 
@@ -1721,6 +1872,9 @@ def _activate_combo_option(combo, options, match) -> None:
     if _chromium_control(combo):
         model_index = next((i for i, item in enumerate(options) if item[1] is node), index)
         _activate_web_option(combo, label, node, model_index)
+        return
+    if _gecko_app(combo):
+        _activate_gecko_option(combo, label, node, options)
         return
     if _combo_active_label(combo) == label:
         return
@@ -2190,7 +2344,12 @@ def set_text(acc, text: str) -> bool:
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
     A field with no EditableText is cleared and typed on X11; that also
-    returns True only when the snapshot read equals ``text``.
+    returns True only when the snapshot read equals ``text``. On Firefox,
+    when EditableText returns success and the snapshot read is still not
+    ``text``, the field is focused and the value is typed, and success is
+    still that read-back. Chromium and GTK keep the previous tail: keys are
+    sent only when the snapshot read is already empty, because focusing a
+    Chrome number input can make an empty field read back as 0.
     """
     eti = _editable_iface(acc)
     if eti is None:
@@ -2217,8 +2376,11 @@ def set_text(acc, text: str) -> bool:
                 return False
     if _confirm_text(acc, text):
         return True
-    # The AT-SPI write did not stick. Typing is only safe once the snapshot
-    # read says the field is empty; otherwise it would append.
+    # Firefox returns true from set_text_contents and insert_text and the DOM
+    # stays empty. Key events land after the field is focused. Chromium is
+    # not this path: focusing an empty number input can make the read-back 0.
+    if _gecko_app(acc):
+        return _focus_and_replace(acc, text)
     if _text_is_gone(acc) and _x11_keys_available():
         _type_string(text)
         return _confirm_text(acc, text)
@@ -2387,6 +2549,178 @@ def _chromium_app(acc) -> bool:
         return True
     name = (_call_first(app, ("get_name", "getName"), default="") or "").lower()
     return "chrom" in name
+
+
+def _gecko_app(acc) -> bool:
+    """True when ``acc`` belongs to Firefox. Chromium and GTK are not."""
+    if acc is None:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    toolkit = (_call_first(app, ("get_toolkit_name", "getToolkitName"), default="") or "").lower()
+    if "gecko" in toolkit:
+        return True
+    name = (_call_first(app, ("get_name", "getName"), default="") or "").lower()
+    return name == "firefox" or name.startswith("firefox ")
+
+
+def _frame_hierarchy_showing(node) -> bool:
+    """Whether ``node`` or a document/frame ancestor has STATE_SHOWING.
+
+    Firefox background tabs and the preloaded New Tab page are VISIBLE and
+    carry the content area's bounds. They are not SHOWING. The active tab's
+    document web, its internal frame, and the scroll pane around that frame
+    are SHOWING.
+    """
+    current = node
+    seen: set[int] = set()
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            return False
+        seen.add(id(current))
+        role = _role_name(current)
+        if role in {"document web", "document frame", "internal frame", "scroll pane"}:
+            if _state_has(current, "SHOWING"):
+                return True
+        if role in {"frame", "window", "application"}:
+            break
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            break
+        current = parent
+    return False
+
+
+def _selected_tab_name(node) -> str | None:
+    """The selected page tab in ``node``'s top-level frame, or None."""
+    current = node
+    frame = None
+    seen: set[int] = set()
+    for _ in range(16):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        role = _role_name(current)
+        if role in {"frame", "window"}:
+            frame = current
+            break
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            break
+        current = parent
+    if frame is None:
+        return None
+    return _selected_tab_under(frame, 0)
+
+
+def _selected_tab_under(node, depth: int) -> str | None:
+    if node is None or depth > 5:
+        return None
+    role = _role_name(node)
+    if role == "page tab" and _state_has(node, "SELECTED"):
+        label = _node_name(node)
+        return label or None
+    if depth and role in {"document web", "internal frame", "document frame"}:
+        return None
+    count = min(_child_count(node), 30)
+    for index in range(count):
+        found = _selected_tab_under(_child_at(node, index), depth + 1)
+        if found:
+            return found
+    return None
+
+
+def _names_match_tab(title: str, tab: str) -> bool:
+    """Whether a document title is the selected tab's label.
+
+    Equality is the match. A longer title that starts with a tab label of at
+    least 8 characters still matches a truncated tab. ``New Tab`` does not
+    match ``Form Probe``.
+    """
+    left = title.strip().casefold()
+    right = tab.strip().casefold()
+    if not left or not right:
+        return True
+    if left == right:
+        return True
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return len(short) >= 8 and long.startswith(short)
+
+
+def _gecko_web_document_on_screen(doc) -> bool:
+    """True when this document web is the one the user can see.
+
+    The frame hierarchy has to be SHOWING. When the window has a selected
+    page tab, the document title has to be that tab. A preloaded New Tab
+    that is not the selected tab is not on screen, and neither is a
+    background tab whose frame is only VISIBLE.
+    """
+    if not _frame_hierarchy_showing(doc):
+        return False
+    tab = _selected_tab_name(doc)
+    if not tab:
+        return True
+    return _names_match_tab(_node_name(doc), tab)
+
+
+def _has_browser_frame(node, depth: int = 0) -> bool:
+    """True when ``node`` is or directly wraps a browser document frame."""
+    if node is None or depth > 2:
+        return False
+    role = _role_name(node)
+    if role in {"internal frame", "document web"}:
+        return True
+    count = min(_child_count(node), 6)
+    for index in range(count):
+        if _has_browser_frame(_child_at(node, index), depth + 1):
+            return True
+    return False
+
+
+def _hidden_gecko_browser(node) -> bool:
+    """True when ``node`` is a Firefox document the user is not looking at.
+
+    A scroll pane that is not SHOWING and wraps an internal frame is a
+    background tab or the preloaded New Tab browser. An internal frame
+    without SHOWING is the same. A document web is hidden when its frame
+    hierarchy is not SHOWING, or when it is not the selected tab.
+    """
+    role = _role_name(node)
+    if role == "scroll pane":
+        if _state_has(node, "SHOWING"):
+            return False
+        return _has_browser_frame(node)
+    if role == "internal frame":
+        return not _state_has(node, "SHOWING")
+    if role == "document web":
+        return not _gecko_web_document_on_screen(node)
+    return False
+
+
+def hidden_web_target(acc) -> bool:
+    """True when ``acc`` sits in a Firefox document that is not showing.
+
+    False for GTK, Chromium, and Firefox chrome (the tab strip, the toolbar).
+    A click on a link in a background tab is this case: the link's document
+    is not the selected, showing one.
+    """
+    if acc is None or not _gecko_app(acc):
+        return False
+    node = acc
+    seen: set[int] = set()
+    for _ in range(32):
+        if node is None or id(node) in seen:
+            return False
+        seen.add(id(node))
+        role = _role_name(node)
+        if role == "document web":
+            return not _gecko_web_document_on_screen(node)
+        if role == "internal frame" and not _state_has(node, "SHOWING"):
+            return True
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    return False
 
 
 def _list_containers(root, limit: int = _MAX_LIST_CONTAINERS) -> list:

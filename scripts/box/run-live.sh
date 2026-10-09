@@ -51,7 +51,7 @@ fi
 # Preserve all diagnostics and exit statuses, including errors before the summary.
 timeout -k 5 600 .venv/bin/pytest -q -rs -p no:cacheprovider \
   --junitxml="$REPORT_DIR/full.xml" 2>&1 | tee "$REPORT_DIR/full.log"
-timeout -k 5 300 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py \
+timeout -k 5 480 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py \
   -q -rs -p no:cacheprovider --junitxml="$REPORT_DIR/linux.xml" 2>&1 | tee "$REPORT_DIR/linux.log"
 .venv/bin/python scripts/box/check_results.py "$REPORT_DIR/linux.xml"
 timeout -k 5 300 .venv/bin/pytest tests/test_browser.py tests/test_adapters.py \

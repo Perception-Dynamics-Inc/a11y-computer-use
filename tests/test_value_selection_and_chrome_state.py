@@ -335,6 +335,81 @@ def test_gtk_combo_selects_through_the_combo_not_the_popup_highlight(monkeypatch
     assert ATSPIAccessor().read(combo).value == "Green"
 
 
+def _gecko_combo():
+    """A Firefox <select>: options live in a menu, and the app toolkit is Gecko."""
+    red = _Node("menu item", "Red", actions=["select"], states={"SELECTED", "SHOWING", "VISIBLE"})
+    green = _Node("menu item", "Green", actions=["select"], states={"VISIBLE"})
+    blue = _Node("menu item", "Blue", actions=["select"], states={"VISIBLE"})
+    menu = _Node("menu", "", children=[red, green, blue], states={"VISIBLE"})
+    combo = _Node(
+        "combo box", "Color", text="", children=[menu],
+        actions=["open"], states={"EXPANDABLE", "ENABLED", "SENSITIVE"},
+    )
+    app = _Node("application", "Firefox")
+    app.toolkit = "Gecko"
+    combo.get_application = lambda: app
+    # Firefox's combo Selection does not report the active option. The menu
+    # item's SELECTED state does. Drop the GTK selection iface.
+    combo.get_selection_iface = lambda: None
+    return combo, red, green, blue
+
+
+def test_firefox_select_uses_the_option_action_when_it_lands(monkeypatch) -> None:
+    """Synthetic Gecko combo. The option action selects. No key is sent."""
+    from a11y_computer_use.drivers import _linux_input
+
+    combo, red, _green, blue = _gecko_combo()
+
+    def select(index, node=blue):
+        node.action_log.append(node.actions[index])
+        for item in (red, _green, blue):
+            item.states.discard("SELECTED")
+        node.states.add("SELECTED")
+        return True
+
+    blue.do_action = select
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, combo)
+    element = _element("e2", "AXComboBox", "Color", editable=True, clickable=True)
+    assert driver.set_value(element, "Blue") is True
+    assert "SELECTED" in blue.states
+    assert "SELECTED" not in red.states
+    assert keys == []
+
+
+def test_firefox_select_uses_keys_when_the_option_action_does_not_land(monkeypatch) -> None:
+    """Synthetic Gecko combo. select returns false. Down moves the selection."""
+    from a11y_computer_use.drivers import _linux_input
+
+    combo, red, green, blue = _gecko_combo()
+    items = [red, green, blue]
+
+    def miss(index, node=blue):
+        node.action_log.append("select")
+        return False
+
+    for item in items:
+        item.do_action = lambda index, node=item: miss(index, node)
+
+    def press(chord: str) -> None:
+        keys.append(chord)
+        if chord != "Down":
+            return
+        current = next(i for i, item in enumerate(items) if "SELECTED" in item.states)
+        items[current].states.discard("SELECTED")
+        items[min(current + 1, len(items) - 1)].states.add("SELECTED")
+
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    driver = _driver(monkeypatch, combo)
+    element = _element("e2", "AXComboBox", "Color", editable=True, clickable=True)
+    assert driver.set_value(element, "Blue") is True
+    assert "SELECTED" in blue.states
+    assert keys == ["Down", "Down"]
+    assert blue.action_log == ["select"]
+
+
 def test_chrome_select_and_number_reject_values_that_cannot_land(monkeypatch) -> None:
     kazakhstan = _Node("menu item", "Kazakhstan", states={"SELECTED"})
     japan = _Node("menu item", "Japan")
