@@ -1,6 +1,6 @@
 # The reference agent loop
 
-`a11y-computer-use agent --task "..."` runs a complete observe, plan, act, verify loop with a model of your choice. It exists so a newcomer can see a11y-computer-use work end to end in one command, and so cu-arena has a planner harness that treats every observation strategy the same way. The loop lives in `a11y_computer_use/agent.py`; the planners live in `a11y_computer_use/providers.py`.
+`a11y-computer-use agent --task "..."` runs a complete observe, plan, act, verify loop with a model of your choice. It exists so a newcomer can see a11y-computer-use work end to end in one command, and so cu-arena has a planner harness that treats every observation strategy the same way. The loop lives in `a11y_computer_use/agent/reference.py` (imported as `a11y_computer_use.agent.run_task`); the planners live in `a11y_computer_use/providers.py`. The separate `a11y-agent` program is documented in `docs/agent.md`.
 
 ## What it does
 

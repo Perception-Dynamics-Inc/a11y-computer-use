@@ -1,5 +1,9 @@
 """Reference agent loop: observe -> plan -> act -> verify, end to end.
 
+This module used to be ``a11y_computer_use/agent.py``. It is re-exported from
+``a11y_computer_use.agent`` so ``run_task`` and the cu-arena harness keep
+working. The new ``Agent`` class lives in ``core.py``.
+
 ``a11y_computer_use agent --task "..."`` is the one-command demonstration of the
 whole stack. A planner (any `a11y_computer_use.providers.Provider`) reads the
 pruned accessibility snapshot, picks tools by element ref, and the loop runs

@@ -1,6 +1,6 @@
 """Reflex layer: instant voice-to-action commands that never plan, only pick.
 
-The agent loop (`agent.py`) lets a model plan over observations; that is right
+The agent loop (`agent/reference.py`) lets a model plan over observations; that is right
 for long tasks and wrong for "open Notes" said out loud, where the whole budget
 is a few hundred milliseconds. This module is the other end of the scale:
 

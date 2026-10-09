@@ -115,7 +115,7 @@ A snapshot carries, for each kept element, its role, title, value (clipped to 20
 
 ### Reference agent loop
 
-`a11y-computer-use agent` (`a11y_computer_use/agent.py`, planners in `a11y_computer_use/providers.py`) is the one code path where a11y-computer-use itself makes outbound requests; `a11y-computer-use bench h2h` (`a11y_computer_use/h2h.py`) drives the same planners and shares it. Each planner turn posts the conversation so far, including snapshot text and, for the `anthropic` and `openai` planners, base64 PNG screenshots, to the chosen provider over HTTPS with the standard library's `urllib`:
+`a11y-computer-use agent` (`a11y_computer_use/agent/reference.py`, planners in `a11y_computer_use/providers.py`) is the one code path where a11y-computer-use itself makes outbound requests; `a11y-computer-use bench h2h` (`a11y_computer_use/h2h.py`) drives the same planners and shares it. Each planner turn posts the conversation so far, including snapshot text and, for the `anthropic` and `openai` planners, base64 PNG screenshots, to the chosen provider over HTTPS with the standard library's `urllib`:
 
 - `anthropic`: `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`), authenticated with `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`.
 - `openai`: `OPENAI_BASE_URL` (default `https://api.openai.com/v1`), authenticated with `OPENAI_API_KEY`; any OpenAI-compatible endpoint, local or remote, can be set here, and the key is required only for `api.openai.com`.

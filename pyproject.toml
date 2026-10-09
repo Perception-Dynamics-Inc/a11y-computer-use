@@ -88,6 +88,7 @@ browser = ["websocket-client"]
 
 [project.scripts]
 a11y-computer-use = "a11y_computer_use.cli:main"
+a11y-agent = "a11y_computer_use.agent.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Perception-Dynamics-Inc/a11y-computer-use"

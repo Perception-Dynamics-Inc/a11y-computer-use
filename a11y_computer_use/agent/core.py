@@ -1,0 +1,1094 @@
+"""Computer-use agent loop: observe, act, verify, recover.
+
+The model picks tool calls. Each call runs through ``server.Runtime.call_tool``,
+the same safety layer the MCP server uses. This module does not register tools
+on that server.
+
+``done`` is accepted only when its 1 to 3 conditions hold against a fresh
+snapshot (or the filesystem, for ``file_exists``). A repeated no-op is forced
+onto a different method. A snapshot that keeps repeating becomes ``stuck``.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import time
+import threading
+from collections.abc import Callable, Iterator
+
+from a11y_computer_use import conditions
+from a11y_computer_use.agent.actions import (
+    Action,
+    risk_reason,
+    tool_schemas,
+    validate_action,
+)
+from a11y_computer_use.agent.events import Event
+from a11y_computer_use.agent.models.base import (
+    Message,
+    ModelTurn,
+    ToolCall,
+    assistant_message,
+    make_model,
+)
+from a11y_computer_use.agent.result import RunResult, StepRecord
+from a11y_computer_use.agent.trace import (
+    Trace,
+    redact_args,
+    redact_text,
+    truncate_observation,
+)
+from a11y_computer_use.schema import ComputerUseError, Snapshot
+
+_REPLAN = (
+    "The screen is stuck: this snapshot has already repeated. "
+    "Choose a different strategy. Do not repeat the last action."
+)
+_SYSTEM = """You control a computer through accessibility actions. You see a pruned
+accessibility snapshot and answer with tool calls. Calls in one turn run one
+at a time, and each one is checked against a new snapshot before the next.
+
+Use element refs from the latest observation. Prefer set_value and select for
+fields and options. click, type, key, scroll, app, window, menu, and wait are
+available. app quit, closing a window, and submitting or sending need approval.
+
+Never type a password, one-time code, or card number. If the screen is a
+login, a 2FA prompt, a payment form, or a captcha, call ask_human instead.
+
+Call done only when the goal is finished. done requires an answer and 1 to 3
+conditions the loop can see: an element role and name, a field value, a window
+title, or a file on disk. A condition that fails is rejected and you must
+continue. Do not claim success without one of those checks.
+"""
+
+_HUMAN_KINDS = ("captcha", "payment", "2fa", "login")
+_FIELD_ROLES = ("textfield", "textarea", "securetextfield", "passwordfield", "combobox", "text", "password", "secure")
+
+
+class _Cancelled(Exception):
+    """Raised on the loop thread when ``cancel`` has been set."""
+
+
+class Agent:
+    """Run one goal against the desktop.
+
+    ``model`` is a ``Model`` or a spec such as ``scripted:/path.json``.
+    ``display`` is copied to ``$DISPLAY`` before the runtime is created.
+    ``approve`` is called for quit, close, and submit actions. When it is
+    omitted, ``auto_deny`` skips those actions. ``cancel`` is safe to call
+    from another thread.
+    """
+
+    def __init__(
+        self,
+        model: str | object,
+        *,
+        display: str | None = None,
+        max_steps: int = 50,
+        max_time_s: float = 900,
+        approve: Callable[[Action], bool] | None = None,
+        auto_deny: bool = True,
+        on_event: Callable[[Event], None] | None = None,
+        trace_dir: str | os.PathLike | None = None,
+        vision: bool = False,
+        runtime: object | None = None,
+        max_retries: int = 2,
+        max_replans: int = 2,
+    ) -> None:
+        self._model_spec = model
+        self.display = display
+        self.max_steps = max_steps
+        self.max_time_s = max_time_s
+        self.approve = approve
+        self.auto_deny = auto_deny
+        self.on_event = on_event
+        self._trace_dir = trace_dir
+        self.vision = vision
+        self._runtime = runtime
+        self.max_retries = max_retries
+        self.max_replans = max_replans
+        self._cancel = threading.Event()
+        self._result: RunResult | None = None
+        self.model = None
+        self.runtime = None
+        self.trace: Trace | None = None
+
+    def cancel(self) -> None:
+        """Ask the in-flight ``run`` or ``stream`` to stop. Thread-safe."""
+        self._cancel.set()
+
+    def run(self, goal: str) -> RunResult:
+        """Execute ``goal`` and return the final result."""
+        for _event in self.stream(goal):
+            pass
+        assert self._result is not None
+        return self._result
+
+    def stream(self, goal: str) -> Iterator[Event]:
+        """Yield typed events for ``goal``. ``on_event`` sees each one too."""
+        for event in self._loop(goal):
+            if self.on_event is not None:
+                self.on_event(event)
+            yield event
+
+    # -- loop -----------------------------------------------------------------
+
+    def _loop(self, goal: str) -> Iterator[Event]:
+        self._cancel.clear()
+        self._result = None
+        started = time.perf_counter()
+        self._steps: list[StepRecord] = []
+        self._conditions: list[dict] = []
+        self._messages: list[Message] = []
+        self._levels: dict[tuple, int] = {}
+        self._digests: list[str] = []
+        self._replans = 0
+        self._nudges = 0
+        self._app: str | None = None
+        self._last_observation = ""
+        self._last_snap: Snapshot | None = None
+        try:
+            self._prepare()
+            yield from self._drive(goal, started)
+        except _Cancelled:
+            self._result = self._build("failed", "", "cancelled", started)
+            yield Event("error", {"reason": "cancelled"})
+        except Exception as exc:  # a broken runtime must still produce a result
+            reason = f"error: {type(exc).__name__}: {exc}"
+            self._result = self._build("failed", "", reason, started)
+            yield Event("error", {"reason": reason})
+
+    def _prepare(self) -> None:
+        if self.display:
+            os.environ["DISPLAY"] = self.display
+        self.model = make_model(self._model_spec)  # type: ignore[arg-type]
+        if self._runtime is None:
+            from a11y_computer_use.server import Runtime
+
+            self.runtime = Runtime()
+        else:
+            self.runtime = self._runtime
+        self.trace = Trace(self._trace_dir)
+        self._messages = [
+            Message(role="system", content=_SYSTEM),
+        ]
+
+    def _drive(self, goal: str, started: float) -> Iterator[Event]:
+        self._messages.append(Message(role="user", content=f"Goal: {goal}"))
+        while True:
+            if self._cancel.is_set():
+                raise _Cancelled()
+            if self._timed_out(started):
+                self._finish("failed", "", "max_time", started)
+                return
+            if len(self._steps) >= self.max_steps:
+                self._finish("failed", "", "max_steps", started)
+                return
+
+            observation, snap = self._observe()
+            self._last_observation = observation
+            self._last_snap = snap
+            digest = snapshot_digest(snap, observation)
+            yield Event("observation", {
+                "text": truncate_observation(observation),
+                "app": self._app_name(),
+                "digest": digest,
+            })
+            human = blocking_human(snap)
+            if human is not None:
+                self._finish("needs_human", "", human["message"], started, needs_human=human)
+                yield Event("needs_human", human)
+                return
+
+            image = self._vision_image(observation, snap)
+            self._messages.append(Message(
+                role="user",
+                content=_user_content(observation, self._app_name(), image),
+            ))
+            screen = self._note_screen(digest)
+            if screen == "fail":
+                yield Event("stuck", {"digest": digest, "replans": self._replans, "terminal": True})
+                self._finish("failed", "", "stuck", started)
+                return
+            if screen == "replan":
+                yield Event("stuck", {"digest": digest, "replans": self._replans, "terminal": False})
+
+            remaining = self.max_time_s - (time.perf_counter() - started)
+            turn = self.model.complete(  # type: ignore[union-attr]
+                self._messages, tool_schemas(), timeout=max(0.0, remaining),
+            )
+            yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
+            self._messages.append(assistant_message(turn))
+            if not turn.calls:
+                self._nudges += 1
+                if self._nudges >= 2:
+                    self._finish("failed", "", "no_action", started)
+                    return
+                self._messages.append(Message(
+                    role="user",
+                    content="Reply with a tool call, or call done with 1 to 3 visible conditions.",
+                ))
+                continue
+            self._nudges = 0
+            for call in turn.calls:
+                if self._cancel.is_set():
+                    raise _Cancelled()
+                if self._timed_out(started):
+                    self._finish("failed", "", "max_time", started)
+                    return
+                if len(self._steps) >= self.max_steps:
+                    self._finish("failed", "", "max_steps", started)
+                    return
+                stop = yield from self._one_call(call, turn, started)
+                if stop:
+                    return
+
+    def _one_call(self, call: ToolCall, turn: ModelTurn, started: float) -> Iterator[Event]:
+        requested = Action.from_call(call)
+        index = len(self._steps) + 1
+        yield Event("step_started", {"index": index, "action": requested.name})
+        problem = validate_action(requested)
+        if problem is not None:
+            self._commit(
+                requested, requested, problem, verified=False, error=problem,
+                duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+            )
+            yield Event("action", _action_event(index, requested, self._last_snap))
+            yield Event("step_finished", {"index": index, "verified": False, "error": problem})
+            self._messages.append(Message(
+                role="tool", content=problem, tool_call_id=call.id, name=requested.name,
+            ))
+            return False
+        if requested.name == "done":
+            yield from self._done(requested, turn, started)
+            return self._result is not None and self._result.status == "success"
+        if requested.name == "ask_human":
+            info = _ask_human_info(requested, self._last_snap)
+            self._commit(
+                requested, requested, info["message"], verified=True, error=None,
+                duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+            )
+            yield Event("action", _action_event(index, requested, self._last_snap))
+            yield Event("step_finished", {"index": index, "verified": True, "error": None})
+            self._finish("needs_human", "", info["message"], started, needs_human=info)
+            yield Event("needs_human", info)
+            return True
+
+        kind = target_human_kind(requested, self._last_snap)
+        if kind is not None and requested.name in {"type", "set_value", "select", "click", "key"}:
+            info = human_info(kind, _element_for(requested, self._last_snap), self._last_snap)
+            self._finish("needs_human", "", info["message"], started, needs_human=info)
+            yield Event("needs_human", info)
+            return True
+
+        label = _action_label(requested, self._last_snap)
+        allowed, denial = self._allowed(requested, label)
+        if not allowed:
+            self._commit(
+                requested, requested, denial or "approval_denied", verified=False,
+                error=denial, duration=0.0, recovery=[], turn=turn,
+                started_at=time.perf_counter(),
+            )
+            yield Event("action", _action_event(index, requested, self._last_snap))
+            yield Event("step_finished", {"index": index, "verified": False, "error": denial})
+            self._messages.append(Message(
+                role="tool", content=denial or "approval_denied",
+                tool_call_id=call.id, name=requested.name,
+            ))
+            return False
+
+        key = _action_key(requested)
+        level = self._levels.get(key, 0)
+        executed, forced = forced_method(requested, level, self._last_snap)
+        recovery = [forced] if forced else []
+        before = snapshot_digest(self._last_snap, self._last_observation)
+        started_at = time.perf_counter()
+        result, error = self._invoke(executed)
+        if error and self.max_retries > 0:
+            retried, retry_notes = self._recover(requested, executed)
+            recovery.extend(retry_notes)
+            if retried is not None:
+                executed = retried[0]
+                result, error = retried[1], retried[2]
+        observation, snap = self._observe()
+        self._last_observation = observation
+        self._last_snap = snap
+        after = snapshot_digest(snap, observation)
+        verified = _is_verified(executed, before, after, error)
+        if (
+            executed.name == "app"
+            and str(executed.args.get("action") or "") in {"launch", "focus"}
+            and not error
+        ):
+            named = executed.args.get("name")
+            if named:
+                self._app = str(named)
+        if verified:
+            self._levels[key] = 0
+        else:
+            self._levels[key] = level + 1
+        self._commit(
+            requested, executed, result, verified=verified, error=error,
+            duration=time.perf_counter() - started_at, recovery=recovery,
+            turn=turn, started_at=started_at,
+        )
+        yield Event("action", _action_event(index, executed, snap))
+        yield Event("observation", {
+            "text": truncate_observation(observation),
+            "app": self._app_name(),
+            "digest": after,
+        })
+        yield Event("step_finished", {"index": index, "verified": verified, "error": error, "result": result})
+        self._messages.append(Message(
+            role="tool",
+            content=_tool_feedback(executed, result, error, recovery),
+            tool_call_id=call.id,
+            name=executed.name,
+        ))
+        return False
+
+    def _done(self, action: Action, turn: ModelTurn, started: float) -> Iterator[Event]:
+        index = len(self._steps) + 1
+        observation, snap = self._observe()
+        self._last_observation = observation
+        self._last_snap = snap
+        yield Event("observation", {
+            "text": truncate_observation(observation),
+            "app": self._app_name(),
+            "digest": snapshot_digest(snap, observation),
+        })
+        checked = check_conditions(list(action.args.get("conditions") or []), snap)
+        self._conditions = checked
+        ok = all(item["ok"] for item in checked)
+        detail = "; ".join(item["detail"] for item in checked if not item["ok"]) or "conditions held"
+        self._commit(
+            action, action, detail, verified=ok, error=None if ok else "evidence_failed",
+            duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+            conditions=checked,
+        )
+        yield Event("action", _action_event(index, action, snap))
+        yield Event("step_finished", {
+            "index": index, "verified": ok, "error": None if ok else "evidence_failed",
+        })
+        if ok:
+            answer = str(action.args.get("answer") or "")
+            self._finish("success", answer, "done", started)
+            yield Event("done", {"answer": answer, "conditions": checked})
+            return
+        self._messages.append(Message(
+            role="tool",
+            content="done rejected: " + detail,
+            tool_call_id=action.id,
+            name="done",
+        ))
+
+    def _recover(
+        self, requested: Action, executed: Action,
+    ) -> tuple[tuple[Action, str, str | None] | None, list[str]]:
+        """One alternate-ref retry, then Escape. Bounded by ``max_retries``."""
+        notes: list[str] = []
+        attempts = 0
+        alt = alternate_action(requested, self._last_snap)
+        if alt is not None and alt[0].args.get("ref") != executed.args.get("ref"):
+            attempts += 1
+            action, label = alt
+            result, error = self._invoke(action)
+            notes.append(label)
+            if not error:
+                return (action, result, error), notes
+        if attempts < self.max_retries:
+            note = self._backtrack()
+            notes.append(note)
+        return None, notes
+
+    def _backtrack(self) -> str:
+        try:
+            self.runtime.call_tool("key", {"chord": "Escape"}, confirm=self._safety_confirm)  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 - backtrack is best-effort
+            return f"backtrack failed: {type(exc).__name__}"
+        return "backtrack:Escape"
+
+    def _invoke(self, action: Action) -> tuple[str, str | None]:
+        from a11y_computer_use.server import ActionRefused, error_text, refusal_text
+
+        try:
+            tool, params = to_runtime_call(action, self._app_name())
+            raw = self.runtime.call_tool(tool, params, confirm=self._safety_confirm)  # type: ignore[union-attr]
+        except ComputerUseError as exc:
+            return "", error_text(exc)
+        except ActionRefused as exc:
+            return "", refusal_text(exc.decision)
+        except (TypeError, ValueError, KeyError) as exc:
+            return "", f"invalid_arguments: {exc}"
+        except Exception as exc:  # noqa: BLE001 - one tool must not kill the run
+            return "", f"error: {type(exc).__name__}: {exc}"
+        return _stringify(raw), None
+
+    def _allowed(self, action: Action, label: str | None) -> tuple[bool, str | None]:
+        reason = risk_reason(action, label)
+        if reason is None:
+            return True, None
+        if self.approve is not None:
+            if self.approve(action):
+                return True, None
+            return False, f"approval_denied: {reason}"
+        if self.auto_deny:
+            return False, f"approval_denied: {reason}"
+        return True, None
+
+    def _safety_confirm(self, prompt: str) -> bool:
+        if self.approve is not None:
+            return bool(self.approve(Action("confirm", {"prompt": prompt})))
+        return not self.auto_deny
+
+    def _observe(self) -> tuple[str, Snapshot | None]:
+        from a11y_computer_use.server import error_text
+
+        app = self._app_name()
+        try:
+            text = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
+        except ComputerUseError as exc:
+            text = error_text(exc)
+        except Exception as exc:  # noqa: BLE001 - observation is data, not fatal
+            text = f"error: {type(exc).__name__}: {exc}"
+        snap = getattr(self.runtime, "_current", None)
+        return str(text), snap if isinstance(snap, Snapshot) else None
+
+    def _vision_image(self, observation: str, snap: Snapshot | None) -> dict | None:
+        if not self.vision or not _needs_vision(observation, snap):
+            return None
+        png = _png_of(self._grab())
+        if not png or self.trace is None:
+            return None
+        path = self.trace.dir / f"observe-{len(self._digests) + 1:04d}.png"
+        path.write_bytes(png)
+        return {"type": "image", "path": str(path), "mime": "image/png"}
+
+    def _grab(self) -> object:
+        try:
+            return self.runtime.screenshot()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 - capture is optional
+            return None
+
+    def _note_screen(self, digest: str) -> str | None:
+        self._digests.append(digest)
+        window = self._digests[-8:]
+        if window.count(digest) < 3:
+            return None
+        self._replans += 1
+        self._digests.clear()
+        if self._replans > self.max_replans:
+            return "fail"
+        self._messages.append(Message(role="user", content=_REPLAN))
+        return "replan"
+
+    def _commit(
+        self,
+        requested: Action,
+        executed: Action,
+        result: str,
+        *,
+        verified: bool,
+        error: str | None,
+        duration: float,
+        recovery: list[str],
+        turn: ModelTurn | None,
+        started_at: float,
+        conditions: list[dict] | None = None,
+    ) -> None:
+        del started_at
+        target = target_view(executed, self._last_snap)
+        sensitive = target_human_kind(executed, self._last_snap) is not None
+        args, secrets = redact_args(_public_args(executed.args), sensitive=sensitive)
+        step = StepRecord(
+            index=len(self._steps) + 1,
+            action=executed.name,
+            target=target,
+            args=args,
+            result=redact_text(result or "", secrets),
+            error=error,
+            verified=verified,
+            duration_s=duration,
+        )
+        self._steps.append(step)
+        requested_args, _requested_secrets = redact_args(_public_args(requested.args), sensitive=sensitive)
+        response_calls = []
+        if turn is not None:
+            for call in turn.calls:
+                call_args, _call_secrets = redact_args(dict(call.args), sensitive=False)
+                response_calls.append({"name": call.name, "args": call_args, "id": call.id})
+        entry = {
+            "index": step.index,
+            "observation": redact_text(truncate_observation(self._last_observation), secrets),
+            "model": {
+                "name": getattr(self.model, "name", ""),
+                "supports_images": bool(getattr(self.model, "supports_images", False)),
+            },
+            "request": {
+                "message_count": len(self._messages),
+                "tools": [item["name"] for item in tool_schemas()],
+            },
+            "response": {
+                "text": redact_text(turn.text, secrets) if turn is not None else "",
+                "calls": response_calls,
+            },
+            "requested": {"name": requested.name, "args": requested_args},
+            "action": executed.name,
+            "target": target,
+            "args": args,
+            "result": step.result,
+            "error": error,
+            "verified": verified,
+            "duration_s": step.to_dict()["duration_s"],
+            "recovery": [note for note in recovery if note],
+            "screenshot": self._save_shot(step.index),
+            "conditions": conditions,
+        }
+        if self.trace is not None:
+            self.trace.record(entry, step.to_dict())
+
+    def _save_shot(self, index: int) -> str | None:
+        png = _png_of(self._grab())
+        if not png or self.trace is None:
+            return None
+        try:
+            return self.trace.save_png(index, png)
+        except OSError:
+            return None
+
+    def _timed_out(self, started: float) -> bool:
+        return (time.perf_counter() - started) >= self.max_time_s
+
+    def _app_name(self) -> str:
+        if self._app:
+            return self._app
+        front = getattr(self.runtime, "_frontmost", None)
+        if callable(front):
+            try:
+                name = front()
+            except Exception:  # noqa: BLE001
+                return "unknown"
+            if name:
+                return str(name)
+        return "unknown"
+
+    def _finish(
+        self,
+        status: str,
+        answer: str,
+        reason: str,
+        started: float,
+        needs_human: dict | None = None,
+    ) -> None:
+        self._result = self._build(status, answer, reason, started, needs_human)
+
+    def _build(
+        self,
+        status: str,
+        answer: str,
+        reason: str,
+        started: float,
+        needs_human: dict | None = None,
+    ) -> RunResult:
+        return RunResult(
+            status=status,  # type: ignore[arg-type]
+            answer=answer,
+            steps=len(self._steps),
+            elapsed_s=time.perf_counter() - started,
+            reason=reason,
+            conditions=list(self._conditions),
+            needs_human=needs_human,
+            trace_dir="" if self.trace is None else str(self.trace.dir),
+            step_log=list(self._steps),
+        )
+
+
+# -- snapshots, humans, evidence, methods -----------------------------------
+
+
+def snapshot_digest(snap: Snapshot | None, text: str) -> str:
+    """Digest of the accessible state, ignoring snapshot ids and bounds."""
+    if snap is None:
+        raw = text
+    else:
+        rows = []
+        for el in snap.elements:
+            rows.append("\t".join((
+                el.ref,
+                el.role,
+                el.title,
+                "" if el.value is None else str(el.value),
+                "1" if el.enabled else "0",
+                "1" if el.focused else "0",
+                "" if el.checked is None else str(int(el.checked)),
+                "1" if el.selected else "0",
+            )))
+        raw = "\n".join(rows)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def blocking_human(snap: Snapshot | None) -> dict | None:
+    """A login, 2FA, payment, or captcha the agent must not click through."""
+    if snap is None:
+        return None
+    found: dict[str, object] = {}
+    for el in snap.elements:
+        kind = human_kind(el)
+        if kind is not None and kind not in found:
+            found[kind] = el
+    for kind in _HUMAN_KINDS:
+        if kind in found:
+            return human_info(kind, found[kind], snap)
+    return None
+
+
+def human_kind(element: object) -> str | None:
+    """Classify one element, or None when the agent may act on it.
+
+    A static label that mentions a password or a captcha is not itself a
+    challenge. A password, OTP, or card field is, and so is a captcha iframe.
+    """
+    role = str(getattr(element, "role", "") or "")
+    title = str(getattr(element, "title", "") or "")
+    placeholder = str(getattr(element, "placeholder", "") or "")
+    role_key = role.casefold()
+    role_norm = role_key.removeprefix("ax")
+    blob = f"{role} {title} {placeholder}".casefold()
+    iframe = role_norm in {"iframe", "webarea", "webview"} or "iframe" in role_norm
+    captcha = any(token in blob for token in ("captcha", "recaptcha", "hcaptcha", "turnstile"))
+    if captcha and (iframe or "captcha" in role_norm):
+        return "captcha"
+    if role_norm == "statictext":
+        return None
+    field = bool(getattr(element, "editable", False) or getattr(element, "secure", False))
+    field = field or role_norm in _FIELD_ROLES or any(token in role_norm for token in _FIELD_ROLES)
+    if not field:
+        return None
+    if getattr(element, "secure", False) or "password" in role_norm or _has(title, placeholder, "password", "passwd", "passcode"):
+        return "login"
+    if _has(title, placeholder, "otp", "2fa", "two-factor", "one-time", "verification code", "authenticator"):
+        return "2fa"
+    if _has(title, placeholder, "card number", "credit card", "debit card", "cvv", "cvc", "payment card"):
+        return "payment"
+    return None
+
+
+def human_info(kind: str, element: object, snap: Snapshot | None) -> dict:
+    ref = getattr(element, "ref", None)
+    title = getattr(element, "title", "") or ""
+    role = getattr(element, "role", "") or ""
+    return {
+        "kind": kind,
+        "message": (
+            f"Stopped for a human ({kind}): {role} {title!r}"
+            + (f" ref {ref}" if ref else "")
+            + ". Secrets are not typed and payments are not submitted."
+        ),
+        "ref": ref,
+        "window": _window_title(snap),
+    }
+
+
+def target_human_kind(action: Action, snap: Snapshot | None) -> str | None:
+    element = _element_for(action, snap)
+    if element is None:
+        return None
+    return human_kind(element)
+
+
+def check_conditions(conditions_arg: list, snap: Snapshot | None) -> list[dict]:
+    """Evaluate done-evidence. Each result is condition, ok, detail."""
+    checked: list[dict] = []
+    for condition in conditions_arg:
+        ok, detail = _one_condition(condition, snap)
+        checked.append({"condition": condition, "ok": ok, "detail": detail})
+    return checked
+
+
+def _one_condition(condition: object, snap: Snapshot | None) -> tuple[bool, str]:
+    if not isinstance(condition, dict) or not condition:
+        return False, "a condition must be one object with one key"
+    # file_exists may carry contains and min_bytes beside the path.
+    if "file_exists" in condition:
+        extra = set(condition) - {"file_exists", "contains", "min_bytes"}
+        if extra:
+            return False, "a condition must be one object with one key"
+        return _file_condition(condition)
+    if len(condition) != 1:
+        return False, "a condition must be one object with one key"
+    key = next(iter(condition))
+    if key == "element":
+        spec = condition["element"]
+        if not isinstance(spec, dict) or not spec.get("role") or not spec.get("name"):
+            return False, "element condition needs role and name"
+        found = _find_element(snap, role=str(spec["role"]), name=str(spec["name"]))
+        if found is None:
+            return False, f"no {spec['role']} named {spec['name']!r}"
+        return True, f"found {found.ref} {found.role} {found.title!r}"
+    if key == "value":
+        spec = condition["value"]
+        if not isinstance(spec, dict) or "equals" not in spec:
+            return False, "value condition needs equals and ref or name"
+        element = None
+        if spec.get("ref"):
+            element = _by_ref(snap, str(spec["ref"]))
+        elif spec.get("name"):
+            element = _find_element(snap, name=str(spec["name"]))
+        if element is None:
+            return False, "value condition did not match an element"
+        actual = "" if element.value is None else str(element.value)
+        wanted = str(spec["equals"])
+        if actual != wanted:
+            return False, f"{element.ref} value is {actual!r}, wanted {wanted!r}"
+        return True, f"{element.ref} value is {wanted!r}"
+    if key == "window_title_contains":
+        needle = str(condition["window_title_contains"])
+        title = _window_title(snap) or ""
+        if needle.casefold() in title.casefold():
+            return True, f"window title {title!r} contains {needle!r}"
+        return False, f"window title {title!r} does not contain {needle!r}"
+    return False, f"unrecognized condition {key!r}"
+
+
+def _file_condition(condition: dict) -> tuple[bool, str]:
+    raw = condition["file_exists"]
+    probe_condition = {"file_exists": raw}
+    if "min_bytes" in condition:
+        probe_condition["min_bytes"] = condition["min_bytes"]
+    state: dict = {}
+    try:
+        matched = conditions.Checker().probe(probe_condition, state)
+    except ValueError as exc:
+        return False, str(exc)
+    except ComputerUseError as exc:
+        return False, exc.message
+    if not matched:
+        return False, f"file {raw!r} was not found"
+    contains = condition.get("contains")
+    if contains is None:
+        return True, str(matched)
+    path = (state.get("last") or {}).get("path")
+    if not path:
+        return False, "file exists but its path was not reported"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            body = handle.read()
+    except OSError as exc:
+        return False, f"file exists but could not be read: {exc}"
+    if str(contains) not in body:
+        return False, f"file {path} does not contain {contains!r}"
+    return True, f"{matched}; contains {contains!r}"
+
+
+def forced_method(action: Action, level: int, snap: Snapshot | None) -> tuple[Action, str | None]:
+    """Replace a repeated no-op with the next method.
+
+    Level 0 is the model's action. Then alternate ref, coordinate click, and
+    a keyboard fallback, skipping a method that cannot be built.
+    """
+    if level <= 0:
+        return action, None
+    options: list[tuple[Action, str]] = []
+    alternate = alternate_action(action, snap)
+    if alternate is not None:
+        options.append(alternate)
+    coordinate = coordinate_action(action, snap)
+    if coordinate is not None:
+        options.append(coordinate)
+    options.append(keyboard_action(action))
+    chosen, label = options[min(level, len(options)) - 1]
+    return chosen, label
+
+
+def alternate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str] | None:
+    ref = action.args.get("ref") or action.args.get("_source_ref")
+    if snap is None or not ref:
+        return None
+    current = _by_ref(snap, str(ref))
+    role = current.role if current is not None else None
+    name = current.title if current is not None else action.args.get("name")
+    if not name and role is None:
+        return None
+    for element in snap.elements:
+        if element.ref == ref or not element.enabled:
+            continue
+        if role is not None and element.role != role:
+            continue
+        if name and element.title.casefold() != str(name).casefold():
+            continue
+        args = dict(action.args)
+        args["ref"] = element.ref
+        args.pop("x", None)
+        args.pop("y", None)
+        return Action(action.name, args, action.id), f"alternate_ref:{element.ref}"
+    return None
+
+
+def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str] | None:
+    element = _element_for(action, snap)
+    if element is None or element.bounds is None:
+        return None
+    bounds = element.bounds
+    if bounds.width <= 0 or bounds.height <= 0:
+        return None
+    x = int(bounds.x + bounds.width / 2)
+    y = int(bounds.y + bounds.height / 2)
+    args = {
+        "x": x,
+        "y": y,
+        "display_id": int(bounds.display_id),
+        "_source_ref": element.ref,
+    }
+    return Action("click", args, action.id), f"coordinate_click:{x},{y}"
+
+
+def keyboard_action(action: Action) -> tuple[Action, str]:
+    if action.name in {"type", "set_value", "select"}:
+        text = action.args.get("text", action.args.get("value", ""))
+        return Action("type", {"text": "" if text is None else str(text)}, action.id), "keyboard:type"
+    return Action("key", {"chord": "Return"}, action.id), "keyboard:Return"
+
+
+def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
+    """Map an agent action onto ``Runtime.call_tool`` arguments."""
+    args = action.args
+    name = action.name
+    if name == "click":
+        params: dict = {}
+        if args.get("ref"):
+            params["ref"] = args["ref"]
+        if args.get("x") is not None and args.get("y") is not None:
+            params["x"] = int(args["x"])
+            params["y"] = int(args["y"])
+        if args.get("display_id") is not None:
+            params["display_id"] = int(args["display_id"])
+        if args.get("button"):
+            params["button"] = args["button"]
+        if args.get("count"):
+            params["count"] = int(args["count"])
+        return "click", params
+    if name == "type":
+        # Pass app only when the model named one. The tracked app is not a
+        # background-typing address: on Linux that argument is unsupported.
+        params = {"text": str(args.get("text", ""))}
+        if args.get("app"):
+            params["app"] = args["app"]
+        return "type", params
+    if name == "key":
+        params = {"chord": str(args["chord"])}
+        if args.get("app"):
+            params["app"] = args["app"]
+        return "key", params
+    if name in {"set_value", "select"}:
+        return "set_value", {"ref": args["ref"], "value": str(args.get("value", ""))}
+    if name == "scroll":
+        params = {"dx": int(args.get("dx", 0)), "dy": int(args.get("dy", -3))}
+        if args.get("ref"):
+            params["ref"] = args["ref"]
+        if args.get("x") is not None and args.get("y") is not None:
+            params["x"] = int(args["x"])
+            params["y"] = int(args["y"])
+        return "scroll", params
+    if name == "app":
+        params = {"action": args["action"]}
+        if args.get("name"):
+            params["name"] = args["name"]
+        return "app", params
+    if name == "window":
+        params = {"action": args["action"]}
+        for key in ("window_id", "app", "x", "y", "width", "height"):
+            if args.get(key) is not None:
+                params[key] = args[key]
+        return "window", params
+    if name == "menu":
+        params = {"app": args.get("app") or app or "", "action": args.get("action", "press")}
+        if args.get("path"):
+            params["path"] = args["path"]
+        return "menu", params
+    if name == "wait":
+        if "condition" in args and isinstance(args["condition"], dict):
+            return "wait_until", {
+                "condition": args["condition"],
+                "timeout_s": float(args.get("timeout_s", 30)),
+                "poll_s": float(args.get("poll_s", 0.2)),
+            }
+        seconds = float(args.get("seconds", 0))
+        return "wait_until", {
+            "condition": {"settle": seconds},
+            "timeout_s": max(seconds, 0.0) + 1.0,
+            "poll_s": 0.05,
+        }
+    raise ValueError(f"action {name!r} is not executed through the runtime")
+
+
+def target_view(action: Action, snap: Snapshot | None) -> dict:
+    element = _element_for(action, snap)
+    return {
+        "ref": None if element is None else element.ref,
+        "role": None if element is None else element.role,
+        "name": None if element is None else element.title,
+    }
+
+
+def _element_for(action: Action, snap: Snapshot | None):
+    if snap is None:
+        return None
+    ref = action.args.get("ref") or action.args.get("_source_ref")
+    if ref:
+        found = _by_ref(snap, str(ref))
+        if found is not None:
+            return found
+    name = action.args.get("name")
+    if name:
+        return _find_element(snap, name=str(name))
+    return None
+
+
+def _by_ref(snap: Snapshot | None, ref: str):
+    if snap is None:
+        return None
+    for element in snap.elements:
+        if element.ref == ref:
+            return element
+    return None
+
+
+def _find_element(snap: Snapshot | None, *, role: str | None = None, name: str | None = None):
+    if snap is None:
+        return None
+    for element in snap.elements:
+        if role is not None and not _roles_match(element.role, role):
+            continue
+        if name is not None and element.title.casefold() != name.casefold():
+            continue
+        return element
+    return None
+
+
+def _roles_match(actual: str, wanted: str) -> bool:
+    def norm(value: str) -> str:
+        text = value.casefold().strip()
+        return text[2:] if text.startswith("ax") else text
+    return norm(actual) == norm(wanted)
+
+
+def _window_title(snap: Snapshot | None) -> str | None:
+    if snap is None:
+        return None
+    for element in snap.elements:
+        role = element.role.casefold().removeprefix("ax")
+        if role in {"window", "dialog", "sheet"} and element.title:
+            return element.title
+    return snap.app
+
+
+def _needs_vision(observation: str, snap: Snapshot | None) -> bool:
+    if "no interactive elements were found" in observation:
+        return True
+    if snap is None:
+        return False
+    structural = {"axwindow", "axgroup", "axscrollarea", "axtoolbar", "axlayoutarea"}
+    for element in snap.elements:
+        if element.title:
+            continue
+        role = element.role.casefold()
+        if role in {"aximage", "axunknown"} or (element.clickable and role not in structural):
+            return True
+    return False
+
+
+def _user_content(observation: str, app: str, image: dict | None) -> str | list[dict]:
+    text = f"Observation of {app}:\n{truncate_observation(observation)}"
+    if image is None:
+        return text
+    return [{"type": "text", "text": text}, image]
+
+
+def _action_key(action: Action) -> tuple:
+    args = action.args
+    target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or args.get("text") or ""
+    return (action.name, str(target))
+
+
+def _action_label(action: Action, snap: Snapshot | None) -> str | None:
+    if action.name == "menu":
+        path = str(action.args.get("path") or "")
+        return path.split(">")[-1].strip() or path or None
+    element = _element_for(action, snap)
+    if element is not None and element.title:
+        return element.title
+    name = action.args.get("name")
+    return str(name) if name else None
+
+
+def _is_verified(action: Action, before: str, after: str, error: str | None) -> bool:
+    if error:
+        return False
+    verb = str(action.args.get("action") or "")
+    if action.name == "wait":
+        return True
+    if action.name in {"app", "window", "menu"} and verb in {"list", "state"}:
+        return True
+    return before != after
+
+
+def _public_args(args: dict) -> dict:
+    return {key: value for key, value in args.items() if not str(key).startswith("_")}
+
+
+def _call_view(call: ToolCall) -> dict:
+    args, _secrets = redact_args(dict(call.args))
+    return {"name": call.name, "args": args, "id": call.id}
+
+
+def _action_event(index: int, action: Action, snap: Snapshot | None) -> dict:
+    args, _secrets = redact_args(_public_args(action.args))
+    return {"index": index, "action": action.name, "args": args, "target": target_view(action, snap)}
+
+
+def _tool_feedback(action: Action, result: str, error: str | None, recovery: list[str]) -> str:
+    if error:
+        text = f"{action.name} failed: {error}"
+    else:
+        text = result or f"{action.name} ok"
+    if recovery:
+        text += " recovery: " + ", ".join(recovery)
+    return text
+
+
+def _ask_human_info(action: Action, snap: Snapshot | None) -> dict:
+    kind = str(action.args.get("kind") or "other")
+    return {
+        "kind": kind,
+        "message": str(action.args.get("message") or "the agent asked for a human"),
+        "ref": action.args.get("ref"),
+        "window": _window_title(snap),
+    }
+
+
+def _has(title: str, placeholder: str, *needles: str) -> bool:
+    blob = f"{title} {placeholder}".casefold()
+    return any(needle in blob for needle in needles)
+
+
+def _png_of(raw: object) -> bytes | None:
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    if isinstance(raw, tuple) and len(raw) == 2:
+        return _png_of(raw[1])
+    png = getattr(raw, "png", None)
+    if isinstance(png, (bytes, bytearray)):
+        return bytes(png)
+    return None
+
+
+def _stringify(raw: object) -> str:
+    if isinstance(raw, tuple) and raw:
+        return str(raw[0])
+    return str(raw)
+
+
+__all__ = ["Agent", "blocking_human", "check_conditions", "forced_method", "human_kind", "to_runtime_call"]
