@@ -2501,6 +2501,49 @@ def atspi_screen_box(acc) -> tuple[float, float, float, float] | None:
     return (x, y, width, height)
 
 
+def opaque_click_target(acc) -> bool:
+    """A canvas, or an image with no name.
+
+    The accessibility tree does not contain the pixels, so a focus or
+    state change is not evidence the click landed inside the drawing.
+    A named image that is not a canvas can still change the page, and
+    that change remains evidence.
+    """
+    if acc is None:
+        return False
+    role = _role_name(acc)
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if role in {"canvas", "drawing area"} or tag == "canvas" or xml & {"graphics-document", "graphics-symbol"}:
+        return True
+    if role in {"image", "icon"} or bool(xml & {"img", "image"}):
+        name = str(_call_first(acc, ("get_name",), default="") or "").strip()
+        return not name
+    return False
+
+
+def opaque_click_verdict(acc) -> tuple[str, str] | None:
+    """``(unverifiable, evidence)`` for a canvas or unnamed image. None otherwise.
+
+    The click may already have been sent. This does not claim it missed.
+    Accessibility cannot see the pixels, so the result is not confirmed
+    from the tree. The evidence tells the caller to check a crop or a
+    screenshot.
+    """
+    if not opaque_click_target(acc):
+        return None
+    return (
+        "unverifiable",
+        "accessibility cannot see inside this canvas or unnamed image, so the click is not confirmed; "
+        "verify with crop or a screenshot",
+    )
+
+
 def coordinate_click_info(acc) -> dict | None:
     """Identity and AT-SPI box for a canvas or image click, or None.
 

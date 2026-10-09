@@ -6176,6 +6176,8 @@ def test_linux_chrome_canvas_ref_click_lands_on_the_center(tmp_path) -> None:
         result = runtime.click(canvas.ref)
         assert result.startswith("clicked "), result
         assert "click_without_coordinates" not in result
+        assert result.outcome == "unverifiable", (result.outcome, result.evidence)
+        assert "crop" in result.evidence and "screenshot" in result.evidence
 
         point = None
         deadline = time.monotonic() + 8

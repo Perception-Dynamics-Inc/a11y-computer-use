@@ -376,6 +376,42 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
     assert landed.evidence == "the caret is in the target paragraph"
 
 
+def test_canvas_click_stays_unverifiable_when_the_tree_changes(tmp_path, monkeypatch) -> None:
+    """Focus moving onto a canvas is not confirmation.
+
+    The accessibility tree cannot see the pixels. The outcome says so and
+    points at crop or a screenshot, even when the tree changed.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    driver.name = "linux"
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        driver._replace("e5", title="focused")
+        return True
+
+    driver.press_element = press  # type: ignore[method-assign]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot_id, ref: object() if ref == "e4" else None)
+    monkeypatch.setattr(
+        _atspi, "opaque_click_verdict",
+        lambda handle: (
+            "unverifiable",
+            "accessibility cannot see inside this canvas or unnamed image, so the click is not confirmed; "
+            "verify with crop or a screenshot",
+        ),
+    )
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("e4")
+    assert result.startswith("clicked ")
+    assert result.outcome == "unverifiable"
+    assert result.outcome != "confirmed"
+    assert "crop" in result.evidence and "screenshot" in result.evidence
+    assert "changed" not in result.evidence
+
+
 def test_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
     driver = TreeDriver()
     runtime = _runtime(tmp_path, driver)

@@ -3743,6 +3743,8 @@ class Runtime:
         verdict = None
         if isinstance(target, Element):
             verdict = self._paragraph_click_verdict(target)
+            if verdict is None:
+                verdict = self._opaque_click_verdict(target)
         return self._conclude(
             text, tool="click", app=app, before=before,
             element=target if isinstance(target, Element) else None,
@@ -3769,6 +3771,33 @@ class Runtime:
 
         def read():
             return _atspi.paragraph_click_verdict(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _opaque_click_verdict(self, element: Element) -> tuple[str, str] | None:
+        """Unverifiable for a canvas or an unnamed image. None for every other target.
+
+        A click on those pixels can move focus, and that accessibility
+        change is not proof the click landed in the drawing. The result
+        says to check a crop or a screenshot instead of reporting confirmed.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.opaque_click_verdict(handle)
 
         try:
             if callable(runner):
@@ -6310,7 +6339,10 @@ def build_server(
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
         reported as success. A click on a LibreOffice text paragraph is
-        confirmed only when the caret is in that paragraph."""
+        confirmed only when the caret is in that paragraph. A click on a
+        canvas or an unnamed image is unverifiable: accessibility cannot
+        see those pixels, so a tree change is not confirmation. The evidence
+        says to verify with crop or a screenshot."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.

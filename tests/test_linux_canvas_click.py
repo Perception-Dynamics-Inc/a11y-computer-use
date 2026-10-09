@@ -182,6 +182,34 @@ def test_chrome_button_still_uses_the_action(atspi, monkeypatch) -> None:
     assert node.action_log == ["click"]
 
 
+def test_canvas_and_unnamed_image_clicks_are_not_confirmed(atspi) -> None:
+    """A tree change is not proof a canvas or unnamed image was hit.
+
+    The pixels are not in the accessibility tree. The verdict is
+    unverifiable and names crop or a screenshot. A named image that is
+    not a canvas, and a button, stay on the normal check.
+    """
+    canvas = _Node(
+        "image", "Drawing board", actions=["click"], x=40, y=80, w=600, h=400,
+        attrs={"tag": "canvas", "id": "board"},
+    )
+    verdict = _atspi.opaque_click_verdict(canvas)
+    assert verdict is not None
+    assert verdict[0] == "unverifiable"
+    assert "crop" in verdict[1] and "screenshot" in verdict[1]
+    assert "confirmed" not in verdict[0]
+
+    blank = _Node("image", "", actions=["click"], x=10, y=10, w=32, h=32)
+    unnamed = _atspi.opaque_click_verdict(blank)
+    assert unnamed is not None and unnamed[0] == "unverifiable"
+    assert "crop" in unnamed[1] and "screenshot" in unnamed[1]
+
+    named = _Node("image", "Logo", actions=["click"], x=10, y=10, w=32, h=32, attrs={"tag": "img"})
+    assert _atspi.opaque_click_verdict(named) is None
+    button = _Node("push button", "Save", actions=["click"], x=10, y=10, w=80, h=24)
+    assert _atspi.opaque_click_verdict(button) is None
+
+
 def test_gtk_image_still_uses_the_action(atspi, monkeypatch) -> None:
     node = _Node("image", "Icon", actions=["click"], x=10, y=10, w=32, h=32, toolkit="gtk")
     element = _element("AXImage", Bounds(0, 10, 10, 32, 32))
