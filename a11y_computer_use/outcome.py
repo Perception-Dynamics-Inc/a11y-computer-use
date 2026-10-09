@@ -250,9 +250,19 @@ def judge(
 
 
 def pid_alive(pid: int) -> bool:
-    """Whether ``pid`` exists. A synthetic snapshot pid that was never alive is not."""
+    """Whether ``pid`` is still running.
+
+    A process that has exited but has not been reaped counts as dead. On
+    Linux that is a zombie in ``/proc``. On macOS it is a ``Z`` state, and
+    signal 0 still succeeds until ``wait``. On Windows ``os.kill(pid, 0)``
+    is ``CTRL_C_EVENT`` and would interrupt the caller, so the exit code is
+    read with ``GetExitCodeProcess`` instead. A synthetic snapshot pid that
+    was never alive is not a crash.
+    """
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -262,19 +272,78 @@ def pid_alive(pid: int) -> bool:
     except OSError:
         return False
     if sys.platform.startswith("linux"):
-        # A zombie still has a /proc entry and still accepts signal 0. The
-        # process has already exited; the parent has not reaped it. A click
-        # that quits the target is this case until the caller calls wait.
-        try:
-            with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as handle:
-                text = handle.read()
-        except OSError:
-            return False
-        end = text.rfind(")")
-        if end == -1 or end + 2 >= len(text):
-            return False
-        return text[end + 2] not in {"Z", "X"}
+        return _linux_pid_alive(pid)
+    if sys.platform == "darwin":
+        return not _darwin_zombie(pid)
     return True
+
+
+def _linux_pid_alive(pid: int) -> bool:
+    """False for a zombie or a pid that disappeared between the signal and the read."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    end = text.rfind(")")
+    if end == -1 or end + 2 >= len(text):
+        return False
+    return text[end + 2] not in {"Z", "X"}
+
+
+def _darwin_zombie(pid: int) -> bool:
+    """True when ``ps`` reports a zombie. Signal 0 cannot see that state."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    state = completed.stdout.strip()
+    if completed.returncode != 0 or not state:
+        return True
+    return state.startswith("Z")
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """True while the process has not exited.
+
+    An unreaped process still has a handle. ``GetExitCodeProcess`` returns
+    ``STILL_ACTIVE`` only while it is running.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        if ctypes.get_last_error() == error_access_denied:
+            return True
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def wait_until_dead(pid: int, wait_s: float) -> bool:
