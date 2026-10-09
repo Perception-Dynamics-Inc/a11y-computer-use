@@ -153,6 +153,33 @@ def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
     assert checked["title"] == "Toolbar" and checked["checked"] is True
 
 
+def test_qt_checkable_menu_item_reports_checked_true_or_false() -> None:
+    """A Qt QAction stays role ``menu item`` and adds the CHECKABLE state.
+
+    Off is false, on is true. Qt 6.4 sets CHECKED and not CHECKABLE, so an
+    on item is still true. A plain item in the same menu stays None, and a
+    GTK check menu item is unchanged.
+    """
+    plain = _item("Do Thing")
+    off = _item("Option X", states=("sensitive", "enabled", "checkable"))
+    on = _item("Option X", states=("sensitive", "enabled", "checkable", "checked"))
+    qt64 = _item("Option X", states=("sensitive", "enabled", "checked"))
+    gtk = _item("Toolbar", role="check menu item", states=("sensitive", "enabled", "checked"))
+
+    def listed(item):
+        bar = Acc("menu bar", "", [_menu("Tools", plain, item)])
+        app = Acc("application", "qtx", [Acc("frame", "qtx", [bar], states={"active"})])
+        rows = _linux_menus.menu_items(app, "Tools")
+        return next(row for row in rows if row["title"] == item.name)
+
+    assert listed(off)["checked"] is False
+    assert listed(on)["checked"] is True
+    assert listed(qt64)["checked"] is True
+    assert listed(plain)["checked"] is None
+    assert listed(gtk)["checked"] is True
+    assert _linux_menus._checked(plain) is None
+
+
 def test_named_popup_child_is_the_menu_not_an_extra_item() -> None:
     app = named_popup_app()
     assert [row["title"] for row in _linux_menus.menu_items(app, "File")] == ["New", "Save"]

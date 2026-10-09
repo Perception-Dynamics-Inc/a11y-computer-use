@@ -222,9 +222,21 @@ def _key_binding(node: object) -> str:
 
 
 def _checked(node: object) -> bool | None:
-    if _role(node) not in ("check menu item", "radio menu item"):
+    """True, false, or None when the item is not a check at all.
+
+    GTK uses the roles ``check menu item`` and ``radio menu item``. Qt keeps
+    the role ``menu item``. A bridge that sets ``CHECKABLE`` reports false
+    when the action is off and true when ``CHECKED`` is also set. Qt 6.4
+    publishes ``CHECKED`` when the action is on and does not publish
+    ``CHECKABLE``, so an on item is true and an off item stays None. A plain
+    item stays None.
+    """
+    role = _role(node)
+    checkable = role in ("check menu item", "radio menu item") or _has_state(node, "CHECKABLE")
+    checked = _has_state(node, "CHECKED")
+    if not checkable and not checked:
         return None
-    return _has_state(node, "CHECKED")
+    return checked
 
 
 def _describe(node: object) -> MenuItem:
