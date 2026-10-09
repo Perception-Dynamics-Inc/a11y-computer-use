@@ -327,6 +327,11 @@ def resolve_launch(
                     break
             if not concrete and len(granted_terms) == 1:
                 concrete = granted_terms[0]
+            # The label is not in any terminal group, so a grant does not match
+            # it by identity. The chosen grant is still a resolved launch, even
+            # when no desktop file is named Terminal.
+            if concrete:
+                hit = concrete
         if not concrete:
             for entry in matched:
                 exe = str(entry.get("exec") or "")

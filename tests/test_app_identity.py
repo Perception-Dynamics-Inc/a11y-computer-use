@@ -113,6 +113,19 @@ def test_resolve_launch_rewrites_labels_and_rejects_unknown_names() -> None:
     assert other_terminal.gate_key != "xterm"
     assert same_app(other_terminal.gate_key or "", "xterm") is False
 
+    # CI installs xterm and no desktop file named Terminal. The grant alone resolves.
+    bare = resolve_launch(
+        "Terminal", granted=["pcmanfm", "xterm"], entries=[], path_lookup=lambda _name: None,
+    )
+    assert bare.resolved is True
+    assert bare.launch_name == "xterm"
+    assert bare.gate_key == "xterm"
+
+    ambiguous = resolve_launch(
+        "Terminal", granted=["xterm", "kitty"], entries=[], path_lookup=lambda _name: None,
+    )
+    assert ambiguous.resolved is False
+
 
 def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_errors(
     tmp_path, monkeypatch,
@@ -153,12 +166,16 @@ def test_launch_uses_the_granted_alias_and_unknown_names_are_not_permission_erro
     store = safety.PermissionStore(tmp_path / "p.json")
     store.set_tier("thunar", Tier.CLICK)
     store.set_tier("soffice", Tier.CLICK)
+    store.set_tier("xterm", Tier.FULL)
     runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
     runtime.APP_LAUNCH_WAIT_S = 1
     text = runtime.app("launch", "Files")
     assert "needs_permission" not in text
     assert "ask the user" not in text
     assert launched == ["thunar"]
+    terminal = runtime.app("launch", "Terminal")
+    assert "needs_permission" not in terminal
+    assert launched == ["thunar", "xterm"]
 
     with pytest.raises(ComputerUseError) as exc:
         runtime.app("launch", "not-a-real-app-zz9")
