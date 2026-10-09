@@ -168,6 +168,54 @@ def test_controls_inside_an_empty_text_container_are_kept() -> None:
     assert observe.find_elements(snap, role="checkbox")
 
 
+def test_div_sentence_on_a_group_is_findable_and_a_button_wrapper_collapses() -> None:
+    """Synthetic tree. The div's value is the sentence, so find does not need the fragments.
+
+    Firefox keeps only the link under that group. A valueless group would
+    collapse onto the link and the sentence would be gone. A group whose
+    only child is a button still collapses onto the button.
+    """
+    tree = ax(
+        "AXWindow",
+        title="Doc",
+        at=(0.0, 0.0),
+        size=(800.0, 400.0),
+        children=[
+            ax(
+                "AXGroup",
+                value="Div with span text and a link inside.",
+                at=(20.0, 20.0),
+                size=(500.0, 24.0),
+                children=[
+                    ax(
+                        "AXLink",
+                        title="a link",
+                        at=(180.0, 20.0),
+                        size=(50.0, 24.0),
+                        actions=("AXPress",),
+                    ),
+                ],
+            ),
+            ax(
+                "AXGroup",
+                at=(20.0, 60.0),
+                size=(120.0, 30.0),
+                children=[button("Div button", (24.0, 60.0))],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    sentence = "Div with span text and a link inside."
+    assert any(sentence in str(el.value or "") for el in snap.elements)
+    for text in ("Div with span", "span text and", "a link inside", "Div with"):
+        assert observe.find_elements(snap, text=text), text
+    assert any(el.title == "a link" and el.role == "AXLink" for el in snap.elements)
+    assert any(el.title == "Div button" for el in snap.elements)
+    assert not any(
+        el.role == "AXGroup" and not el.title and el.value is None for el in snap.elements
+    )
+
+
 def test_find_treats_nbsp_as_a_space() -> None:
     tree = ax(
         "AXWindow",

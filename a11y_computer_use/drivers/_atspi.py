@@ -429,6 +429,32 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     return ""
 
 
+def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
+    """The readable text of a ``<div>`` whose children are inline.
+
+    AT-SPI exposes that div as a section, and a section is a group, so the
+    value read is skipped. Chromium's text is the sentence with one U+FFFC
+    per link, and the same words are also separate static-text children, so
+    find cannot match a phrase that crosses them. Firefox exposes that same
+    string and no static-text children, so the valueless group collapses
+    onto the link and the words disappear. A div whose text is only an
+    embedded control (a button wrapper, ``\\ufffc``) stays valueless and
+    still collapses onto that control. A choice control is not spliced in.
+    """
+    if role_str != "section":
+        return None
+    if str(attrs.get("tag") or "").lower() != "div":
+        return None
+    raw = _direct_text(acc)
+    if not raw.replace(_OBJECT_REPLACEMENT, "").strip():
+        return None
+    if _OBJECT_REPLACEMENT in raw:
+        expanded = _expand_embedded(acc, raw)
+        if expanded.strip():
+            return expanded
+    return raw.strip() or None
+
+
 def _expand_embedded(acc, text: str, depth: int = 0) -> str:
     """Replace each U+FFFC with the embedded child's text.
 
@@ -996,6 +1022,13 @@ class ATSPIAccessor:
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
                 checked = flag == "true"
+        # Groups skip the value probe. A div is a section, and its text is
+        # the inline sentence; reading that one string is what find matches.
+        value = None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str)
+        if value is None:
+            sentence = _div_inline_sentence(node, role_str, attrs)
+            if sentence:
+                value = sentence
         return RawNode(
             role=role,
             subrole=None,
@@ -1007,8 +1040,7 @@ class ATSPIAccessor:
             position=position,
             size=size,
             actions=_action_names(node),
-            # skip the value probe (2 D-Bus calls) on roles that never have one
-            value=None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str),
+            value=value,
             checked=checked,
             selected=selected,
             expanded=expanded,
