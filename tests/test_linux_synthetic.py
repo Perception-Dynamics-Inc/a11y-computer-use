@@ -1685,6 +1685,46 @@ def test_firefox_hidden_documents_are_pruned_and_not_clickable(monkeypatch) -> N
     assert tree["products"].pressed is False
 
 
+def test_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch) -> None:
+    """Synthetic tree. A ref whose node is still in a hidden document is
+    not_showing. A DEFUNCT node is stale_ref. Not a live Firefox."""
+    from a11y_computer_use.schema import Bounds, Element, Scope, Snapshot
+
+    tree = _firefox_documents()
+    products = Element(
+        "e49", "AXLink", "Products", None, Bounds(0, 8, 234, 67, 23), "snap-old",
+        clickable=True,
+    )
+    old = Snapshot("snap-old", Scope.WINDOW, "firefox", 1, 0.0, (), (products,))
+    live = Snapshot("snap-live", Scope.WINDOW, "firefox", 1, 0.0, (), ())
+    observe._register_epoch("snap-old", {}, {"e49": tree["products"]})
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "snapshot", lambda *_args, **_kwargs: live)
+
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e49")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["next"][0] == "foreground"
+    assert "re-observe" not in exc.value.message
+
+    tree["products"].states.add("DEFUNCT")
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: tree["frame"])
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e49")
+    assert exc.value.code is ErrorCode.STALE_REF
+
+    tree["products"].states.discard("DEFUNCT")
+    observe._register_epoch("snap-old", {}, {})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.resolve_ref(old, "e49")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_showing"
+    assert exc.value.detail["outcome"] == "refused"
+
+
 def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
     field = _KeyClearedWebField("bench-value-0")
     sent: list[str] = []

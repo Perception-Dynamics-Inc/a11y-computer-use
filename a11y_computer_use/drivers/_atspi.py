@@ -3374,6 +3374,64 @@ def _hidden_gecko_browser(node) -> bool:
     return False
 
 
+def accessible_gone(acc) -> bool:
+    """True when ``acc`` is missing or Firefox has destroyed it.
+
+    A background-tab node is still alive: it has a role and is not DEFUNCT.
+    A node removed from the document is DEFUNCT, or it no longer answers
+    with a role. That one is gone, not merely hidden.
+    """
+    if acc is None:
+        return True
+    try:
+        if _state_has(acc, "DEFUNCT"):
+            return True
+    except Exception:
+        return True
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return True
+    return not bool(role)
+
+
+def hidden_named_target(root, ax_role: str, title: str) -> bool:
+    """True when a live node of ``ax_role`` and ``title`` sits in a hidden document.
+
+    The snapshot prunes that document, so a ref into it fails to rematch and
+    would otherwise be reported as stale. A match that is showing is not this
+    case: the element really left the tree the ref was issued against. A
+    DEFUNCT node is skipped. GTK and Chromium trees are not walked.
+    """
+    if root is None or not ax_role or not title or not _gecko_app(root):
+        return False
+    hidden = False
+    showing = False
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 400:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        if accessible_gone(node):
+            continue
+        mapped = _ROLE.get(_role_name(node), "")
+        if mapped == ax_role and _node_name(node) == title:
+            if hidden_web_target(node):
+                hidden = True
+            else:
+                showing = True
+            if hidden and showing:
+                break
+        count = min(_child_count(node), 40)
+        for index in range(count):
+            queue.append(_child_at(node, index))
+    return hidden and not showing
+
+
 def hidden_web_target(acc) -> bool:
     """True when ``acc`` sits in a Firefox document that is not showing.
 

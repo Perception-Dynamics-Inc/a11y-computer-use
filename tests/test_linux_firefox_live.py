@@ -319,6 +319,56 @@ def test_firefox_hidden_tabs_are_absent_and_not_clickable(firefox_form, tmp_path
     assert not any(el.title == "Products" for el in again.elements)
 
 
+def test_firefox_background_ref_is_not_showing_not_stale(firefox_form, tmp_path) -> None:
+    """Live Firefox. A ref issued while the form was showing is not_showing
+    after that tab is in the background. The node is still alive. The error
+    is refused, and it does not say re-observe."""
+    driver = firefox_form
+    runtime = _runtime(tmp_path, driver)
+    runtime.desktop_snapshot("firefox")
+    snap = runtime._current
+    assert snap is not None
+    name = _field(snap, "Name")
+    assert name is not None, _dump(driver)
+    ref = name.ref
+    tab = next(
+        (el for el in snap.elements if el.title == "Firefox Privacy Notice" and "tab" in el.role.lower()),
+        None,
+    )
+    if tab is None:
+        tab = next((el for el in snap.elements if el.title == "Firefox Privacy Notice"), None)
+    assert tab is not None, _dump(driver)
+    runtime.click(tab.ref)
+    deadline = time.monotonic() + 6
+    hidden = False
+    while time.monotonic() < deadline:
+        seen = driver.snapshot(Scope.WINDOW, "firefox")
+        if not any(el.title == "Name" for el in seen.elements):
+            hidden = True
+            break
+        time.sleep(0.25)
+    assert hidden, _dump(driver)
+    try:
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click(ref)
+        assert exc.value.code is ErrorCode.UNSUPPORTED
+        assert exc.value.detail["reason"] == "not_showing"
+        assert exc.value.detail["outcome"] == "refused"
+        assert "re-observe" not in exc.value.message
+    finally:
+        back = driver.snapshot(Scope.WINDOW, "firefox")
+        form_tab = next(
+            (el for el in back.elements if el.title == "Form Probe" and "tab" in el.role.lower()),
+            None,
+        )
+        if form_tab is not None:
+            runtime.desktop_snapshot("firefox")
+            try:
+                runtime.click(form_tab.ref)
+            except ComputerUseError:
+                pass
+
+
 def _wait_values(driver, expected: dict[str, str], timeout_s: float = 4.0):
     deadline = time.monotonic() + timeout_s
     last = None

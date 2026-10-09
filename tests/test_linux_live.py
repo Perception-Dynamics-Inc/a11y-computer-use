@@ -2344,3 +2344,182 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
     finally:
         _stop(proc)
         log.close()
+
+_OUTCOME_APP = "cuaoutcome"
+
+_GTK_OUTCOME = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuaoutcome")
+    win = Gtk.Window(title="cuaoutcome")
+    win.set_name("cuaoutcome")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    entry = Gtk.Entry()
+    btn = Gtk.Button(label="Save")
+    btn.connect("clicked", lambda _b: entry.set_text("SAVED"))
+    idle = Gtk.Button(label="Idle label")
+    idle.connect("clicked", lambda _b: None)
+    box.pack_start(btn, False, False, 0)
+    box.pack_start(idle, False, False, 0)
+    box.pack_start(entry, False, False, 0)
+    win.add(box)
+    win.set_default_size(400, 220)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+_CRASH_APP = "cuacrashapp"
+
+_GTK_CRASH = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuacrashapp")
+    win = Gtk.Window(title="cuacrashapp")
+    win.set_name("cuacrashapp")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    btn = Gtk.Button(label="Boom")
+    btn.connect("clicked", lambda _b: GLib.idle_add(Gtk.main_quit))
+    box.pack_start(btn, False, False, 0)
+    win.add(box)
+    win.set_default_size(320, 120)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_named(tmp_path, source: str, filename: str) -> subprocess.Popen:
+    script = tmp_path / filename
+    script.write_text(source)
+    return subprocess.Popen([sys.executable, str(script)])
+
+
+def _wait_app(driver, app: str, predicate, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if last.elements and predicate(last):
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_click_that_changes_state_is_confirmed(tmp_path) -> None:
+    """Live GTK. Pressing Save writes SAVED. The sentence stays, and the
+    outcome is confirmed from the entry's new value."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.clickable and el.title == "Save" for el in shot.elements),
+        )
+        assert snap is not None, "the outcome window never appeared"
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP)
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.clickable and el.title == "Save")
+        result = runtime.click(button.ref)
+        assert str(result).startswith(f"clicked {button.ref}")
+        assert result == str(result)
+        deadline = time.monotonic() + 4
+        saved = False
+        while time.monotonic() < deadline:
+            after = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+            saved = any((el.value or "") == "SAVED" for el in after.elements)
+            if saved:
+                break
+            time.sleep(0.2)
+        assert saved, [(el.role, el.title, el.value) for el in after.elements]
+        assert result.outcome == "confirmed"
+        assert result.next == ()
+        assert result.evidence
+    finally:
+        _stop(proc)
+
+
+def test_linux_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
+    """Live GTK. Idle label is a button whose handler does nothing. The press
+    goes through AT-SPI. The second press does not change the tree, so the
+    outcome is suspected_noop. The sentence stays the click sentence."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_named(tmp_path, _GTK_OUTCOME, "cuaoutcome.py")
+    try:
+        snap = _wait_app(
+            driver, _OUTCOME_APP,
+            lambda shot: any(el.title == "Idle label" for el in shot.elements),
+        )
+        assert snap is not None, "the outcome window never appeared"
+        runtime = _runtime_for(tmp_path, driver, _OUTCOME_APP)
+        label = next(el for el in snap.elements if el.title == "Idle label")
+        runtime._current = snap
+        first = runtime.click(label.ref)
+        assert str(first).startswith("clicked ")
+        runtime.desktop_snapshot(_OUTCOME_APP)
+        again = runtime._current
+        assert again is not None
+        label = next(el for el in again.elements if el.title == "Idle label")
+        result = runtime.click(label.ref)
+        assert str(result).startswith(f"clicked {label.ref}")
+        assert result.outcome == "suspected_noop"
+        assert "did not change" in result.evidence
+        assert result.next
+        assert result.next[0] in {"ref", "coordinates"}
+        after = driver.snapshot(Scope.WINDOW, _OUTCOME_APP)
+        assert not any((el.value or "") == "SAVED" for el in after.elements)
+    finally:
+        _stop(proc)
+
+
+def test_linux_click_that_exits_the_process_is_not_confirmed(tmp_path) -> None:
+    """Live GTK. Boom quits the process. The click was delivered, and the
+    outcome is partial, not confirmed."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_named(tmp_path, _GTK_CRASH, "cuacrash.py")
+    try:
+        snap = _wait_app(
+            driver, _CRASH_APP,
+            lambda shot: any(el.clickable and el.title == "Boom" for el in shot.elements),
+        )
+        assert snap is not None, "the crash window never appeared"
+        assert snap.pid == proc.pid, f"snapshot pid {snap.pid} is not the app pid {proc.pid}"
+        runtime = _runtime_for(tmp_path, driver, _CRASH_APP)
+        runtime._PROCESS_SETTLE_S = 1.5
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.clickable and el.title == "Boom")
+        result = runtime.click(button.ref)
+        assert str(result).startswith(f"clicked {button.ref}")
+        assert result.outcome == "partial"
+        assert result.outcome != "confirmed"
+        assert "exited after the action" in result.evidence
+        assert result.next == ("ref", "foreground")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        assert proc.poll() is not None
+    finally:
+        _stop(proc)

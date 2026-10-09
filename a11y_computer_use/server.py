@@ -59,7 +59,7 @@ if sys.platform == "darwin":
         NSWorkspace,
     )
 
-from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, reporting, safety
+from a11y_computer_use import __version__, conditions, drivers, notes, observe, ocr, onboarding, outcome, reporting, safety
 from a11y_computer_use.untrusted import DomainPolicy, env_flag, fence as fence_text, looks_like_url
 from a11y_computer_use.menus import parse_path as menus_parse
 
@@ -1827,6 +1827,166 @@ class Runtime:
         )
         return result
 
+    # How long to watch a live Linux pid after an action. A click handler that
+    # quits on the next main-loop turn is still alive when the call returns.
+    _PROCESS_SETTLE_S = 0.3
+
+    def _capture(self) -> dict | None:
+        """The current snapshot, and whether its pid is a live Linux process.
+
+        Taken before the action. A later snapshot is compared with it. The
+        pid check is Linux-only: hermetic snapshots stamp a fake pid, and a
+        pid that was not alive before the action is not a crash.
+        A Runtime built with ``__new__`` in a test has no snapshot yet.
+        """
+        snap = getattr(self, "_current", None)
+        if snap is None:
+            return None
+        pid = snap.pid
+        alive = False
+        if (
+            getattr(self.driver, "name", None) == "linux"
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid > 0
+        ):
+            alive = outcome.pid_alive(pid)
+        # Fingerprints are taken now. A driver that mutates the same element
+        # objects would otherwise make the before and after trees look alike.
+        return {
+            "snap": snap,
+            "state": outcome.state_fingerprint(snap),
+            "bounds": outcome.bounds_fingerprint(snap),
+            "pid": pid,
+            "app": snap.app,
+            "pid_alive": alive,
+        }
+
+    def _reread(self, app: str | None) -> "Snapshot | None":
+        """A fresh snapshot used only to judge the action. The ref epoch stays.
+
+        With no snapshot yet there is nothing to compare, so this does not
+        observe. A click that never took a tree stays on that path.
+        """
+        if not app or getattr(self, "_current", None) is None:
+            return None
+        try:
+            return self.driver.snapshot(Scope.WINDOW, app)
+        except Exception:
+            return None
+
+    def _process_died(self, before: dict | None) -> bool:
+        if not before or not before.get("pid_alive"):
+            return False
+        pid = before.get("pid")
+        if not isinstance(pid, int):
+            return False
+        return outcome.wait_until_dead(pid, self._PROCESS_SETTLE_S)
+
+    def _element_like(self, element: Element, snap: "Snapshot") -> Element | None:
+        """The same control in a later snapshot. Refs are not stable across epochs."""
+        same_path = [
+            el for el in snap.elements
+            if el.role == element.role and el.title == element.title and el.path == element.path
+        ]
+        if len(same_path) == 1:
+            return same_path[0]
+        same_name = [
+            el for el in snap.elements
+            if el.role == element.role and el.title == element.title
+        ]
+        if len(same_name) == 1:
+            return same_name[0]
+        if element.stable_id:
+            for el in snap.elements:
+                if el.stable_id == element.stable_id:
+                    return el
+        return same_path[0] if same_path else (same_name[0] if same_name else None)
+
+    def _focused_editable(self, snap: "Snapshot | None") -> Element | None:
+        if snap is None:
+            return None
+        focused = [el for el in snap.elements if el.focused and el.editable]
+        if focused:
+            return focused[0]
+        return next((el for el in snap.elements if el.focused), None)
+
+    def _judge_mutation(
+        self,
+        app: str | None,
+        before: dict | None,
+        element: Element | None,
+        requested: str | None,
+        *,
+        bounds: bool = False,
+        previous: str | None = None,
+    ) -> tuple[str, str]:
+        died = self._process_died(before)
+        after = self._reread(app)
+        readable = after is not None and before is not None
+        changed: bool | None = None
+        if readable and before is not None and after is not None:
+            changed = before["state"] != outcome.state_fingerprint(after)
+            if bounds and not changed:
+                changed = before["bounds"] != outcome.bounds_fingerprint(after)
+        readback = None
+        before_value = previous
+        if requested is not None and after is not None:
+            if element is not None:
+                match = self._element_like(element, after)
+                if match is not None:
+                    readback = "" if match.value is None else str(match.value)
+            else:
+                focused = self._focused_editable(after)
+                earlier = self._focused_editable(before["snap"]) if before else None
+                if focused is not None:
+                    readback = "" if focused.value is None else str(focused.value)
+                if before_value is None and earlier is not None:
+                    before_value = "" if earlier.value is None else str(earlier.value)
+            if readback is None:
+                readable = False
+        return outcome.judge(
+            changed=changed,
+            requested=requested,
+            readback=readback,
+            before_value=before_value,
+            process_died=died,
+            readable=readable if requested is None else readback is not None or not died,
+        )
+
+    def _conclude(
+        self,
+        text: str,
+        *,
+        tool: str,
+        app: str | None = None,
+        before: dict | None = None,
+        element: Element | None = None,
+        requested: str | None = None,
+        had_ref: bool = False,
+        bounds: bool = False,
+        previous: str | None = None,
+        verdict: tuple[str, str] | None = None,
+    ) -> outcome.ActionResult:
+        """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
+        if verdict is None:
+            judged, evidence = self._judge_mutation(
+                app, before, element, requested, bounds=bounds, previous=previous,
+            )
+        else:
+            judged, evidence = verdict
+        died = "exited after the action" in evidence
+        browser = getattr(self.driver, "name", None) == "browser"
+        return outcome.ActionResult(
+            text,
+            outcome=judged,
+            next=outcome.suggest_next(
+                tool, judged, had_ref=had_ref or element is not None, browser=browser,
+                process_died=died,
+            ),
+            evidence=evidence,
+        )
+
     def _effect_after(self, pre: "Snapshot | None") -> str:
         """Effect Receipt: re-snapshot ``pre``'s app after a mutating action and
         return the rendered diff (what changed), advancing the ref epoch. Returns
@@ -2893,6 +3053,7 @@ class Runtime:
         self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="click")
         action = Click(target=target, button=parsed_button, count=count, modifiers=mods)
+        before = self._capture()
 
         menu_note: list[str] = []
 
@@ -2924,7 +3085,12 @@ class Runtime:
         self._run_gated(action, app, execute, confirm=confirm)
         msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
-        return f"{msg}\n\neffect: {effect}" if effect else msg
+        text = f"{msg}\n\neffect: {effect}" if effect else msg
+        return self._conclude(
+            text, tool="click", app=app, before=before,
+            element=target if isinstance(target, Element) else None,
+            had_ref=ref is not None,
+        )
 
     @_serialized
     def hover(
@@ -3209,6 +3375,9 @@ class Runtime:
         action = TypeText(text=text)
         target = self._background_target(app)
         note: list[str] = []
+        before = self._capture()
+        focused = self._focused_editable(self._current)
+        previous = None if focused is None or focused.value is None else str(focused.value)
         if target is not None:
             bundle, pid = target
 
@@ -3221,9 +3390,10 @@ class Runtime:
 
             typed = self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
             count = typed if isinstance(typed, int) and not isinstance(typed, bool) else len(text)
-            return (
+            return self._conclude(
                 f"typed {count} characters into {bundle} "
-                "(addressed to its process; nothing was activated)"
+                "(addressed to its process; nothing was activated)",
+                tool="type", app=bundle, before=before, requested=text, previous=previous,
             )
         front = self._frontmost()
 
@@ -3236,7 +3406,10 @@ class Runtime:
             return len(text)
 
         count = self._run_gated(action, front, execute, recheck=self._recheck_frontmost_app)
-        return f"typed {count} characters{''.join(note)}"
+        return self._conclude(
+            f"typed {count} characters{''.join(note)}",
+            tool="type", app=front, before=before, requested=text, previous=previous,
+        )
 
     def _validate_chord(self, chord: str) -> None:
         """Reject a chord this driver cannot press, before the permission gate.
@@ -3274,6 +3447,7 @@ class Runtime:
         action = KeyChord(chord=chord)
         target = self._background_target(app)
         note: list[str] = []
+        before = self._capture()
         if target is not None:
             bundle, pid = target
 
@@ -3282,7 +3456,10 @@ class Runtime:
                 self.driver.key_chord(chord, pid=self._input_pid(pid))
 
             self._run_gated(action, bundle, execute_bg, recheck=self._recheck_pid(bundle, pid))
-            return f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)"
+            return self._conclude(
+                f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
+                tool="key", app=bundle, before=before,
+            )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
         # frontmost name empty. A named foreign app stays the gate key so the
@@ -3302,7 +3479,10 @@ class Runtime:
                 self.driver.key_chord(chord)
 
         self._run_gated(action, target, execute, recheck=self._recheck_key_target)
-        return f"pressed {chord}{''.join(note)}"
+        return self._conclude(
+            f"pressed {chord}{''.join(note)}",
+            tool="key", app=target, before=before,
+        )
 
     @_serialized
     def scroll(
@@ -3320,6 +3500,7 @@ class Runtime:
         self._reject_coordinate(ref, x, y, display_id)
         target, app = self._target(ref, x, y, display_id, kind="scroll")
         action = Scroll(target=target, dx=dx, dy=dy, unit=parsed_unit)
+        before = self._capture()
 
         def execute() -> None:
             self._refuse_disabled(target, verb="scroll")
@@ -3344,8 +3525,14 @@ class Runtime:
             recheck=lambda gated, target=target: self._recheck_enabled_target(gated, target),
         )
         if into_view:
-            return f"scrolled {self._label(ref, target)} into view"
-        return f"scrolled {self._label(ref, target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
+            text = f"scrolled {self._label(ref, target)} into view"
+        else:
+            text = f"scrolled {self._label(ref, target)} by (dx={dx}, dy={dy}) {parsed_unit.value}"
+        return self._conclude(
+            text, tool="scroll", app=app, before=before,
+            element=target if isinstance(target, Element) else None,
+            had_ref=ref is not None, bounds=True,
+        )
 
     @_serialized
     def drag(
@@ -3614,6 +3801,8 @@ class Runtime:
         the value."""
         snap, live = self._resolve(ref, "typetext")
         app = snap.app or self._frontmost()
+        before = self._capture()
+        previous = "" if live.value is None else str(live.value)
         if live.secure:
             self._record_failure(
                 "typetext", app=app, params={"ref": ref, "role": live.role},
@@ -3652,7 +3841,13 @@ class Runtime:
 
         self._run_gated(action, app, execute)
         shown = landed[-1] if landed else value
-        return f"set {ref} = {shown!r}"
+        choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
+        return self._conclude(
+            f"set {ref} = {shown!r}",
+            tool="select" if choice else "set_value",
+            app=app, before=before, element=live, requested=value,
+            had_ref=True, previous=previous,
+        )
 
     @_serialized
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
@@ -4038,7 +4233,10 @@ class Runtime:
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
             rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self.driver.running_apps)
-            return json.dumps(rows)
+            return self._conclude(
+                json.dumps(rows), tool="app",
+                verdict=("confirmed", f"listed {len(rows)} apps"),
+            )
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
@@ -4088,10 +4286,19 @@ class Runtime:
 
             title = self._run_gated(AppOp(verb=verb, app=gate_key), gate_key, launch)
             if self._resolves_apps():
-                return f"launched {name}"
+                return self._conclude(
+                    f"launched {name}", tool="app",
+                    verdict=("confirmed", f"launched {name}"),
+                )
             if title is None:
-                return f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s"
-            return f"launched {name}; first window: {title!r}"
+                return self._conclude(
+                    f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s",
+                    tool="app", verdict=("partial", "no window appeared"),
+                )
+            return self._conclude(
+                f"launched {name}; first window: {title!r}", tool="app",
+                verdict=("confirmed", f"first window {title!r} appeared"),
+            )
         if verb is AppVerb.QUIT:
             _running, bundle = self._resolve_app(name)
 
@@ -4135,7 +4342,14 @@ class Runtime:
                             "changes) and needs a human decision")
                 return f"sent quit to {bundle}; it is still running"
 
-            return self._run_gated(AppOp(verb=verb, app=bundle), bundle, quit_app)
+            text = self._run_gated(AppOp(verb=verb, app=bundle), bundle, quit_app)
+            if text.startswith(f"quit {bundle}"):
+                verdict = ("confirmed", f"{bundle} is not running")
+            elif "dialog" in text:
+                verdict = ("partial", f"{bundle} is showing a dialog")
+            else:
+                verdict = ("partial", f"{bundle} is still running")
+            return self._conclude(text, tool="app", verdict=verdict)
         running, bundle = self._resolve_app(name)  # FOCUS
         try:
             pid = int(running.processIdentifier()) if running is not None else None
@@ -4153,12 +4367,21 @@ class Runtime:
         if front:
             cover = self._window_cover(name, bundle)
             if cover:
-                return (f"focused {bundle}, but its window is covered by {cover} at its centre (a "
-                        f"floating window?): the user cannot see it, and coordinate input there would "
-                        f"be refused. Ref actions still work; to show it, raise it with window raise or "
-                        f"ask the user to move {cover}.")
-            return f"focused {bundle}"
-        return f"activated {bundle}, but it is not frontmost yet (another app may hold focus)"
+                return self._conclude(
+                    f"focused {bundle}, but its window is covered by {cover} at its centre (a "
+                    f"floating window?): the user cannot see it, and coordinate input there would "
+                    f"be refused. Ref actions still work; to show it, raise it with window raise or "
+                    f"ask the user to move {cover}.",
+                    tool="app", verdict=("partial", f"covered by {cover}"),
+                )
+            return self._conclude(
+                f"focused {bundle}", tool="app",
+                verdict=("confirmed", f"{bundle} is frontmost"),
+            )
+        return self._conclude(
+            f"activated {bundle}, but it is not frontmost yet (another app may hold focus)",
+            tool="app", verdict=("partial", f"{bundle} is not frontmost"),
+        )
 
     def _window_cover(self, name: str, bundle: str) -> str | None:
         """Who owns the pixel at the centre of the app's first window, when that
@@ -4198,22 +4421,50 @@ class Runtime:
         if verb is MenuVerb.LIST:
             rows = self._run_gated(MenuOp(verb=verb, app=bundle, path=path or ""), bundle,
                                    lambda: self.driver.menu_items(app, path))
-            return json.dumps(rows)
+            return self._conclude(
+                json.dumps(rows), tool="menu",
+                verdict=("confirmed", f"listed {len(rows)} menu items"),
+            )
         if verb is MenuVerb.STATE:
             state = self._run_gated(MenuOp(verb=verb, app=bundle, path=""), bundle,
                                     lambda: self.driver.menu_state(app))
-            return json.dumps(state)
+            return self._conclude(
+                json.dumps(state), tool="menu",
+                verdict=("confirmed", "read the menu state"),
+            )
         if verb is MenuVerb.CLOSE:
             closed = self._run_gated(MenuOp(verb=verb, app=bundle, path=""), bundle,
                                      lambda: self.driver.menu_close(app))
-            return (f"closed menu {' > '.join(closed)} in {bundle}" if closed
-                    else f"no menu was open in {bundle}")
+            if closed:
+                return self._conclude(
+                    f"closed menu {' > '.join(closed)} in {bundle}", tool="menu",
+                    verdict=("confirmed", f"closed {' > '.join(closed)}"),
+                )
+            return self._conclude(
+                f"no menu was open in {bundle}", tool="menu",
+                verdict=("suspected_noop", f"no menu was open in {bundle}"),
+            )
         if not path:
             raise ValueError("menu press requires path, e.g. 'File > Save'")
         menus_parse(path)  # validate before gating, so a malformed path fails fast
+        before_menu = None
+        try:
+            before_menu = self.driver.menu_state(bundle)
+        except Exception:
+            before_menu = None
+        before = self._capture()
         title = self._run_gated(MenuOp(verb=verb, app=bundle, path=path), bundle,
                                 lambda: self.driver.menu_press(app, path), confirm=confirm)
-        return f"pressed menu item {title!r} in {bundle}"
+        text = f"pressed menu item {title!r} in {bundle}"
+        try:
+            after_menu = self.driver.menu_state(bundle)
+        except Exception:
+            after_menu = None
+        if before_menu is not None and after_menu is not None and before_menu != after_menu:
+            return self._conclude(
+                text, tool="menu", verdict=("confirmed", "the menu state changed"),
+            )
+        return self._conclude(text, tool="menu", app=bundle, before=before)
 
     @_serialized
     def file_dialog(self, action: str, path: str, app: str | None = None) -> str:
@@ -4272,12 +4523,26 @@ class Runtime:
                              "bounds": {"display_id": b.display_id, "x": b.x, "y": b.y,
                                         "width": b.width, "height": b.height}}
                             for wid, b, title in _windows_all_spaces(bundle, with_titles=True)]
-                return json.dumps(rows)
+                return self._conclude(
+                    json.dumps(rows), tool="window",
+                    verdict=("confirmed", f"listed {len(rows)} windows"),
+                )
             front = self._frontmost()
             if not str(front or "").strip() or front == "unknown":
-                return self._list_windows_without_focus()
+                listed = self._list_windows_without_focus()
+                try:
+                    count = len(json.loads(listed))
+                except json.JSONDecodeError:
+                    count = 0
+                return self._conclude(
+                    listed, tool="window", verdict=("confirmed", f"listed {count} windows"),
+                )
             rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
-            return json.dumps([_window_row(r) for r in rows])
+            shown = [_window_row(r) for r in rows]
+            return self._conclude(
+                json.dumps(shown), tool="window",
+                verdict=("confirmed", f"listed {len(shown)} windows"),
+            )
         platform = str(getattr(self.driver, "name", None) or "this platform")
         method_name = _WINDOW_METHODS.get(verb)
         method = getattr(self.driver, method_name, None) if method_name else None
@@ -4325,11 +4590,77 @@ class Runtime:
 
         self._run_gated(op, owner_name, act)
         if verb is WindowVerb.MOVE:
-            return f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
-        if verb is WindowVerb.RESIZE:
-            return f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
-        past = _WINDOW_PAST[verb]
-        return f"{past} window {window_id} ({owner_name})"
+            text = f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
+        elif verb is WindowVerb.RESIZE:
+            text = f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
+        else:
+            past = _WINDOW_PAST[verb]
+            text = f"{past} window {window_id} ({owner_name})"
+        return self._conclude(
+            text, tool="window",
+            verdict=self._window_verdict(
+                verb, int(window_id), x=x, y=y, width=width, height=height,
+            ),
+        )
+
+    def _window_verdict(
+        self, verb: WindowVerb, window_id: int, *,
+        x: int | None = None, y: int | None = None,
+        width: int | None = None, height: int | None = None,
+    ) -> tuple[str, str]:
+        """Read the window list after the verb. A missing window after close is
+        confirmed. A missing window after any other verb is not."""
+        try:
+            rows = self.driver.windows()
+        except Exception:
+            return "unverifiable", "the window list could not be read"
+        match = None
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                wid = int(row.get("window_id"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if wid == window_id:
+                match = row
+                break
+        if verb is WindowVerb.CLOSE:
+            if match is None:
+                return "confirmed", f"window {window_id} is gone"
+            return "suspected_noop", f"window {window_id} is still open"
+        if match is None:
+            return "partial", f"window {window_id} is gone"
+        bounds = match.get("bounds") or {}
+        if not isinstance(bounds, dict):
+            bounds = {}
+        if verb is WindowVerb.MOVE and x is not None and y is not None:
+            try:
+                if int(bounds["x"]) == int(x) and int(bounds["y"]) == int(y):
+                    return "confirmed", f"window {window_id} is at ({int(x)}, {int(y)})"
+            except (KeyError, TypeError, ValueError):
+                return "unverifiable", f"window {window_id} has no bounds"
+            return "partial", f"window {window_id} is at ({bounds.get('x')}, {bounds.get('y')})"
+        if verb is WindowVerb.RESIZE and width is not None and height is not None:
+            try:
+                if int(bounds["width"]) == int(width) and int(bounds["height"]) == int(height):
+                    return "confirmed", f"window {window_id} is {int(width)}x{int(height)}"
+            except (KeyError, TypeError, ValueError):
+                return "unverifiable", f"window {window_id} has no bounds"
+            return "partial", (
+                f"window {window_id} is {bounds.get('width')}x{bounds.get('height')}"
+            )
+        if verb is WindowVerb.MINIMIZE and (
+            match.get("on_screen") is False or match.get("minimized") is True
+        ):
+            return "confirmed", f"window {window_id} is minimized"
+        if verb is WindowVerb.MAXIMIZE and match.get("maximized") is True:
+            return "confirmed", f"window {window_id} is maximized"
+        if verb is WindowVerb.MINIMIZE:
+            return "suspected_noop", f"window {window_id} is still showing"
+        if verb is WindowVerb.MAXIMIZE:
+            return "unverifiable", f"window {window_id} does not report maximized"
+        return "confirmed", f"window {window_id} is still listed"
 
     def _list_windows_without_focus(self) -> str:
         """Unfiltered ``window list`` when nothing is focused.
@@ -4506,6 +4837,7 @@ class Runtime:
             "wait_for": self.wait_for,
             "act": partial(self.act_batch, confirm=confirm),
             "set_value": self.set_value,
+            "select": self.set_value,
             "scroll_to_find": self.scroll_to_find,
             "app": self.app,
             "window": self.window,
@@ -4690,7 +5022,26 @@ def build_server(
     # identified the library rather than this package. Issue #14.
     server._mcp_server.version = __version__
 
-    async def run(fn, /, *args, _tool: str | None = None, **kwargs):
+    def _publish(result):
+        """Text plus structured outcome. The sentence is the text content.
+
+        Tools annotated as ``CallToolResult`` have no output schema, so this
+        object is returned as-is. A client that only reads the text still sees
+        the sentence it parsed before.
+        """
+        from mcp.types import CallToolResult, TextContent
+
+        if isinstance(result, outcome.ActionResult):
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(result))],
+                structuredContent=result.as_dict(),
+                isError=result.outcome == "refused",
+            )
+        if isinstance(result, str):
+            return CallToolResult(content=[TextContent(type="text", text=result)])
+        return result
+
+    async def run(fn, /, *args, _tool: str | None = None, _outcome: bool = False, **kwargs):
         """Run a blocking Runtime call on a worker thread and convert
         structured failures into clear tool-error strings.
 
@@ -4732,8 +5083,15 @@ def build_server(
                 exc.detail["hint"] = onboarding.first_hint("accessibility")
             elif exc.code is ErrorCode.PERMISSION_DENIED_SCREEN:
                 exc.detail["hint"] = onboarding.first_hint("screen_recording")
+            if _outcome:
+                return outcome.refused_result(
+                    text=error_text(exc), code=exc.code.value, message=exc.message, detail=exc.detail,
+                )
             raise ToolError(error_text(exc)) from exc
         except ActionRefused as exc:
+            if _outcome:
+                text = refusal_text(exc.decision)
+                return outcome.ActionResult(text, outcome="refused", next=(), evidence=text)
             raise ToolError(refusal_text(exc.decision)) from exc
         except (ToolError, anyio.get_cancelled_exc_class()):
             raise
@@ -4744,6 +5102,11 @@ def build_server(
         except Exception as exc:  # noqa: BLE001 - a crash inside the tool is our defect
             raise ToolError(reporting.internal_error_text(tool_name, exc)) from exc
         note = reporting.slow_call_note(tool_name, time.monotonic() - started)
+        if note and isinstance(result, outcome.ActionResult):
+            return outcome.ActionResult(
+                f"{result}\n{note}",
+                outcome=result.outcome, next=result.next, evidence=result.evidence,
+            )
         if note and isinstance(result, str):
             return f"{result}\n{note}"
         return result
@@ -4943,7 +5306,7 @@ def build_server(
         count: int = 1,
         modifiers: list[str] | None = None,
         verify: bool = False,
-    ) -> str:
+    ) -> CallToolResult:
         """Click an element ref from the latest desktop_snapshot (preferred;
         re-resolved against the live tree), an OCR text ref from the latest
         screen_text (o7: the screen is re-read and the text re-found), or a raw
@@ -4962,14 +5325,17 @@ def build_server(
         (Delete, Move to Trash, ...) first asks you to confirm via elicitation;
         confirmation_declined means it was not approved. verify=true appends an
         'effect:' block — the post-click snapshot diff — so you can confirm what
-        the click changed without a separate desktop_snapshot round-trip."""
+        the click changed without a separate desktop_snapshot round-trip.
+        The text is unchanged. Structured content adds outcome, next, and
+        evidence (confirmed, suspected_noop, unverifiable, partial, or refused)."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
-        return await run(
+        return _publish(await run(
             runtime.click, ref, x, y, display_id, button, count, modifiers,
             confirm=_confirmer_for(server.get_context()), verify=verify,
-        )
+            _outcome=True, _tool="click",
+        ))
 
     @server.tool(name="hover")
     async def hover(
@@ -4990,7 +5356,7 @@ def build_server(
         return await run(runtime.hover, x, y, display_id, ref)
 
     @server.tool(name="type")
-    async def type_text(text: str, app: str | None = None) -> str:
+    async def type_text(text: str, app: str | None = None) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
         for long text). With app=<bundle id or name> on macOS the keystrokes
         are addressed to that app's process: it need not be frontmost, nothing
@@ -5007,11 +5373,12 @@ def build_server(
         back, and a mismatch is an error rather than success. An empty app is
         invalid_arguments. Gated at tier 'full' against the target app; refuses
         with secure_field when a password field has focus — secrets are typed
-        by the human, never by this tool."""
-        return await run(runtime.type_text, text, app)
+        by the human, never by this tool. The text is unchanged. Structured
+        content adds outcome, next, and evidence."""
+        return _publish(await run(runtime.type_text, text, app, _outcome=True, _tool="type"))
 
     @server.tool(name="key")
-    async def key(chord: str, app: str | None = None) -> str:
+    async def key(chord: str, app: str | None = None) -> CallToolResult:
         """Press one key chord, e.g. 'cmd+s', 'cmd+shift+t', 'escape':
         lowercase names joined by '+', modifiers first, one regular key last.
         An unknown key is invalid_arguments and is rejected before any input.
@@ -5029,8 +5396,9 @@ def build_server(
         open switches to the menu with that mnemonic. A different frontmost
         app is still focus_changed. The app's own open menu counts as the key
         target, including when the frontmost name is empty. Gated at tier
-        'full'."""
-        return await run(runtime.key, chord, app)
+        'full'. The text is unchanged. Structured content adds outcome, next,
+        and evidence."""
+        return _publish(await run(runtime.key, chord, app, _outcome=True, _tool="key"))
 
     @server.tool(name="scroll")
     async def scroll(
@@ -5042,7 +5410,7 @@ def build_server(
         dy: int = 0,
         unit: str = "lines",
         into_view: bool = False,
-    ) -> str:
+    ) -> CallToolResult:
         """Scroll over an element ref (latest snapshot) or an x/y point.
         A point outside the display (valid x is 0..width-1, y is 0..height-1)
         is invalid_arguments and sends no input. An unknown display_id is
@@ -5051,8 +5419,12 @@ def build_server(
         'pixels'. Gated at tier 'click'. Pass
         into_view=true with a ref to reveal that element via the accessibility
         API WITHOUT moving the pointer (dx/dy ignored); a wheel scroll instead
-        moves the cursor to the scroll point."""
-        return await run(runtime.scroll, ref, x, y, display_id, dx, dy, unit, into_view)
+        moves the cursor to the scroll point. The text is unchanged.
+        Structured content adds outcome, next, and evidence."""
+        return _publish(await run(
+            runtime.scroll, ref, x, y, display_id, dx, dy, unit, into_view,
+            _outcome=True, _tool="scroll",
+        ))
 
     @server.tool(name="drag")
     async def drag(
@@ -5125,7 +5497,7 @@ def build_server(
         ))
 
     @server.tool(name="set_value")
-    async def set_value(ref: str, value: str) -> str:
+    async def set_value(ref: str, value: str) -> CallToolResult:
         """Set an editable field's value in ONE deterministic op via the
         accessibility API — no per-character typing, no focus/click dance. ref is
         an editable element from the latest desktop_snapshot/find. Falls back to
@@ -5139,8 +5511,10 @@ def build_server(
         and includes both. An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success. Gated at tier 'full';
         refuses secure/password fields (secrets are entered by the human, never
-        this tool). Ideal for filling forms fast."""
-        return await run(runtime.set_value, ref, value)
+        this tool). Ideal for filling forms fast. The text is unchanged.
+        Structured content adds outcome, next, and evidence. A combo, popup,
+        or list is the select action: the same sentence, judged by read-back."""
+        return _publish(await run(runtime.set_value, ref, value, _outcome=True, _tool="set_value"))
 
     @server.tool(name="scroll_to_find")
     async def scroll_to_find(
@@ -5169,7 +5543,7 @@ def build_server(
         return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
 
     @server.tool(name="app")
-    async def app(action: str, name: str | None = None, activate: bool | None = None) -> str:
+    async def app(action: str, name: str | None = None, activate: bool | None = None) -> CallToolResult:
         """Application verbs: action='list' returns running GUI apps as JSON
         (bundle_id, name, pid, frontmost). 'launch' starts name and waits up to
         60 s for its first window (returns the title). On Linux, a name that is
@@ -5195,15 +5569,16 @@ def build_server(
         are unavoidable. 'quit' sends the quit chord and reports whether a
         dialog (unsaved changes) is still showing. name is a bundle id
         (preferred; grants are keyed by bundle id) or a display name.
-        launch/focus are tier 'click', quit is tier 'full'."""
-        return await run(runtime.app, action, name, activate)
+        launch/focus are tier 'click', quit is tier 'full'. The text is
+        unchanged. Structured content adds outcome, next, and evidence."""
+        return _publish(await run(runtime.app, action, name, activate, _outcome=True, _tool="app"))
 
     @server.tool(name="window")
     async def window(
         action: str, window_id: int | None = None, app: str | None = None,
         x: int | None = None, y: int | None = None,
         width: int | None = None, height: int | None = None,
-    ) -> str:
+    ) -> CallToolResult:
         """Window verbs: list, raise, focus, minimize, maximize, move, resize,
         close. action='list' returns windows as JSON (window_id, app, pid,
         title, bounds, on_screen). With app=X, 'list' returns only the windows
@@ -5227,8 +5602,12 @@ def build_server(
         that cannot perform a verb returns unsupported and names the platform.
         A window whose owner cannot be identified returns unsupported with
         reason owner_unknown; that error does not ask for a grant of an empty
-        app name."""
-        return await run(runtime.window, action, window_id, app, x, y, width, height)
+        app name. The text is unchanged. Structured content adds outcome,
+        next, and evidence."""
+        return _publish(await run(
+            runtime.window, action, window_id, app, x, y, width, height,
+            _outcome=True, _tool="window",
+        ))
 
     @server.tool(name="clipboard")
     async def clipboard(action: str, text: str | None = None) -> str:
@@ -5248,7 +5627,7 @@ def build_server(
         return await run(runtime.clipboard, action, text)
 
     @server.tool(name="menu")
-    async def menu(app: str, path: str | None = None, action: str = "press") -> str:
+    async def menu(app: str, path: str | None = None, action: str = "press") -> CallToolResult:
         """Drive an app's menu bar through accessibility, which works even when
         the app's content is custom-drawn (After Effects, Figma, games).
         action='press' activates the item at path, written like a manual:
@@ -5264,8 +5643,13 @@ def build_server(
         or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
-        (AT-SPI menu bar). Windows and the browser return unsupported."""
-        return await run(runtime.menu, app, path, action, confirm=_confirmer_for(server.get_context()))
+        (AT-SPI menu bar). Windows and the browser return unsupported. The text
+        is unchanged. Structured content adds outcome, next, and evidence."""
+        return _publish(await run(
+            runtime.menu, app, path, action,
+            confirm=_confirmer_for(server.get_context()),
+            _outcome=True, _tool="menu",
+        ))
 
     @server.tool(name="file_dialog")
     async def file_dialog(action: str, path: str, app: str | None = None) -> str:

@@ -309,30 +309,96 @@ class LinuxDriver:
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         """Re-resolve a snapshot-scoped ref against a fresh live tree via the
         SHARED anchor matcher (`observe._match_anchor`) — the same re-resolution
-        semantics as macOS, without macOS's pyobjc `observe.snapshot`."""
+        semantics as macOS, without macOS's pyobjc `observe.snapshot`.
+
+        A node the pruned tree dropped because its document is not showing is
+        ``not_showing``, not ``stale_ref``. ``stale_ref`` stays the answer when
+        the node is gone.
+        """
         from a11y_computer_use import observe
 
         if live is None:
             live = self.snapshot(snap.scope, snap.app)
-        return observe.rematch_ref(snap, ref, live)
+        try:
+            return observe.rematch_ref(snap, ref, live)
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.STALE_REF:
+                self._raise_if_hidden_alive(snap, ref)
+            raise
+
+    def _not_showing_error(self, ref: str, role: str, title: str) -> ComputerUseError:
+        shown = f" {title!r}" if title else ""
+        return ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{ref} ({role}{shown}) is not showing",
+            detail={
+                "ref": ref,
+                "role": role,
+                "reason": "not_showing",
+                "outcome": "refused",
+                "next": ["foreground", "ref"],
+                "evidence": f"{ref} is still in the tree but its document is not showing",
+            },
+        )
+
+    def _raise_if_hidden_alive(self, snap: Snapshot, ref: str) -> None:
+        """Raise ``not_showing`` when ``ref`` still exists in a hidden document.
+
+        The handle from the snapshot that issued the ref is checked first. A
+        DEFUNCT handle is not that case. When the handle itself is gone, the
+        raw tree (including documents the snapshot prunes) is searched for the
+        same role and name. A showing match, or no match, leaves the original
+        ``stale_ref`` in place.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            element = snap.element(ref)
+        except KeyError:
+            return
+        handle = observe.ax_handle_for(snap.snapshot_id, ref)
+        if handle is not None:
+            try:
+                gone = self._run(lambda: _atspi.accessible_gone(handle))
+                hidden = False if gone else self._run(lambda: _atspi.hidden_web_target(handle))
+            except Exception:
+                return
+            if not gone and hidden:
+                raise self._not_showing_error(element.ref, element.role, element.title)
+            if not gone:
+                return
+        try:
+            root = self._run(lambda: _atspi.find_root(snap.app or "", snap.scope))
+            if root is None:
+                return
+            found = self._run(lambda: _atspi.hidden_named_target(root, element.role, element.title))
+        except Exception:
+            return
+        if found:
+            raise self._not_showing_error(element.ref, element.role, element.title)
 
     def _refuse_hidden(self, element: Element, handle) -> None:
         """Raise when ``handle`` is in a Firefox document that is not showing.
 
         A link in a background tab has on-screen bounds and its action
         reports success. The click did not happen on screen. GTK and
-        Chromium handles are not this case.
+        Chromium handles are not this case. A destroyed accessible is not
+        this case either: that stays a stale ref from resolution.
         """
         from a11y_computer_use.drivers import _atspi
 
-        if handle is None or not self._run(lambda: _atspi.hidden_web_target(handle)):
+        if handle is None:
             return
-        title = f" {element.title!r}" if element.title else ""
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            f"{element.ref} ({element.role}{title}) is not showing",
-            detail={"ref": element.ref, "role": element.role, "reason": "not_showing"},
-        )
+        try:
+            if self._run(lambda: _atspi.accessible_gone(handle)):
+                return
+            hidden = self._run(lambda: _atspi.hidden_web_target(handle))
+        except Exception:
+            return
+        if not hidden:
+            return
+        raise self._not_showing_error(element.ref, element.role, element.title)
 
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
