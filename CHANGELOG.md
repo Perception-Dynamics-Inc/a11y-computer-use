@@ -7,6 +7,17 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [Unreleased]
+
+### Added
+
+- `click`, `type`, `key`, `set_value`, `select`, `scroll`, `menu`, `app`, and `window` keep the sentence they already returned. The same result carries `outcome` (`confirmed`, `suspected_noop`, `unverifiable`, `partial`, or `refused`), `next` (an ordered list of `ref`, `coordinates`, `cdp`, `keyboard`, and `foreground`), and a short `evidence` string. MCP tools put those fields in structured content. The text content is still the sentence. The agent follows `next` when it recovers, and it counts `suspected_noop` and `unverifiable` as one screen when a clock moves the snapshot digest. The outcome comes from a read-back, a change in the accessibility state, or the target process still being alive. A click that exits the target is `partial`, not `confirmed`. A ref whose node is still alive in a hidden document, including a background Firefox tab, is `not_showing` with `outcome` `refused`. A node that is gone stays `stale_ref`. Hermetic tests cover each tool. Live GTK checks cover a Save click (`confirmed`), a second press of an inert button (`suspected_noop`), and a button that quits the process (`partial`). A live Firefox test refuses the old Name ref after that tab is in the background (#118) (ede0a70, 2026-10-09).
+
+### Fixed
+
+- An exited process that the parent has not reaped counts as dead on macOS and Windows, the same as a Linux zombie. On macOS, `kill(pid, 0)` still succeeds for a zombie, so `pid_alive` reads the `ps` state and treats `Z` as dead. The hermetic test kills a child, polls for up to 2 seconds, and asserts `pid_alive` is false before `wait`. On Windows, `os.kill(pid, 0)` is `CTRL_C_EVENT`. The Windows job on `89e5074` stopped in `subprocess.py` with `KeyboardInterrupt` after 6 passed tests. `pid_alive` opens the process and treats any exit code other than `STILL_ACTIVE` as dead (dc9f229, 2026-10-09).
+- The live Firefox background-tab test selects the Form Probe tab again before it returns. Firefox exposes that tab as a button, so a role check for `tab` never clicked it and the contenteditable test still saw the Privacy Notice page (be575e3, 2026-10-09).
+
 ## [0.4.53] - 2026-10-09
 
 ### Fixed
