@@ -123,8 +123,11 @@ _CLICKABLE_ROLES = frozenset(
         "AXRadioButton",
     }
 )
+# A combo or select is not an editable entry. set_value writes it through the
+# combo path. AXComboBox used to set the edit flag, which made a Firefox
+# <select> match find(editable=true).
 _EDITABLE_ROLES = frozenset(
-    {"AXComboBox", "AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
+    {"AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
 
 #: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
@@ -198,10 +201,14 @@ class RawNode:
     #: do not grow a new signal. A zero-size web wrapper that can take focus
     #: stays a control; a plain div that cannot does not.
     focusable: bool = False
-    #: Platform text-entry signal independent of role. AT-SPI sets this from
-    #: ``STATE_EDITABLE``, or from an EditableText interface on a section,
-    #: paragraph, or panel. Default false, so macOS, Windows, and the browser
-    #: stay editable only when the role is a text field.
+    #: Platform text-entry signal independent of role. AT-SPI sets this only
+    #: when the node itself is an editable entry: an entry, text, or password
+    #: role that is not read-only, or a contenteditable section (a div or span
+    #: with ``STATE_EDITABLE``; Chromium may omit EditableText, Firefox must
+    #: expose it). A paragraph, panel, document, or combo is not an entry, even
+    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. Default
+    #: false, so macOS, Windows, and the browser stay editable only when the
+    #: role is a text field.
     editable: bool = False
 
 
@@ -1402,9 +1409,9 @@ def _empty_text_container(raw: RawNode) -> bool:
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """Derive (clickable, editable, secure) from role/subrole/actions.
 
-    ``raw.editable`` is the platform signal (AT-SPI ``STATE_EDITABLE`` or
-    EditableText). A group with that signal is editable even though its role
-    is not a text field.
+    ``raw.editable`` is the platform signal that the node itself is an
+    editable entry. A contenteditable section can carry it. A combo does not
+    become editable from its role.
     """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES

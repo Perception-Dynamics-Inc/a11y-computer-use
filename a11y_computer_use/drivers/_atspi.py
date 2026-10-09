@@ -1181,7 +1181,9 @@ class ATSPIAccessor:
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
             atspi_web=atspi_web_kind(role_str),
-            editable=state_editable or _container_editable_text(node, role, role_str),
+            editable=editable_entry(
+                node, role_str=role_str, attrs=attrs, state_editable=state_editable,
+            ),
         )
 
     def children(self, node: object) -> Sequence[object]:
@@ -2538,21 +2540,86 @@ def _editable_iface(acc):
 
 
 _CONTAINER_TEXT_ROLES = frozenset({"section", "paragraph", "panel", "grouping", "filler"})
+# Roles whose text interface is the document or a static node. Selecting one
+# selects the page. A combo is not an entry either; set_value writes it first.
+_STATIC_REPLACE_ROLES = frozenset({
+    "paragraph", "heading", "label", "static", "caption",
+    "panel", "grouping", "filler",
+    "document web", "document frame", "document email",
+    "combo box", "combo-box",
+})
+_ENTRY_ROLE_NAMES = frozenset({
+    "entry", "password text", "text", "editable text", "terminal", "document text",
+})
+_CONTENTEDITABLE_TAGS = frozenset({"div", "span"})
 
 
-def _container_editable_text(acc, role: str, role_str: str) -> bool:
-    """True when a non-text role still exposes EditableText.
+def editable_entry(
+    acc,
+    *,
+    role_str: str | None = None,
+    attrs: dict | None = None,
+    state_editable: bool | None = None,
+) -> bool:
+    """True when this node itself is an editable text entry.
 
-    A text field, text area, search field, combo box, or secure field is
-    already editable from its role, so this does not probe those. A Chrome
-    contenteditable with no textbox role is a section. ``STATE_EDITABLE`` is
-    read with the other states; this is the interface the state can omit.
+    Firefox reports ``STATE_EDITABLE``, and exposes EditableText, on
+    document and static nodes. Those are not entries. A paragraph, panel,
+    document, or combo/select is not an entry. A read-only node is not.
+
+    An entry, password, or text role is an entry when it has EditableText or
+    ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
+    whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
+    Chromium often has no EditableText (#221). Firefox's own roleless
+    contenteditable has EditableText. A paragraph is not that section.
     """
-    if role in {"AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField", "AXComboBox"}:
+    if acc is None:
         return False
-    if role_str not in _CONTAINER_TEXT_ROLES:
+    role = role_str if role_str is not None else _role_name(acc)
+    if role in {"combo box", "combo-box"} or role in _STATIC_REPLACE_ROLES:
         return False
-    return _editable_iface(acc) is not None
+    if role in _ENTRY_ROLE_NAMES:
+        if _state_has(acc, "READ_ONLY"):
+            return False
+        if state_editable is None:
+            state_editable = _state_has(acc, "EDITABLE")
+        if state_editable:
+            return True
+        return _editable_iface(acc) is not None
+    if role != "section":
+        return False
+    if attrs is None:
+        attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    if tag not in _CONTENTEDITABLE_TAGS:
+        return False
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return False
+    if state_editable is None:
+        state_editable = _state_has(acc, "EDITABLE")
+    if not state_editable or _state_has(acc, "READ_ONLY"):
+        return False
+    if _chromium_app(acc):
+        return True
+    return bool(_gecko_app(acc) and _editable_iface(acc) is not None)
+
+
+def _blocks_text_replace(acc) -> bool:
+    """True when ``set_text`` must not select or type into this node.
+
+    A role-less object is a synthetic field. A paragraph, panel, document,
+    or combo is blocked even when it exposes EditableText or
+    ``STATE_EDITABLE``. A contenteditable section and a real entry are not.
+    """
+    role = _role_name(acc)
+    if role == "":
+        return False
+    if role in _STATIC_REPLACE_ROLES:
+        return True
+    if role == "section":
+        return not (editable_entry(acc) or _chromium_contenteditable(acc))
+    return _state_has(acc, "READ_ONLY")
 
 
 def _state_has(acc, name: str) -> bool:
@@ -5130,7 +5197,12 @@ def set_text(acc, text: str) -> bool:
     Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
+    A paragraph, panel, document, or combo is not replaced. Firefox exposes
+    EditableText on those nodes, and selecting one selects the page. This
+    returns false before any selection or key.
     """
+    if _blocks_text_replace(acc):
+        return False
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
