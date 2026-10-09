@@ -258,7 +258,7 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
         seen["keep_zero"] = keep_zero
         return (8.0, 9.0), (0.0, 40.0)
 
-    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
     monkeypatch.setattr(_atspi, "_extents", extents)
 
     class Acc:
@@ -281,7 +281,7 @@ def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> 
 
 def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> None:
     """Gtk.Entry and Gtk.TextView share the AT-SPI role ``text``. The entry is single-line."""
-    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((0.0, 0.0), (80.0, 24.0)))
     monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: "")
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
@@ -310,6 +310,147 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
     assert entry.role == "AXTextField"
     assert area.role == "AXTextArea"
     assert plain.role == "AXTextArea"
+
+
+class _Section:
+    """A Chrome ``<div contenteditable>`` with no textbox role: AT-SPI section."""
+
+    def __init__(self, name: str, text: str, states: set[str]):
+        self.name = name
+        self.text = text
+        self.states = set(states)
+        self.attrs = {"tag": "div"}
+
+    def get_role_name(self):
+        return "section"
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+
+def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch) -> None:
+    """A section with STATE_EDITABLE is a group the snapshot marks editable.
+
+    Not a browser. The role stays a group. The edit flag comes from the
+    state, not from a textbox role. A section with neither the state nor
+    EditableText stays non-editable. EditableText alone is enough.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10.0, 20.0), (240.0, 48.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    raw = _atspi.ATSPIAccessor().read(_Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"}))
+    assert raw.role == "AXGroup"
+    assert raw.editable is True
+    assert raw.value == "old note"
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    rendered = observe.render_text(snap)
+    assert 'group "Notes box" ="old note" (click,edit)' in rendered
+    assert snap.elements[0].editable is True
+
+    quiet = _atspi.ATSPIAccessor().read(_Section("Quiet", "static words", {"ENABLED"}))
+    assert quiet.role == "AXGroup"
+    assert quiet.editable is False
+
+    via = _Section("Iface", "typed", {"ENABLED"})
+    via.get_editable_text_iface = lambda: object()
+    assert _atspi.ATSPIAccessor().read(via).editable is True
+
+
+def test_roleless_contenteditable_set_text_clears_then_types(fake_atspi, monkeypatch) -> None:
+    """Fake Chrome section. No EditableText. The #165 clear runs, then the keys.
+
+    Not a browser. BackSpace leaves a newline, which is empty, and Delete is
+    still sent. The read-back is the new string. An empty value uses that
+    same clear and does not restore the old words.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        field.text = text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "new note"
+    sent.clear()
+    assert _atspi.set_text(field, "") is True
+    assert field.text == "\n"
+    assert "new note" not in field.text
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+
+def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic group. The editable flag is what lets set_value through.
+
+    Not a browser. A plain group raises not_editable and sends no chords.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: setattr(field, "text", text))
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    box = Bounds(0, 8, 8, 200, 40)
+    editable = Element(
+        "e4", "AXGroup", "Notes box", "old note", box, "snap-1", editable=True, clickable=True,
+    )
+    assert LinuxDriver().set_value(editable, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+    sent.clear()
+    plain = Element("e5", "AXGroup", "Quiet", "static words", box, "snap-1", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(plain, "nope")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_editable"
+    assert sent == []
+    assert field.text == "new note"
 
 
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:

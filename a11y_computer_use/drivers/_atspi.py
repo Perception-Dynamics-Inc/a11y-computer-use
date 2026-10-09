@@ -854,19 +854,27 @@ def _range_value(acc):
 
 
 def _state_flags(acc):
-    """(enabled, focused, checked, selected, expanded, focusable) from the state set.
+    """(enabled, focused, checked, selected, expanded, focusable, editable).
 
     checked/expanded are None when the element is not checkable/expandable so
-    the shared schema can tell "off" apart from "not a checkbox"."""
+    the shared schema can tell "off" apart from "not a checkbox". ``editable``
+    is ``STATE_EDITABLE``. A fake state set that lists names and has no
+    ``StateType`` member matches the name string."""
     Atspi = _atspi()
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
-        return True, False, None, False, None, False
+        return True, False, None, False, None, False, False
     st = getattr(Atspi, "StateType", None)
 
     def has(name: str) -> bool:
         member = getattr(st, name, None)
-        return bool(member is not None and _safe(lambda: sset.contains(member), False))
+        if member is not None:
+            return bool(_safe(lambda: sset.contains(member), False))
+        names = getattr(sset, "names", None)
+        if isinstance(names, (set, frozenset, list, tuple)):
+            folded = {str(item).upper() for item in names}
+            return name.upper() in folded
+        return False
 
     enabled = has("ENABLED") or has("SENSITIVE")
     focused = has("FOCUSED")
@@ -878,7 +886,8 @@ def _state_flags(acc):
     selected = has("SELECTED")
     expanded = has("EXPANDED") if has("EXPANDABLE") else None
     focusable = has("FOCUSABLE")
-    return enabled, focused, checked, selected, expanded, focusable
+    editable = has("EDITABLE")
+    return enabled, focused, checked, selected, expanded, focusable, editable
 
 
 # ARIA role (AT-SPI 'xml-roles' attribute, set by Chromium/GTK for web content)
@@ -1068,7 +1077,7 @@ class ATSPIAccessor:
             # Keep a 0-height section's size. Hit-testing still treats it as
             # no box; only the snapshot walk needs the zero extent.
             position, size = _extents(node, keep_zero=True)
-        enabled, focused, checked, selected, expanded, focusable = _state_flags(node)
+        enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
         if role_str == "combo box":
@@ -1103,6 +1112,7 @@ class ATSPIAccessor:
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
             atspi_web=atspi_web_kind(role_str),
+            editable=state_editable or _container_editable_text(node, role, role_str),
         )
 
     def children(self, node: object) -> Sequence[object]:
@@ -2246,6 +2256,24 @@ def grab_focus(acc) -> bool:
 
 def _editable_iface(acc):
     return _call_first(acc, ("get_editable_text_iface", "get_editable_text"))
+
+
+_CONTAINER_TEXT_ROLES = frozenset({"section", "paragraph", "panel", "grouping", "filler"})
+
+
+def _container_editable_text(acc, role: str, role_str: str) -> bool:
+    """True when a non-text role still exposes EditableText.
+
+    A text field, text area, search field, combo box, or secure field is
+    already editable from its role, so this does not probe those. A Chrome
+    contenteditable with no textbox role is a section. ``STATE_EDITABLE`` is
+    read with the other states; this is the interface the state can omit.
+    """
+    if role in {"AXTextField", "AXTextArea", "AXSearchField", "AXSecureTextField", "AXComboBox"}:
+        return False
+    if role_str not in _CONTAINER_TEXT_ROLES:
+        return False
+    return _editable_iface(acc) is not None
 
 
 def _state_has(acc, name: str) -> bool:
@@ -4351,6 +4379,30 @@ def _clear_contenteditable(acc) -> bool:
     return False
 
 
+def _set_contenteditable_by_keys(acc, text: str) -> bool:
+    """Replace a Chrome contenteditable that has no EditableText.
+
+    The clear is the same one ``set_value("")`` uses: focus, select-all,
+    BackSpace, and Delete, then a poll. A newline from ``<br>`` counts as
+    empty. The new string is typed only after that clear. True only when
+    the readable text matches, including one trailing newline. A failed
+    type puts the original text back. An input, a textarea, and a GTK
+    field do not use this path.
+    """
+    if text == "":
+        return _clear_contenteditable(acc)
+    if _shown_matches(acc, text):
+        return True
+    original = _full_text(acc)
+    if not _clear_contenteditable(acc):
+        return False
+    _type_string(text)
+    if _confirm_text_landed(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
 def set_text(acc, text: str) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -4377,10 +4429,13 @@ def set_text(acc, text: str) -> bool:
     be verified, the text from before the call is put back, so a
     contenteditable is not left empty. A Chromium field that still reads a
     value (an empty number input reads 0) is not focused in order to restore
-    it. An empty string on a Chrome contenteditable is focus, select-all,
+    it.     An empty string on a Chrome contenteditable is focus, select-all,
     BackSpace, and Delete, then a poll. A newline left by ``<br>`` is empty.
     Words that remain are ``text_mismatch``, and the previous text stays.
     An input, a textarea, and a GTK field do not use that clear.
+    A Chrome contenteditable with no EditableText, including a section that
+    has no textbox role, uses that same clear and then types the new string.
+    Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
     """
@@ -4390,6 +4445,8 @@ def set_text(acc, text: str) -> bool:
         return _clear_contenteditable(acc)
     eti = _editable_iface(acc)
     if eti is None:
+        if _chromium_contenteditable(acc):
+            return _set_contenteditable_by_keys(acc, text)
         return _replace_with_keys(acc, text)
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
@@ -4431,6 +4488,12 @@ def set_text(acc, text: str) -> bool:
     # Only a blank read is restored. A Chromium number input that reads 0
     # after a failed clear is not blank, and focusing it to put the old
     # digits back is what makes the empty field read 0.
+    if (
+        _chromium_contenteditable(acc)
+        and _role_name(acc) in _CONTAINER_TEXT_ROLES
+        and _set_contenteditable_by_keys(acc, text)
+    ):
+        return True
     if _text_is_gone(acc):
         _restore_text(acc, original)
     return False
