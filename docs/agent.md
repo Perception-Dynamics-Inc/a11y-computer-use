@@ -1,11 +1,11 @@
 # a11y-agent
 
 `a11y-agent` runs one goal against the desktop. It observes an accessibility
-snapshot, asks a model for tool calls, and executes each call through
+snapshot, asks a model for tool calls, and executes each desktop call through
 `server.Runtime.call_tool`. That is the same safety layer the MCP server
 uses: permission tiers, the frontmost recheck, secure-field refusal, the
 confirmation gate, and the audit log. This package does not add tools to
-the MCP server.
+the MCP server. `shell` and `python` are agent actions, not MCP tools.
 
 The reference planner loop behind `a11y-computer-use agent` is unchanged. It
 lives in `a11y_computer_use/agent/reference.py` and is still
@@ -20,16 +20,25 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    app, or the frontmost app before one has been launched or focused.
 2. Pause if the tree shows a password field, a one-time-code field, a card
    field, or a captcha iframe. The result is `needs_human`. Nothing is typed.
-3. Ask the model for one turn. A turn is a list of tool calls. M1 runs that
-   list one call at a time.
-4. Approve. Quit, closing a window, and submit or send actions call
-   `approve(action)` when a hook is set. With no hook, `auto_deny=True` skips
-   them and records `approval_denied`. The skipped call is not executed.
-5. Execute through `Runtime.call_tool`. `select` is `set_value` on the
-   server. The agent does not reimplement click, type, menus, or windows.
-6. Verify. The loop takes a fresh snapshot. A mutating action that leaves the
-   snapshot digest unchanged is a no-op (`verified` false). A tool error is
-   `verified` false.
+3. Ask the model for one turn. A turn is a list of tool calls. The loop runs
+   that list one call at a time. Each call is verified on its own. The first
+   failure, refusal, or `needs_human` stops the rest of that turn. The step
+   record, the `step_finished` event, and the trajectory line list `skipped`
+   (the calls that did not run) and `turn_stop` (`failure`, `refusal`, or
+   `needs_human`). A later turn still runs unless the stop was `needs_human`
+   or a successful `done`.
+4. Approve. Quit, closing a window, submit or send, and every exec action
+   call `approve(action)` when a hook is set. With no hook, `auto_deny=True`
+   skips them and records `approval_denied`. A refused call is not executed,
+   and later calls in that turn are not executed either.
+5. Execute desktop actions through `Runtime.call_tool`. `select` is
+   `set_value` on the server. The agent does not reimplement click, type,
+   menus, or windows. `shell` and `python` do not go through `call_tool`.
+6. Verify. The loop takes a fresh snapshot. A mutating desktop action that
+   leaves the snapshot digest unchanged is a no-op (`verified` false). A tool
+   error is `verified` false. A no-op or a tool error stops the rest of the
+   turn. `shell` and `python` are verified by exit code 0, not by the
+   snapshot.
 7. Recover. A tool error retries once with another element of the same role
    and name, then sends Escape. A repeated no-op of the same action and
    target is forced onto the next method: alternate ref, then a coordinate
@@ -90,9 +99,10 @@ opaque-region markers are not implemented. The library does not OCR.
 a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --trace-dir /tmp/trace --json
 ```
 
-`--auto-deny` is the default: quit, close, and submit are skipped with no
-prompt. `--approve` prompts on stdin and is the only interactive mode. Do not
-pass both.
+`--auto-deny` is the default: quit, close, submit, and exec are skipped with
+no prompt. `--approve` prompts on stdin and is the only interactive mode. Do
+not pass both. `--allow-exec` exposes `shell` and `python`. It is off by
+default, and it does not bypass `--auto-deny` or the approve hook.
 
 `--json` writes exactly one JSON object to stdout:
 
@@ -109,7 +119,9 @@ pass both.
 | `step_log` | One object per action |
 
 Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`),
-`args` (secrets redacted), `result`, `error`, `verified`, and `duration_s`.
+`args` (secrets redacted), `result`, `error`, `verified`, `duration_s`,
+`skipped` (later calls in that turn that did not run), and `turn_stop`
+(`failure`, `refusal`, `needs_human`, or null).
 
 Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
@@ -122,6 +134,14 @@ The SDK equivalent is `Agent(display=":N")`.
 `click`, `type`, `key`, `set_value`, `select`, `scroll`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
+
+`shell` and `python` are added to the model's tool list only when the agent
+is constructed with `allow_exec=True` or the CLI is passed `--allow-exec`.
+`shell` takes `command`. `python` takes `code` and runs it with a fresh
+`python -I -c`. Both accept `cwd` and `timeout_s` (default 30 seconds, capped
+at 120). Stored stdout and stderr are capped at 4000 characters and marked
+`…[truncated N chars]`. A timeout kills the process group, sets
+`exit_code` to null, and stops the rest of the turn.
 
 `done` conditions, one to three of:
 
@@ -137,9 +157,18 @@ a captcha iframe. It does not guess credentials or submit payments.
 ## Approval and secrets
 
 Risky actions are app quit, window close, menu items whose label is quit or
-exit, and clicks or menu items whose label is submit, send, or pay. Typing
-into a password, OTP, or card field is not sent to `approve`. The run stops
-with `needs_human` and the characters are not typed.
+exit, clicks or menu items whose label is submit, send, or pay, and every
+`shell` or `python` call. Typing into a password, OTP, or card field is not
+sent to `approve`. The run stops with `needs_human` and the characters are
+not typed.
+
+Exec has two gates. `allow_exec` defaults to false: the tools are omitted
+from the schema, a call the model emits anyway is not run, and the audit
+line says `exec_disabled`. When exec is enabled, the call still goes through
+`approve`. A hook that returns false is `denied`. No hook and `auto_deny`
+(the headless default) is `auto_denied`. The command runs only when the hook
+returns true, or when `auto_deny` is false. `read` / `click` / `full` on the
+desktop permission store are unchanged, and exec is not one of those tiers.
 
 The existing permission store still applies. An ungranted app returns
 `needs_permission` from the runtime; this package does not grant tiers by
@@ -153,8 +182,16 @@ directory):
 - `trajectory.jsonl` — one object per step: the observation text sent toward
   the model (truncated with `…[truncated N chars]` when it is huge), model
   name, request metadata, response text and tool calls, the action that ran,
-  result, error, `verified`, recovery notes, and a screenshot path.
+  result, error, `verified`, recovery notes, a screenshot path, `skipped`,
+  and `turn_stop`.
 - `steps.jsonl` — the same records as `step_log`.
+- `exec-audit.jsonl` — one JSON line per exec attempt, appended and never
+  rewritten. Each line has `timestamp`, `command`, `cwd`, `exit_code`,
+  `output` (already truncated), `truncated`, `approval` (`approved`,
+  `denied`, `auto_denied`, `exec_disabled`, or `rejected`), `error`, and
+  `action` (`shell` or `python`). Denied and rejected attempts are logged
+  with a null exit code and are not started. Approved attempts are logged
+  when the process exits or times out.
 - `step-NNNN.png` — a screenshot when `Runtime.screenshot` returns PNG bytes.
   A capture failure leaves the path null and does not fail the run.
 - `observe-NNNN.png` — the whole-window shot attached when `vision=True`.
@@ -165,7 +202,9 @@ Card-number-shaped strings and secret argument names are stored as
 ## Models
 
 `Model.complete(messages, tools, timeout=...)` returns a `ModelTurn` of
-`ToolCall`s plus optional text. `tools` is `agent.actions.tool_schemas()`.
+`ToolCall`s plus optional text. `tools` is
+`agent.actions.tool_schemas(allow_exec=...)`. The default call omits `shell`
+and `python`.
 After each turn the loop appends `assistant_message(turn)`, so the next
 request replays the tool calls the model just made.
 
@@ -178,25 +217,28 @@ repo.
 
 ## Forward compatibility
 
-M2 should not need to rename the types in this package.
+Later milestones should not need to rename the types in this package.
 
-- A model turn is already a list (`ModelTurn.calls`). M1 executes the list
-  in order, and each call has its own verification, recovery, and step
-  record. A later milestone can schedule several calls from one turn without
-  changing the schema the model sees.
-- `ReservedPermission.EXEC` (`"exec"`) is the permission for shell and
-  Python. It is off. There is no exec tool in `tool_schemas()`, and the loop
-  will not run a shell. When that tool exists it must stay off by default,
-  call `approve` before it runs, and write the invocation to the audit log.
-  `read` / `click` / `full` on the existing permission store are unchanged.
+- `ModelTurn.calls` is the list of tool calls for one turn. The loop runs
+  them in order, stops at the first failure, refusal, or `needs_human`, and
+  records which calls ran.
+- `ReservedPermission.EXEC` (`"exec"`) is the permission for `shell` and
+  `python`. It stays off unless `allow_exec=True`. Enabling it does not add
+  tools to the MCP server.
 
 ## What is tested
 
 Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
-`tests/test_agent_core_cli.py`):
+`tests/test_agent_core_cli.py`, `tests/test_agent_exec.py`):
 
-- event order, one-at-a-time calls, `max_steps`, `max_time`, `cancel`
+- event order, a successful multi-action turn, `max_steps`, `max_time`,
+  `cancel`
+- stop-on-failure, stop-on-refusal, and a no-op that does not run the later
+  calls in the turn
 - approve deny and the auto-deny default
+- exec permission gating, audit-log fields, `exec_disabled`, `auto_denied`,
+  hook denial, argument rejection, timeout, nonzero exit, and the output cap
+- `--allow-exec` reaching `Agent`
 - needs_human for a password field, an OTP field, a card field, a captcha
   iframe, and `ask_human`
 - evidence-checked done, including a rejected condition and `file_exists`
@@ -207,14 +249,21 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - `vision=True` attaching a window screenshot, and `display` setting
   `$DISPLAY`
 
+Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
+
+- GTK save, wrong-step recovery, stuck Ping, Chrome form, needs_human pages,
+  and CLI `--json` exit codes
+- one GTK turn that sets the note, the path, and the format, then saves
+- exec with `allow_exec` writing a file, and the same command denied by the
+  approve hook
+
 Not in this change:
 
-- No live GTK or Chrome agent run. That end-to-end test is a separate change.
+- No HTTP server and no MCP tools for `shell` or `python`. The existing MCP
+  tool list is unchanged.
 - No live call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command
   provider. Those clients are in `a11y_computer_use.agent.models` and are
   tested with recorded HTTP fixtures, not from this loop.
 - No OCR, no element-crop vision, no opaque-region markers.
-- No shell or Python execution.
 
-The existing MCP tool list is untouched. `a11y-computer-use agent` still uses
-the reference loop.
+`a11y-computer-use agent` still uses the reference loop.

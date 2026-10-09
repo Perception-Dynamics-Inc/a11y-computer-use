@@ -154,10 +154,12 @@ def test_one_turn_runs_calls_one_at_a_time(tmp_path):
     def on_call(name, params, runtime):
         if name == "set_value":
             replace_ref(runtime, params["ref"], value=params["value"])
+        elif name == "click":
+            replace_ref(runtime, params["ref"], focused=True)
 
     runtime = FakeRuntime(elements)
     runtime.on_call = on_call
-    result, _events, runtime, _agent = run(
+    result, events, runtime, _agent = run(
         ScriptedModel([turn(
             ToolCall("set_value", {"ref": "e3", "value": "hello"}),
             ToolCall("click", {"ref": "e2"}),
@@ -174,6 +176,110 @@ def test_one_turn_runs_calls_one_at_a_time(tmp_path):
     assert result.step_log[0].action == "set_value"
     assert result.step_log[1].action == "click"
     assert result.step_log[2].action == "done"
+    assert all(step.turn_stop is None and step.skipped == [] for step in result.step_log)
+    finished = [event for event in events if event.type == "step_finished"]
+    assert [event.data["turn_stop"] for event in finished] == [None, None, None]
+    trajectory = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    assert [entry["turn_stop"] for entry in trajectory] == [None, None, None]
+    assert trajectory[0]["response"]["calls"][0]["name"] == "set_value"
+    assert len(trajectory[0]["response"]["calls"]) == 3
+
+
+def test_multi_action_stops_at_the_first_failure(tmp_path):
+    elements = window(
+        el("e2", "AXButton", "Save", parent="e1", clickable=True),
+        el("e3", "AXTextField", "Note", parent="e1", editable=True, value=""),
+    )
+
+    def on_call(name, params, runtime):
+        if name == "set_value":
+            replace_ref(runtime, params["ref"], value=params["value"])
+
+    runtime = FakeRuntime(elements)
+    runtime.on_call = on_call
+    runtime.fail["e2"] = ComputerUseError(ErrorCode.STALE_REF, "missing button")
+    result, events, runtime, _agent = run(
+        ScriptedModel([
+            turn(
+                ToolCall("set_value", {"ref": "e3", "value": "hello"}, id="a"),
+                ToolCall("click", {"ref": "e2"}, id="b"),
+                done("typed", [{"value": {"ref": "e3", "equals": "hello"}}], call_id="c"),
+            ),
+            turn(done("typed", [{"value": {"ref": "e3", "equals": "hello"}}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+    )
+    assert [name for name, _params in runtime.calls] == ["set_value", "click"]
+    assert result.status == "success"
+    assert [step.action for step in result.step_log] == ["set_value", "click", "done"]
+    stopped = result.step_log[1]
+    assert stopped.verified is False
+    assert stopped.turn_stop == "failure"
+    assert [item["name"] for item in stopped.skipped] == ["done"]
+    assert stopped.skipped[0]["id"] == "c"
+    finished = next(
+        event for event in events
+        if event.type == "step_finished" and event.data.get("turn_stop") == "failure"
+    )
+    assert [item["name"] for item in finished.data["ran"]] == ["set_value", "click"]
+    assert finished.data["skipped"][0]["name"] == "done"
+    trajectory = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    assert trajectory[1]["turn_stop"] == "failure"
+    assert trajectory[1]["skipped"][0]["name"] == "done"
+    assert trajectory[1]["action"] == "click"
+
+
+def test_multi_action_stops_on_refusal_and_on_a_rejected_done(tmp_path):
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    refused, events, runtime, _agent = run(
+        ScriptedModel([
+            turn(
+                ToolCall("app", {"action": "quit", "name": "demo"}, id="q"),
+                ToolCall("click", {"ref": "e2"}, id="k"),
+                done("left open", [{"window_title_contains": "Demo"}], call_id="d"),
+            ),
+            turn(done("left open", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        approve=lambda _action: False,
+        trace_dir=tmp_path / "refuse",
+    )
+    assert runtime.calls == []
+    assert refused.status == "success"
+    assert refused.step_log[0].turn_stop == "refusal"
+    assert refused.step_log[0].error.startswith("approval_denied")
+    assert [item["name"] for item in refused.step_log[0].skipped] == ["click", "done"]
+    assert refused.step_log[1].action == "done"
+    assert any(event.type == "step_finished" and event.data.get("turn_stop") == "refusal" for event in events)
+
+    noop = FakeRuntime(elements)
+
+    def unchanged(name, params, runtime):
+        del name, params, runtime
+
+    noop.on_call = unchanged
+    stopped, _events, noop, _agent = run(
+        ScriptedModel([
+            turn(
+                ToolCall("click", {"ref": "e2"}, id="n"),
+                done("saved", [{"element": {"role": "AXButton", "name": "Save"}}], call_id="early"),
+            ),
+            turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}])),
+        ]),
+        elements,
+        runtime=noop,
+        trace_dir=tmp_path / "noop",
+        max_retries=0,
+    )
+    assert [name for name, _params in noop.calls] == ["click"]
+    assert stopped.step_log[0].verified is False
+    assert stopped.step_log[0].turn_stop == "failure"
+    assert stopped.step_log[0].skipped[0]["name"] == "done"
+    assert stopped.status == "success"
+    assert stopped.step_log[1].verified is True
 
 
 def test_max_steps_stops_before_a_third_observation():
@@ -575,6 +681,8 @@ def test_scripted_spec_and_schemas(tmp_path):
     names = {item["name"] for item in tool_schemas()}
     assert "done" in names
     assert "exec" not in names
+    assert "shell" not in names
+    assert "python" not in names
     done_schema = next(item for item in tool_schemas() if item["name"] == "done")
     assert "conditions" in done_schema["parameters"]["properties"]
     assert ReservedPermission.EXEC == "exec"

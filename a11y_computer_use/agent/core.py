@@ -1,8 +1,10 @@
 """Computer-use agent loop: observe, act, verify, recover.
 
-The model picks tool calls. Each call runs through ``server.Runtime.call_tool``,
+The model picks tool calls. Desktop calls run through ``server.Runtime.call_tool``,
 the same safety layer the MCP server uses. This module does not register tools
-on that server.
+on that server. ``shell`` and ``python`` are not desktop tools: they run only
+when ``allow_exec`` is set, after ``approve``, and each attempt is appended
+to ``exec-audit.jsonl``.
 
 ``done`` is accepted only when its 1 to 3 conditions hold against a fresh
 snapshot (or the filesystem, for ``file_exists``). A repeated no-op is forced
@@ -16,13 +18,22 @@ import os
 import time
 import threading
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 from a11y_computer_use import conditions
 from a11y_computer_use.agent.actions import (
+    EXEC_ACTION_NAMES,
     Action,
     risk_reason,
     tool_schemas,
     validate_action,
+)
+from a11y_computer_use.agent.exec import (
+    DEFAULT_EXEC_TIMEOUT_S,
+    append_audit,
+    audit_record,
+    bound_timeout,
+    run_command,
 )
 from a11y_computer_use.agent.events import Event
 from a11y_computer_use.agent.models.base import (
@@ -47,7 +58,8 @@ _REPLAN = (
 )
 _SYSTEM = """You control a computer through accessibility actions. You see a pruned
 accessibility snapshot and answer with tool calls. Calls in one turn run one
-at a time, and each one is checked against a new snapshot before the next.
+at a time, and each one is checked before the next. If a call fails, is
+refused, or needs a human, later calls in that turn do not run.
 
 Use element refs from the latest observation. Prefer set_value and select for
 fields and options. click, type, key, scroll, app, window, menu, and wait are
@@ -60,6 +72,13 @@ Call done only when the goal is finished. done requires an answer and 1 to 3
 conditions the loop can see: an element role and name, a field value, a window
 title, or a file on disk. A condition that fails is rejected and you must
 continue. Do not claim success without one of those checks.
+"""
+
+_EXEC_SYSTEM = """
+shell and python are available because exec is allowed on this agent. Both
+need approval before they run. shell takes command. python takes code. Both
+accept cwd and timeout_s. Their output is truncated. Do not use them to read
+or type a password, one-time code, or card number.
 """
 
 _HUMAN_KINDS = ("captcha", "payment", "2fa", "login")
@@ -75,9 +94,10 @@ class Agent:
 
     ``model`` is a ``Model`` or a spec such as ``scripted:/path.json``.
     ``display`` is copied to ``$DISPLAY`` before the runtime is created.
-    ``approve`` is called for quit, close, and submit actions. When it is
-    omitted, ``auto_deny`` skips those actions. ``cancel`` is safe to call
-    from another thread.
+    ``approve`` is called for quit, close, submit, and exec actions. When it
+    is omitted, ``auto_deny`` skips those actions. ``allow_exec`` exposes
+    ``shell`` and ``python``; it is off by default, and each exec call is
+    still approved and audited. ``cancel`` is safe to call from another thread.
     """
 
     def __init__(
@@ -89,6 +109,7 @@ class Agent:
         max_time_s: float = 900,
         approve: Callable[[Action], bool] | None = None,
         auto_deny: bool = True,
+        allow_exec: bool = False,
         on_event: Callable[[Event], None] | None = None,
         trace_dir: str | os.PathLike | None = None,
         vision: bool = False,
@@ -102,6 +123,7 @@ class Agent:
         self.max_time_s = max_time_s
         self.approve = approve
         self.auto_deny = auto_deny
+        self.allow_exec = allow_exec
         self.on_event = on_event
         self._trace_dir = trace_dir
         self.vision = vision
@@ -170,8 +192,9 @@ class Agent:
         else:
             self.runtime = self._runtime
         self.trace = Trace(self._trace_dir)
+        prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
         self._messages = [
-            Message(role="system", content=_SYSTEM),
+            Message(role="system", content=prompt),
         ]
 
     def _drive(self, goal: str, started: float) -> Iterator[Event]:
@@ -216,7 +239,9 @@ class Agent:
 
             remaining = self.max_time_s - (time.perf_counter() - started)
             turn = self.model.complete(  # type: ignore[union-attr]
-                self._messages, tool_schemas(), timeout=max(0.0, remaining),
+                self._messages,
+                tool_schemas(allow_exec=self.allow_exec),
+                timeout=max(0.0, remaining),
             )
             yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
             self._messages.append(assistant_message(turn))
@@ -231,7 +256,7 @@ class Agent:
                 ))
                 continue
             self._nudges = 0
-            for call in turn.calls:
+            for position, call in enumerate(turn.calls):
                 if self._cancel.is_set():
                     raise _Cancelled()
                 if self._timed_out(started):
@@ -240,47 +265,94 @@ class Agent:
                 if len(self._steps) >= self.max_steps:
                     self._finish("failed", "", "max_steps", started)
                     return
-                stop = yield from self._one_call(call, turn, started)
-                if stop:
+                remaining = [_call_view(item) for item in turn.calls[position + 1:]]
+                prior = [_call_view(item) for item in turn.calls[:position]]
+                outcome = yield from self._one_call(call, turn, started, remaining, prior)
+                if outcome == "stop_run":
                     return
+                if outcome == "stop_turn":
+                    break
 
-    def _one_call(self, call: ToolCall, turn: ModelTurn, started: float) -> Iterator[Event]:
+    def _one_call(
+        self,
+        call: ToolCall,
+        turn: ModelTurn,
+        started: float,
+        remaining: list[dict],
+        prior: list[dict],
+    ) -> Iterator[Event]:
         requested = Action.from_call(call)
         index = len(self._steps) + 1
         yield Event("step_started", {"index": index, "action": requested.name})
-        problem = validate_action(requested)
+        problem = validate_action(requested, allow_exec=self.allow_exec)
         if problem is not None:
+            if requested.name in EXEC_ACTION_NAMES:
+                self._audit_exec(
+                    requested,
+                    approval="exec_disabled" if not self.allow_exec else "rejected",
+                    exit_code=None,
+                    output="",
+                    error=problem,
+                )
             self._commit(
                 requested, requested, problem, verified=False, error=problem,
                 duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+                skipped=remaining, turn_stop="failure",
             )
             yield Event("action", _action_event(index, requested, self._last_snap))
-            yield Event("step_finished", {"index": index, "verified": False, "error": problem})
-            self._messages.append(Message(
-                role="tool", content=problem, tool_call_id=call.id, name=requested.name,
+            yield Event("step_finished", _step_finished(
+                index, verified=False, error=problem, skipped=remaining, turn_stop="failure",
+                ran=[*prior, _call_view(call)],
             ))
-            return False
+            self._messages.append(Message(
+                role="tool",
+                content=_with_stop_note(problem, remaining, "failure"),
+                tool_call_id=call.id, name=requested.name,
+            ))
+            return "stop_turn"
         if requested.name == "done":
-            yield from self._done(requested, turn, started)
-            return self._result is not None and self._result.status == "success"
+            yield from self._done(requested, turn, started, remaining)
+            if self._result is not None and self._result.status == "success":
+                return "stop_run"
+            return "stop_turn"
         if requested.name == "ask_human":
             info = _ask_human_info(requested, self._last_snap)
             self._commit(
                 requested, requested, info["message"], verified=True, error=None,
                 duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+                skipped=remaining, turn_stop="needs_human",
             )
             yield Event("action", _action_event(index, requested, self._last_snap))
-            yield Event("step_finished", {"index": index, "verified": True, "error": None})
+            yield Event("step_finished", _step_finished(
+                index, verified=True, error=None, skipped=remaining, turn_stop="needs_human",
+                ran=[*prior, _call_view(call)],
+            ))
             self._finish("needs_human", "", info["message"], started, needs_human=info)
-            yield Event("needs_human", info)
-            return True
+            yield Event("needs_human", {
+                **info,
+                "ran": [*prior, _call_view(call)],
+                "skipped": remaining,
+                "turn_stop": "needs_human",
+            })
+            return "stop_run"
 
         kind = target_human_kind(requested, self._last_snap)
         if kind is not None and requested.name in {"type", "set_value", "select", "click", "key"}:
             info = human_info(kind, _element_for(requested, self._last_snap), self._last_snap)
+            info = {
+                **info,
+                "ran": prior,
+                "skipped": [_call_view(call), *remaining],
+                "turn_stop": "needs_human",
+            }
             self._finish("needs_human", "", info["message"], started, needs_human=info)
             yield Event("needs_human", info)
-            return True
+            return "stop_run"
+
+        if requested.name in EXEC_ACTION_NAMES:
+            return (yield from self._exec_call(
+                requested, call, turn, started, index, remaining, prior,
+            ))
 
         label = _action_label(requested, self._last_snap)
         allowed, denial = self._allowed(requested, label)
@@ -289,14 +361,19 @@ class Agent:
                 requested, requested, denial or "approval_denied", verified=False,
                 error=denial, duration=0.0, recovery=[], turn=turn,
                 started_at=time.perf_counter(),
+                skipped=remaining, turn_stop="refusal",
             )
             yield Event("action", _action_event(index, requested, self._last_snap))
-            yield Event("step_finished", {"index": index, "verified": False, "error": denial})
+            yield Event("step_finished", _step_finished(
+                index, verified=False, error=denial, skipped=remaining, turn_stop="refusal",
+                ran=[*prior, _call_view(call)],
+            ))
             self._messages.append(Message(
-                role="tool", content=denial or "approval_denied",
+                role="tool",
+                content=_with_stop_note(denial or "approval_denied", remaining, "refusal"),
                 tool_call_id=call.id, name=requested.name,
             ))
-            return False
+            return "stop_turn"
 
         key = _action_key(requested)
         level = self._levels.get(key, 0)
@@ -328,10 +405,12 @@ class Agent:
             self._levels[key] = 0
         else:
             self._levels[key] = level + 1
+        turn_stop = None if verified else "failure"
+        skipped = [] if verified else remaining
         self._commit(
             requested, executed, result, verified=verified, error=error,
             duration=time.perf_counter() - started_at, recovery=recovery,
-            turn=turn, started_at=started_at,
+            turn=turn, started_at=started_at, skipped=skipped, turn_stop=turn_stop,
         )
         yield Event("action", _action_event(index, executed, snap))
         yield Event("observation", {
@@ -339,16 +418,141 @@ class Agent:
             "app": self._app_name(),
             "digest": after,
         })
-        yield Event("step_finished", {"index": index, "verified": verified, "error": error, "result": result})
+        ran = [*prior, _call_view(call)] if turn_stop else None
+        yield Event("step_finished", _step_finished(
+            index, verified=verified, error=error, result=result,
+            skipped=skipped, turn_stop=turn_stop, ran=ran,
+        ))
+        feedback = _tool_feedback(executed, result, error, recovery)
+        if turn_stop:
+            feedback = _with_stop_note(feedback, remaining, turn_stop)
         self._messages.append(Message(
             role="tool",
-            content=_tool_feedback(executed, result, error, recovery),
+            content=feedback,
             tool_call_id=call.id,
             name=executed.name,
         ))
-        return False
+        return "stop_turn" if turn_stop else "continue"
 
-    def _done(self, action: Action, turn: ModelTurn, started: float) -> Iterator[Event]:
+    def _exec_call(
+        self,
+        requested: Action,
+        call: ToolCall,
+        turn: ModelTurn,
+        started: float,
+        index: int,
+        remaining: list[dict],
+        prior: list[dict],
+    ) -> Iterator[Event]:
+        """Approve, run, and audit one shell or Python call. Not a runtime tool."""
+        del started
+        label = _action_label(requested, self._last_snap)
+        allowed, denial = self._allowed(requested, label)
+        command = _exec_command(requested)
+        cwd = str(requested.args.get("cwd") or os.getcwd())
+        if not allowed:
+            approval = "denied" if self.approve is not None else "auto_denied"
+            self._audit_exec(
+                requested, approval=approval, exit_code=None, output="",
+                error=denial, cwd=cwd,
+            )
+            self._commit(
+                requested, requested, denial or "approval_denied", verified=False,
+                error=denial, duration=0.0, recovery=[], turn=turn,
+                started_at=time.perf_counter(), skipped=remaining, turn_stop="refusal",
+            )
+            yield Event("action", _action_event(index, requested, self._last_snap))
+            yield Event("step_finished", _step_finished(
+                index, verified=False, error=denial, skipped=remaining, turn_stop="refusal",
+                ran=[*prior, _call_view(call)],
+            ))
+            self._messages.append(Message(
+                role="tool",
+                content=_with_stop_note(denial or "approval_denied", remaining, "refusal"),
+                tool_call_id=call.id, name=requested.name,
+            ))
+            return "stop_turn"
+
+        timeout_s = bound_timeout(float(requested.args.get("timeout_s", DEFAULT_EXEC_TIMEOUT_S)))
+        started_at = time.perf_counter()
+        if requested.name == "python":
+            outcome = run_command(
+                command, shell=False, cwd=cwd, timeout_s=timeout_s, python_code=command,
+            )
+        else:
+            outcome = run_command(command, shell=True, cwd=cwd, timeout_s=timeout_s)
+        self._audit_exec(
+            requested,
+            approval="approved",
+            exit_code=outcome.exit_code,
+            output=outcome.output,
+            error=outcome.error,
+            cwd=cwd,
+            truncated=outcome.truncated,
+        )
+        observation, snap = self._observe()
+        self._last_observation = observation
+        self._last_snap = snap
+        verified = outcome.ok
+        turn_stop = None if verified else "failure"
+        skipped = [] if verified else remaining
+        detail = outcome.output or (outcome.error or "ok")
+        self._commit(
+            requested, requested, detail, verified=verified, error=outcome.error,
+            duration=time.perf_counter() - started_at, recovery=[], turn=turn,
+            started_at=started_at, skipped=skipped, turn_stop=turn_stop,
+        )
+        yield Event("action", _action_event(index, requested, self._last_snap))
+        yield Event("observation", {
+            "text": truncate_observation(observation),
+            "app": self._app_name(),
+            "digest": snapshot_digest(snap, self._last_observation),
+        })
+        ran = [*prior, _call_view(call)] if turn_stop else None
+        yield Event("step_finished", _step_finished(
+            index, verified=verified, error=outcome.error, result=detail,
+            skipped=skipped, turn_stop=turn_stop, ran=ran,
+        ))
+        feedback = outcome.output if outcome.ok else f"{requested.name} failed: {outcome.error}"
+        if outcome.output and not outcome.ok:
+            feedback += "\n" + outcome.output
+        if turn_stop:
+            feedback = _with_stop_note(feedback, remaining, turn_stop)
+        self._messages.append(Message(
+            role="tool", content=feedback, tool_call_id=call.id, name=requested.name,
+        ))
+        return "stop_turn" if turn_stop else "continue"
+
+    def _audit_exec(
+        self,
+        action: Action,
+        *,
+        approval: str,
+        exit_code: int | None,
+        output: str,
+        error: str | None = None,
+        cwd: str | None = None,
+        truncated: bool = False,
+    ) -> None:
+        if self.trace is None:
+            return
+        record = audit_record(
+            action=action.name,
+            command=_exec_command(action),
+            cwd=str(cwd or action.args.get("cwd") or os.getcwd()),
+            exit_code=exit_code,
+            output=output,
+            approval=approval,
+            error=error,
+            truncated=truncated,
+        )
+        append_audit(self._exec_audit_path(), record)
+
+    def _exec_audit_path(self) -> Path:
+        assert self.trace is not None
+        return self.trace.dir / "exec-audit.jsonl"
+
+    def _done(self, action: Action, turn: ModelTurn, started: float, remaining: list[dict]) -> Iterator[Event]:
         index = len(self._steps) + 1
         observation, snap = self._observe()
         self._last_observation = observation
@@ -362,23 +566,26 @@ class Agent:
         self._conditions = checked
         ok = all(item["ok"] for item in checked)
         detail = "; ".join(item["detail"] for item in checked if not item["ok"]) or "conditions held"
+        turn_stop = None if ok else "failure"
+        skipped = remaining if not ok or remaining else []
         self._commit(
             action, action, detail, verified=ok, error=None if ok else "evidence_failed",
             duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
-            conditions=checked,
+            conditions=checked, skipped=skipped, turn_stop=turn_stop,
         )
         yield Event("action", _action_event(index, action, snap))
-        yield Event("step_finished", {
-            "index": index, "verified": ok, "error": None if ok else "evidence_failed",
-        })
+        yield Event("step_finished", _step_finished(
+            index, verified=ok, error=None if ok else "evidence_failed",
+            skipped=skipped, turn_stop=turn_stop,
+        ))
         if ok:
             answer = str(action.args.get("answer") or "")
             self._finish("success", answer, "done", started)
-            yield Event("done", {"answer": answer, "conditions": checked})
+            yield Event("done", {"answer": answer, "conditions": checked, "skipped": skipped})
             return
         self._messages.append(Message(
             role="tool",
-            content="done rejected: " + detail,
+            content=_with_stop_note("done rejected: " + detail, remaining, "failure"),
             tool_call_id=action.id,
             name="done",
         ))
@@ -496,6 +703,8 @@ class Agent:
         turn: ModelTurn | None,
         started_at: float,
         conditions: list[dict] | None = None,
+        skipped: list | None = None,
+        turn_stop: str | None = None,
     ) -> None:
         del started_at
         target = target_view(executed, self._last_snap)
@@ -510,6 +719,8 @@ class Agent:
             error=error,
             verified=verified,
             duration_s=duration,
+            skipped=list(skipped or []),
+            turn_stop=turn_stop,
         )
         self._steps.append(step)
         requested_args, _requested_secrets = redact_args(_public_args(requested.args), sensitive=sensitive)
@@ -527,7 +738,7 @@ class Agent:
             },
             "request": {
                 "message_count": len(self._messages),
-                "tools": [item["name"] for item in tool_schemas()],
+                "tools": [item["name"] for item in tool_schemas(allow_exec=self.allow_exec)],
             },
             "response": {
                 "text": redact_text(turn.text, secrets) if turn is not None else "",
@@ -544,6 +755,8 @@ class Agent:
             "recovery": [note for note in recovery if note],
             "screenshot": self._save_shot(step.index),
             "conditions": conditions,
+            "skipped": step.skipped,
+            "turn_stop": turn_stop,
         }
         if self.trace is not None:
             self.trace.record(entry, step.to_dict())
@@ -1045,6 +1258,43 @@ def _call_view(call: ToolCall) -> dict:
 def _action_event(index: int, action: Action, snap: Snapshot | None) -> dict:
     args, _secrets = redact_args(_public_args(action.args))
     return {"index": index, "action": action.name, "args": args, "target": target_view(action, snap)}
+
+
+def _exec_command(action: Action) -> str:
+    if action.name == "python":
+        return str(action.args.get("code") or "")
+    return str(action.args.get("command") or "")
+
+
+def _step_finished(
+    index: int,
+    *,
+    verified: bool,
+    error: str | None,
+    skipped: list | None = None,
+    turn_stop: str | None = None,
+    result: str | None = None,
+    ran: list | None = None,
+) -> dict:
+    data = {
+        "index": index,
+        "verified": verified,
+        "error": error,
+        "skipped": list(skipped or []),
+        "turn_stop": turn_stop,
+    }
+    if result is not None:
+        data["result"] = result
+    if ran is not None:
+        data["ran"] = ran
+    return data
+
+
+def _with_stop_note(text: str, remaining: list[dict], reason: str) -> str:
+    if not remaining:
+        return text
+    names = ", ".join(str(item.get("name")) for item in remaining)
+    return f"{text}\nStopped this turn ({reason}). Did not run: {names}."
 
 
 def _tool_feedback(action: Action, result: str, error: str | None, recovery: list[str]) -> str:

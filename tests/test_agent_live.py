@@ -1,4 +1,4 @@
-"""Live M1 agent runs against the GTK fixture and the local HTML pages.
+"""Live agent runs against the GTK fixture and the local HTML pages.
 
 The fixture smoke test launches the GTK app and the pages and snapshots them
 with the Linux and browser drivers.
@@ -392,6 +392,40 @@ def _save_turn(text: str, dest: Path, turn_cls, call_cls):
     )])
 
 
+class _ThreeActionSave(_SaveScript):
+    """One turn sets the note, the path, and the format. Later turns save."""
+
+    def __init__(self, dest: Path, turn_cls, call_cls) -> None:
+        super().__init__(dest, turn_cls, call_cls)
+        self.batched = False
+
+    def __call__(self, messages):
+        self.calls += 1
+        text = message_text(messages)
+        elements = parse_snapshot(text)
+        notes = pick(elements, role="textarea", name="Notes")
+        path = pick(elements, role="textfield", name="Save path")
+        combo = pick(elements, role="combobox", name="Format")
+        if (
+            not self.batched
+            and notes is not None
+            and path is not None
+            and combo is not None
+            and (
+                not _note_landed(notes.value)
+                or (path.value or "") != str(self.dest)
+                or combo.value != "plain"
+            )
+        ):
+            self.batched = True
+            return self.Turn(calls=[
+                self.Call(name="set_value", args={"ref": notes.ref, "value": NOTE}),
+                self.Call(name="set_value", args={"ref": path.ref, "value": str(self.dest)}),
+                self.Call(name="select", args={"ref": combo.ref, "value": "plain"}),
+            ])
+        return _save_turn(text, self.dest, self.Turn, self.Call)
+
+
 class _WrongThenSave(_SaveScript):
     """First turn writes the wrong note and claims success. Later turns recover."""
 
@@ -623,6 +657,171 @@ def test_agent_saves_note_and_records_trace(tmp_path, isolated_home) -> None:
     finally:
         stop_process(proc)
         dest.unlink(missing_ok=True)
+
+
+@requires_display
+def test_agent_runs_three_actions_in_one_turn(tmp_path, isolated_home) -> None:
+    """A scripted model issues set_value, set_value, and select in one turn."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    dest = _short_dest()
+    dest.unlink(missing_ok=True)
+    proc = launch_gtk()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+        script = _ThreeActionSave(dest, ModelTurn, ToolCall)
+        result = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, script),
+            f"In {APP_NAME}, write the note, set Format to plain, and save it to {dest}.",
+            trace,
+        )
+        assert script.batched, "the model never issued the 3-action turn"
+        assert result.status == "success", result
+        assert dest.read_text() == NOTE
+        actions = [_step_action(step) for step in result.step_log]
+        window_of_three = None
+        for index in range(len(actions) - 2):
+            if actions[index:index + 3] == ["set_value", "set_value", "select"]:
+                window_of_three = index
+                break
+        assert window_of_three is not None, actions
+        batch = list(result.step_log[window_of_three:window_of_three + 3])
+        assert [_step_verified(step) for step in batch] == [True, True, True]
+        assert all(not _step_skipped(step) for step in batch)
+        lines = [
+            json.loads(line)
+            for line in (Path(result.trace_dir) / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(len(entry.get("response", {}).get("calls") or []) == 3 for entry in lines), lines
+    finally:
+        stop_process(proc)
+        dest.unlink(missing_ok=True)
+
+
+def _step_skipped(step) -> list:
+    if isinstance(step, dict):
+        return list(step.get("skipped") or [])
+    return list(getattr(step, "skipped", None) or [])
+
+
+@requires_display
+def test_agent_exec_writes_a_file_when_allowed(tmp_path, isolated_home) -> None:
+    """Live shell, with allow_exec and an approve hook, writes the file."""
+    import shlex
+
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    target = tmp_path / "exec-live.txt"
+    token = f"m2-live-{uuid.uuid4().hex[:8]}"
+    command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(target))}"
+    trace = tmp_path / "trace"
+    trace.mkdir()
+
+    def script(_messages):
+        if target.is_file() and target.read_text(encoding="utf-8") == token:
+            return ModelTurn(calls=[ToolCall(
+                name="done",
+                args={
+                    "answer": "wrote the file",
+                    "conditions": [{"file_exists": str(target), "contains": token}],
+                },
+            )])
+        return ModelTurn(calls=[
+            ToolCall(name="shell", args={"command": command, "timeout_s": 10}),
+            ToolCall(name="done", args={
+                "answer": "wrote the file",
+                "conditions": [{"file_exists": str(target), "contains": token}],
+            }),
+        ])
+
+    result = _run_agent(
+        Agent,
+        ScriptedModel(script),
+        f"Write {token} to {target} with the shell.",
+        trace,
+        allow_exec=True,
+        max_steps=6,
+    )
+    assert result.status == "success", result
+    assert target.read_text(encoding="utf-8") == token
+    assert _step_action(result.step_log[0]) == "shell"
+    assert _step_verified(result.step_log[0]) is True
+    rows = [
+        json.loads(line)
+        for line in (Path(result.trace_dir) / "exec-audit.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["approval"] == "approved"
+    assert rows[0]["exit_code"] == 0
+    assert rows[0]["command"] == command
+    assert rows[0]["cwd"]
+    assert "timestamp" in rows[0]
+
+
+@requires_display
+def test_agent_exec_denial_does_not_write(tmp_path, isolated_home) -> None:
+    """allow_exec still refuses the command when approve returns false."""
+    import shlex
+
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    target = tmp_path / "exec-denied.txt"
+    marker = tmp_path / "marker.txt"
+    marker.write_text("present", encoding="utf-8")
+    token = "should-not-land"
+    command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(target))}"
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    state = {"phase": "deny"}
+
+    def script(_messages):
+        if state["phase"] == "deny":
+            state["phase"] = "finish"
+            return ModelTurn(calls=[
+                ToolCall(name="shell", args={"command": command, "timeout_s": 10}),
+                ToolCall(name="done", args={
+                    "answer": "wrote it",
+                    "conditions": [{"file_exists": str(target), "contains": token}],
+                }),
+            ])
+        return ModelTurn(calls=[ToolCall(
+            name="done",
+            args={
+                "answer": "refused the shell",
+                "conditions": [{"file_exists": str(marker), "contains": "present"}],
+            },
+        )])
+
+    result = _run_agent(
+        Agent,
+        ScriptedModel(script),
+        f"Do not write {target}.",
+        trace,
+        allow_exec=True,
+        approve=lambda _action: False,
+        auto_deny=True,
+        max_steps=6,
+    )
+    assert not target.exists()
+    assert result.status == "success", result
+    assert result.answer == "refused the shell"
+    assert _step_action(result.step_log[0]) == "shell"
+    assert _step_verified(result.step_log[0]) is False
+    assert _step_skipped(result.step_log[0])
+    assert _step_skipped(result.step_log[0])[0]["name"] == "done"
+    rows = [
+        json.loads(line)
+        for line in (Path(result.trace_dir) / "exec-audit.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["approval"] == "denied"
+    assert rows[0]["exit_code"] is None
+    assert rows[0]["command"] == command
+    assert token not in rows[0]["output"]
 
 
 @requires_display

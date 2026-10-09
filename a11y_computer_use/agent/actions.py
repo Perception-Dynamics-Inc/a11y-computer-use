@@ -1,21 +1,22 @@
 """Typed actions the model may request, and the JSON schemas it is shown.
 
-A model turn may contain several calls (``ModelTurn.calls``). M1 executes
-that list one action at a time, and each action is verified on its own.
-There is no ``exec`` action in this list. ``ReservedPermission.EXEC`` is the
-name M2 will use for shell and Python; it stays off, behind ``approve``, and
-audited. Adding it later does not rename the actions below.
+A model turn may contain several calls (``ModelTurn.calls``). The loop runs
+that list one action at a time and stops the rest of the turn at the first
+failure, refusal, or ``needs_human``. ``shell`` and ``python`` are exec
+actions. They stay out of ``tool_schemas()`` unless ``allow_exec`` is true,
+and they are not MCP tools.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 from a11y_computer_use.agent.models.base import ToolCall
 
-#: Action names M1 will execute. ``done`` and ``ask_human`` end or pause the run.
+#: Desktop actions. ``done`` and ``ask_human`` end or pause the run.
 ACTION_NAMES = frozenset({
     "click",
     "type",
@@ -31,6 +32,10 @@ ACTION_NAMES = frozenset({
     "ask_human",
 })
 
+#: Shell and Python. Hidden, rejected, and unaudited as runnable until
+#: ``allow_exec`` is set. They are not added to the MCP server.
+EXEC_ACTION_NAMES = frozenset({"shell", "python"})
+
 _SUBMIT_WORDS = (
     "submit",
     "send",
@@ -44,12 +49,11 @@ _SUBMIT_WORDS = (
 
 
 class ReservedPermission(str, Enum):
-    """Permissions reserved for a later milestone.
+    """Permission names that are not tiers in the desktop permission store.
 
-    ``exec`` is shell and Python execution. M1 does not grant it and does not
-    expose a tool that would use it. A future executor must leave it off by
-    default, refuse it unless ``approve`` returns true, and write the command
-    to the audit log before it runs.
+    ``exec`` is shell and Python. It is off unless an ``Agent`` is built with
+    ``allow_exec=True``. Each call still goes through ``approve`` (headless
+    ``auto_deny`` refuses it) and is appended to the exec audit log.
     """
 
     EXEC = "exec"
@@ -69,13 +73,25 @@ class Action:
         return cls(name=str(call.name), args=dict(args), id=call.id)
 
 
-def tool_schemas() -> list[dict]:
-    """JSON-schema function definitions passed to ``Model.complete``."""
-    return [_schema(name, description, properties, required) for name, description, properties, required in _SPECS]
+def tool_schemas(*, allow_exec: bool = False) -> list[dict]:
+    """JSON-schema function definitions passed to ``Model.complete``.
+
+    ``shell`` and ``python`` are included only when ``allow_exec`` is true.
+    The default list is the desktop actions the MCP server already knows,
+    plus ``done`` and ``ask_human``, which belong to the agent loop.
+    """
+    specs = list(_SPECS)
+    if allow_exec:
+        specs.extend(_EXEC_SPECS)
+    return [_schema(name, description, properties, required) for name, description, properties, required in specs]
 
 
-def validate_action(action: Action) -> str | None:
+def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     """Return an error string when ``action`` cannot be executed, else None."""
+    if action.name in EXEC_ACTION_NAMES:
+        if not allow_exec:
+            return "exec is not allowed"
+        return _exec_error(action)
     if action.name not in ACTION_NAMES:
         return f"unknown action {action.name!r}"
     args = action.args
@@ -120,6 +136,28 @@ def risk_reason(action: Action, label: str | None) -> str | None:
         return f"submitting {label}"
     if action.name == "menu" and any(word in text for word in ("quit", "exit", "close window", "log out", "sign out")):
         return f"menu {label}"
+    if action.name == "shell":
+        return "running a shell command"
+    if action.name == "python":
+        return "running python"
+    return None
+
+
+def _exec_error(action: Action) -> str | None:
+    if action.name == "shell" and not str(action.args.get("command") or "").strip():
+        return "shell requires command"
+    if action.name == "python" and not str(action.args.get("code") or "").strip():
+        return "python requires code"
+    if "timeout_s" in action.args and action.args.get("timeout_s") is not None:
+        try:
+            timeout = float(action.args["timeout_s"])
+        except (TypeError, ValueError):
+            return "timeout_s must be a positive number"
+        if timeout <= 0:
+            return "timeout_s must be a positive number"
+    cwd = action.args.get("cwd")
+    if cwd is not None and not os.path.isdir(str(cwd)):
+        return "cwd is not a directory"
     return None
 
 
@@ -255,8 +293,27 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
 ]
 
 
+_EXEC_SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
+    (
+        "shell",
+        "Run a shell command on this machine. Requires exec permission and approval. "
+        "command is the shell string. cwd and timeout_s are optional. Output is truncated.",
+        {"command": _STR, "cwd": _STR, "timeout_s": _NUM},
+        ["command"],
+    ),
+    (
+        "python",
+        "Run Python source in a fresh interpreter. Requires exec permission and approval. "
+        "code is the source. cwd and timeout_s are optional. Output is truncated.",
+        {"code": _STR, "cwd": _STR, "timeout_s": _NUM},
+        ["code"],
+    ),
+]
+
+
 __all__ = [
     "ACTION_NAMES",
+    "EXEC_ACTION_NAMES",
     "Action",
     "ReservedPermission",
     "risk_reason",
