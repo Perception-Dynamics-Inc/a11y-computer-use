@@ -3458,17 +3458,19 @@ def replace_writer_cell_text(acc, value: str) -> None:
 
     if matches():
         return
-    set_text(paragraphs[0], value)
+    # A paragraph is blocked in set_text so a Firefox page is not selected.
+    # This cell's paragraph is the value, so the write is forced.
+    set_text(paragraphs[0], value, force=True)
     if matches():
         for extra in paragraphs[1:]:
             if (_full_text(extra) or "") != "":
-                set_text(extra, "")
+                set_text(extra, "", force=True)
         if matches():
             return
     current = _writer_paragraphs(acc)
     for child, original in zip(current, originals):
         if (_full_text(child) or "") != original:
-            set_text(child, original)
+            set_text(child, original, force=True)
     raise _text_mismatch(
         "text_mismatch",
         f"the value read back does not match {value!r}",
@@ -5162,7 +5164,7 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     return False
 
 
-def set_text(acc, text: str) -> bool:
+def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
     GTK's ``set_text_contents`` replaces, and the snapshot read then equals
@@ -5199,9 +5201,10 @@ def set_text(acc, text: str) -> bool:
     ``valuetext``. The Value interface is not that check.
     A paragraph, panel, document, or combo is not replaced. Firefox exposes
     EditableText on those nodes, and selecting one selects the page. This
-    returns false before any selection or key.
+    returns false before any selection or key. ``force`` is the Writer
+    table-cell path: that paragraph is the cell value and is replaced.
     """
-    if _blocks_text_replace(acc):
+    if not force and _blocks_text_replace(acc):
         return False
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
