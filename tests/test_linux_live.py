@@ -2255,6 +2255,79 @@ def _wait_qt_line(path, expected: str, timeout_s: float = 4.0):
     raise AssertionError(f"line edit is {last!r}, expected {expected!r}")
 
 
+def _a11y_bus_address() -> str:
+    """The session's AT-SPI bus address, or ``""`` when it cannot be read."""
+    env = os.environ.get("AT_SPI_BUS_ADDRESS") or ""
+    if env:
+        return env
+    try:
+        import dbus
+
+        bus = dbus.SessionBus()
+        obj = bus.get_object("org.a11y.Bus", "/org/a11y/bus")
+        iface = dbus.Interface(obj, "org.a11y.Bus")
+        return str(iface.GetAddress() or "")
+    except Exception:
+        return ""
+
+
+def _root_atspi_bus() -> str:
+    """The ``AT_SPI_BUS`` string on the X root, or ``""``."""
+    if not os.environ.get("DISPLAY"):
+        return ""
+    try:
+        from Xlib import display
+        from Xlib.Xatom import STRING
+    except Exception:
+        return ""
+    disp = display.Display()
+    try:
+        root = disp.screen().root
+        atom = disp.intern_atom("AT_SPI_BUS")
+        prop = root.get_full_property(atom, STRING)
+        if prop is None or prop.value is None:
+            return ""
+        raw = prop.value
+        if isinstance(raw, str):
+            return raw.split("\x00", 1)[0]
+        return bytes(raw).split(b"\x00", 1)[0].decode("utf-8", "replace")
+    finally:
+        disp.close()
+
+
+def _publish_atspi_bus() -> str:
+    """Write the AT-SPI address onto the X root property ``AT_SPI_BUS``.
+
+    Qt reads that property when ``AT_SPI_BUS_ADDRESS`` is unset. The bus
+    launcher usually sets the property. A fixture that starts Qt before
+    the property exists never appears in the tree. Returns the address
+    that was written, or ``""`` when there is no X display.
+
+    The returned address is not exported. On Qt 6.4, a variable that is
+    already set makes the bridge emit its enable signal before the slot
+    is connected, and the application never registers.
+    """
+    if not os.environ.get("DISPLAY"):
+        return ""
+    address = _a11y_bus_address() or _root_atspi_bus()
+    if not address:
+        raise AssertionError(
+            "no AT-SPI bus address to publish as the X root property AT_SPI_BUS"
+        )
+    from Xlib import display
+    from Xlib.Xatom import STRING
+
+    disp = display.Display()
+    try:
+        root = disp.screen().root
+        atom = disp.intern_atom("AT_SPI_BUS")
+        root.change_property(atom, STRING, 8, address.encode("utf-8") + b"\x00")
+        disp.flush()
+    finally:
+        disp.close()
+    return address
+
+
 def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
     """Live Qt via AT-SPI: non-ASCII insert, combo name and selection, value display.
 
@@ -2275,6 +2348,8 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
     env = os.environ.copy()
     env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
     env["QT_QPA_PLATFORM"] = "xcb"
+    env.pop("AT_SPI_BUS_ADDRESS", None)
+    _publish_atspi_bus()
     proc = subprocess.Popen(
         [sys.executable, str(script), str(state)],
         env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -3513,3 +3588,152 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     finally:
         _stop(proc)
         httpd.shutdown()
+
+
+_QT_TABLE_APP = "cuqttable"
+
+_QT_TABLE_FIXTURE = textwrap.dedent(
+    r"""
+    import os
+    import sys
+
+    os.environ["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    widgets = __import__("PyQt6.QtWidgets", fromlist=["QtWidgets"])
+    app = widgets.QApplication(sys.argv)
+    app.setApplicationName("cuqttable")
+    try:
+        app.setDesktopFileName("cuqttable")
+    except Exception:
+        pass
+    tabs = widgets.QTabWidget()
+    grid = widgets.QTableWidget(4, 3)
+    grid.setAccessibleName("Grid")
+    for row in range(4):
+        for col in range(3):
+            grid.setItem(row, col, widgets.QTableWidgetItem("R%dC%d" % (row, col)))
+    tabs.addTab(grid, "Table")
+    tree = widgets.QTreeWidget()
+    tree.setAccessibleName("Tree")
+    fruits = widgets.QTreeWidgetItem(["Fruits"])
+    widgets.QTreeWidgetItem(fruits, ["Apple"])
+    tree.addTopLevelItem(fruits)
+    tabs.addTab(tree, "Tree")
+    tabs.setWindowTitle("cuqttable")
+    tabs.resize(520, 360)
+    tabs.move(40, 40)
+    tabs.show()
+    tabs.raise_()
+    run = getattr(app, "exec", None)
+    if run is None:
+        run = app.exec_
+    sys.exit(run())
+    """
+)
+
+
+def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> None:
+    """A Qt table lists column, row, and cell roles, and a cell click selects it.
+
+    The tree tab is hidden until it is shown. Fruits is a collapsed cell.
+    Qt's only action on that item is Toggle, which selects it and does not
+    expand it, so the child stays out of the tree. The fixture writes
+    AT_SPI_BUS and does not export AT_SPI_BUS_ADDRESS.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuqttable.py"
+    script.write_text(_QT_TABLE_FIXTURE)
+    log_path = tmp_path / "table.log"
+    log = open(log_path, "w", encoding="utf-8")
+    env = os.environ.copy()
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    env.pop("AT_SPI_BUS_ADDRESS", None)
+    _publish_atspi_bus()
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError("Qt table fixture exited\n" + _qt_log(log_path))
+            try:
+                snap = driver.snapshot(Scope.WINDOW, _QT_TABLE_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                titles = {el.title for el in snap.elements}
+                if "R0C0" in titles and "R3C2" in titles and "Grid" in titles:
+                    break
+            time.sleep(0.4)
+        else:
+            shown = [] if snap is None else [(el.role, el.title) for el in snap.elements]
+            raise AssertionError(f"Qt table did not expose its cells: {shown}\n{_qt_log(log_path)}")
+
+        cells = [el for el in snap.elements if el.role == "AXCell"]
+        assert {el.title for el in cells} >= {f"R{r}C{c}" for r in range(4) for c in range(3)}
+        assert any(el.role == "AXColumn" and el.title == "1" for el in snap.elements)
+        assert any(el.role == "AXRow" and el.title == "1" for el in snap.elements)
+        found = observe.find_elements(snap, text="R3C2", role="cell")
+        assert len(found) == 1 and found[0].role == "AXCell", found
+        driver.activate_app(_QT_TABLE_APP)
+        runtime = _runtime_for(tmp_path, driver, _QT_TABLE_APP)
+        runtime._current = snap
+        clicked = runtime.click(found[0].ref)
+        assert "clicked" in clicked, clicked
+
+        deadline = time.monotonic() + 4
+        selected = None
+        while time.monotonic() < deadline:
+            snap = driver.snapshot(Scope.WINDOW, _QT_TABLE_APP)
+            selected = next((el for el in snap.elements if el.title == "R3C2"), None)
+            if selected is not None and selected.selected:
+                break
+            time.sleep(0.2)
+        assert selected is not None and selected.role == "AXCell" and selected.selected, (
+            None if selected is None else (selected.role, selected.title, selected.selected)
+        )
+
+        tree_tab = next(el for el in snap.elements if el.title == "Tree" and el.role == "AXButton")
+        runtime._current = snap
+        runtime.click(tree_tab.ref)
+        deadline = time.monotonic() + 8
+        fruits = None
+        while time.monotonic() < deadline:
+            snap = driver.snapshot(Scope.WINDOW, _QT_TABLE_APP)
+            fruits = next(
+                (el for el in snap.elements if el.title == "Fruits" and el.role == "AXCell"),
+                None,
+            )
+            if fruits is not None and fruits.expanded is False:
+                break
+            time.sleep(0.3)
+        assert fruits is not None and fruits.expanded is False, fruits
+        runtime._current = snap
+        clicked = runtime.click(fruits.ref)
+        assert "clicked" in clicked, clicked
+        deadline = time.monotonic() + 4
+        again = None
+        while time.monotonic() < deadline:
+            snap = driver.snapshot(Scope.WINDOW, _QT_TABLE_APP)
+            again = next(
+                (el for el in snap.elements if el.title == "Fruits" and el.role == "AXCell"),
+                None,
+            )
+            if again is not None and again.selected:
+                break
+            time.sleep(0.2)
+        assert again is not None and again.selected and again.expanded is False, (
+            None if again is None else (again.role, again.selected, again.expanded)
+        )
+    finally:
+        _stop(proc)
+        log.close()

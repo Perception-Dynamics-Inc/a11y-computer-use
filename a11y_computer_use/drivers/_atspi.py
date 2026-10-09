@@ -80,8 +80,12 @@ _ROLE = {
     # LibreOffice Calc. The name is the address (A1). AXGroup is in
     # _NO_VALUE_ROLES, so mapping this to a group hid the cell text.
     # A GTK file chooser's body cells use the same role and stay in the
-    # snapshot by name, via `_with_table_body`.
+    # snapshot by name, via `_with_table_body`. Qt uses the same role for a
+    # QTableWidget cell and a QTreeWidget item.
     "table cell": "AXCell",
+    "table column header": "AXColumn",
+    "table row header": "AXRow",
+    "table row": "AXRow",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
     "scroll bar": "AXScrollBar",
