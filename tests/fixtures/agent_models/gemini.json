@@ -1,0 +1,336 @@
+{
+  "roundtrip_request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Click Save."
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "text": "Clicking Save."
+          },
+          {
+            "functionCall": {
+              "name": "click",
+              "args": {
+                "ref": "e2"
+              },
+              "id": "call_1"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "functionResponse": {
+              "name": "click",
+              "id": "call_1",
+              "response": {
+                "result": "clicked e2"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "systemInstruction": {
+      "parts": [
+        {
+          "text": "You drive the computer."
+        }
+      ]
+    },
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "click",
+            "description": "Click a ref.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "description": "Type text.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "roundtrip_response": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Typing."
+            },
+            {
+              "functionCall": {
+                "name": "type",
+                "args": {
+                  "text": "hi"
+                },
+                "id": "call_2"
+              },
+              "thoughtSignature": "sig-test"
+            }
+          ]
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 20,
+      "candidatesTokenCount": 8,
+      "totalTokenCount": 28
+    }
+  },
+  "multi_request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Do both."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "click",
+            "description": "Click a ref.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "description": "Type text.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "multi_response": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "functionCall": {
+                "name": "click",
+                "args": {
+                  "ref": "e2"
+                },
+                "id": "c1"
+              },
+              "thoughtSignature": "sig-1"
+            },
+            {
+              "functionCall": {
+                "name": "type",
+                "args": {
+                  "text": "hi"
+                },
+                "id": "c2"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 3,
+      "candidatesTokenCount": 4
+    }
+  },
+  "image_request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "What is this?"
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "click",
+            "description": "Click a ref.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref"
+              ]
+            }
+          },
+          {
+            "name": "type",
+            "description": "Type text.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "tool_image_request": {
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Look"
+          }
+        ]
+      },
+      {
+        "role": "model",
+        "parts": [
+          {
+            "functionCall": {
+              "name": "screenshot",
+              "args": {},
+              "id": "call_s"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "parts": [
+          {
+            "functionResponse": {
+              "name": "screenshot",
+              "id": "call_s",
+              "response": {
+                "result": "screen"
+              }
+            }
+          },
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "screenshot",
+            "description": "Capture the screen.",
+            "parameters": {
+              "type": "object",
+              "properties": {}
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "text_response": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "ok"
+            }
+          ]
+        }
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 1,
+      "candidatesTokenCount": 1
+    }
+  }
+}

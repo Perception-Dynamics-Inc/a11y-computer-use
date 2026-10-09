@@ -1,0 +1,315 @@
+{
+  "roundtrip_request": {
+    "model": "gpt-4.1",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You drive the computer."
+      },
+      {
+        "role": "user",
+        "content": "Click Save."
+      },
+      {
+        "role": "assistant",
+        "content": "Clicking Save.",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "click",
+              "arguments": "{\"ref\":\"e2\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "clicked e2",
+        "name": "click"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "click",
+          "description": "Click a ref.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "type",
+          "description": "Type text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "roundtrip_response": {
+    "id": "chatcmpl-fixture",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": "Typing.",
+          "tool_calls": [
+            {
+              "id": "call_2",
+              "type": "function",
+              "function": {
+                "name": "type",
+                "arguments": "{\"text\":\"hi\"}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 20,
+      "completion_tokens": 8,
+      "total_tokens": 28
+    }
+  },
+  "multi_request": {
+    "model": "gpt-4.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Do both."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "click",
+          "description": "Click a ref.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "type",
+          "description": "Type text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "multi_response": {
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "c1",
+              "type": "function",
+              "function": {
+                "name": "click",
+                "arguments": "{\"ref\":\"e2\"}"
+              }
+            },
+            {
+              "id": "c2",
+              "type": "function",
+              "function": {
+                "name": "type",
+                "arguments": "{\"text\":\"hi\"}"
+              }
+            }
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 3,
+      "completion_tokens": 4
+    }
+  },
+  "image_request": {
+    "model": "gpt-4.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is this?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "click",
+          "description": "Click a ref.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "type",
+          "description": "Type text.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "tool_image_request": {
+    "model": "gpt-4.1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Look"
+      },
+      {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_s",
+            "type": "function",
+            "function": {
+              "name": "screenshot",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_s",
+        "content": "screen",
+        "name": "screenshot"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Image returned by screenshot:"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "screenshot",
+          "description": "Capture the screen.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      }
+    ]
+  },
+  "text_response": {
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "content": "ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1,
+      "completion_tokens": 1
+    }
+  }
+}
