@@ -14,7 +14,7 @@ Codex on Space 1.
 | `click(ref=...)`, `act` steps on refs | `AXPress` on the element |
 | `set_value(ref=...)` | `AXValue` on the element |
 | `menu`, `file_dialog` | accessibility menu bar and panels |
-| `type(text, app=X)`, `key(chord, app=X)` | keystrokes addressed to X's process (`CGEventPostToPid`) |
+| `type(text, app=X)`, `key(chord, app=X)` | macOS: keystrokes addressed to X's process (`CGEventPostToPid`), no activation |
 | `app launch ... activate=false` | `open -g`: the app starts behind the current one |
 | `desktop_snapshot`, `find`, `screen_text`, `wait_for`, `wait_until`, `window list` | read-only |
 
@@ -24,6 +24,14 @@ gated against the addressed app (tier `full`), not against whatever is in
 front, and the recheck before injection confirms the process is still the one
 the grant was decided for, so a keystroke can never land in another app. That
 is a stronger guarantee than the frontmost check it replaces.
+
+Linux has no per-process keystroke post. `type` and `key` with `app=` resolve
+that app's window from the EWMH window list and the AT-SPI application, focus
+it when it is not already the active window, check that the focus held, and
+then send the input. A window that cannot be focused is `focus_changed`. An
+app with no window is `app_not_found`. The error does not say the call is
+macOS-only. An empty `app` is `invalid_arguments` on every tool that accepts
+the argument.
 
 ## What still needs the app in front
 
@@ -36,7 +44,8 @@ one, the agent should say so before calling `app focus`.
 
 `A11Y_COMPUTER_USE_FOCUS_MODE=background` makes the quiet paths the default:
 `type` and `key` without `app` address the app of the latest snapshot, and
-`app launch` starts apps behind the current one. The owner's Claude Code,
+`app launch` starts apps behind the current one. On Linux that address focuses
+the snapshot app's window and then sends the input. The owner's Claude Code,
 Claude Desktop, and Codex configurations set it. The default, `auto`, keeps
 the classic frontmost behaviour for hosts that expect it.
 

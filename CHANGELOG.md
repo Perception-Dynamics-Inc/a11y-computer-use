@@ -7,6 +7,13 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.51] - 2026-10-09
+
+### Fixed
+
+- On Linux, `type` and `key` with `app=` resolve that app's window from the EWMH list and the AT-SPI application, focus it when it is not already active, and then send the input. A window that cannot be focused is `focus_changed`. An app with no window is `app_not_found`. The error does not say the call is macOS-only. A live pair of GTK windows, with the other window in front, receives `landed-type` from `type` and `z` from `key` in the named entry only. Hermetic tests use a fake driver and fake X objects (#140) (2026-10-09).
+- An empty or whitespace `app` is `invalid_arguments` on every tool that accepts `app=`. It is not treated as omitted and does not ask for a permission grant of a blank name (#144) (2026-10-09).
+
 ## [0.4.48] - 2026-10-09
 
 ### Added
