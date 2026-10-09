@@ -558,6 +558,47 @@ def test_dense_container_capped_tighter_than_lists() -> None:
     assert f"… {30 - observe.DENSE_MAX_CHILDREN} more" in render_text(snap)
 
 
+def test_spreadsheet_addresses_keep_b2_and_cell_text() -> None:
+    """A sheet titled A1, B2, … is not the calendar cap of 12.
+
+    Synthetic tree. Sixty-four address cells, E1 holding 10. B2 stays, and
+    find matches the address and the value.
+    """
+    cells = []
+    for row in range(1, 5):
+        for col in range(16):
+            title = f"{chr(ord('A') + col)}{row}"
+            value = "10" if title == "E1" else None
+            cells.append(ax(
+                "AXCell", title=title, value=value,
+                at=(40.0 + col * 20.0, 180.0 + row * 18.0), size=(18.0, 16.0),
+            ))
+    table = ax("AXTable", title="Sheet", at=(20.0, 160.0), size=(400.0, 200.0), children=cells)
+    root = ax("AXWindow", title="Calc", at=(0.0, 0.0), size=(800.0, 600.0), children=[table])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="soffice", pid=1, geometry=GEOMETRY)
+    titles = {el.title for el in snap.elements}
+    assert "A1" in titles and "B2" in titles and "E1" in titles
+    e1 = next(el for el in snap.elements if el.title == "E1")
+    assert e1.value == "10"
+    assert observe.find_elements(snap, text="B2")
+    assert any(el.title == "E1" for el in observe.find_elements(snap, text="10"))
+    assert "… " not in render_text(snap)
+
+
+def test_calendar_day_numbers_stay_on_the_dense_cap() -> None:
+    cells = [
+        ax("AXCell", title=str(day), at=(10.0, 10.0 + day), size=(20.0, 16.0))
+        for day in range(1, 31)
+    ]
+    table = ax("AXTable", title="May", at=(0.0, 0.0), size=(300.0, 400.0), children=cells)
+    root = ax("AXWindow", title="Calendar", at=(0.0, 0.0), size=(400.0, 500.0), children=[table])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY)
+    table_el = next(el for el in snap.elements if el.role == "AXTable")
+    kept = [el for el in snap.elements if el.parent == table_el.ref]
+    assert len(kept) == observe.DENSE_MAX_CHILDREN
+    assert f"… {30 - observe.DENSE_MAX_CHILDREN} more" in render_text(snap)
+
+
 def test_interactive_count_distinguishes_hostile_apps() -> None:
     rich = build_snapshot(
         typical_app_window(), DictAccessor(), scope=Scope.WINDOW, app="x", pid=1, geometry=GEOMETRY

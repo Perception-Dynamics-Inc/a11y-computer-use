@@ -97,6 +97,7 @@ Linux (the `linux` job), on Ubuntu 24.04:
 
 ```bash
 sudo apt-get install -y --no-install-recommends at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
+  libreoffice-calc libreoffice-gtk3 \
   xvfb dbus dbus-x11 openbox xdotool x11-utils xclip curl xz-utils \
   libdbus-glib-1-2 libxt6t64 libasound2t64
 python3 -m venv --system-site-packages .venv

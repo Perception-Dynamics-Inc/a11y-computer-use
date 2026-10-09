@@ -38,6 +38,7 @@ def test_role_map_covers_common_atspi_roles() -> None:
     assert r["password text"] == "AXSecureTextField"
     assert r["link"] == "AXLink"
     assert r["check box"] == "AXCheckBox"
+    assert r["table cell"] == "AXCell"
     assert r["radio button"] == "AXRadioButton"
     assert r["frame"] == "AXWindow"
     assert r["menu item"] == "AXMenuItem"
@@ -4722,6 +4723,180 @@ def _bare_runtime(driver):
     runtime._require_permission = lambda *_args, **_kwargs: None
     runtime._recheck_target = lambda *_args, **_kwargs: None
     return runtime
+
+
+def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) -> None:
+    """Synthetic cell. The Value interface is not read for an address cell."""
+    cell = _Acc(
+        "table cell", name="D1", value=0.0,
+        minimum=-1.7976931348623157e+308, maximum=1.7976931348623157e+308,
+    )
+    cell.text = ""
+    probed = {"n": 0}
+    original = fake_atspi.Value.get_minimum_value
+
+    def counting(acc):
+        probed["n"] += 1
+        return original(acc)
+
+    fake_atspi.Value.get_minimum_value = staticmethod(counting)
+    try:
+        assert _atspi.control_kind(cell) is None
+        assert probed["n"] == 0
+        assert _atspi._value_text(cell, "AXCell", "table cell") is None
+        cell.text = "setv"
+        assert _atspi._value_text(cell, "AXCell", "table cell") == "setv"
+        cell.text = ""
+        cell.get_attributes = lambda: {"formula": "B1*2"}
+        assert _atspi._value_text(cell, "AXCell", "table cell") == "=B1*2"
+        assert _atspi.sheet_cell_matches(cell, "=B1*2") is True
+        cell.text = "0"
+        assert _atspi._value_text(cell, "AXCell", "table cell") == "0"
+        assert _atspi.sheet_cell_matches(cell, "=B1*2") is True
+        meter = _Acc("filler", name="Meter", value=1, minimum=0, maximum=10)
+        assert _atspi.control_kind(meter) == "value"
+        assert probed["n"] == 1
+    finally:
+        fake_atspi.Value.get_minimum_value = staticmethod(original)
+
+
+def test_huge_calc_table_uses_accessible_at(fake_atspi) -> None:
+    """Synthetic table. Child count is INT_MAX; row-major children are not the cells."""
+
+    class _Table:
+        @staticmethod
+        def get_n_rows(_acc):
+            return 1048576
+
+        @staticmethod
+        def get_n_columns(_acc):
+            return 16384
+
+        @staticmethod
+        def get_accessible_at(acc, row, col):
+            return acc.cells.get((row, col))
+
+    fake_atspi.Table = _Table
+    try:
+        table = _Acc("table", name="Sheet")
+        table.get_child_count = lambda: 2147483647
+        table.get_child_at_index = lambda _index: _Acc("table cell", name="ROW1")
+        table.cells = {}
+        for row in range(4):
+            for col in range(8):
+                cell = _Acc(
+                    "table cell", name=f"{chr(ord('A') + col)}{row + 1}",
+                    width=20, height=16,
+                )
+                table.cells[(row, col)] = cell
+        names = [kid.get_name() for kid in _atspi.ATSPIAccessor().children(table)]
+        assert "A1" in names and "B2" in names and "E1" in names
+        assert "ROW1" not in names
+    finally:
+        del fake_atspi.Table
+
+
+def test_sheet_editor_paragraph_is_the_in_progress_text(fake_atspi, monkeypatch) -> None:
+    """Synthetic tree. The table's child count is not walked."""
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "11"
+    panel = _Acc("panel", name="Cell F1")
+    _adopt(panel, paragraph)
+    table = _Acc("table", name="grid")
+    walked = {"n": 0}
+
+    def huge():
+        walked["n"] += 1
+        return 10**9
+
+    table.get_child_count = huge
+    doc = _Acc("document spreadsheet", name="Sheet")
+    _adopt(doc, table, panel)
+    app = _Acc("application", name="soffice")
+    _adopt(app, doc)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    assert _atspi.sheet_editor_text("soffice.bin") == "11"
+    assert walked["n"] == 0
+    assert _atspi.sheet_editor_text("gedit") is None
+
+
+def test_type_into_calc_reads_the_editor_and_a_terminal_still_mismatches(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic focus. No live LibreOffice and no live terminal."""
+    from a11y_computer_use.drivers import _linux_input
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    state = {"editor": None, "app": "soffice.bin"}
+    driver.frontmost_app = lambda: (state["app"], 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+
+    def editor(_app):
+        return state["editor"]
+
+    def typed(text):
+        state["editor"] = text
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
+    monkeypatch.setattr(_linux_input, "type_string", typed)
+    assert driver.type_text("10") == 2
+    state["app"] = "gnome-terminal"
+    state["editor"] = None
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "01")
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("10")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "01"
+
+
+def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) -> None:
+    """Synthetic cell. No keystroke reaches an X server."""
+    from a11y_computer_use.drivers import _linux_input
+
+    cell = _Acc("table cell", name="D1", value=0.0, minimum=-1e308, maximum=1e308, width=40, height=16)
+    cell.text = ""
+    cell.component.grab_focus = lambda: True
+    sent: list[str] = []
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
+    monkeypatch.setattr(_linux_input, "type_string", sent.append)
+    monkeypatch.setattr(_linux_input, "press_chord", sent.append)
+    monkeypatch.setattr(
+        _atspi, "sheet_cell_matches",
+        lambda acc, value: value == "setv" and sent == ["setv", "return"],
+    )
+    element = Element("e3", "AXCell", "D1", None, Bounds(0, 10, 10, 40, 16), "snap")
+    assert LinuxDriver().set_value(element, "setv") is True
+    assert sent == ["setv", "return"]
+
+
+def test_soffice_without_a_bridge_is_unsupported_and_other_apps_stay_missing(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic. The process check is stubbed; nothing is launched."""
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: True)
+    driver = LinuxDriver()
+    with pytest.raises(ComputerUseError) as missing_bridge:
+        driver.snapshot(Scope.WINDOW, "soffice")
+    assert missing_bridge.value.code is ErrorCode.UNSUPPORTED
+    assert missing_bridge.value.detail["reason"] == "no_accessibility_bridge"
+    assert "libreoffice-gtk3" in missing_bridge.value.message
+    assert "SAL_USE_VCLPLUGIN=gtk3" in missing_bridge.value.message
+    with pytest.raises(ComputerUseError) as other:
+        driver.snapshot(Scope.WINDOW, "gedit")
+    assert other.value.code is ErrorCode.APP_NOT_FOUND
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: False)
+    with pytest.raises(ComputerUseError) as stopped:
+        driver.snapshot(Scope.WINDOW, "libreoffice")
+    assert stopped.value.code is ErrorCode.APP_NOT_FOUND
 
 
 def test_tools_for_an_app_that_is_not_running_return_app_not_found(

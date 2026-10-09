@@ -256,6 +256,17 @@ class LinuxDriver:
             # the app is not running. An empty snapshot there told the agent
             # the app was open and custom-drawn.
             if root is None:
+                if _atspi.libreoffice_without_bridge(app):
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        "LibreOffice is running without an accessibility bridge. "
+                        "Install libreoffice-gtk3 and start it with SAL_USE_VCLPLUGIN=gtk3.",
+                        detail={
+                            "app": app,
+                            "reason": "no_accessibility_bridge",
+                            "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
+                        },
+                    )
                 raise ComputerUseError(
                     ErrorCode.APP_NOT_FOUND,
                     f"no running application matches {app!r}",
@@ -489,6 +500,12 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
+            # Not the Value interface: that range is a double and rejects text.
+            # Focus, type (a selected cell replaces), commit with Return, then
+            # the cell text or the formula attribute has to match.
+            self._write_sheet_cell(handle, value)
+            return True
         if handle is not None:
             kind = self._run(lambda: _atspi.control_kind(handle))
             if kind == "combo":
@@ -987,15 +1004,17 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         app_id, _pid = self.frontmost_app()
-        before = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        before = self._typed_readback(app_id)
         _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
-        after = self._run(lambda: _atspi.focused_text(app_id)) if app_id else None
+        after = self._typed_readback(app_id)
         # A Chrome contenteditable can publish the keys after that first
-        # read. Poll until the text settles. Any other focused control keeps
-        # the single read. No readable text is still not a mismatch.
+        # read. Poll until the text settles. LibreOffice already read the
+        # open cell editor, so it does not take this poll. Any other focused
+        # control keeps the single read. No readable text is still not a mismatch.
         if (
             app_id
             and after is not None
+            and not _atspi.libreoffice_app(app_id)
             and not _atspi._typed_visible(before, after, text)
         ):
             focused = self._run(lambda: _atspi._focused_contenteditable(app_id))
@@ -1020,6 +1039,53 @@ class LinuxDriver:
                 actual=after,
             )
         return len(text)
+
+    def _typed_readback(self, app_id: str | None) -> str | None:
+        """Text used to verify a keystroke type.
+
+        For LibreOffice, an open cell editor's paragraph is the in-progress
+        string. The focused cell's own text stays empty until Return, which
+        is why 0.4.45 reported ``actual: ""`` after the digits had landed.
+        Any other app uses the focused node's text, so a terminal that shows
+        the inverted string is still a mismatch.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if not app_id:
+            return None
+        text = self._run(lambda: _atspi.focused_text(app_id))
+        if not _atspi.libreoffice_app(app_id):
+            return text
+        editor = self._run(lambda: _atspi.sheet_editor_text(app_id))
+        if editor:
+            return editor
+        return text
+
+    def _write_sheet_cell(self, handle, value: str) -> None:
+        """Type ``value`` into a Calc cell and commit it with Return."""
+        from a11y_computer_use.drivers import _atspi
+
+        self._run(lambda: _atspi.grab_focus(handle))
+        if _on_wayland():
+            raise _wayland_input_error("set_value on a spreadsheet cell")
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.type_string(value)
+        _linux_input.press_chord("return")
+        for attempt in range(15):
+            if self._run(lambda: _atspi.sheet_cell_matches(handle, value)):
+                return
+            if attempt + 1 < 15:
+                time.sleep(0.1)
+        actual = self._run(lambda: _atspi._full_text(handle))
+        formula = self._run(lambda: _atspi._sheet_formula(handle))
+        raise _atspi._text_mismatch(
+            "text_mismatch",
+            f"the value read back does not match {value!r}",
+            expected=value,
+            actual=actual,
+            formula=formula,
+        )
 
     def _refuse_xtest_password_focus(self) -> None:
         """The focused-password probe `type_text` uses before XTEST keystrokes.
