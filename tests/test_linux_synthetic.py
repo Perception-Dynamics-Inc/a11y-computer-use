@@ -492,7 +492,19 @@ def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch)
     gecko = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
     gecko.get_application = lambda: _toolkit_app("Gecko", "Firefox")
     gecko.get_editable_text_iface = lambda: object()
-    assert _atspi.ATSPIAccessor().read(gecko).editable is True
+    gecko_raw = _atspi.ATSPIAccessor().read(gecko)
+    assert gecko_raw.editable is True
+    assert gecko_raw.platform_editable is True
+
+    # Firefox contenteditable is the state on the section, not the interface.
+    gecko_state = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    gecko_state.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    assert _atspi.ATSPIAccessor().read(gecko_state).editable is True
+
+    gecko_iface = _Section("Wrapped", "chrome text", {"ENABLED", "FOCUSABLE"})
+    gecko_iface.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    gecko_iface.get_editable_text_iface = lambda: object()
+    assert _atspi.ATSPIAccessor().read(gecko_iface).editable is False
 
 
 def test_roleless_contenteditable_set_text_clears_then_types(fake_atspi, monkeypatch) -> None:
@@ -684,7 +696,45 @@ def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monke
         "entry", "Locked", "no", {"EDITABLE", "READ_ONLY", "ENABLED"}, "input", "Gecko", "Firefox",
     )
     frozen.iface = object()
-    assert read(frozen).editable is False
+    frozen_raw = read(frozen)
+    assert frozen_raw.editable is False
+    assert frozen_raw.platform_editable is False
+    frozen_snap = build_snapshot(
+        (frozen_raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert frozen_snap.elements[0].editable is False
+
+    # EditableText without STATE_EDITABLE is not an entry. The text-field
+    # role must not put the wrapper back into find editable=true.
+    wrapper = _Tagged("entry", "", "https://example.test", {"ENABLED"}, "input", "Gecko", "Firefox")
+    wrapper.iface = object()
+    raw_w = read(wrapper)
+    assert raw_w.editable is False
+    assert raw_w.platform_editable is False
+    assert raw_w.role == "AXTextField"
+    wrap_snap = build_snapshot(
+        (raw_w, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert wrap_snap.elements[0].editable is False
+    assert "edit" not in observe.render_text(wrap_snap)
+
+    state_only = _Tagged(
+        "entry", "Name", "", {"EDITABLE", "ENABLED"}, "input", "Gecko", "Firefox",
+    )
+    assert read(state_only).editable is True
+    assert read(state_only).platform_editable is True
+
+    spin = _Tagged("spin button", "Count", "50", {"EDITABLE", "ENABLED"}, "input", "Gecko", "Firefox")
+    assert read(spin).editable is True
+    quiet_spin = _Tagged("spin button", "Count", "50", {"ENABLED"}, "input", "Gecko", "Firefox")
+    quiet_spin.iface = object()
+    raw_spin = read(quiet_spin)
+    assert raw_spin.editable is False
+    assert raw_spin.platform_editable is False
+    spin_snap = build_snapshot(
+        (raw_spin, []), _FakeAccessor(), scope=Scope.WINDOW, app="gtk", pid=1, geometry=_geometry(),
+    )
+    assert spin_snap.elements[0].editable is False
 
     sent: list[str] = []
     monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
@@ -701,6 +751,139 @@ def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monke
     assert _atspi.set_text(paragraph, "nope") is False
     assert sent == []
     assert paragraph.text == "idle"
+
+
+class _CaretNode:
+    """A text node with a caret, one selection, and an optional parent."""
+
+    def __init__(self, role: str, text: str, *, caret: int, selection, parent=None, states=None):
+        self.role = role
+        self.text = text
+        self.caret = caret
+        self.selection = selection
+        self.parent = parent
+        self.states = set(states or ())
+        self.name = ""
+        self.selects_document = False
+
+    def get_role_name(self):
+        return self.role
+
+    def get_parent(self):
+        return self.parent
+
+    def get_name(self):
+        return self.name
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_editable_text_iface(self):
+        return None
+
+
+def _point(node: _CaretNode) -> tuple:
+    return (node.caret, node.selection)
+
+
+def test_set_value_restores_the_caret_when_refused_or_failed(fake_atspi, monkeypatch) -> None:
+    """A refused or failed set_value puts the previous caret and selection back.
+
+    The refusal selects the document the way a Firefox paragraph's select-all
+    does, then raises not_editable. The failure path does the same and raises
+    text_mismatch. Neither leaves the page selected, and neither sends a key.
+    """
+    doc = _CaretNode("document web", "hello page", caret=3, selection=(3, 4))
+    entry = _CaretNode(
+        "entry", "Hi", caret=1, selection=(0, 1), parent=doc, states={"EDITABLE", "ENABLED"},
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: entry)
+    box = Bounds(0, 8, 40, 200, 20)
+    element = Element("e2", "AXTextField", "Name", "Hi", box, "snap-1", editable=True)
+    before_doc = _point(doc)
+    before_entry = _point(entry)
+
+    def select_page(_acc) -> bool:
+        doc.selection = (0, len(doc.text))
+        doc.caret = len(doc.text)
+        entry.selection = (0, len(entry.text))
+        entry.caret = len(entry.text)
+        return True
+
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", select_page)
+    with pytest.raises(ComputerUseError) as refused:
+        LinuxDriver().set_value(element, "nope")
+    assert refused.value.detail["reason"] == "not_editable"
+    assert _point(doc) == before_doc
+    assert _point(entry) == before_entry
+    assert sent == []
+
+    def fail_write(_acc, _text) -> bool:
+        doc.selection = (0, len(doc.text))
+        doc.caret = len(doc.text)
+        entry.selection = (0, len(entry.text))
+        entry.caret = len(entry.text)
+        return False
+
+    monkeypatch.setattr(_atspi, "_blocks_text_replace", lambda _acc: False)
+    monkeypatch.setattr(_atspi, "set_text", fail_write)
+    with pytest.raises(ComputerUseError) as failed:
+        LinuxDriver().set_value(element, "nope")
+    assert failed.value.detail["reason"] == "text_mismatch"
+    assert _point(doc) == before_doc
+    assert _point(entry) == before_entry
+    assert sent == []
+
+
+def test_set_text_restores_a_document_selection_when_the_write_fails(fake_atspi, monkeypatch) -> None:
+    """A failed replace restores the document selection after its own select-all.
+
+    Success does not put the old selection back. No key is sent.
+    """
+    doc = _CaretNode("document web", "hello page", caret=5, selection=(2, 3))
+    field = _ReplacingField("idle")
+    field.parent = doc
+    field.get_parent = lambda: field.parent
+    field.selects_document = True
+    field.caret = 1
+    field.selection = (1, 2)
+    field.get_role_name = lambda: ""
+    field.delete_text = lambda _start, _end: True
+    sent: list[str] = []
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+
+    def sticky(text):
+        field.selection = (0, len(field.text))
+        doc.selection = (0, len(doc.text))
+        doc.caret = len(doc.text)
+        return True
+
+    field.set_text_contents = sticky
+    assert _atspi.set_text(field, "nope") is False
+    assert field.text == "idle"
+    assert field.caret == 1
+    assert field.selection == (1, 2)
+    assert doc.caret == 5
+    assert doc.selection == (2, 3)
+    assert sent == []
+
+    def replace(text):
+        field.text = text
+        field.selection = (0, len(text))
+        field.caret = len(text)
+        return True
+
+    field.set_text_contents = replace
+    field.selects_document = False
+    assert _atspi.set_text(field, "new") is True
+    assert field.text == "new"
+    assert field.selection == (0, 3)
+    assert field.caret == 3
 
 
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
@@ -1569,11 +1752,26 @@ class _FakeAtspi:
         @staticmethod
         def set_selection(acc, _selection_num, start_offset, end_offset):
             acc.selection = (int(start_offset), int(end_offset))
+            parent = getattr(acc, "parent", None)
+            if parent is not None and getattr(acc, "selects_document", False):
+                parent.selection = (0, len(getattr(parent, "text", "") or ""))
+                parent.caret = len(getattr(parent, "text", "") or "")
             return True
 
         @staticmethod
         def add_selection(acc, start_offset, end_offset):
             acc.selection = (int(start_offset), int(end_offset))
+            return True
+
+        @staticmethod
+        def remove_selection(acc, index):
+            if int(index) == 0:
+                acc.selection = None
+            return True
+
+        @staticmethod
+        def set_caret_offset(acc, offset):
+            acc.caret = int(offset)
             return True
 
     Value = _ValueApi

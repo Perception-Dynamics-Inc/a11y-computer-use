@@ -1006,27 +1006,47 @@ class LinuxDriver:
                     )
         # A menu, heading, label, button, paragraph, or select is not a text
         # target. Raising here is what stops the Runtime from focusing it and
-        # typing the value into whatever is frontmost. No key, click, or focus
-        # is sent. The snapshot flag is not enough: Firefox reports
-        # STATE_EDITABLE and EditableText on static nodes, and selecting one
-        # selects the page. The live node has to be an editable entry.
+        # typing the value into whatever is frontmost. The snapshot flag is
+        # not enough: Firefox reports EditableText on static nodes and on
+        # address-bar wrappers, and selecting one selects the page. The live
+        # node has to be an editable entry (its own STATE_EDITABLE). A refused
+        # or failed write restores the caret and selection captured before
+        # the call, including on the document, and that restore sends no keys.
+        points = []
+        if handle is not None:
+            points = self._run(lambda: _atspi._capture_text_points(handle)) or []
+
+        def restore() -> None:
+            if points:
+                self._run(lambda: _atspi._restore_text_points(points))
+
         if not _accepts_text(element):
+            restore()
             raise _not_editable(element)
         if handle is None:
             return False
         # A synthetic field has no AT-SPI role and stays on set_text. A
-        # paragraph, panel, document, combo, or read-only node is refused
-        # here, before set_text can select it. A contenteditable section and
-        # a Chrome date segment are not refused.
+        # paragraph, panel, document, combo, read-only node, or entry
+        # without STATE_EDITABLE is refused here, before set_text can
+        # select it. A contenteditable section and a Chrome date segment
+        # are not refused.
         if self._run(lambda: _atspi._blocks_text_replace(handle)):
+            restore()
             raise _not_editable(element)
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
         # not a bounded read that can echo the request. A write that does not
         # stick raises: returning False made the Runtime type into whatever
         # was focused and still report success. Marshaled onto the a11y thread.
-        success = self._run(lambda: _atspi.set_text(handle, value))
+        # A failed write restores the pre-call caret after set_text's own
+        # restore, which can itself select the document.
+        try:
+            success = self._run(lambda: _atspi.set_text(handle, value))
+        except Exception:
+            restore()
+            raise
         if not success:
+            restore()
             raise ComputerUseError(
                 ErrorCode.UNSUPPORTED,
                 f"the value read back does not match {value!r}",

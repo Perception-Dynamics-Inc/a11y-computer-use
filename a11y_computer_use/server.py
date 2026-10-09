@@ -6319,13 +6319,17 @@ def build_server(
         """Set an editable field's value in ONE deterministic op via the
         accessibility API — no per-character typing, no focus/click dance. ref is
         an editable element from the latest desktop_snapshot/find. Falls back to
-        focus+type when the app exposes no settable value. On Linux, a ref that
+        focus+type when the app exposes no settable value.         On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. A Firefox
-        paragraph, document, or select is not an editable entry, even when
-        AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
-        before any select-all. A select is still set as a combo. A Chrome or
-        Firefox contenteditable section stays editable. A combo or
+        and that call sends no keystrokes, clicks, or focus changes. The edit
+        flag is the element's own STATE_EDITABLE, not EditableText support.
+        A Firefox paragraph, document, select, or address-bar wrapper is not
+        an editable entry; the error is raised before any select-all. When
+        set_value is refused or the write fails, the previous caret and text
+        selection are restored, including on the document, so the page is not
+        left fully selected. A select is still set as a combo. A Chrome or
+        Firefox contenteditable section (a div or span with STATE_EDITABLE)
+        stays editable without requiring EditableText. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
         them. A spin button, slider, or other Value control is set through that
