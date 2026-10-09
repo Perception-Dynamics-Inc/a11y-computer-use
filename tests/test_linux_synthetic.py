@@ -1449,6 +1449,184 @@ def test_set_text_without_editable_text_on_wayland_does_not_type(fake_atspi, mon
     assert typed == []
 
 
+class _NoopWebField(_KeyClearedWebField):
+    """EditableText returns true and does not change the DOM. Key events do.
+
+    This is the Firefox web entry on a fake transport, not a live browser.
+    """
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.writes: list[str] = []
+
+    def set_text_contents(self, text):
+        self.writes.append(text)
+        return True
+
+    def insert_text(self, pos, text, length):
+        return True
+
+    def delete_text(self, start, end):
+        self.deletes += 1
+        return True
+
+
+def test_set_text_focuses_and_types_when_editable_text_is_a_noop(fake_atspi, monkeypatch) -> None:
+    """Fake transport. The DOM changes only because the test applies the keys."""
+    field = _NoopWebField("")
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        field.text = text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: None)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "Ann Lee") is True
+    assert field.text == "Ann Lee"
+    assert field.focused is True
+    assert typed == ["Ann Lee"]
+    assert field.writes  # EditableText was tried before the keys
+
+
+class _GeckoNode:
+    """A Firefox-shaped accessible. States are a name set, so no gi import."""
+
+    def __init__(self, role, name="", states=(), children=()):
+        self.role = role
+        self.name = name
+        self.states = set(states)
+        self.children = list(children)
+        self.parent = None
+        self.application = None
+        self.actions: list[str] = []
+        self.pressed = False
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_toolkit_name(self):
+        return getattr(self, "toolkit", "")
+
+    def get_state_set(self):
+        return _NS(names=set(self.states), contains=lambda member: str(member) in self.states)
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+    def get_application(self):
+        return self.application
+
+    def get_action_iface(self):
+        return self if self.actions else None
+
+    def get_n_actions(self):
+        return len(self.actions)
+
+    def get_action_name(self, index):
+        return self.actions[index]
+
+    def do_action(self, _index):
+        self.pressed = True
+        return True
+
+
+def _firefox_documents():
+    """Active form, a background tab, and a preloaded New Tab, with on-screen bounds.
+
+    The background documents are VISIBLE and not SHOWING. The selected tab is
+    Form Probe. This is the shape from a live Firefox ESR tree, as fakes.
+    """
+    app = _GeckoNode("application", "Firefox")
+    app.toolkit = "Gecko"
+    tab = _GeckoNode("page tab", "Form Probe", ("SHOWING", "VISIBLE", "SELECTED"))
+    other_tab = _GeckoNode("page tab", "Firefox Privacy Notice", ("SHOWING", "VISIBLE"))
+    tabs = _GeckoNode("page tab list", "", ("SHOWING", "VISIBLE"), [tab, other_tab])
+    name = _GeckoNode("entry", "Name", ("SHOWING", "VISIBLE", "FOCUSABLE"))
+    form = _GeckoNode("document web", "Form Probe", ("SHOWING", "VISIBLE", "FOCUSABLE"), [name])
+    form_frame = _GeckoNode("internal frame", "", ("SHOWING", "VISIBLE"), [form])
+    form_pane = _GeckoNode("scroll pane", "", ("SHOWING", "VISIBLE"), [form_frame])
+    products = _GeckoNode("link", "Products", ("VISIBLE", "FOCUSABLE"), )
+    products.actions = ["jump"]
+    background = _GeckoNode(
+        "document web", "Firefox Privacy Notice", ("VISIBLE", "FOCUSABLE"), [products],
+    )
+    background_frame = _GeckoNode("internal frame", "", ("VISIBLE",), [background])
+    background_pane = _GeckoNode("scroll pane", "", ("VISIBLE",), [background_frame])
+    wikipedia = _GeckoNode("link", "Wikipedia", ("VISIBLE", "FOCUSABLE"))
+    wikipedia.actions = ["jump"]
+    new_tab = _GeckoNode("document web", "New Tab", ("VISIBLE", "FOCUSABLE"), [wikipedia])
+    new_frame = _GeckoNode("internal frame", "", ("VISIBLE",), [new_tab])
+    new_pane = _GeckoNode("scroll pane", "", ("VISIBLE",), [new_frame])
+    panel = _GeckoNode("panel", "", ("SHOWING", "VISIBLE"), [form_pane, background_pane, new_pane])
+    frame = _GeckoNode("frame", "Form Probe — Mozilla Firefox", ("SHOWING", "VISIBLE"), [tabs, panel])
+    for node in (
+        tab, other_tab, tabs, name, form, form_frame, form_pane, products, background,
+        background_frame, background_pane, wikipedia, new_tab, new_frame, new_pane, panel, frame,
+    ):
+        node.application = app
+    return {
+        "panel": panel,
+        "form": form,
+        "name": name,
+        "products": products,
+        "wikipedia": wikipedia,
+        "new_tab": new_tab,
+        "new_frame": new_frame,
+        "new_pane": new_pane,
+        "frame": frame,
+    }
+
+
+def test_firefox_hidden_documents_are_pruned_and_not_clickable(monkeypatch) -> None:
+    """Synthetic tree. Not a live Firefox. Hidden documents have on-screen bounds
+    in the real tree; here the filter is what drops them."""
+    tree = _firefox_documents()
+    accessor = _atspi.ATSPIAccessor()
+    shown = accessor.children(tree["panel"])
+    assert shown == [tree["panel"].children[0]]
+    assert accessor.children(tree["panel"].children[0].children[0]) == [tree["form"]]
+    assert _atspi.hidden_web_target(tree["products"]) is True
+    assert _atspi.hidden_web_target(tree["wikipedia"]) is True
+    assert _atspi.hidden_web_target(tree["name"]) is False
+    # A showing document that is not the selected tab is not the page on screen.
+    tree["new_tab"].states.add("SHOWING")
+    tree["new_frame"].states.add("SHOWING")
+    tree["new_pane"].states.add("SHOWING")
+    assert accessor.children(tree["new_frame"]) == []
+
+    from a11y_computer_use.schema import Bounds, Element
+
+    element = Element(
+        "e49", "AXLink", "Products", None, Bounds(0, 8, 234, 67, 23), "snap-hidden",
+        clickable=True, enabled=True,
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: tree["products"])
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_showing"
+    assert tree["products"].pressed is False
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(element)
+    assert exc.value.detail["reason"] == "not_showing"
+    assert tree["products"].pressed is False
+
+
 def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
     field = _KeyClearedWebField("bench-value-0")
     sent: list[str] = []

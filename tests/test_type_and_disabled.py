@@ -239,6 +239,60 @@ def test_coordinate_click_types_through_the_focused_editable(atspi, monkeypatch)
     assert field.text == "hello world"
 
 
+def test_noop_editable_text_is_focused_and_typed_then_read_back(atspi, monkeypatch) -> None:
+    """Firefox EditableText returns true and leaves the field empty. Keys land."""
+    driver = LinuxDriver()
+    field = _IgnoreField("")
+    field.focused = False
+    field.get_component_iface = lambda: field
+
+    def grab_focus():
+        field.focused = True
+        return True
+
+    field.grab_focus = grab_focus
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        field.text += text
+
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("firefox", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 7)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "firefox")
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    driver._focused_editable = field
+    assert driver.type_text("Bo") == 2
+    assert field.text == "Bo"
+    assert field.focused is True
+    assert typed == ["Bo"]
+
+
+def test_noop_editable_text_stays_an_error_when_keys_do_not_land(atspi, monkeypatch) -> None:
+    driver = LinuxDriver()
+    field = _IgnoreField("")
+    field.get_component_iface = lambda: field
+    field.grab_focus = lambda: True
+    typed: list[str] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("firefox", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 7)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "firefox")
+    monkeypatch.setattr(_linux_input, "type_string", typed.append)
+    driver._focused_editable = field
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("Bo")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["unchanged"] is True
+    assert field.text == ""
+    assert typed == ["Bo"]
+
+
 def test_focused_password_is_refused_before_insert_or_keys(atspi, monkeypatch) -> None:
     driver = LinuxDriver()
     field = _ByteField()

@@ -280,6 +280,24 @@ class LinuxDriver:
             live = self.snapshot(snap.scope, snap.app)
         return observe.rematch_ref(snap, ref, live)
 
+    def _refuse_hidden(self, element: Element, handle) -> None:
+        """Raise when ``handle`` is in a Firefox document that is not showing.
+
+        A link in a background tab has on-screen bounds and its action
+        reports success. The click did not happen on screen. GTK and
+        Chromium handles are not this case.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if handle is None or not self._run(lambda: _atspi.hidden_web_target(handle)):
+            return
+        title = f" {element.title!r}" if element.title else ""
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) is not showing",
+            detail={"ref": element.ref, "role": element.role, "reason": "not_showing"},
+        )
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -294,6 +312,7 @@ class LinuxDriver:
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is None:
             return False
+        self._refuse_hidden(element, handle)
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -419,6 +438,11 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         self._focused_editable = None
+        if isinstance(target, Element):
+            from a11y_computer_use import observe
+
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._refuse_hidden(target, handle)
         x, y = _point_of(target)
         with _linux_input.held(modifiers):
             _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
@@ -763,10 +787,13 @@ class LinuxDriver:
         of the frontmost app and uses the same `insert_text` helper: UTF-8
         byte length on the GI binding, insert at the caret, replace a
         selection, and return the character count read back. A mismatch
-        raises instead of reporting success. Falls back to synthetic XTEST
-        keystrokes when that lookup finds no EditableText (Chrome's ATK
-        objects, or a click that focused nothing editable). A CRLF is one
-        newline on both paths.
+        raises instead of reporting success. When EditableText returns
+        success and the field text does not change (Firefox web entries),
+        the field is focused and the same text is sent as key events, and
+        that field is read back. Falls back to synthetic XTEST keystrokes
+        when that lookup finds no EditableText (Chrome's ATK objects, or a
+        click that focused nothing editable). A CRLF is one newline on both
+        paths.
         """
         if dry_run or not text:
             return None
@@ -799,7 +826,16 @@ class LinuxDriver:
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
         if handle is not None:
-            inserted = self._run(lambda: _atspi.insert_text(handle, text))
+            try:
+                inserted = self._run(lambda: _atspi.insert_text(handle, text))
+            except ComputerUseError as exc:
+                detail = exc.detail or {}
+                # EditableText claimed the insert and the field did not change.
+                # Focus it and send the keys, then read this field back.
+                if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):
+                    if self._run(lambda: _atspi.focus_and_type_into(handle, text)):
+                        return len(text)
+                raise
             if isinstance(inserted, int) and not isinstance(inserted, bool):
                 return inserted
             if inserted:
