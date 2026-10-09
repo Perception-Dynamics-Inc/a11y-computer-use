@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 import time
 from collections.abc import Sequence
 
@@ -631,6 +632,27 @@ def _sane_range(low: float, high: float) -> bool:
     return True
 
 
+# LibreOffice GTK dialogs and checkboxes expose an AtkValue that is not
+# AtkValue. CurrentValue then reads an uninitialized double (about
+# 6.93e-310), which is subnormal. Zero and ordinary small values stay.
+_UNINITIALIZED_VALUE_ROLES = frozenset({"AXDialog", "AXCheckBox"})
+_UNINITIALIZED_VALUE_ROLE_NAMES = frozenset({"dialog", "alert", "check box"})
+
+
+def _uninitialized_double(value: object) -> bool:
+    """True for a non-finite number or a subnormal double.
+
+    ``0``, ``0.0``, and small normalized values such as ``0.001`` and
+    ``1e-6`` are not this. The uninitialized LibreOffice reading is.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    number = float(value)
+    if not math.isfinite(number):
+        return True
+    return number != 0.0 and abs(number) < sys.float_info.min
+
+
 def _relation_type_token(value) -> str:
     parts = (
         value,
@@ -738,7 +760,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     Text, or the accessible name, is what those roles show. Value is read for
     a slider, spin button, or progress bar, and only when Qt's minimum and
     maximum are a real range. GTK's fallback for a non-range control is
-    unchanged.
+    unchanged, except a dialog or a checkbox whose CurrentValue is a
+    subnormal double: that reading is absent. Zero and a small normalized
+    value on those roles stay.
     """
     if role == "AXSecureTextField":
         return None
@@ -798,9 +822,13 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     if _qt_app(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
-    if cur is not None:
-        return cur
-    return None
+    if cur is None:
+        return None
+    if (
+        role in _UNINITIALIZED_VALUE_ROLES or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+    ) and _uninitialized_double(cur):
+        return None
+    return cur
 
 
 def _range_value(acc):
