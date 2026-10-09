@@ -99,7 +99,7 @@ print(rt.desktop_snapshot("com.apple.TextEdit", mode="interactive"))
 rt.click(ref="e3", verify=True)
 ```
 
-Existing Anthropic or OpenAI computer-use loops can run through it unchanged via `a11y_computer_use.adapters` ([docs/provider-adapters.md](./docs/provider-adapters.md)). A reference agent loop ships as `a11y-computer-use agent --task "..."` and works with Anthropic, OpenAI-compatible endpoints (Ollama included), or the Claude Code CLI.
+Existing Anthropic or OpenAI computer-use loops can run through it unchanged via `a11y_computer_use.adapters` ([docs/provider-adapters.md](./docs/provider-adapters.md)). A reference agent loop ships as `a11y-computer-use agent --task "..."` and works with Anthropic, OpenAI-compatible endpoints (Ollama included), or the Claude Code CLI. `a11y-agent` runs one goal from an accessibility snapshot; the loop, the scripted model, and the exit codes are in [docs/agent.md](./docs/agent.md).
 
 Spoken commands skip the planner: `a11y-computer-use voice` matches each utterance to one fixed skill and runs it through the same safety gate, with a per-command timeline ([docs/voice.md](./docs/voice.md)). `agent --mcp-command "ssh vm a11y-computer-use mcp"` keeps the planner local and runs every action on a remote machine under its own grants.
 
@@ -113,6 +113,6 @@ Format and checks: [docs/missions.md](./docs/missions.md). The example mission i
 
 ## Docs
 
-[Agent loop](./docs/agent-loop.md) · [Missions](./docs/missions.md) · [Permissions](./docs/permissions.md) · [Coexist](./docs/coexist.md) · [Reporting](./docs/reporting.md) · [Voice](./docs/voice.md) · [WebMCP](./docs/webmcp.md) · [OCR refs](./docs/ocr-refs.md) · [macOS menus and dialogs](./docs/macos-primitives.md) · [Adapters](./docs/provider-adapters.md) · [Observation cost](./docs/observation-cost.md) · [Benchmark](./docs/benchmark.md) · [Browser backend](./docs/browser-backend.md) · [Linux](./docs/linux-port.md) · [Windows](./docs/windows-port.md) · [Real-desktop test bed](./docs/box-testbed.md) · [CI](./docs/ci.md) · [Decision records](./docs/decisions/) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
+[Agent loop](./docs/agent-loop.md) · [a11y-agent](./docs/agent.md) · [Missions](./docs/missions.md) · [Permissions](./docs/permissions.md) · [Coexist](./docs/coexist.md) · [Reporting](./docs/reporting.md) · [Voice](./docs/voice.md) · [WebMCP](./docs/webmcp.md) · [OCR refs](./docs/ocr-refs.md) · [macOS menus and dialogs](./docs/macos-primitives.md) · [Adapters](./docs/provider-adapters.md) · [Observation cost](./docs/observation-cost.md) · [Benchmark](./docs/benchmark.md) · [Browser backend](./docs/browser-backend.md) · [Linux](./docs/linux-port.md) · [Windows](./docs/windows-port.md) · [Real-desktop test bed](./docs/box-testbed.md) · [CI](./docs/ci.md) · [Decision records](./docs/decisions/) · [Changelog](./CHANGELOG.md) · [Contributing](./CONTRIBUTING.md)
 
 Apache-2.0. Copyright 2026 Perception Dynamics, Inc.

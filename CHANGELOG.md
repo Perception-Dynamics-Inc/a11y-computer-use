@@ -7,6 +7,12 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.48] - 2026-10-09
+
+### Added
+
+- Live tests for the M1 computer-use agent. A scripted model (not an LLM) drives `Agent.run` through a GTK note window and local Chrome pages: it saves a file and checks the bytes, fills a form, stops for a human on login, a one-time code, a card number, and a captcha iframe, recovers when a wrong `done` fails its evidence check, and changes strategy after the screen is stuck. `a11y-agent run --json` exits 0, 1, 2, or 3. The loop is [docs/agent.md](./docs/agent.md) (2026-10-09).
+
 ## [0.4.47] - 2026-10-09
 
 ### Fixed
