@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "find",
     "screenshot",
     "zoom",
+    "crop",
     "screen_text",
     "click",
     "hover",

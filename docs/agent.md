@@ -87,11 +87,14 @@ it because no model API keys are available.
 `desktop_snapshot`, `call_tool`, `screenshot`, and `_frontmost`). The default
 constructs a real `Runtime` after applying `display`.
 
-`vision=True` attaches a whole-window screenshot to the observation when the
-tree says it has no interactive elements, or when it contains an unnamed
-image or unnamed clickable. The image block is
-`{"type": "image", "path": "...", "mime": "image/png"}`. Element crops and
-opaque-region markers are not implemented. The library does not OCR.
+`vision=True` attaches PNG crops of unnamed images, unknown widgets, and
+unnamed clickables (at most four), then a whole-window screenshot, when the
+tree says it has no interactive elements or contains those refs. The model
+can also call `crop(ref)` with optional `padding` and `scale`. Each image
+block is `{"type": "image", "path": "...", "mime": "image/png"}`. The library
+does not OCR or recognize the pixels. Opaque-region markers (drawn labels on
+the crop) are not implemented. A runtime with no `crop` method still receives
+the window screenshot.
 
 ## CLI
 
@@ -173,7 +176,7 @@ the runtime already fenced.
 
 ## Actions
 
-`click`, `type`, `key`, `set_value`, `select`, `scroll`, `app`
+`click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
 
@@ -242,6 +245,8 @@ directory):
 - `step-NNNN.png` — a screenshot when `Runtime.screenshot` returns PNG bytes.
   A capture failure leaves the path null and does not fail the run.
 - `observe-NNNN.png` — the whole-window shot attached when `vision=True`.
+- `crop-<ref>-NNNN.png` — a vision crop of an unnamed or opaque ref.
+- `crop-action-NNNN-<ref>.png` — the PNG returned when the model calls `crop`.
 
 Card-number-shaped strings and secret argument names are stored as
 `[REDACTED]`.
@@ -305,8 +310,10 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   failure with `reason` `stuck` after repeated screens
 - stale-ref recovery that sends Escape and then completes
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
-- `vision=True` attaching a window screenshot, and `display` setting
-  `$DISPLAY`
+- `vision=True` attaching element crops and then a window screenshot, and
+  `display` setting `$DISPLAY`
+- `crop` returning an image block on the tool message, and a failed crop
+  staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the
   injection flag (`tests/test_untrusted.py`, `tests/test_agent_core.py`)
 - domain allow and block rules, including a scripted run that sees injection
@@ -318,7 +325,8 @@ page whose text contains an injection string and a link to
 `https://blocked.example/`. The scripted agent fences that text and completes
 the legitimate goal. Clicking the link and launching the blocked URL both
 return `domain_blocked`. That test uses `ScriptedModel`, not a live LLM.
-The document URL on that page comes from AT-SPI.
+The document URL on that page comes from AT-SPI. The same file crops a red
+GTK button named Swatch and checks the PNG size and dominant color.
 
 Live, headless Chromium when a CDP endpoint is up
 (`tests/test_browser.py::test_live_cdp_reads_document_url_and_link_href`):
@@ -340,13 +348,14 @@ Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 
 Not in this change:
 
-- No HTTP server and no MCP tools for `shell` or `python`. The existing MCP
-  tool list is unchanged.
+- No HTTP server and no MCP tools for `shell` or `python`.
 - No live call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command
   provider. Those clients are in `a11y_computer_use.agent.models` and are
   tested with recorded HTTP fixtures, not from this loop. The system prompt
   tells a real model that fenced text is data; the scripted tests do not
   measure whether an LLM would obey it.
-- No OCR, no element-crop vision, no opaque-region markers.
+- No OCR. Element crops are `crop` and the vision hook. Opaque-region
+  markers are not implemented.
 
+`crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.

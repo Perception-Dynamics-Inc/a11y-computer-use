@@ -1,7 +1,7 @@
 """MCP server: the v1 tool surface (PLAN.md §8).
 
 The full MCP tool surface, one canonical schema shared with the CLI: observe
-(desktop_snapshot, find, screenshot, zoom), act (click, hover, type, key, scroll,
+(desktop_snapshot, find, screenshot, zoom, crop), act (click, hover, type, key, scroll,
 drag, wait_for, act, set_value, scroll_to_find), manage (app, window, clipboard),
 plus console and network when the browser backend provides those feeds. EVERY tool —
 observation included —
@@ -1416,6 +1416,85 @@ def format_zoom(region: Bounds) -> str:
         f"zoom of display {region.display_id} at ({region.x}, {region.y}) "
         f"{region.width}x{region.height}"
     )
+
+
+def format_crop(ref: str, region: Bounds, padding: int, scale: float, image_w: int, image_h: int) -> str:
+    """The text that accompanies a ref crop. It names the rectangle and the PNG."""
+    return (
+        f"crop of {ref} on display {region.display_id} at ({region.x}, {region.y}) "
+        f"{region.width}x{region.height} (padding {padding}, scale {scale:g}); "
+        f"image {image_w}x{image_h} PNG. No text was read from these pixels."
+    )
+
+
+def _crop_padding(padding: object) -> int:
+    if isinstance(padding, bool) or not isinstance(padding, (int, float)) or not math.isfinite(float(padding)):
+        raise ValueError(f"padding must be a nonnegative integer, got {padding!r}")
+    if int(padding) != padding or padding < 0 or padding > 512:
+        raise ValueError(f"padding must be an integer from 0 to 512, got {padding!r}")
+    return int(padding)
+
+
+def _crop_scale(scale: object) -> float:
+    if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(float(scale)):
+        raise ValueError(f"scale must be a positive finite number, got {scale!r}")
+    if float(scale) <= 0 or float(scale) > 8:
+        raise ValueError(f"scale must be greater than 0 and at most 8, got {scale!r}")
+    return float(scale)
+
+
+def _misses_display(bounds: Bounds, display) -> bool:
+    right = min(bounds.x + bounds.width, display.width)
+    bottom = min(bounds.y + bounds.height, display.height)
+    return right <= max(bounds.x, 0) or bottom <= max(bounds.y, 0)
+
+
+def _not_visible(ref: str, reason: str, bounds: Bounds, message: str) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.NOT_VISIBLE,
+        f"{ref} is {reason.replace('_', '-')}: {message}",
+        detail={
+            "ref": ref,
+            "reason": reason,
+            "bounds": {
+                "display_id": bounds.display_id,
+                "x": bounds.x,
+                "y": bounds.y,
+                "width": bounds.width,
+                "height": bounds.height,
+            },
+        },
+    )
+
+
+def _box_on_image(png: bytes, region: Bounds, display) -> tuple[int, int, int, int]:
+    """Map a display rect onto the screenshot's pixels."""
+    import io
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(png))
+    if display.width < 1 or display.height < 1:
+        raise ValueError("display has no pixels")
+    sx = image.width / display.width
+    sy = image.height / display.height
+    x = max(0, min(image.width - 1, round(region.x * sx)))
+    y = max(0, min(image.height - 1, round(region.y * sy)))
+    width = max(1, round(region.width * sx))
+    height = max(1, round(region.height * sy))
+    if x + width > image.width:
+        width = image.width - x
+    if y + height > image.height:
+        height = image.height - y
+    return x, y, width, height
+
+
+def _same_app(owner: str, app: str) -> bool:
+    if owner.casefold() == app.casefold():
+        return True
+    from a11y_computer_use.drivers._linux_system import _comm_matches_identifier
+
+    return _comm_matches_identifier(app, owner) or _comm_matches_identifier(owner, app)
 
 
 # ---------------------------------------------------------------------------
@@ -2873,6 +2952,101 @@ class Runtime:
             lambda: self.driver.zoom_region(region),
         )
         return png, region
+
+    @_serialized
+    def crop(self, ref: str, padding: int = 0, scale: float = 1.0) -> tuple[str, "capture.ScaledImage"]:
+        """PNG of ``ref``'s on-screen bounds, plus those bounds.
+
+        ``padding`` grows the rect on every side before it is clipped to the
+        display. ``scale`` sizes the PNG (1 keeps the cropped pixels). The
+        pixels are not read. An element that misses the display, or whose
+        center belongs to another window, raises ``not_visible``.
+        """
+        pad = _crop_padding(padding)
+        factor = _crop_scale(scale)
+        _snap, live = self._resolve(ref, "crop")
+        app = _snap.app or self._frontmost()
+
+        def execute() -> tuple[str, "capture.ScaledImage"]:
+            return self._crop_visible(live, ref, pad, factor)
+
+        return self._run_gated(ObserveOp(verb=ObserveVerb.ZOOM, app=app), app, execute)
+
+    def _crop_visible(self, element: Element, ref: str, padding: int, scale: float):
+        from a11y_computer_use import capture
+
+        bounds = element.bounds
+        if bounds.width < 1 or bounds.height < 1:
+            raise _not_visible(ref, "off_screen", bounds, "the ref has no on-screen size")
+        display = self._display_for_bounds(bounds)
+        if _misses_display(bounds, display):
+            raise _not_visible(
+                ref, "off_screen", bounds,
+                f"the ref does not intersect display {display.display_id} "
+                f"({display.width}x{display.height})",
+            )
+        cover = self._cover_owner(element, self._current.app if self._current is not None else None)
+        if cover == "off_screen":
+            raise _not_visible(ref, "off_screen", bounds, "the ref is outside the visible viewport")
+        if cover == "covered":
+            raise _not_visible(
+                ref, "covered", bounds, "another element is painted over the ref's center",
+            )
+        if cover:
+            raise _not_visible(ref, "covered", bounds, f"the ref is covered by {cover}")
+        padded = Bounds(
+            bounds.display_id,
+            bounds.x - padding,
+            bounds.y - padding,
+            bounds.width + 2 * padding,
+            bounds.height + 2 * padding,
+        )
+        region = clip_region_to_display(padded.x, padded.y, padded.width, padded.height, display)
+        out_w = max(1, round(region.width * scale))
+        out_h = max(1, round(region.height * scale))
+        if max(out_w, out_h) > 4096:
+            raise ValueError(
+                f"crop would be {out_w}x{out_h}; the long edge must be at most 4096"
+            )
+        shot = self.driver.screenshot(region.display_id)
+        png, width, height = capture.crop_png(
+            shot.png, _box_on_image(shot.png, region, display), scale,
+        )
+        scaled = capture.ScaledImage(
+            png=png, width=width, height=height,
+            source_width=region.width, source_height=region.height,
+        )
+        return format_crop(ref, region, padding, scale, width, height), scaled
+
+    def _display_for_bounds(self, bounds: Bounds):
+        found = self._known_displays()
+        if found is None:
+            from a11y_computer_use.schema import Display
+
+            return Display(bounds.display_id, max(bounds.x + bounds.width, 1),
+                           max(bounds.y + bounds.height, 1), 1.0, True)
+        for display in found:
+            if display.display_id == bounds.display_id:
+                return display
+        raise ValueError(unknown_display_message(bounds.display_id, found))
+
+    def _cover_owner(self, element: Element, app: str | None) -> str | None:
+        """None when the element's center is this app. ``off_screen`` or a cover name otherwise."""
+        fn = getattr(self.driver, "occlusion", None)
+        if callable(fn):
+            try:
+                return fn(element, app)
+            except ComputerUseError:
+                return None
+        try:
+            owner = self.driver.app_at_point(element.bounds.center)
+        except Exception:  # noqa: BLE001 - no hit-test on this driver
+            return None
+        if not owner or not app:
+            return None
+        if _same_app(str(owner), app):
+            return None
+        return str(owner)
 
     def _browser_feed(self, app: str, method: str, verb: ObserveVerb, what: str) -> str:
         """Read a browser-only observation feed (console/network) through the gate.
@@ -4864,7 +5038,7 @@ class Runtime:
         tool's keyword arguments (the agent loop's entry point).
 
         Returns what the Runtime method returns: a string for every tool except
-        ``screenshot`` (``(text, ScaledImage)``) and ``zoom``
+        ``screenshot`` and ``crop`` (``(text, ScaledImage)``) and ``zoom``
         (``(PNG bytes, clipped Bounds)``).
         ``confirm`` is the human-confirmation callback threaded into ``click``
         and ``act``; without one, plausibly irreversible actions fail safe.
@@ -4876,6 +5050,7 @@ class Runtime:
             "find": self.find,
             "screenshot": self.screenshot,
             "zoom": self.zoom,
+            "crop": self.crop,
             "screen_text": self.screen_text,
             "console": self.console,
             "network": self.network,
@@ -4936,7 +5111,10 @@ _INSTRUCTIONS = (
     "and mode='diff' to re-observe after an action. When a snapshot has no "
     "actionable elements (custom-drawn apps such as Telegram or After Effects), "
     "call screen_text: on-device OCR returns text lines as refs o1..oN and "
-    "click(ref='o7') lands on that text, so you never guess coordinates. Actions are "
+    "click(ref='o7') lands on that text, so you never guess coordinates. "
+    "crop(ref='e14') returns a PNG of that element's on-screen bounds and does "
+    "not read the pixels; padding and scale are optional, and an off-screen or "
+    "covered ref is not_visible. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
     "permission_denied_* errors, run `a11y_computer_use doctor`. In long tasks, "
@@ -5323,6 +5501,21 @@ def build_server(
         against the frontmost app. Needs the Screen Recording permission."""
         png, region = await run(runtime.zoom, display_id, x, y, width, height)
         return [format_zoom(region), Image(data=png, format="png")]
+
+    @server.tool(name="crop")
+    async def crop(ref: str, padding: int = 0, scale: float = 1.0) -> list:
+        """Return a PNG of one element's on-screen bounds from the latest
+        desktop_snapshot, plus the text naming that rectangle. padding grows
+        the rect on every side (0..512) before clipping it to the display.
+        scale sizes the PNG (1 keeps the cropped pixels; at most 8). The
+        library does not OCR or recognize the pixels. Works for AT-SPI and CDP
+        refs, including a control inside a cross-origin iframe whose box is in
+        the top document. An element that misses the display, or whose center
+        is covered by another window, is not_visible and no image is returned.
+        Take a desktop_snapshot first. Tier 'read' against that snapshot's app.
+        Needs the Screen Recording permission on the OS backends."""
+        text, image = await run(runtime.crop, ref, padding, scale)
+        return [text, Image(data=image.png, format="png")]
 
     @server.tool(name="screen_text")
     async def screen_text(

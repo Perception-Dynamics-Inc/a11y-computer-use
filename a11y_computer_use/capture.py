@@ -292,6 +292,36 @@ def zoom_region(region: Bounds) -> bytes:
     return buffer.getvalue()
 
 
+def crop_png(png: bytes, box: tuple[int, int, int, int], scale: float = 1.0) -> tuple[bytes, int, int]:
+    """Crop ``png`` to ``box`` ``(x, y, width, height)`` and optionally scale it.
+
+    ``box`` is in the image's own pixels and must lie inside the image. An
+    integer ``scale`` uses nearest-neighbor so a solid color stays that color.
+    The library does not read the pixels. Returns ``(png, width, height)`` of
+    the image that was encoded.
+    """
+    if scale <= 0 or not isinstance(scale, (int, float)) or isinstance(scale, bool):
+        raise ValueError(f"scale must be a positive finite number, got {scale!r}")
+    x, y, width, height = box
+    image = Image.open(io.BytesIO(png))
+    if image.width < 1 or image.height < 1:
+        raise ValueError("screenshot is empty")
+    if width < 1 or height < 1 or x < 0 or y < 0 or x + width > image.width or y + height > image.height:
+        raise ValueError(
+            f"crop box ({x}, {y}) {width}x{height} is outside the "
+            f"{image.width}x{image.height} screenshot"
+        )
+    cropped = image.crop((x, y, x + width, y + height))
+    out_w = max(1, round(width * float(scale)))
+    out_h = max(1, round(height * float(scale)))
+    if (out_w, out_h) != (cropped.width, cropped.height):
+        resample = Image.Resampling.NEAREST if float(scale) == int(scale) else Image.Resampling.LANCZOS
+        cropped = cropped.resize((out_w, out_h), resample)
+    buffer = io.BytesIO()
+    cropped.save(buffer, format="PNG")
+    return buffer.getvalue(), cropped.width, cropped.height
+
+
 def to_jpeg(png: bytes, quality: int = 80) -> bytes:
     """Re-encode PNG bytes as JPEG (alpha dropped). A 1080p desktop is four to
     five times smaller as JPEG at quality 80, which is what makes a screenshot

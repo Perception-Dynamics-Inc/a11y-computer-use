@@ -8,7 +8,7 @@
 
 - `schema.py`: the canonical Element/Snapshot/Action contract. Identical on every OS.
 - `observe.build_snapshot` and the pruning engine: walks any `TreeAccessor` and prunes/indexes it. The Linux `ATSPIAccessor` feeds the *same* engine; `_match_anchor` (ref re-resolution) is reused verbatim.
-- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 25 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
+- `safety.py` (tiers, gates, audit log, confirmation classifier) and the MCP server. `build_server` registers 26 tools on the Linux, macOS, and Windows drivers (`desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `screen_text`, `click`, `hover`, `type`, `key`, `scroll`, `drag`, `wait_for`, `act`, `set_value`, `scroll_to_find`, `app`, `window`, `clipboard`, `menu`, `file_dialog`, `notes`, `wait_until`, `request_permission`, `grant_app`, `report_issue`). The browser driver adds `console`, `network`, and `webmcp` when the driver has those methods. Platform-free.
 
 ## The role-vocabulary trick
 

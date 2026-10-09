@@ -608,6 +608,88 @@ def test_vision_attaches_a_window_screenshot(tmp_path):
     assert isinstance(captured[0], str)
 
 
+def test_vision_attaches_crops_of_unnamed_elements_then_the_window(tmp_path):
+    elements = window(*[
+        el(f"e{index}", "AXImage", "", parent="e1") for index in range(2, 7)
+    ])
+    runtime = FakeRuntime(elements)
+
+    def crop(ref, padding=0, scale=1.0):
+        return (f"crop {ref}", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+    captured: list = []
+
+    def script(messages):
+        captured.append(messages[-1].content)
+        return turn(done("saw them", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, _agent = run(
+        ScriptedModel(script), elements, runtime=runtime, vision=True, trace_dir=tmp_path,
+    )
+    assert result.status == "success"
+    content = captured[0]
+    images = [block for block in content if block.get("type") == "image"]
+    assert len(images) == 5  # four crops, then the window
+    assert all("crop-e" in image["path"] for image in images[:4])
+    assert "observe-" in images[-1]["path"]
+    assert os.path.isfile(images[-1]["path"])
+    assert "does not read these pixels" in content[0]["text"]
+
+
+def test_crop_action_returns_an_image_and_does_not_recover(tmp_path):
+    elements = window(el("e2", "AXImage", "", parent="e1"))
+    runtime = FakeRuntime(elements)
+
+    def call_tool(name, params, confirm=None):
+        del confirm
+        runtime.calls.append((name, dict(params)))
+        ref = params.get("ref")
+        if ref in runtime.fail:
+            raise runtime.fail[ref]
+        if name == "crop":
+            return ("crop of e2 on display 0 at (20, 30) 80x24", SimpleNamespace(png=PNG))
+        return f"{name} ok"
+
+    runtime.call_tool = call_tool
+    seen: list = []
+
+    def script(messages):
+        seen.append(list(messages))
+        if len(seen) == 1:
+            return turn(ToolCall("crop", {"ref": "e2", "padding": 4, "scale": 2}, id="c1"))
+        return turn(done("cropped", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script), elements, runtime=runtime, trace_dir=tmp_path,
+    )
+    assert result.status == "success"
+    assert runtime.calls == [("crop", {"ref": "e2", "padding": 4, "scale": 2})]
+    assert result.step_log[0].verified is True
+    tool = next(message for message in seen[1] if message.role == "tool")
+    assert isinstance(tool.content, list)
+    assert tool.content[-1]["type"] == "image"
+    assert tool.content[-1]["mime"] == "image/png"
+    assert os.path.isfile(tool.content[-1]["path"])
+    assert tool.content[-1]["path"].endswith(".png")
+
+    runtime.fail["e9"] = ComputerUseError(ErrorCode.NOT_VISIBLE, "e9 is off-screen")
+    runtime.calls.clear()
+
+    def failing(messages):
+        if not runtime.calls:
+            return turn(ToolCall("crop", {"ref": "e9"}))
+        return turn(done("stopped", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(failing), elements, runtime=runtime, trace_dir=tmp_path / "fail",
+    )
+    assert result.status == "success"
+    assert runtime.calls == [("crop", {"ref": "e9"})]
+    assert result.step_log[0].verified is False
+    assert "not_visible" in (result.step_log[0].error or "")
+
+
 def test_display_sets_environment():
     # Agent writes os.environ directly. Restore it here: monkeypatch.delenv
     # does not record an undo when the variable was already absent, so a

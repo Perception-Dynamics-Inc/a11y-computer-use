@@ -218,7 +218,7 @@ class CDPSession:
                 raise self._connection_error(method, "invalid JSON from CDP") from exc
             if not isinstance(msg, dict):
                 raise self._connection_error(method, "CDP message is not an object")
-            if msg.get("id") == mid:
+            if msg.get("id") == mid and msg.get("sessionId") == session_id:
                 if "error" in msg:
                     err = msg["error"]
                     if not isinstance(err, dict):
