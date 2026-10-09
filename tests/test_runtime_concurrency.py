@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import anyio
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from a11y_computer_use import safety, server
@@ -99,7 +98,9 @@ def test_batch_owns_snapshot_until_all_steps_complete(runtime) -> None:
         assert all(step["ok"] for step in json.loads(batch.result(timeout=3)))
     assert driver.calls == ["block", "second"]
     runtime.desktop_snapshot("test-app")
-    assert driver.snapshot_count == 1
+    # Each type reads the tree after it runs. The explicit snapshot is the third.
+    # The blocked section above still saw zero: the read happens after the driver returns.
+    assert driver.snapshot_count == 3
 
 
 def test_close_waits_for_active_input_and_is_idempotent(runtime) -> None:
@@ -182,8 +183,10 @@ async def test_expired_queue_call_never_reaches_driver(runtime) -> None:
         group.start_soon(mcp.call_tool, "type", {"text": "block"})
         try:
             await wait_for_driver(driver)
-            with pytest.raises(ToolError, match="busy: timed out waiting"):
-                await mcp.call_tool("type", {"text": "expired"})
+            expired = await mcp.call_tool("type", {"text": "expired"})
+            assert expired.isError
+            assert "busy: timed out waiting" in expired.content[0].text
+            assert expired.structuredContent["outcome"] == "refused"
         finally:
             driver.release.set()
     await mcp.call_tool("type", {"text": "after"})
@@ -226,8 +229,10 @@ async def test_active_cancellation_keeps_input_ownership_until_worker_finishes(r
             scope.cancel()
             await anyio.sleep(0)
             assert not finished.is_set()
-            with pytest.raises(ToolError, match="busy:.*queue is full"):
-                await mcp.call_tool("type", {"text": "overlap"})
+            overlap = await mcp.call_tool("type", {"text": "overlap"})
+            assert overlap.isError
+            assert "busy:" in overlap.content[0].text and "queue is full" in overlap.content[0].text
+            assert overlap.structuredContent["outcome"] == "refused"
         finally:
             driver.release.set()
     await mcp.call_tool("type", {"text": "after"})

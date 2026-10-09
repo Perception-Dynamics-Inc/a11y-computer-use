@@ -319,14 +319,17 @@ def test_click_does_not_snap_against_a_stale_snapshot_when_the_refresh_fails(tmp
     assert a.handle({"action": "left_click", "coordinate": [160, 104]}).snapped_ref == "e3"
     front["app"] = "com.example.Dialog"  # ungranted app now frontmost; the refresh is refused
     r = a.handle({"action": "left_click", "coordinate": [160, 104]})
-    assert fake.snapshots == 1 and rt._current.snapshot_id == "snap-1"  # still the Editor's tree
+    # The first click refreshed once (snap-1) and read the tree again to judge
+    # the outcome. That read does not replace the epoch. The refused click
+    # took no further snapshot.
+    assert fake.snapshots == 2 and rt._current.snapshot_id == "snap-1"
     assert r.snapped_ref is None and fake.calls["press"] == ["e3"]  # no second AX press
     assert r.error == "refused"  # the raw coordinate click is gated against the frontmost app
     # Set-of-Mark labels are likewise only drawn from a fresh tree: an adapter bound
     # to an ungranted app cannot refresh, so no labels from the Editor's stale tree
     front["app"] = APP  # screenshots gate against the frontmost app again
     marked = AnthropicComputerAdapter(rt, app="com.example.Other", marks=True).handle({"action": "screenshot"})
-    assert marked.ok and fake.snapshots == 1 and rt._current.snapshot_id == "snap-1"
+    assert marked.ok and fake.snapshots == 2 and rt._current.snapshot_id == "snap-1"
     plain = AnthropicComputerAdapter(rt, app="com.example.Other").handle({"action": "screenshot"})
     assert marked.png == plain.png
 
