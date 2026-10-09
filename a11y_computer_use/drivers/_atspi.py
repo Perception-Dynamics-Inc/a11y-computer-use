@@ -4283,6 +4283,94 @@ def _row_settled(node) -> bool:
     return _row_selected(node)
 
 
+def _qt_grid(acc):
+    """The Qt ``table`` that contains ``acc``, or None for a tree item.
+
+    A ``QTableWidget`` cell's parent is ``table``. A ``QTreeWidget`` item is
+    also a ``table cell``, and its parent is ``tree``. The tree item stays
+    on Toggle: that selects the row and does not expand it.
+    """
+    if not _qt_app(acc):
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None:
+            return None
+        role = _role_name(parent)
+        if role in {"tree", "tree table"}:
+            return None
+        if role == "table":
+            return parent
+        node = parent
+    return None
+
+
+def qt_table_cell(acc) -> bool:
+    """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
+    try:
+        return _role_name(acc) == "table cell" and _qt_grid(acc) is not None
+    except Exception:
+        return False
+
+
+def _same_cell(left, right) -> bool:
+    if left is right or left == right:
+        return True
+    name = _node_name(left)
+    return bool(name) and name == _node_name(right)
+
+
+def _qt_cell_exclusive(table, acc) -> bool:
+    """True when ``acc`` is the only selected cell and it is focused.
+
+    On Qt 6.4 a pointer click sets ``SELECTED`` and ``FOCUSED`` on that
+    cell and clears the others. ``FOCUSED`` is the current cell:
+    ``currentItem`` is not its own AT-SPI state. ``Toggle`` sets
+    ``SELECTED`` without ``FOCUSED`` and leaves the other cells selected.
+    """
+    if not _state_has(acc, "SELECTED") or not _state_has(acc, "FOCUSED"):
+        return False
+    count = min(_child_count(table), 500)
+    saw = False
+    for index in range(count):
+        child = _child_at(table, index)
+        if child is None or _role_name(child) != "table cell":
+            continue
+        if not _state_has(child, "SELECTED"):
+            continue
+        if _same_cell(child, acc):
+            saw = True
+            continue
+        return False
+    return saw
+
+
+def activate_qt_table_cell(acc) -> bool:
+    """Select only this Qt grid cell and make it the current cell.
+
+    ``Toggle`` and ``Selection.select_child`` add the cell and leave the
+    current cell unchanged. A click at the cell's center is the mouse
+    click. True only when this cell is selected and focused and no other
+    cell in the table is selected. A miss is false, so the caller does not
+    report the click as confirmed.
+    """
+    table = _qt_grid(acc)
+    if table is None:
+        return False
+    if _qt_cell_exclusive(table, acc):
+        return True
+    if not _x11_keys_available():
+        return False
+    _click_center(acc)
+    for attempt in range(8):
+        if _qt_cell_exclusive(table, acc):
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 

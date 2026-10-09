@@ -4232,6 +4232,165 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
         log.close()
 
 
+_QT_CELL_APP = "cuqtcells"
+
+_QT_CELL_FIXTURE = textwrap.dedent(
+    r"""
+    import os
+    import sys
+
+    os.environ["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    widgets = __import__("PyQt6.QtWidgets", fromlist=["QtWidgets"])
+    app = widgets.QApplication(sys.argv)
+    app.setApplicationName("cuqtcells")
+    try:
+        app.setDesktopFileName("cuqtcells")
+    except Exception:
+        pass
+    path = sys.argv[1]
+    grid = widgets.QTableWidget(4, 3)
+    grid.setAccessibleName("Grid")
+    for row in range(4):
+        for col in range(3):
+            grid.setItem(row, col, widgets.QTableWidgetItem("R%dC%d" % (row, col)))
+
+    def dump(*_args):
+        current = grid.currentItem()
+        selected = [item.text() for item in grid.selectedItems()]
+        line = "current=%s selected=%s\n" % (
+            "null" if current is None else current.text(),
+            ",".join(selected),
+        )
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(line)
+        os.replace(temporary, path)
+
+    grid.itemSelectionChanged.connect(dump)
+    grid.currentItemChanged.connect(dump)
+    dump()
+    grid.setWindowTitle("cuqtcells")
+    grid.resize(520, 360)
+    grid.move(40, 40)
+    grid.show()
+    grid.raise_()
+    run = getattr(app, "exec", None)
+    if run is None:
+        run = app.exec_
+    sys.exit(run())
+    """
+)
+
+
+def _qt_cell_log(path) -> tuple[str, list[str]]:
+    text = path.read_text(encoding="utf-8").strip()
+    current = ""
+    selected: list[str] = []
+    for part in text.split():
+        if part.startswith("current="):
+            current = part.split("=", 1)[1]
+        elif part.startswith("selected="):
+            raw = part.split("=", 1)[1]
+            selected = [item for item in raw.split(",") if item]
+    return current, selected
+
+
+def test_linux_qt_table_cell_click_selects_only_that_cell(tmp_path) -> None:
+    """A ref click selects one Qt cell and makes it current.
+
+    Toggle would add the cell and leave currentItem. The widget log is the
+    current cell and the selected set. The click outcome is confirmed only
+    when the accessibility tree shows that one focused cell.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    state = tmp_path / "cells.txt"
+    script = tmp_path / "cuqtcells.py"
+    script.write_text(_QT_CELL_FIXTURE)
+    log_path = tmp_path / "cells.log"
+    log = open(log_path, "w", encoding="utf-8")
+    env = os.environ.copy()
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    env.pop("AT_SPI_BUS_ADDRESS", None)
+    _publish_atspi_bus()
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(state)],
+        env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError("Qt cell fixture exited\n" + _qt_log(log_path))
+            try:
+                snap = driver.snapshot(Scope.WINDOW, _QT_CELL_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                titles = {el.title for el in snap.elements}
+                if "R0C0" in titles and "R3C2" in titles:
+                    break
+            time.sleep(0.4)
+        else:
+            shown = [] if snap is None else [(el.role, el.title) for el in snap.elements]
+            raise AssertionError(f"Qt cells did not appear: {shown}\n{_qt_log(log_path)}")
+
+        driver.activate_app(_QT_CELL_APP)
+        runtime = _runtime_for(tmp_path, driver, _QT_CELL_APP)
+
+        def click_cell(title: str):
+            found = observe.find_elements(snap, text=title, role="cell")
+            assert len(found) == 1 and found[0].role == "AXCell", found
+            runtime._current = snap
+            clicked = runtime.click(found[0].ref)
+            assert str(clicked).startswith("clicked "), clicked
+            assert clicked.outcome == "confirmed", (clicked.outcome, clicked.evidence)
+            deadline = time.monotonic() + 4
+            current, selected = "", []
+            shot = snap
+            while time.monotonic() < deadline:
+                current, selected = _qt_cell_log(state)
+                shot = driver.snapshot(Scope.WINDOW, _QT_CELL_APP)
+                chosen = [
+                    el for el in shot.elements
+                    if el.role == "AXCell" and el.selected
+                ]
+                if (
+                    current == title
+                    and selected == [title]
+                    and len(chosen) == 1
+                    and chosen[0].title == title
+                    and chosen[0].focused
+                ):
+                    return clicked, shot
+                time.sleep(0.2)
+            raise AssertionError(
+                f"{title}: widget current={current} selected={selected} "
+                f"tree={[(el.title, el.selected, el.focused) for el in shot.elements if el.role == 'AXCell']}"
+            )
+
+        snap = driver.snapshot(Scope.WINDOW, _QT_CELL_APP)
+        click_cell("R3C2")
+        snap = driver.snapshot(Scope.WINDOW, _QT_CELL_APP)
+        click_cell("R1C0")
+        current, selected = _qt_cell_log(state)
+        assert current == "R1C0" and selected == ["R1C0"], (current, selected)
+        snap = driver.snapshot(Scope.WINDOW, _QT_CELL_APP)
+        still = [el.title for el in snap.elements if el.role == "AXCell" and el.selected]
+        assert still == ["R1C0"], still
+        assert not any(el.title == "R3C2" and el.selected for el in snap.elements)
+    finally:
+        _stop(proc)
+        log.close()
+
+
 _QT_MENU_APP = "cuqtmenu"
 
 _QT_MENU_FIXTURE = textwrap.dedent(

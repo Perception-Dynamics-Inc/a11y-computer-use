@@ -481,6 +481,152 @@ def test_qt_combo_unknown_option_does_nothing_and_a_miss_is_not_success(atspi, m
     assert clicks
 
 
+def _qt_grid_cells():
+    other = _Node(
+        "table cell", "R3C2",
+        states={"SELECTABLE", "FOCUSABLE", "SELECTED"},
+        actions=["toggle"], toolkit="Qt", x=10, y=10, w=40, h=20,
+    )
+    cell = _Node(
+        "table cell", "R1C0",
+        states={"SELECTABLE", "FOCUSABLE"},
+        actions=["toggle"], toolkit="Qt", x=10, y=40, w=40, h=20,
+    )
+    header = _Node("table column header", "1", toolkit="Qt")
+    _Node("table", "Grid", children=[header, other, cell], toolkit="Qt")
+    return other, cell
+
+
+def test_qt_table_cell_pointer_selects_only_that_cell_and_focuses_it(atspi, monkeypatch) -> None:
+    """Toggle adds a Qt cell and leaves the current cell. A center click does not.
+
+    Success is the cell that was clicked: it is selected and focused, and
+    the cell that was already selected is not. A second call on that cell
+    does not click again. A tree item is not a grid cell.
+    """
+    other, cell = _qt_grid_cells()
+    clicks: list[tuple[int, int]] = []
+
+    def click(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+        other.states.discard("SELECTED")
+        other.states.discard("FOCUSED")
+        cell.states.add("SELECTED")
+        cell.states.add("FOCUSED")
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    assert _atspi.qt_table_cell(cell) is True
+    assert _atspi.activate_qt_table_cell(cell) is True
+    assert clicks == [(30, 50)]
+    assert cell.action_log == []
+    assert other.action_log == []
+    assert "SELECTED" in cell.states and "FOCUSED" in cell.states
+    assert "SELECTED" not in other.states
+
+    assert _atspi.activate_qt_table_cell(cell) is True
+    assert clicks == [(30, 50)]
+
+    fruits = _Node("table cell", "Fruits", actions=["toggle"], toolkit="Qt")
+    _Node("tree", "Tree", children=[fruits], toolkit="Qt")
+    gtk = _Node("table cell", "A1", toolkit="gtk")
+    _Node("table", "Sheet", children=[gtk], toolkit="gtk")
+    assert _atspi.qt_table_cell(fruits) is False
+    assert _atspi.activate_qt_table_cell(fruits) is False
+    assert _atspi.qt_table_cell(gtk) is False
+    assert fruits.action_log == []
+    assert clicks == [(30, 50)]
+
+
+def test_qt_table_cell_that_only_gets_added_is_not_success(atspi, monkeypatch) -> None:
+    """A click that leaves two cells selected, or skips focus, is not success."""
+    other, cell = _qt_grid_cells()
+    clicks: list[tuple[int, int]] = []
+
+    def click(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+        cell.states.add("SELECTED")
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    assert _atspi.activate_qt_table_cell(cell) is False
+    assert clicks == [(30, 50)]
+    assert cell.action_log == []
+    assert "FOCUSED" not in cell.states
+    assert "SELECTED" in other.states
+
+
+def test_press_element_uses_the_pointer_for_a_qt_grid_cell(atspi, monkeypatch) -> None:
+    """The driver does not Toggle a Qt grid cell, and it does not confirm a miss."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Bounds, Element
+
+    other, cell = _qt_grid_cells()
+    clicks: list[tuple[int, int]] = []
+    pressed: list[object] = []
+
+    def click(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+        other.states.discard("SELECTED")
+        cell.states.update({"SELECTED", "FOCUSED"})
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    monkeypatch.setattr(_atspi, "do_press", lambda acc: pressed.append(acc) or True)
+    element = Element(
+        "e1", "AXCell", "R1C0", None, Bounds(0, 10, 40, 40, 20), "snap", clickable=True,
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        "a11y_computer_use.observe.ax_handle_for", lambda *_args, **_kwargs: cell,
+    )
+    assert driver.press_element(element) is True
+    assert clicks == [(30, 50)]
+    assert pressed == []
+    assert cell.action_log == []
+
+    other.states.add("SELECTED")
+    cell.states.discard("FOCUSED")
+
+    def add_only(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+        cell.states.add("SELECTED")
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", add_only)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert "only that cell" in exc.value.message
+    assert pressed == []
+
+
+def test_press_element_still_toggles_a_qt_tree_item(atspi, monkeypatch) -> None:
+    """A tree item is not a grid cell. Toggle selects it and does not expand it."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Bounds, Element
+
+    fruits = _Node(
+        "table cell", "Fruits", actions=["toggle"], toolkit="Qt",
+        states={"SELECTABLE", "FOCUSABLE", "EXPANDABLE"},
+    )
+    _Node("tree", "Tree", children=[fruits], toolkit="Qt")
+    clicks: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_input.click",
+        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
+    )
+    element = Element(
+        "e2", "AXCell", "Fruits", None, Bounds(0, 10, 40, 80, 20), "snap", clickable=True,
+    )
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        "a11y_computer_use.observe.ax_handle_for", lambda *_args, **_kwargs: fruits,
+    )
+    assert driver.press_element(element) is True
+    assert fruits.action_log == ["toggle"]
+    assert clicks == []
+
+
 def test_gtk_combo_still_uses_its_own_selection(atspi, monkeypatch) -> None:
     red = _Node("menu item", "Red", states={"SELECTED"}, toolkit="gtk")
     green = _Node("menu item", "Green", toolkit="gtk")
