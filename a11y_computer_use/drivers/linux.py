@@ -604,14 +604,14 @@ class LinuxDriver:
             return None
 
         def _do() -> str | None:
-            root = _atspi.find_root(app, Scope.WINDOW)
-            url = _atspi.document_url_of(root) if root is not None else None
+            window = _atspi.find_root(app, Scope.WINDOW)
+            url = _atspi.document_url_of(window) if window is not None else None
             if url:
                 return url
             app_root = _atspi.find_root(app, Scope.APP)
-            if app_root is None or app_root is root:
+            if app_root is None or app_root is window:
                 return None
-            return _atspi.document_url_of(app_root)
+            return _atspi.other_frame_document_url(app_root, window)
 
         try:
             return self._run(_do)
@@ -629,6 +629,54 @@ class LinuxDriver:
         try:
             return self._run(lambda: _atspi.hyperlink_uri(handle))
         except Exception:  # noqa: BLE001 - no URI is "not a link", not a failure
+            return None
+
+    def element_document_url(self, element: Element) -> str | None:
+        """URL of the document that owns ``element``, including an iframe."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.document_url_for(handle))
+        except Exception:  # noqa: BLE001 - a missing document is not a failed action
+            return None
+
+    def element_in_browser_chrome(self, element: Element) -> bool:
+        """True when ``element`` is browser UI (the tab strip, the omnibox)."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.in_browser_chrome(handle)))
+        except Exception:  # noqa: BLE001 - unknown chrome is treated as page content
+            return False
+
+    def focus_in_browser_chrome(self, app: str) -> bool:
+        """True when keyboard focus is in browser UI rather than the page."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not app:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.focus_in_browser_chrome(app)))
+        except Exception:  # noqa: BLE001 - unknown focus falls through to the page URL
+            return False
+
+    def address_bar_text(self, app: str) -> str | None:
+        """Text of the address bar, read from the application tree."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not app:
+            return None
+        try:
+            return self._run(lambda: _atspi.address_bar_text(app))
+        except Exception:  # noqa: BLE001 - an unreadable bar is not a destination
             return None
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:

@@ -1232,24 +1232,329 @@ def _doc_url(acc) -> str | None:
 
 
 def document_url_of(root) -> str | None:
-    """DocURL of the first document under ``root``, bounded so a large tree
-    cannot turn one policy check into a full walk."""
+    """Content-document URL under ``root``.
+
+    Firefox keeps every tab's document in the tree. The URL is the selected
+    tab that is SHOWING, not the first document a walk meets. A Chromium
+    omnibox popup is browser chrome and is not a page URL. An iframe's
+    document is nested; the page URL is the document that is not inside
+    another one. The walk is bounded so one policy check cannot become a
+    full tree walk.
+    """
     if root is None:
         return None
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    held: list[tuple[object, str]] = []
     queue = [root]
     seen = 0
-    while queue and seen < 200:
+    visited: set[int] = set()
+    while queue and seen < 400:
         node = queue.pop(0)
+        ident = id(node)
+        if ident in visited:
+            continue
+        visited.add(ident)
         seen += 1
         url = _doc_url(node)
-        if url:
-            return url
+        if url and not is_browser_chrome_url(url):
+            if not _gecko_app(node) and not _nested_in_document(node):
+                return url
+            if (
+                _gecko_app(node)
+                and _gecko_web_document_on_screen(node)
+                and not _nested_in_document(node)
+            ):
+                return url
+            held.append((node, url))
+        elif url and is_browser_chrome_url(url):
+            # The popup's children are browser UI. Do not spend the budget
+            # walking them when the page document is a sibling window.
+            continue
         count = _call_first(node, ("get_child_count",), default=0) or 0
         for index in range(min(int(count), 80)):
             child = _call_first(node, ("get_child_at_index",), index)
             if child is not None:
                 queue.append(child)
+    return _pick_content_document(held)
+
+
+def _nested_in_document(node) -> bool:
+    """True when ``node`` sits inside another content document (an iframe)."""
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    parent = _parent_of(node)
+    seen: set[int] = set()
+    for _ in range(16):
+        if parent is None or id(parent) in seen:
+            return False
+        seen.add(id(parent))
+        url = _doc_url(parent)
+        if url and not is_browser_chrome_url(url):
+            return True
+        if _role_name(parent) in {"frame", "window", "application"}:
+            return False
+        parent = _parent_of(parent)
+    return False
+
+
+def _pick_content_document(candidates: list[tuple[object, str]]) -> str | None:
+    """The on-screen top document, or None when every Firefox document is hidden."""
+    if not candidates:
+        return None
+    visible: list[tuple[object, str]] = []
+    for node, url in candidates:
+        if _gecko_app(node) and not _gecko_web_document_on_screen(node):
+            continue
+        visible.append((node, url))
+    if not visible:
+        if any(_gecko_app(node) for node, _url in candidates):
+            return None
+        visible = list(candidates)
+    top = [(node, url) for node, url in visible if not _nested_in_document(node)]
+    pool = top or visible
+    for node, url in pool:
+        if _state_has(node, "SHOWING"):
+            return url
+    return pool[0][1]
+
+
+def other_frame_document_url(app_root, skip) -> str | None:
+    """Page URL of a top-level frame other than ``skip``.
+
+    The active frame can be the omnibox popup. The page lives in another
+    frame of the same application. Each frame is walked on its own budget.
+    """
+    if app_root is None:
+        return None
+    count = _call_first(app_root, ("get_child_count",), default=0) or 0
+    for index in range(min(int(count), 8)):
+        frame = _call_first(app_root, ("get_child_at_index",), index)
+        if frame is None or frame is skip:
+            continue
+        url = document_url_of(frame)
+        if url:
+            return url
     return None
+
+
+def document_url_for(acc) -> str | None:
+    """URL of the content document that owns ``acc``.
+
+    An iframe is its own document, so a control inside the frame reports the
+    frame origin. The toolbar, the tab strip, and the omnibox are not inside
+    a content document.
+    """
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    node = acc
+    seen: set[int] = set()
+    for _ in range(32):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        url = _doc_url(node)
+        if url and not is_browser_chrome_url(url):
+            return url
+        if _role_name(node) == "application":
+            return None
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        node = parent
+    return None
+
+
+def in_browser_chrome(acc) -> bool:
+    """True when ``acc`` is Chromium or Firefox UI, not page content.
+
+    GTK and Qt are not browser chrome. A node inside a page or iframe
+    document is page content even when its text looks like a URL.
+    """
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    if acc is None or not (_chromium_app(acc) or _gecko_app(acc)):
+        return False
+    node = acc
+    seen: set[int] = set()
+    for _ in range(32):
+        if node is None or id(node) in seen:
+            return True
+        seen.add(id(node))
+        url = _doc_url(node)
+        if url and is_browser_chrome_url(url):
+            return True
+        if url:
+            return False
+        if _role_name(node) == "application":
+            return True
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return True
+        node = parent
+    return True
+
+
+_LOCATION_NAME_BITS = (
+    "address and search",
+    "enter address",
+    "search or enter",
+    "search with google",
+    "location bar",
+    "url bar",
+)
+
+
+def _node_id(acc) -> str:
+    attrs = _get_attributes(acc)
+    for key, val in attrs.items():
+        if str(key).lower() in {"id", "html-id", "id-attribute"} and isinstance(val, str):
+            return val.strip().lower()
+    return ""
+
+
+def _node_plain_text(acc) -> str:
+    """Text of ``acc`` for the address bar. A fake may set ``text`` or ``get_text``."""
+    direct = getattr(acc, "text", None)
+    if isinstance(direct, str) and direct:
+        return direct
+    getter = getattr(acc, "get_text", None)
+    if callable(getter):
+        got = None
+        try:
+            got = getter(0, -1)
+        except TypeError:
+            got = _safe(getter, None)
+        if isinstance(got, str) and got:
+            return got
+    try:
+        raw = _full_text(acc)
+    except Exception:
+        raw = None
+    return raw if isinstance(raw, str) else ""
+
+
+def is_location_entry(acc) -> bool:
+    """True for the address bar of Chromium or Firefox, not a page text field.
+
+    The node is outside any content document. Its name or id is the location
+    bar, or it is an entry whose text is a URL. A GTK entry is neither.
+    """
+    from a11y_computer_use.untrusted import looks_like_url
+
+    if acc is None or not in_browser_chrome(acc):
+        return False
+    ident = _node_id(acc)
+    if "urlbar" in ident:
+        return True
+    name = _node_name(acc).lower()
+    if any(bit in name for bit in _LOCATION_NAME_BITS):
+        return True
+    role = _role_name(acc)
+    if role in {"entry", "text", "combo box", "editable text", "combo-box"}:
+        if looks_like_url(_node_plain_text(acc).strip()) or looks_like_url(_node_name(acc).strip()):
+            return True
+    return False
+
+
+def address_bar_text_under(root) -> str | None:
+    """Text of the location entry under ``root``, preferring the focused one."""
+    from a11y_computer_use.untrusted import is_browser_chrome_url, looks_like_url
+
+    if root is None:
+        return None
+    found = []
+    queue = [root]
+    seen = 0
+    visited: set[int] = set()
+    while queue and seen < 500 and len(found) < 4:
+        node = queue.pop(0)
+        if node is None or id(node) in visited:
+            continue
+        visited.add(id(node))
+        seen += 1
+        if is_location_entry(node):
+            found.append(node)
+        url = _doc_url(node)
+        if url and not is_browser_chrome_url(url):
+            continue
+        count = _call_first(node, ("get_child_count",), default=0) or 0
+        for index in range(min(int(count), 40)):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    if not found:
+        return None
+    ordered = sorted(found, key=lambda node: not _state_has(node, "FOCUSED"))
+    for node in ordered:
+        text = _node_plain_text(node).strip()
+        if looks_like_url(text):
+            return text
+        name = _node_name(node).strip()
+        if looks_like_url(name):
+            return name
+        if text:
+            return text
+    return None
+
+
+def address_bar_text(app: str) -> str | None:
+    """The address bar under ``app``, including when the omnibox popup is focused.
+
+    The popup window does not contain the entry that holds the typed URL.
+    The search starts at the application, not at the active popup.
+    """
+    from a11y_computer_use.schema import Scope
+
+    if not app:
+        return None
+    return address_bar_text_under(find_root(app, Scope.APP))
+
+
+def focus_in_browser_chrome(app: str) -> bool:
+    """True when keyboard focus is in browser UI rather than a page document."""
+    if not app:
+        return False
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        acc, truncated = None, False
+    if acc is not None and not truncated:
+        return in_browser_chrome(acc)
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    return _window_is_only_browser_chrome(root)
+
+
+def _window_is_only_browser_chrome(root) -> bool:
+    """True when ``root`` has a browser-chrome document and no page document."""
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    chrome = False
+    queue = [root]
+    seen = 0
+    visited: set[int] = set()
+    while queue and seen < 80:
+        node = queue.pop(0)
+        if node is None or id(node) in visited:
+            continue
+        visited.add(id(node))
+        seen += 1
+        url = _doc_url(node)
+        if url and is_browser_chrome_url(url):
+            chrome = True
+            continue
+        if url:
+            return False
+        count = _call_first(node, ("get_child_count",), default=0) or 0
+        for index in range(min(int(count), 20)):
+            child = _call_first(node, ("get_child_at_index",), index)
+            if child is not None:
+                queue.append(child)
+    return chrome
 
 
 def find_root(app: str, scope) -> object | None:

@@ -276,7 +276,7 @@ jobs:
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
             ( openbox >/dev/null 2>&1 & )
             sleep 2
-            timeout -k 5 600 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
+            timeout -k 5 600 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
 
   package:
