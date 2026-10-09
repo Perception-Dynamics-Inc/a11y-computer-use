@@ -17,8 +17,9 @@ is covered by tests/test_linux_synthetic.py; its live effect is not asserted her
 
 from __future__ import annotations
 
-import subprocess
 import os
+import signal
+import subprocess
 import sys
 import textwrap
 import time
@@ -1051,6 +1052,28 @@ def _stop(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def _stop_group(proc: subprocess.Popen) -> None:
+    """Stop a process started with ``start_new_session=True``, including children.
+
+    Chrome reparents its renderers. ``terminate`` on the parent leaves those
+    processes up, and a later Firefox window then has to share the bus with them.
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)
+
+
 def _runtime_for(tmp_path, driver, *apps: str):
     from a11y_computer_use import safety, server
 
@@ -1376,6 +1399,7 @@ def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:
             f"--user-data-dir={profile}", "--window-size=1000,800", url,
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 25
@@ -1464,7 +1488,7 @@ def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:
         assert any(record.get("injection") is True for record in records)
         assert "<untrusted nonce=" in trajectory
     finally:
-        _stop(proc)
+        _stop_group(proc)
 
 
 
