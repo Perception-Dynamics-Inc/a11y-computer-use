@@ -5388,6 +5388,88 @@ def test_linux_chrome_omnibox_and_find_bar_type_matches(tmp_path) -> None:
         shutil.rmtree(profile, ignore_errors=True)
 
 
+def test_linux_chrome_page_stays_after_find_bar_closes(tmp_path) -> None:
+    """Live Chrome: the page is still in the snapshot after the find bar closes.
+
+    The content root is a viewport-sized scroller. Ctrl+F, a query for the
+    text below the fold, and Close find bar scroll that root above the
+    screen. The snapshot after close still lists the match. Skips when no
+    Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = (
+        "<!doctype html><meta charset=utf-8><title>Find Scroll</title>"
+        "<style>html,body{margin:0;height:100%} body{height:100vh;overflow:auto}</style>"
+        "<body aria-label=article>"
+        "<h1>Almaty article</h1>"
+        "<p>TopMarkerAlmaty</p>"
+        "<a href=#x>Jump to content</a>"
+        "<div style=height:3200px>pad</div>"
+        "<p>ElevationMarkerUnique</p>"
+        "<div style=height:400px>end</div>"
+        "</body>"
+    )
+    proc, profile = _launch_chrome(tmp_path, page, "cufindscroll")
+    try:
+        _wait_chrome(driver, "TopMarkerAlmaty")
+        driver.activate_app("chrome")
+        driver.key_chord("ctrl+f")
+        deadline = time.monotonic() + 6
+        find = None
+        shot = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            find = next(
+                (el for el in shot.elements if el.title == "Find" and el.role == "AXTextField"),
+                None,
+            )
+            if find is not None:
+                break
+            time.sleep(0.15)
+        assert find is not None and shot is not None, _chrome_text(shot)[:800]
+        assert driver.set_value(find, "ElevationMarkerUnique") is True
+        deadline = time.monotonic() + 4
+        close = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            close = next((el for el in shot.elements if el.title == "Close find bar"), None)
+            if close is not None:
+                break
+            time.sleep(0.15)
+        assert close is not None, _chrome_text(shot)[:800]
+        assert driver.press_element(close) is True
+
+        def page_has(needle: str) -> bool:
+            current = driver.snapshot(Scope.WINDOW, "chrome")
+            if any(el.title == "Close find bar" for el in current.elements):
+                return False
+            for el in current.elements:
+                if el.title == "Find":
+                    continue
+                if needle in (el.title or "") or needle in str(el.value or ""):
+                    return True
+            return False
+
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if page_has("ElevationMarkerUnique"):
+                break
+            time.sleep(0.25)
+        else:
+            last = driver.snapshot(Scope.WINDOW, "chrome")
+            raise AssertionError(
+                "page content missing after the find bar closed\n"
+                + _chrome_text(last)[:1200]
+            )
+    finally:
+        _stop_chrome(proc)
+        import shutil
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 _CROP_SCROLL_PAGE = (
     "<!doctype html><meta charset=utf-8><title>cuacropscroll</title>"
     "<style>body{margin:0;font:16px/24px sans-serif}"

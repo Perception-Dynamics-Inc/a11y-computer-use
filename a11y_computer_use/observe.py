@@ -1111,6 +1111,7 @@ def _prune_inner(
     *,
     in_page: bool = False,
     in_web: bool = False,
+    web_depth: int = 0,
     web: _WebWalk | None = None,
 ) -> _PNode | None:
     """``depth`` is the raw tree depth; ``kept_depth`` is the exact pruned depth
@@ -1137,6 +1138,12 @@ def _prune_inner(
         kept_depth = 0
     child_in_page = in_page or kind in ("page", "iframe")
     child_in_web = in_web or kind in ("page", "docframe", "iframe")
+    if in_web:
+        child_web_depth = web_depth + 1
+    elif child_in_web:
+        child_web_depth = 1
+    else:
+        child_web_depth = 0
 
     bounds = _to_bounds(raw.position, raw.size, geometry)
     # An empty label or paragraph is decorative static text. Returning here
@@ -1158,10 +1165,22 @@ def _prune_inner(
     # wrapper looks clickable; it is still hollow when it is unnamed,
     # valueless, and not focusable. Zero-size outside that web content still
     # drops, so macOS trees and their token budgets stay unchanged. A real
-    # rect that merely lies off every display still drops. A focusable,
-    # named, or genuinely interactive zero-size node still drops.
+    # rect that merely lies off every display still drops, except a
+    # viewport-sized Chromium content root shifted above the screen by
+    # find-in-page: that root is hollow so the on-screen descendants stay.
+    # A focusable, named, or genuinely interactive zero-size node still drops.
     hollow_zero = in_web and _plain_zero_wrapper(raw)
-    hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
+    # Find-in-page scrolls the document and Chrome leaves the content root
+    # at a negative Y with the viewport's height, so that box misses the
+    # screen while the text now on screen sits underneath it. Walk that
+    # root. A smaller node above the viewport, and everything below the
+    # fold, still drops without a descendant walk.
+    scrolled = (
+        in_web
+        and 1 <= web_depth <= 2
+        and _scrolled_off_web_container(raw, geometry)
+    )
+    hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero or scrolled)
     # The empty label may have no box of its own. Its checkbox still does.
     if bounds is None and not hollow and not text_container:
         return None  # zero-size (not web) or fully offscreen: drop subtree
@@ -1213,6 +1232,7 @@ def _prune_inner(
                 child_kept_depth,
                 in_page=child_in_page,
                 in_web=child_in_web,
+                web_depth=child_web_depth,
                 web=web,
             )
             if pruned is not None:
@@ -1321,6 +1341,32 @@ def _open_nested_frames(
         elided += 1
     elided += len(pending)
     return kept, elided
+
+
+def _scrolled_off_web_container(
+    raw: RawNode, geometry: tuple[DisplayGeometry, ...]
+) -> bool:
+    """Chrome content root parked above the viewport after find-in-page.
+
+    The section keeps a viewport-sized box and a negative Y, so the rect
+    misses the screen. Descendants that are actually showing still have
+    screen coordinates. A one-line control, a node below the fold, and a
+    section taller than the screen are not this root.
+    """
+    if raw.role not in _WRAPPER_ROLES:
+        return False
+    if raw.position is None or raw.size is None or not geometry:
+        return False
+    width, height = raw.size
+    if width <= 0 or height <= 0 or raw.position[1] >= 0:
+        return False
+    if _to_bounds(raw.position, raw.size, geometry) is not None:
+        return False
+    screen_w = max(geom.display.width / geom.display.scale for geom in geometry)
+    screen_h = max(geom.display.height / geom.display.scale for geom in geometry)
+    if width < min(400.0, screen_w * 0.5) or height < min(400.0, screen_h * 0.5):
+        return False
+    return height <= screen_h * 1.25
 
 
 def _degenerate_size(size: tuple[float, float] | None) -> bool:

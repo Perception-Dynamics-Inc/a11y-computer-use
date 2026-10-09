@@ -845,6 +845,66 @@ def test_zero_section_or_div_with_click_and_show_context_menu_keeps_the_form(rol
     _assert_login_form(snap)
 
 
+def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
+    """Find-in-page parks the content root above the viewport.
+
+    The section is viewport-sized at a negative Y, so its own box misses
+    the screen. The heading now on screen stays. A control that scrolled
+    away, and one below the fold, stay out. Without the web mark the
+    whole subtree drops.
+    """
+    heading = _node(
+        "AXStaticText", "ElevationMarkerUnique",
+        pos=(80.0, 220.0), size=(240.0, 24.0),
+    )
+    above = _node(
+        "AXStaticText", "TopMarkerAlmaty",
+        pos=(80.0, -1800.0), size=(200.0, 20.0),
+    )
+    below = _node(
+        "AXStaticText", "BelowFold",
+        pos=(80.0, 2400.0), size=(120.0, 20.0),
+    )
+    article = _node(
+        "AXGroup", "Almaty", pos=(54.0, -1400.0), size=(1000.0, 4200.0),
+        children=[above, heading, below],
+    )
+    root = _node(
+        "AXGroup", "", pos=(54.0, -2143.0), size=(1077.0, 709.0),
+        children=[article],
+    )
+    doc = _node(
+        "AXGroup", "Find Scroll", pos=(54.0, 91.0), size=(1092.0, 709.0),
+        children=[root], atspi_web="page",
+    )
+    window = _node(
+        "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+        children=[doc],
+    )
+    snap = build_snapshot(
+        window, _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1,
+        geometry=_geometry(),
+    )
+    titles = {el.title for el in snap.elements}
+    assert "ElevationMarkerUnique" in titles
+    assert "TopMarkerAlmaty" not in titles
+    assert "BelowFold" not in titles
+    assert "Find Scroll" in titles
+
+    unmarked = _node(
+        "AXGroup", "Find Scroll", pos=(54.0, 91.0), size=(1092.0, 709.0),
+        children=[root],
+    )
+    bare = build_snapshot(
+        _node(
+            "AXWindow", "Google Chrome", pos=(0.0, 0.0), size=(1280.0, 800.0),
+            children=[unmarked],
+        ),
+        _FakeAccessor(), scope=Scope.WINDOW, app="chrome", pid=1, geometry=_geometry(),
+    )
+    assert "ElevationMarkerUnique" not in {el.title for el in bare.elements}
+
+
 def test_focusable_or_named_zero_wrapper_still_drops_its_subtree() -> None:
     """A zero-size node that can take focus, or that has a name, stays dropped.
 
