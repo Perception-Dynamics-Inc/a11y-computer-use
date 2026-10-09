@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Sequence
 
@@ -146,6 +147,257 @@ def _box_inside_screen(box: tuple[int, int, int, int]) -> bool:
         and x + width <= sw
         and y + height <= sh
     )
+
+
+_PIXELS_PER_NOTCH = 80
+_MAX_PIXEL_NOTCHES = 24
+# One line on a document that is not a Chromium list. The browser driver
+# uses the same 40px step. XTEST notches do not move a Chrome document.
+_PIXELS_PER_LINE = 40
+_DEBUG_PORT = re.compile(rb"--remote-debugging-port=(\d+)")
+
+
+def _pixel_notches(pixels: int) -> int:
+    """Wheel notches for a pixel delta. One notch is about 80 pixels, capped."""
+    pixels = int(pixels)
+    if pixels == 0:
+        return 0
+    count = max(1, min(_MAX_PIXEL_NOTCHES, (abs(pixels) + _PIXELS_PER_NOTCH - 1) // _PIXELS_PER_NOTCH))
+    return count if pixels > 0 else -count
+
+
+def _pixel_scroll_box(target: Target) -> tuple[int, int, int, int] | None:
+    """On-screen box whose pixels prove a scrollbar-less pixel scroll moved."""
+    if isinstance(target, Element):
+        bounds = target.bounds
+        box = (int(bounds.x), int(bounds.y), int(bounds.width), int(bounds.height))
+    elif isinstance(target, Point):
+        box = (int(target.x) - 40, int(target.y) - 40, 80, 80)
+    else:
+        return None
+    if box[2] <= 1 or box[3] <= 1:
+        return None
+    return _clip_box_to_screen(box)
+
+
+def _pixel_scroll_unsupported(dx: int, dy: int) -> ComputerUseError:
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "pixel scroll needs an accessible scroll bar; wheel notches were not sent",
+        detail={
+            "unit": "pixels",
+            "dx": dx,
+            "dy": dy,
+            "api": "AT-SPI Value.set_current_value on a scroll bar",
+            "hint": "The delta is applied to the scroll bar's accessible value, "
+                    "which GTK scrolled windows expose in pixels, and the write "
+                    "must read back as that delta. With no bar, a DOM scroll is "
+                    "used when Chrome was started with --remote-debugging-port, "
+                    "otherwise wheel notches are sent at the element and kept "
+                    "only when the pixels change.",
+        },
+    )
+
+
+def _debug_port_for_pid(pid: int) -> int | None:
+    try:
+        raw = open(f"/proc/{int(pid)}/cmdline", "rb").read()
+    except OSError:
+        return None
+    match = _DEBUG_PORT.search(raw)
+    if match is None:
+        return None
+    port = int(match.group(1))
+    return port if port > 0 else None
+
+
+def _window_covers(row: dict, x: int, y: int) -> bool:
+    bounds = row.get("bounds")
+    if not isinstance(bounds, dict):
+        return False
+    left, top = int(bounds.get("x") or 0), int(bounds.get("y") or 0)
+    width, height = int(bounds.get("width") or 0), int(bounds.get("height") or 0)
+    return width > 0 and height > 0 and left <= x < left + width and top <= y < top + height
+
+
+def _topmost_window_at(x: int, y: int) -> dict | None:
+    """The highest managed window whose bounds contain ``(x, y)``.
+
+    ``windows()`` is bottom-to-top, the same order as the stacking client
+    list. A fullscreen desktop is first and contains every point.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    found = None
+    for row in _linux_system.windows():
+        if isinstance(row, dict) and _window_covers(row, x, y):
+            found = row
+    return found
+
+
+def _cdp_socket_for_window(pages: list, window_title: str) -> str | None:
+    """The DevTools socket of the tab this window is showing.
+
+    A shared profile has other tabs. Scrolling the first one moves a page
+    the user is not looking at. The window title is the page title plus the
+    browser suffix, so the page title has to be that prefix. One tab is used
+    as itself.
+    """
+    sockets = [str(page["webSocketDebuggerUrl"]) for page in pages if page.get("webSocketDebuggerUrl")]
+    if not sockets:
+        return None
+    if len(sockets) == 1:
+        return sockets[0]
+    best: tuple[int, str] | None = None
+    for page in pages:
+        ws = page.get("webSocketDebuggerUrl")
+        title = str(page.get("title") or "")
+        if not ws or not title or not window_title:
+            continue
+        if window_title != title and not (
+            window_title.startswith(title) and window_title[len(title):len(title) + 1] in " -—–"
+        ):
+            continue
+        choice = (len(title), str(ws))
+        if best is None or choice[0] >= best[0]:
+            best = choice
+    return None if best is None else best[1]
+
+
+def _cdp_scroll_pixels(x: int, y: int, *, dx: int, dy: int) -> bool:
+    """DOM-scroll a Chrome window that advertises a DevTools port.
+
+    True only when ``scrollTop`` changes. False when no such window is under
+    the point, so the caller can send a wheel and check the pixels.
+
+    The pid is the topmost window at the point. A fullscreen desktop is
+    also in the client list and contains every point, and it is not the
+    window that paints the page. The socket is the tab whose title the
+    window is showing, not whichever tab the browser listed first.
+    """
+    try:
+        row = _topmost_window_at(x, y)
+        if row is None:
+            return False
+        pid = row.get("pid")
+        if not isinstance(pid, int):
+            return False
+        port = _debug_port_for_pid(pid)
+        if port is None:
+            return False
+        from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+        pages = page_targets(f"http://127.0.0.1:{port}")
+        ws = _cdp_socket_for_window(pages, str(row.get("title") or ""))
+        if not ws:
+            return False
+        transport = connect(str(ws), timeout=3.0)
+        session = CDPSession(transport, default_timeout=3.0)
+        try:
+            expression = (
+                "(() => { const el = document.scrollingElement || document.documentElement;"
+                f" const before = el.scrollTop; el.scrollBy({int(dx)}, {int(dy)});"
+                " return {before: before, after: el.scrollTop}; })()"
+            )
+            reply = session.call("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        finally:
+            transport.close()
+        value = ((reply.get("result") or {}).get("value") or {})
+        before = float(value.get("before"))
+        after = float(value.get("after"))
+    except Exception:
+        return False
+    return abs(after - before) >= 1.0
+
+
+def _on_screen_name(node) -> str | None:
+    """The node's name when its box meets the top of the screen, else None.
+
+    A Chrome document lists every row, including ones parked above the
+    viewport. Those are not the marker a scroll is judged by.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    name = _atspi._node_name(node)
+    pos, size = _atspi._extents(node)
+    if not name or pos is None:
+        return None
+    top = int(pos[1])
+    height = int(size[1]) if size is not None else 0
+    if top + max(height, 0) < 0:
+        return None
+    return name
+
+
+def _showing_names(handle, limit: int = 6) -> tuple[str, ...]:
+    """On-screen names under ``handle``.
+
+    Chrome's document keeps the old static texts for a fraction of a second
+    after the wheel. The marker is the names at or below the top of the
+    screen, not the rows the scroll has already parked above it. The root's
+    own title stays, so the row names are what change.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    found: list[str] = []
+    own = _on_screen_name(handle)
+    if own:
+        found.append(own)
+    count = _atspi._raw_child_count(handle)
+    count = count if isinstance(count, int) and count > 0 else 0
+    for index in range(min(count, 100)):
+        if len(found) >= limit:
+            break
+        child = _atspi._child_at(handle, index)
+        if child is None:
+            continue
+        name = _on_screen_name(child)
+        if name:
+            found.append(name)
+            continue
+        # A row is often an unnamed group whose text is the one child.
+        nested = _atspi._raw_child_count(child)
+        nested = nested if isinstance(nested, int) and nested > 0 else 0
+        for inner in range(min(nested, 4)):
+            text = _atspi._child_at(child, inner)
+            if text is None:
+                continue
+            name = _on_screen_name(text)
+            if name:
+                found.append(name)
+                break
+    return tuple(found)
+
+
+def _settle_shown_names(run, handle) -> None:
+    """Wait until a live Chromium document's on-screen names leave the pre-scroll set.
+
+    The wheel returns before AT-SPI does. A search that snapshots immediately
+    still sees the old rows and scrolls again, so the target goes by between
+    reads. A test double has no GObject pointer and is not waited on. Give
+    up at 0.9s; a tree that never changes is not spun on.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    try:
+        if not run(lambda: hasattr(handle, "__gpointer__")):
+            return
+        if not run(lambda: _atspi._chromium_app(handle)):
+            return
+        before = run(lambda: _showing_names(handle))
+    except Exception:
+        return
+    if len(before) < 2:
+        return
+    deadline = time.monotonic() + 0.9
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        try:
+            after = run(lambda: _showing_names(handle))
+        except Exception:
+            return
+        if after and after != before:
+            return
 
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
@@ -730,14 +982,21 @@ class LinuxDriver:
         that wrapper, and no wheel is sent when the step moves the head.
         A content-height list whose parent is the document, and a document
         group, keep the wheel. A document group is not a list and
-        keeps its own center. ``unit=pixels`` writes the AT-SPI scroll-bar value
-        by that delta and reads it back. It does not grab the list, does not
-        hit-test it, and does not send notches. GTK scrolled windows expose
-        the value in pixels. A missing bar, or a write that jumps or does
-        not stick, raises `unsupported`. A shorter write is kept when one
-        more pixel will not move (the bar is at its end). Pixel scroll does
-        not need XTEST, so it is available on Wayland when a scroll bar is
-        exposed.
+        keeps its own center. XTEST notches at that center do not move a
+        Chrome document. When the window's process was started with
+        ``--remote-debugging-port``, a line step is a DOM ``scrollBy`` of
+        about 40 pixels per line, kept only when ``scrollTop`` changes.
+        Otherwise the wheel is sent as before.
+        ``unit=pixels`` writes the AT-SPI scroll-bar value
+        by that delta and reads it back when a bar is exposed. GTK scrolled
+        windows expose the value in pixels. A missing bar tries a CDP DOM
+        scroll of the document when the window's process was started with
+        ``--remote-debugging-port``, and checks that ``scrollTop`` changed.
+        Otherwise it sends wheel notches at the element's on-screen box
+        (about one notch per 80 pixels, at most 24) and checks that the
+        pixels in that box changed. A step that cannot be verified, or that
+        does not move, raises `unsupported` and is not reported as a scroll.
+        Wayland still has the bar path; the wheel fallback needs XTEST.
         """
         if dry_run:
             return None
@@ -768,7 +1027,18 @@ class LinuxDriver:
             if point is not None:
                 x, y = point
         if container is None:
-            _linux_input.scroll(x, y, dx=dx, dy=dy)
+            # Chrome's document is a group, not a list, and a DevTools port
+            # scrolls it. A GTK window has no port and keeps the notch.
+            # Either way the Chromium tree trails the paint, so the search
+            # waits for the on-screen names before the next snapshot.
+            if not _cdp_scroll_pixels(
+                x, y,
+                dx=int(dx) * _PIXELS_PER_LINE,
+                dy=int(dy) * _PIXELS_PER_LINE,
+            ):
+                _linux_input.scroll(x, y, dx=dx, dy=dy)
+            if handle is not None:
+                _settle_shown_names(self._run, handle)
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))
         raw_box = box
@@ -943,19 +1213,36 @@ class LinuxDriver:
 
         if self._run(do):
             return
+        if _cdp_scroll_pixels(x, y, dx=dx, dy=dy):
+            return
+        if _on_wayland():
+            raise _pixel_scroll_unsupported(dx, dy)
+        box = _pixel_scroll_box(target)
+        if box is None:
+            raise _pixel_scroll_unsupported(dx, dy)
+        try:
+            before = _grab_region(box)
+        except ComputerUseError:
+            raise _pixel_scroll_unsupported(dx, dy) from None
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.scroll(
+            box[0] + box[2] // 2, box[1] + box[3] // 2,
+            dx=_pixel_notches(dx), dy=_pixel_notches(dy),
+        )
+        mean, _samples = _list_pixels_moved(before, box)
+        if mean is not None and mean > _atspi._PAGE_MOVE_MEAN:
+            return
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
-            "pixel scroll needs an accessible scroll bar; wheel notches were not sent",
+            "pixel scroll did not move the page",
             detail={
+                "reason": "page_unchanged",
                 "unit": "pixels",
                 "dx": dx,
                 "dy": dy,
-                "api": "AT-SPI Value.set_current_value on a scroll bar",
-                "hint": "The delta is applied to the scroll bar's accessible value, "
-                        "which GTK scrolled windows expose in pixels, and the write "
-                        "must read back as that delta. Pass a ref inside a scrolled "
-                        "view that exposes a scroll bar, or use unit=lines for one "
-                        "X11 wheel notch per unit.",
+                "mean_abs": mean,
+                "api": "XTEST wheel at the element box",
             },
         )
 

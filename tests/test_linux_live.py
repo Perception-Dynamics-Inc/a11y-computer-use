@@ -3037,3 +3037,479 @@ def test_linux_crop_of_a_red_control_matches_size_and_color(tmp_path) -> None:
         assert red > len(pixels) * 0.8, f"dominant color was not red ({red}/{len(pixels)})"
     finally:
         _stop(proc)
+
+
+def _titles(shot) -> set[str]:
+    return {str(el.title or "") for el in shot.elements}
+
+
+def _snap_within(driver, app: str, scope, limit_s: float = 5.0):
+    """One snapshot that must return well under the wedged-bus timeout.
+
+    A ``Gtk.Dialog.run()`` click used to leave the session's AT-SPI connection
+    stuck, so the next snapshot in that same session took about 24s and came
+    back as a single disabled group. A healthy read is a fraction of a second.
+    """
+    started = time.monotonic()
+    shot = driver.snapshot(scope, app)
+    elapsed = time.monotonic() - started
+    assert elapsed < limit_s, f"snapshot of {app} took {elapsed:.1f}s"
+    return shot
+
+
+def test_linux_dialog_run_snapshot_stays_fast_and_ok_clicks(tmp_path) -> None:
+    """A ref click that enters Gtk.Dialog.run() must not wedge the session.
+
+    Live GTK, not a synthetic tree. The same driver process clicks Open Dialog,
+    snapshots the dialog, and clicks OK. A fresh process is not used for the
+    second read.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    app = "cuamodal"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuamodal.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuamodal")
+        win = Gtk.Window(title="ModalHost")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status = Gtk.Label(label="result=")
+        button = Gtk.Button(label="Open Dialog")
+
+        def on_click(_btn):
+            dialog = Gtk.Dialog(title="Confirm Dialog", transient_for=win, modal=True)
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("OK", Gtk.ResponseType.OK)
+            dialog.set_default_size(360, 180)
+            dialog.move(40, 40)
+            entry = Gtk.Entry()
+            entry.set_text("pending")
+            dialog.get_content_area().pack_start(entry, False, False, 0)
+            dialog.show_all()
+            response = dialog.run()
+            status.set_text("result=ok" if response == Gtk.ResponseType.OK else "result=cancel")
+            dialog.destroy()
+
+        button.connect("clicked", on_click)
+        box.pack_start(status, False, False, 0)
+        box.pack_start(button, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 200)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = _snap_within(driver, app, Scope.WINDOW)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(el.title == "Open Dialog" and el.clickable for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.2)
+        assert snap is not None, "the dialog host never appeared"
+        runtime = _runtime_for(tmp_path, driver, app, "python3")
+        runtime._current = snap
+        button = next(el for el in snap.elements if el.title == "Open Dialog" and el.clickable)
+        started = time.monotonic()
+        clicked = runtime.click(button.ref)
+        assert time.monotonic() - started < 5, clicked
+        assert "clicked" in clicked, clicked
+        dialog = None
+        deadline = time.monotonic() + 4
+        last = snap
+        while time.monotonic() < deadline:
+            last = _snap_within(driver, app, Scope.WINDOW)
+            titles = _titles(last)
+            if "OK" in titles and ("Cancel" in titles or "Confirm Dialog" in titles):
+                dialog = last
+                break
+            last_app = _snap_within(driver, app, Scope.APP)
+            titles = _titles(last_app)
+            if "OK" in titles:
+                dialog = last_app
+                break
+            time.sleep(0.1)
+        assert dialog is not None, [(el.role, el.title, el.enabled) for el in last.elements]
+        assert not (
+            len(dialog.elements) == 1 and dialog.elements[0].role == "AXGroup"
+        ), [(el.role, el.title) for el in dialog.elements]
+        runtime._current = dialog
+        ok = next(el for el in dialog.elements if el.title == "OK" and el.clickable)
+        pressed = runtime.click(ok.ref)
+        assert "clicked" in pressed, pressed
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = _snap_within(driver, app, Scope.APP)
+            shown = " ".join(_titles(shot))
+            if "result=ok" in shown:
+                break
+            time.sleep(0.15)
+        assert "result=ok" in shown, shown
+    finally:
+        _stop(proc)
+
+
+def test_linux_gtk_file_chooser_is_a_real_window_and_opens_a_path(tmp_path) -> None:
+    """A GTK FileChooserDialog is a real window, and a typed path opens the file.
+
+    Live GTK, not a synthetic tree. The chooser is opened with Dialog.run()
+    from a button ref click, in the same session that then snapshots it.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    app = "cuafileapp"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    script = tmp_path / "cuafileapp.py"
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafileapp")
+        folder = {str(folder)!r}
+        win = Gtk.Window(title="FileHost")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status = Gtk.Label(label="chosen=")
+        button = Gtk.Button(label="Browse")
+
+        def on_click(_btn):
+            dialog = Gtk.FileChooserDialog(title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN)
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Open", Gtk.ResponseType.OK)
+            dialog.set_current_folder(folder)
+            dialog.set_default_size(720, 480)
+            def _fit(widget):
+                widget.resize(720, 480)
+                widget.move(40, 40)
+            dialog.connect("map", _fit)
+            response = dialog.run()
+            name = dialog.get_filename() or ""
+            status.set_text("chosen=" + name if response == Gtk.ResponseType.OK else "chosen=")
+            dialog.destroy()
+
+        button.connect("clicked", on_click)
+        box.pack_start(status, False, False, 0)
+        box.pack_start(button, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 160)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = _snap_within(driver, app, Scope.WINDOW)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(el.title == "Browse" and el.clickable for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.2)
+        assert snap is not None, "the file-chooser host never appeared"
+        runtime = _runtime_for(tmp_path, driver, app, "python3")
+        runtime._current = snap
+        browse = next(el for el in snap.elements if el.title == "Browse" and el.clickable)
+        started = time.monotonic()
+        clicked = runtime.click(browse.ref)
+        assert time.monotonic() - started < 5, clicked
+        chooser = None
+        deadline = time.monotonic() + 4
+        last = snap
+        while time.monotonic() < deadline:
+            last = _snap_within(driver, app, Scope.WINDOW)
+            titles = _titles(last)
+            if "Cancel" in titles and "Open" in titles:
+                chooser = last
+                break
+            last_app = _snap_within(driver, app, Scope.APP)
+            if "Cancel" in _titles(last_app) and "Open" in _titles(last_app):
+                chooser = last_app
+                break
+            time.sleep(0.1)
+        assert chooser is not None, [(el.role, el.title, el.enabled) for el in last.elements]
+        assert len(chooser.elements) > 1
+        rendered = " ".join(_titles(chooser))
+        assert any(place in rendered for place in ("Recent", "Home", "Desktop", "Documents")), rendered
+        assert "picked.txt" in rendered, rendered
+        runtime._current = chooser
+        runtime.key("ctrl+l")
+        editable = None
+        deadline = time.monotonic() + 3
+        last = chooser
+        while time.monotonic() < deadline:
+            last = _snap_within(driver, app, Scope.APP)
+            editable = next((el for el in last.elements if el.editable), None)
+            if editable is not None:
+                break
+            time.sleep(0.1)
+        assert editable is not None, [(el.role, el.title, el.value) for el in last.elements]
+        runtime._current = last
+        runtime.click(editable.ref)
+        started = time.monotonic()
+        typed = runtime.type_text(str(target))
+        assert time.monotonic() - started < 5, typed
+        confirmed = None
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            shot = _snap_within(driver, app, Scope.APP)
+            field = next((el for el in shot.elements if el.editable), None)
+            if field is not None and str(target) in str(field.value or ""):
+                confirmed = shot
+                break
+            time.sleep(0.1)
+        assert confirmed is not None, [(el.role, el.title, el.value) for el in shot.elements]
+        runtime._current = confirmed
+        opened = next(
+            (el for el in confirmed.elements if el.title == "Open" and el.clickable and el.enabled),
+            None,
+        )
+        assert opened is not None, [(el.role, el.title, el.enabled, el.clickable) for el in confirmed.elements]
+        runtime.click(opened.ref)
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = _snap_within(driver, app, Scope.APP)
+            shown = " ".join(f"{el.title} {el.value or ''}" for el in shot.elements)
+            if f"chosen={target}" in shown:
+                break
+            time.sleep(0.15)
+        assert f"chosen={target}" in shown, shown
+    finally:
+        _stop(proc)
+
+
+def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> None:
+    """scroll_to_find reaches a row below the fold, and pixel scroll moves the page.
+
+    Live Chrome on a local HTML file, not a synthetic list. Skips when no
+    Chrome binary is on PATH. The page has no accessible scroll bar; the
+    target is far enough down that the first snapshot does not contain it.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import ScrollUnit
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the long-page scroll test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(f"<div>TICKET-{i:04d}</div>" for i in range(80))
+    page = tmp_path / "long.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cualong</title>"
+        "<style>body{margin:0;font:16px/28px sans-serif}</style>"
+        f"{rows}"
+    )
+    profile = tmp_path / "chrome-long-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            "--remote-debugging-port=9333", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = _titles(shot)
+                if "TICKET-0000" in titles and "TICKET-0040" not in titles:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not show the top of the long page without TICKET-0040"
+        anchor = next(el for el in snap.elements if el.title == "TICKET-0000")
+        driver.scroll(anchor, dy=400, unit=ScrollUnit.PIXELS)
+        moved = None
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            titles = _titles(shot)
+            if "TICKET-0000" not in titles and any(title.startswith("TICKET-") for title in titles):
+                moved = shot
+                break
+            time.sleep(0.2)
+        assert moved is not None, sorted(title for title in _titles(shot) if title.startswith("TICKET-"))
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        found = runtime.scroll_to_find("chrome", text="TICKET-0040", max_scrolls=30)
+        assert "TICKET-0040" in found, found
+        assert "not found" not in found, found
+    finally:
+        _stop(proc)
+
+
+def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
+    """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
+
+    The page is served over HTTP. Chrome exposes the control as a button named
+    ``Upload: No file chosen``, not the aria-label alone. The chooser is the
+    GTK dialog Chrome opens in-process. Chrome sets ``NO_AT_BRIDGE`` before
+    GTK init, so that dialog is an X window and not an AT-SPI tree. The test
+    moves it on screen, types the path with Ctrl+L, and clicks Open. It does
+    not use a portal, and it does not skip when the dialog is up.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome/Chromium is required for the upload-picker test"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    httpd = _serve_html(
+        "<!doctype html><meta charset=utf-8><title>cuaupload</title>"
+        "<style>body{margin:48px;font:18px sans-serif}"
+        "input[type=file]{font-size:18px}</style>"
+        "<h1>Upload a file</h1>"
+        "<input id=file type=file aria-label=Upload>"
+    )
+    port = httpd.server_address[1]
+    profile = tmp_path / "chrome-upload-profile"
+    profile.mkdir()
+    env = os.environ.copy()
+    env["GTK_USE_PORTAL"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--disable-features=UseXdgDesktopPortal,XdgFileChooserPortal",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            f"http://127.0.0.1:{port}/",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the file input")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(
+                    el.role == "AXButton" and (el.title or "").startswith("Upload")
+                    for el in shot.elements
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, [
+            (el.role, el.title) for el in (shot.elements if shot else ())
+        ]
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = snap
+        upload = next(
+            el for el in snap.elements
+            if el.role == "AXButton" and (el.title or "").startswith("Upload") and el.clickable
+        )
+        runtime.click(upload.ref)
+        dialog = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            dialog = next(
+                (
+                    row for row in driver.windows()
+                    if row.get("title") == "Open File" and row.get("bounds")
+                ),
+                None,
+            )
+            if dialog is not None:
+                break
+            time.sleep(0.15)
+        assert dialog is not None, [row.get("title") for row in driver.windows()]
+        driver.move_window(dialog["window_id"], 40, 40)
+        bounds = None
+        window_id = dialog["window_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            moved = next(
+                (
+                    row for row in driver.windows()
+                    if row.get("window_id") == window_id and row.get("bounds")
+                ),
+                None,
+            )
+            if moved is not None and abs(moved["bounds"]["x"] - 40) < 80:
+                bounds = moved["bounds"]
+                break
+            time.sleep(0.05)
+        assert bounds is not None, "the Open File dialog did not move on screen"
+        driver.focus_window(window_id)
+        time.sleep(0.15)
+        runtime.key("ctrl+l")
+        time.sleep(0.15)
+        try:
+            runtime.type_text(str(target))
+        except ComputerUseError as exc:
+            # The keys are already on the wire. Chrome's dialog is not an
+            # AT-SPI editable, so the read-back looks at the page and misses
+            # the path. A different error is a real failure.
+            if (exc.detail or {}).get("reason") != "text_mismatch":
+                raise
+        time.sleep(0.15)
+        runtime.click(
+            x=int(bounds["x"] + bounds["width"] - 40),
+            y=int(bounds["y"] + bounds["height"] - 20),
+            display_id=int(bounds["display_id"]),
+        )
+        deadline = time.monotonic() + 6
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = " ".join(el.title or "" for el in shot.elements)
+            if "picked.txt" in shown:
+                break
+            time.sleep(0.2)
+        assert "picked.txt" in shown, shown
+        assert "Open File" not in {row.get("title") for row in driver.windows()}
+    finally:
+        _stop(proc)
+        httpd.shutdown()

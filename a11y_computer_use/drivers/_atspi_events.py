@@ -90,7 +90,8 @@ def _run() -> None:
 
     try:
         Atspi.init()
-        Atspi.set_timeout(300, 15000)
+        # Same bound as `_atspi._atspi`: 300ms per call, no 15s startup grace.
+        Atspi.set_timeout(300, 0)
         global _listener
         _listener = Atspi.EventListener.new(_on_event)
         for ev in _STANDING_EVENTS:

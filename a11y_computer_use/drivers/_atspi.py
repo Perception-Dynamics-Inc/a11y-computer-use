@@ -79,6 +79,8 @@ _ROLE = {
     "table": "AXTable",
     # LibreOffice Calc. The name is the address (A1). AXGroup is in
     # _NO_VALUE_ROLES, so mapping this to a group hid the cell text.
+    # A GTK file chooser's body cells use the same role and stay in the
+    # snapshot by name, via `_with_table_body`.
     "table cell": "AXCell",
     "combo box": "AXComboBox",
     "tool bar": "AXToolbar",
@@ -154,9 +156,12 @@ def _atspi():
 
     if not _inited:
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
-        # Bound per-call D-Bus wait: a hung app stalls one read ~300ms, not the
-        # libatspi default (~800ms), so one bad node can't wreck a snapshot.
-        _safe(lambda: Atspi.set_timeout(300, 15000))
+        # Per-call D-Bus wait is 300ms. The second argument is the startup
+        # grace: while an app is younger than that, libatspi waits the grace
+        # instead (default 15000). An unanswered read of a just-opened GTK
+        # dialog then blocks type and snapshot for 15s. Grace 0 keeps the
+        # 300ms bound from the first call.
+        _safe(lambda: Atspi.set_timeout(300, 0))
         _inited = True
     return Atspi
 
@@ -1076,10 +1081,10 @@ class ATSPIAccessor:
         visible = self._visible_children.get(id(node))
         if visible is not None:
             return _cached_rows_for_snapshot(self._visible_bounds, visible)
-        count = _call_first(node, ("get_child_count", "get_childCount"), default=0) or 0
-        try:
-            count = int(count)
-        except (TypeError, ValueError):
+        # -1 is a wedged D-Bus read. Revive once, then treat a still-negative
+        # count as empty so range() does not walk nothing and hide the dialog.
+        count = _child_count(node)
+        if count < 0:
             count = 0
         # Calc reports 1048576×16384 and get_child_at_index is row-major, so
         # the first fetch is all of row 1. A modest child count is the
@@ -1098,7 +1103,7 @@ class ATSPIAccessor:
             # the tree with on-screen bounds. They are not SHOWING. Drop the
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
-        return kids
+        return _with_table_body(node, kids)
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:
@@ -1268,7 +1273,9 @@ def find_root(app: str, scope) -> object | None:
     active = getattr(st, "ACTIVE", None)
 
     def _frames(acc):
-        n = _call_first(acc, ("get_child_count",), default=0) or 0
+        n = _child_count(acc)
+        if n < 0:
+            n = 0
         out = []
         for j in range(int(n)):
             frame = _call_first(acc, ("get_child_at_index",), j)
@@ -1303,6 +1310,13 @@ def find_root(app: str, scope) -> object | None:
         if candidate is None:
             continue
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        # A dialog opened with Gtk.Dialog.run() wedges this process's
+        # connection to the app: get_name comes back empty and child count
+        # is -1 until the bus is replaced. Revive before treating the
+        # registrant as unnamed, then read the name on the fresh connection.
+        if not name:
+            _child_count(candidate)
+            name = (_call_first(candidate, ("get_name",), default="") or "").lower()
         if needle not in name and not (pids and pid_of(candidate) in pids):
             continue
         frames = _frames(candidate)
@@ -3676,11 +3690,205 @@ _MAX_SCROLL_NODES = 48
 _SCROLL_BAR_ROLE = "scroll bar"
 
 
-def _child_count(acc) -> int:
+# bus name -> monotonic time before which another reconnect is refused.
+# A dialog flood wedges the current connection. Replacing it once recovers
+# the following read. Further -1 counts in that same walk must not open a
+# connection per node. A later action (Ctrl+L in the file chooser) can wedge
+# the replacement too; that is a new failure and gets its own connection
+# once the short same-walk block has passed. A replacement that is itself
+# still failing extends the block so a dead app cannot reconnect per node.
+_revive_block_until: dict[str, float] = {}
+_last_revive_key: str | None = None
+
+
+def _gobject_pointer(obj) -> int | None:
+    """Address of a PyGObject, or None for a synthetic test double."""
+    cap = getattr(obj, "__gpointer__", None)
+    if cap is None:
+        return None
+    try:
+        import ctypes
+
+        api = ctypes.pythonapi
+        api.PyCapsule_GetPointer.restype = ctypes.c_void_p
+        api.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+        api.PyCapsule_GetName.restype = ctypes.c_char_p
+        api.PyCapsule_GetName.argtypes = [ctypes.py_object]
+        return int(api.PyCapsule_GetPointer(cap, api.PyCapsule_GetName(cap)) or 0) or None
+    except Exception:
+        return None
+
+
+def _a11y_bus_address() -> str | None:
+    """The session's accessibility bus address, or None when it cannot be read."""
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Gio, GLib
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        reply = bus.call_sync(
+            "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus", "GetAddress",
+            None, GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 1000, None,
+        )
+        address = reply.get_child_value(0).get_string()
+    except Exception:
+        return None
+    return address or None
+
+
+def _revive_application(acc) -> bool:
+    """Replace a wedged per-app D-Bus connection with a fresh accessibility-bus one.
+
+    libatspi moves each app onto a private socket. A ``DoAction`` that opens a
+    ``Gtk.Dialog.run()`` nested loop (a file chooser, or any dialog the app
+    runs modally) leaves that socket stuck: the click itself returns, and the
+    next read on the same connection waits out the timeout. Child count comes
+    back -1, so the snapshot root is the application group with no children,
+    or the app disappears from name search entirely. A new connection to the
+    shared accessibility bus reads the same tree at once. The old connection
+    is left open: unreffing a socket that still has a watch is a use-after-free.
+    Returns True when the pointer was replaced.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return False
+    try:
+        import ctypes
+    except Exception:
+        return False
+
+    class _GObject(ctypes.Structure):
+        _fields_ = [
+            ("g_class", ctypes.c_void_p),
+            ("ref_count", ctypes.c_uint),
+            ("pad", ctypes.c_uint),
+            ("qdata", ctypes.c_void_p),
+        ]
+
+    class _AtspiObject(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("app", ctypes.c_void_p),
+            ("path", ctypes.c_char_p),
+        ]
+
+    class _AtspiApplication(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("hash", ctypes.c_void_p),
+            ("bus_name", ctypes.c_char_p),
+            ("bus", ctypes.c_void_p),
+        ]
+
+    class _DBusError(ctypes.Structure):
+        _fields_ = [
+            ("name", ctypes.c_char_p),
+            ("message", ctypes.c_char_p),
+            ("dummy", ctypes.c_uint),
+            ("padding", ctypes.c_void_p),
+        ]
+
+    try:
+        obj = _AtspiObject.from_address(pointer)
+        path = obj.path or b""
+        if not path.startswith(b"/org/a11y/atspi/") or not obj.app:
+            return False
+        app = _AtspiApplication.from_address(obj.app)
+        bus_name = app.bus_name or b""
+        if not bus_name.startswith(b":"):
+            return False
+        key = bus_name.decode("utf-8", "replace")
+        now = time.monotonic()
+        if now < _revive_block_until.get(key, 0.0):
+            return False
+        # Hold the block across clear_cache so a re-entrant -1 does not
+        # open a second connection before this one has been tried.
+        _revive_block_until[key] = now + 0.5
+        address = _a11y_bus_address()
+        if not address:
+            return False
+        lib = ctypes.CDLL("libdbus-1.so.3")
+        lib.dbus_error_init.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.restype = ctypes.c_int
+        lib.dbus_error_free.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.restype = ctypes.c_void_p
+        lib.dbus_bus_register.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_bus_register.restype = ctypes.c_int
+        err = _DBusError()
+        lib.dbus_error_init(ctypes.byref(err))
+        conn = lib.dbus_connection_open_private(address.encode(), ctypes.byref(err))
+        if not conn or lib.dbus_error_is_set(ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return False
+        lib.dbus_error_init(ctypes.byref(err))
+        if not lib.dbus_bus_register(conn, ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return False
+        app.bus = conn
+        global _last_revive_key
+        _last_revive_key = key
+        _call_first(acc, ("clear_cache", "clearCache"))
+        return True
+    except Exception:
+        return False
+
+
+def _raw_child_count(acc) -> int:
     try:
         return int(_call_first(acc, ("get_child_count", "get_childCount"), default=0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _child_count(acc) -> int:
+    """Child count, replacing a wedged app bus once when the read returns -1.
+
+    -1 is libatspi's D-Bus failure, not an empty parent. ``range(-1)`` is
+    empty, which is how a file chooser or a ``Dialog.run()`` dialog became a
+    single disabled group.
+    """
+    count = _raw_child_count(acc)
+    if count < 0 and _revive_application(acc):
+        count = _raw_child_count(acc)
+        key = _last_revive_key
+        if key:
+            # A working replacement may be wedged by the next action, so the
+            # block stays short. A replacement that still reads -1 is a dead
+            # app: keep the block long enough to cover the rest of the walk.
+            _revive_block_until[key] = time.monotonic() + (2.0 if count < 0 else 0.05)
+    return count
+
+
+def _with_table_body(node, kids: list) -> list:
+    """Append a GTK table's body cells when the children are only headers.
+
+    A file chooser's file list is a table whose AT-SPI children are the
+    column headers. ``Table.get_n_rows`` is the file rows. Cells already
+    present as children are not added again. A table that already exposes
+    row children is unchanged, and a table with no rows stays header-only.
+    """
+    if _role_name(node) not in {"table", "tree table"}:
+        return kids
+    rows = _call_first(node, ("get_n_rows",), default=None)
+    if isinstance(rows, bool) or not isinstance(rows, int) or rows <= 0:
+        return kids
+    if kids and any("header" not in _role_name(child) for child in kids):
+        return kids
+    seen = {id(child) for child in kids}
+    body = list(kids)
+    for row in range(min(rows, _MAX_CHILDREN_FETCH)):
+        cell = _call_first(node, ("get_accessible_at",), row, 0)
+        if cell is None or id(cell) in seen:
+            continue
+        seen.add(id(cell))
+        body.append(cell)
+    return body
 
 
 def _child_at(acc, index: int):
@@ -5553,7 +5761,9 @@ def scroll_at_point(x: int, y: int, *, dx: int = 0, dy: int = 0) -> bool:
 
     Hit-tests with ``Component.get_accessible_at_point`` and then applies
     `scroll_by_pixels`. Returns False when the point hits nothing that
-    exposes a scroll bar — the caller must not fall back to wheel notches.
+    exposes a scroll bar. The Linux driver then tries a DOM scroll or a
+    wheel at the element box, and keeps the step only when the position
+    changed.
     """
     acc = _accessible_at_point(int(x), int(y))
     if acc is None:
