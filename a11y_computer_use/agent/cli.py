@@ -51,6 +51,8 @@ def build_agent(args: argparse.Namespace):
         auto_deny=auto_deny,
         allow_exec=bool(getattr(args, "allow_exec", False)),
         trace_dir=args.trace_dir,
+        allowed_domains=args.allowed_domains,
+        blocked_domains=args.blocked_domains,
     )
 
 
@@ -83,6 +85,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="allow_exec",
         help="expose shell and python tools; each call is still approved or auto-denied",
+    )
+    run.add_argument(
+        "--allowed-domains",
+        default=None,
+        dest="allowed_domains",
+        help="comma-separated hosts or origins the browser may be acted on or navigated to",
+    )
+    run.add_argument(
+        "--blocked-domains",
+        default=None,
+        dest="blocked_domains",
+        help="comma-separated hosts or origins that fail with domain_blocked (blocked wins)",
     )
     return parser
 

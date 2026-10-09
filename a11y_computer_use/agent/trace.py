@@ -79,6 +79,13 @@ class Trace:
         path.write_bytes(png)
         return str(path)
 
+    def append(self, entry: dict) -> None:
+        """Append one object to ``trajectory.jsonl`` only."""
+        line = json.dumps(entry, default=str, ensure_ascii=False)
+        with self._lock:
+            with self.trajectory_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
     def record(self, entry: dict, step: dict) -> None:
         line_entry = json.dumps(entry, default=str, ensure_ascii=False)
         line_step = json.dumps(step, default=str, ensure_ascii=False)

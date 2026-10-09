@@ -60,6 +60,7 @@ def test_error_codes_are_wire_stable() -> None:
         "unsupported",
         "user_active",
         "element_disabled",
+        "domain_blocked",
     }
 
 

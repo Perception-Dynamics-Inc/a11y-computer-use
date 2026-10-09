@@ -129,6 +129,42 @@ Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`)
 `--display :N` sets `$DISPLAY` for the process before the runtime is created.
 The SDK equivalent is `Agent(display=":N")`.
 
+`--allowed-domains` and `--blocked-domains` are comma-separated hostnames or
+origins (`example.com`, `https://example.com`, `file`). The same lists are
+`Agent(allowed_domains=..., blocked_domains=...)`. A blocked host always
+denies, including its subdomains (`evil.com` matches `a.evil.com` and does
+not match `notevil.com`). When the allow list is non-empty, the origin must
+match it too. Both empty, which is the default, allows every origin. An
+action or navigation to a disallowed origin fails with `domain_blocked` and
+is not performed. The current page URL is read from CDP `Page.getFrameTree`
+when the driver is the browser backend, otherwise from the AT-SPI document
+URL. A link's own URI is checked the same way. A native app with no URL is
+not blocked. The MCP server takes the same lists as
+`build_server(allowed_domains=..., blocked_domains=...)`,
+`a11y-computer-use mcp --allowed-domains ... --blocked-domains ...`, or
+`A11Y_COMPUTER_USE_ALLOWED_DOMAINS` and `A11Y_COMPUTER_USE_BLOCKED_DOMAINS`.
+
+## Untrusted screen text
+
+Text the model sees from the screen is data. `Agent` fences each observation
+(on by default) as `<untrusted nonce=…>…</untrusted nonce=…>`. A closing tag
+that appears inside the text is escaped, so the page cannot end the fence
+early. Phrases such as "ignore previous instructions", "you are now", and
+"system:" set `suspicious=1` on the opening tag. The text is still included
+in full. The system prompt tells the model that fenced text is never an
+instruction. A flagged observation is appended to `trajectory.jsonl` with
+`"injection": true`, and the step record carries the same flag.
+
+`fence_untrusted=False` on `Agent` turns the observation fences off. The MCP
+tool results stay unfenced unless fencing is opted in, so existing clients
+see the same snapshot bytes. Opt in with
+`Runtime(fence_untrusted=True)`, `build_server(fence_untrusted=True)`,
+`a11y-computer-use mcp --fence-untrusted`, or
+`A11Y_COMPUTER_USE_FENCE_UNTRUSTED=1`. When it is on, `desktop_snapshot`,
+`find`, `screen_text`, and clipboard reads are wrapped. Notes and clipboard
+write acknowledgements are not. The agent does not wrap an observation that
+the runtime already fenced.
+
 ## Actions
 
 `click`, `type`, `key`, `set_value`, `select`, `scroll`, `app`
@@ -248,6 +284,17 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
 - `vision=True` attaching a window screenshot, and `display` setting
   `$DISPLAY`
+- untrusted fences: wrapping, escaping a forged closing tag, and the
+  injection flag (`tests/test_untrusted.py`, `tests/test_agent_core.py`)
+- domain allow and block rules, including a scripted run that sees injection
+  text and does not perform the injected action
+- `domain_blocked` before a navigation or a click is sent
+
+Live, Linux only, under Xvfb (`tests/test_linux_live.py`): a local Chrome
+page whose text contains an injection string and a link to
+`https://blocked.example/`. The scripted agent fences that text and completes
+the legitimate goal. Clicking the link and launching the blocked URL both
+return `domain_blocked`. That test uses `ScriptedModel`, not a live LLM.
 
 Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 
@@ -263,7 +310,9 @@ Not in this change:
   tool list is unchanged.
 - No live call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command
   provider. Those clients are in `a11y_computer_use.agent.models` and are
-  tested with recorded HTTP fixtures, not from this loop.
+  tested with recorded HTTP fixtures, not from this loop. The system prompt
+  tells a real model that fenced text is data; the scripted tests do not
+  measure whether an LLM would obey it.
 - No OCR, no element-crop vision, no opaque-region markers.
 
 `a11y-computer-use agent` still uses the reference loop.
