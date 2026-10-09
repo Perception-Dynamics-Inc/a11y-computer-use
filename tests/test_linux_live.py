@@ -2898,8 +2898,10 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
         )
         assert "libreoffice-gtk3" in saw.message
         assert "SAL_USE_VCLPLUGIN=gtk3" in saw.message
+        # A name that is not installed. xfce4-terminal can be left running by
+        # an earlier live launch, and that window is a real app, not a miss.
         with pytest.raises(ComputerUseError) as other:
-            driver.snapshot(Scope.WINDOW, "xfce4-terminal")
+            driver.snapshot(Scope.WINDOW, "cuatest-no-such-app")
         assert other.value.code is ErrorCode.APP_NOT_FOUND
     finally:
         _stop_group(gen)
@@ -2908,6 +2910,89 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
     with pytest.raises(ComputerUseError) as stopped:
         driver.snapshot(Scope.WINDOW, "soffice")
     assert stopped.value.code is ErrorCode.APP_NOT_FOUND
+
+
+def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
+    """Live Calc. A type that lands is confirmed from the cell editor.
+
+    set_value of a formula is confirmed from the formula text. The number
+    the cell then displays is not a partial write.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-outcome"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                if _cell(shot, "E2") is not None and _cell(shot, "F1") is not None and _cell(shot, "F2") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose E2, F1, and F2\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        e2 = _cell(current, "E2")
+        f1 = _cell(current, "F1")
+        f2 = _cell(current, "F2")
+        assert e2 is not None and f1 is not None and f2 is not None
+        seeded = runtime.set_value(e2.ref, "11")
+        assert seeded.outcome == "confirmed", (seeded, seeded.evidence)
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        f2 = _cell(current, "F2")
+        f1 = _cell(current, "F1")
+        assert f2 is not None and f1 is not None
+        formula = runtime.set_value(f2.ref, "=E2+31")
+        assert str(formula).startswith(f"set {f2.ref} = '=E2+31'")
+        assert formula.outcome == "confirmed", (formula, formula.evidence)
+        assert "=E2+31" in formula.evidence
+        assert "42" not in formula.evidence
+        runtime.click(f1.ref)
+        typed = runtime.type_text("Résumé ✓")
+        assert str(typed).startswith("typed ")
+        assert typed.outcome == "confirmed", (typed, typed.evidence)
+        assert "Résumé ✓" in typed.evidence
+        assert "did not change" not in typed.evidence
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
 
 
 def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
