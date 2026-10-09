@@ -1974,7 +1974,7 @@ class Runtime:
             return None
         try:
             rows = self.driver.running_apps()
-        except (ComputerUseError, AttributeError, OSError):
+        except (ComputerUseError, NotImplementedError, AttributeError, OSError):
             return None
         for row in rows or []:
             if not isinstance(row, dict):
@@ -4695,7 +4695,10 @@ class Runtime:
             return front
         try:
             rows = self.driver.running_apps()
-        except ComputerUseError:
+        except (ComputerUseError, NotImplementedError):
+            # No rows, including a backend that has not implemented the list.
+            # The list call itself refuses instead of crashing; see
+            # ``_running_app_rows``.
             rows = []
         from a11y_computer_use.app_identity import matching_stored_key
 
@@ -4705,6 +4708,36 @@ class Runtime:
             if matched:
                 return matched
         return trusted[0]
+
+    def _running_app_rows(self) -> list:
+        """Running-app rows. An unimplemented backend is a refusal, not a crash.
+
+        ``WindowsDriver.running_apps`` still raises ``NotImplementedError``.
+        Once any grant exists, ``app list`` is allowed through the gate and
+        that exception used to become ``internal_error`` on the wire. A
+        platform without an app-list backend returns refusal text instead.
+        """
+        try:
+            rows = self.driver.running_apps()
+        except NotImplementedError as exc:
+            front = "unknown"
+            try:
+                front = self._frontmost() or "unknown"
+            except Exception:  # noqa: BLE001 - the refusal still has to be returned
+                front = "unknown"
+            raise ActionRefused(
+                safety.Decision(
+                    verdict=safety.Verdict.NEEDS_PERMISSION,
+                    app=front,
+                    required=safety.Tier.READ,
+                    granted=None,
+                    reason=(
+                        "listing running apps is not implemented on this "
+                        "platform's backend yet"
+                    ),
+                )
+            ) from exc
+        return list(rows or [])
 
     def _app_matches(self, row: dict, identifier: str, bundle: str | None) -> bool:
         needle = identifier.lower()
@@ -4981,7 +5014,7 @@ class Runtime:
             if callable(listing):
                 try:
                     rows = list(listing() or [])
-                except ComputerUseError:
+                except (ComputerUseError, NotImplementedError):
                     rows = []
             for row in rows:
                 if not isinstance(row, dict):
@@ -5015,7 +5048,7 @@ class Runtime:
         # to come to the front, so the next observation sees a ready app.
         verb = AppVerb(action)
         if verb is AppVerb.LIST:
-            rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self.driver.running_apps)
+            rows = self._run_gated(AppOp(verb=verb), self._list_gate_key(), self._running_app_rows)
             return self._conclude(
                 json.dumps(rows), tool="app",
                 verdict=("confirmed", f"listed {len(rows)} apps"),
@@ -5094,7 +5127,7 @@ class Runtime:
                 try:
                     running = [r for r in self.driver.running_apps()
                                if self._app_matches(r, name, bundle)]
-                except ComputerUseError:
+                except (ComputerUseError, NotImplementedError):
                     running = []
                 if not running:
                     return f"quit {bundle}"

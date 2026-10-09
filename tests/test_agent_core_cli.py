@@ -495,6 +495,9 @@ def _spawn_run(script, trace, home):
     )
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # Windows Path.home() is USERPROFILE. The agent store and this grant file
+    # have to be the same directory, and neither may be the runner profile.
+    env["USERPROFILE"] = str(home)
     env.pop("DISPLAY", None)
     env.pop("WAYLAND_DISPLAY", None)
     kwargs = {
