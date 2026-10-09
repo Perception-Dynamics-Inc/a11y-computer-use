@@ -857,6 +857,20 @@ class LinuxDriver:
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
             return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
+        # A Qt grid cell's Toggle action adds the cell and leaves currentItem
+        # where it was. Selection.select_child does the same on Qt 6.11. A
+        # pointer click at the cell center selects only that cell and makes
+        # it current. Success is that observation. A tree item is not a grid
+        # cell and stays on the row path below.
+        if self._run(lambda: _atspi.qt_table_cell(handle)):
+            if self._run(lambda: _atspi.activate_qt_table_cell(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not select only that cell "
+                "and make it current",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         # A GTK tree cell's activate/expand action reports success and leaves
         # the selection where it was. Select through the parent's Selection
         # interface, or click the row's on-screen center, and require the

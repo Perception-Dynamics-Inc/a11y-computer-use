@@ -6030,7 +6030,11 @@ def build_server(
         'effect:' block — the post-click snapshot diff — so you can confirm what
         the click changed without a separate desktop_snapshot round-trip.
         The text is unchanged. Structured content adds outcome, next, and
-        evidence (confirmed, suspected_noop, unverifiable, partial, or refused)."""
+        evidence (confirmed, suspected_noop, unverifiable, partial, or refused).
+        On Linux a Qt table cell is clicked at its center. That click is
+        confirmed only when the cell is the only selected cell and it is
+        focused, which is the current cell. Toggle adds the cell and is not
+        reported as success."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
