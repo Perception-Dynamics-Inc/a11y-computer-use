@@ -33,7 +33,7 @@ from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
 #: Tools whose result is a fresh observation the planner acts on next.
 OBSERVATION_TOOLS = frozenset(
-    {"desktop_snapshot", "find", "screenshot", "zoom", "screen_text", "scroll_to_find",
+    {"desktop_snapshot", "find", "screenshot", "zoom", "crop", "screen_text", "scroll_to_find",
      "console", "network"}
 )
 
@@ -136,8 +136,11 @@ def system_prompt(runtime: server.Runtime, app: str | None) -> str:
         "stop and report.\n"
         f"The target app is {app!r} on the {runtime.driver.name} backend; pass it as the app "
         "argument where a tool takes one. Prefer refs over x/y coordinates; use screenshot "
-        "only when the tree exposes no interactive elements. Use act to batch several known "
-        "steps into one call.\n"
+        "only when the tree exposes no interactive elements. crop(ref) returns a PNG of "
+        "that element's on-screen bounds, with optional padding and scale, including a "
+        "control inside a cross-origin iframe. The library does not OCR or recognize "
+        "those pixels. Use it when an image, canvas, or control has no usable name. "
+        "Use act to batch several known steps into one call.\n"
         "On the browser backend a snapshot may end with a 'webmcp tools:' block (refs w1..wN): "
         "tools the page itself offers to agents. When one matches the step, prefer "
         "webmcp(action='call', name='w2', arguments={...}) over clicking and typing through "

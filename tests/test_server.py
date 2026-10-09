@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "find",
     "screenshot",
     "zoom",
+    "crop",
     "screen_text",
     "click",
     "hover",
@@ -540,6 +541,41 @@ async def test_zoom_round_trip_returns_text_and_image(
     text_block, image_block = result.content
     assert "zoom of display 1" in text_block.text
     assert image_block.type == "image"
+
+
+async def test_crop_round_trip_returns_text_image_and_bounds(
+    mcp_server, mocked_driver, store, monkeypatch
+) -> None:
+    display = Display(display_id=1, width=400, height=300, scale=1.0, is_main=True)
+    image = PILImage.new("RGB", (400, 300), (255, 255, 255))
+    image.paste(PILImage.new("RGB", (120, 56), (255, 0, 0)), (240, 140))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    png = buf.getvalue()
+    monkeypatch.setattr(capture, "displays", lambda: (display,))
+    monkeypatch.setattr(
+        capture, "screenshot",
+        lambda display_id=None: capture.Screenshot(png=png, display=display),
+    )
+    store.set_tier(APP, safety.Tier.READ)
+    snap = await call_tool(mcp_server, "desktop_snapshot", {"app": "TextEdit"})
+    assert not snap.isError
+    result = await call_tool(mcp_server, "crop", {"ref": "e2", "padding": 0, "scale": 1})
+    assert not result.isError
+    text_block, image_block = result.content
+    assert "crop of e2" in text_block.text
+    assert "at (240, 140) 120x56" in text_block.text
+    assert "No text was read" in text_block.text
+    assert image_block.type == "image"
+    raw = image_block.data
+    if isinstance(raw, str):
+        import base64
+        raw = base64.b64decode(raw)
+    opened = PILImage.open(io.BytesIO(raw))
+    assert opened.size == (120, 56)
+    pixels = list(opened.convert("RGB").getdata())
+    red = sum(1 for r, g, b in pixels if r > 200 and g < 50 and b < 50)
+    assert red == len(pixels)
 
 
 # --- app / window / clipboard adapters -----------------------------------------

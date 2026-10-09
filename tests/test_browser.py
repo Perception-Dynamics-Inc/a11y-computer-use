@@ -300,12 +300,105 @@ def test_browser_snapshot_survives_cross_origin_frame() -> None:
     def oopif(method, params):
         if method == "Accessibility.getFullAXTree" and params.get("frameId") == "CHILD":
             raise _CDPError("Frame with the given id is not found (OOPIF)")
+        if method == "Target.setAutoAttach":
+            raise _CDPError("attach failed")
         return _iframe_responder(method, params)
 
     d, _ = _driver_on(oopif)
     snap = d.snapshot(Scope.WINDOW, "TAB1")  # must not raise
     titles = {e.title for e in snap.elements}
-    assert "Outer" in titles and "Inner" not in titles  # OOPIF skipped, main intact
+    assert "Outer" in titles and "Inner" not in titles  # attach failed; main intact
+
+
+def test_browser_occlusion_reports_off_screen_and_covered() -> None:
+    from a11y_computer_use.schema import Bounds, Element
+
+    def metrics(method, params):
+        if method == "Page.getLayoutMetrics":
+            return {"cssVisualViewport": {
+                "pageX": 0, "pageY": 0, "clientWidth": 100, "clientHeight": 80,
+            }}
+        raise AssertionError(method)
+
+    d, transport = _driver_on(metrics)
+    below = Element(
+        ref="e2", role="AXButton", title="Below", value=None,
+        bounds=Bounds(0, 10, 200, 40, 20), snapshot_id="s",
+    )
+    assert d.occlusion(below, "TAB1") == "off_screen"
+    assert "Runtime.evaluate" not in transport.methods()
+
+    def covered(method, params):
+        if method == "Page.getLayoutMetrics":
+            return {"cssVisualViewport": {
+                "pageX": 0, "pageY": 0, "clientWidth": 800, "clientHeight": 600,
+            }}
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {
+                "kind": "hit", "tag": "DIV", "x": 0, "y": 0, "w": 800, "h": 600,
+            }}}
+        raise AssertionError(method)
+
+    d, _ = _driver_on(covered)
+    button = Element(
+        ref="e2", role="AXButton", title="Save", value=None,
+        bounds=Bounds(0, 10, 10, 40, 20), snapshot_id="s",
+    )
+    assert d.occlusion(button, "TAB1") == "covered"
+
+
+def test_interpret_hit_treats_an_iframe_as_the_document() -> None:
+    target = (8.0, 8.0, 80.0, 30.0)
+    assert browser._interpret_hit({"kind": "none"}, target) == "off_screen"
+    assert browser._interpret_hit(
+        {"kind": "hit", "tag": "IFRAME", "x": 0, "y": 0, "w": 300, "h": 200}, target,
+    ) is None
+    assert browser._interpret_hit(
+        {"kind": "hit", "tag": "SPAN", "x": 10, "y": 10, "w": 20, "h": 10}, target,
+    ) is None
+    assert browser._interpret_hit(
+        {"kind": "hit", "tag": "DIV", "x": 0, "y": 0, "w": 800, "h": 600}, target,
+    ) == "covered"
+
+
+def test_crop_of_a_cross_origin_ref_uses_the_composed_box(tmp_path) -> None:
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.capture import Screenshot
+    from a11y_computer_use.schema import Display
+
+    responder = _OopifResponder()
+    d, transport = _driver_on(responder)
+    responder.transport = transport
+    snap = d.snapshot(Scope.WINDOW, "TAB1")
+    inner = next(e for e in snap.elements if e.title == "Inner")
+    image = Image.new("RGB", (800, 600), (255, 255, 255))
+    image.paste(Image.new("RGB", (inner.bounds.width, inner.bounds.height), (255, 0, 0)),
+                (inner.bounds.x, inner.bounds.y))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    png = buf.getvalue()
+    display = Display(0, 800, 600, 1.0, True)
+    d.screenshot = lambda display_id=None: Screenshot(png=png, display=display)
+    d.occlusion = lambda element, app: None
+    d.displays = lambda: (display,)
+    d.resolve_ref = lambda current, ref, live=None: current.element(ref)
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("TAB1", safety.Tier.READ)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=d)
+    runtime._current = snap
+    text, scaled = runtime.crop(inner.ref)
+    assert "58" in text and "68" in text
+    assert "No text was read" in text
+    opened = Image.open(io.BytesIO(scaled.png))
+    assert opened.size == (inner.bounds.width, inner.bounds.height)
+    pixels = list(opened.getdata())
+    red = sum(1 for r, g, b in pixels if r > 200 and g < 50 and b < 50)
+    assert red > len(pixels) * 0.9
 
 
 _OOPIF_MAIN_AX = [

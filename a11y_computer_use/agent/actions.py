@@ -28,6 +28,7 @@ ACTION_NAMES = frozenset({
     "window",
     "menu",
     "wait",
+    "crop",
     "done",
     "ask_human",
 })
@@ -122,6 +123,8 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
             return f"ask_human kind {kind!r} is not one of login, captcha, 2fa, payment, other"
     if action.name == "click" and not args.get("ref") and (args.get("x") is None or args.get("y") is None):
         return "click requires ref or x and y"
+    if action.name == "crop" and not args.get("ref"):
+        return "crop requires ref"
     return None
 
 
@@ -271,6 +274,14 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "Wait until a condition holds, or for a number of seconds.",
         {"seconds": _NUM, "condition": _OBJ, "timeout_s": _NUM},
         [],
+    ),
+    (
+        "crop",
+        "Return a PNG of one element's on-screen bounds. Use it for an unnamed "
+        "image, a canvas, or any opaque control. padding (0..512) and scale "
+        "(greater than 0, at most 8) are optional. The library does not read the pixels.",
+        {"ref": _STR, "padding": _INT, "scale": _NUM},
+        ["ref"],
     ),
     (
         "done",

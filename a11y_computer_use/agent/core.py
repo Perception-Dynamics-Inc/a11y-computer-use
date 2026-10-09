@@ -63,11 +63,13 @@ at a time, and each one is checked before the next. If a call fails, is
 refused, or needs a human, later calls in that turn do not run.
 
 Use element refs from the latest observation. Prefer set_value and select for
-fields and options. click, type, key, scroll, app, window, menu, and wait are
-available. Request the action. The loop approves or denies app quit, closing
-a window, sending a message, paying, and deleting. An ordinary form submit,
-a save, or a button such as Update cart does not need approval. Do not call
-ask_human before those.
+fields and options. click, type, key, scroll, app, window, menu, wait, and
+crop are available. crop(ref) returns a PNG of that element's on-screen bounds
+(optional padding and scale). The library does not read those pixels. Use it
+for an unnamed image, a canvas, or any control whose title is missing. Request
+the action. The loop approves or denies app quit, closing a window, sending a
+message, paying, and deleting. An ordinary form submit, a save, or a button
+such as Update cart does not need approval. Do not call ask_human before those.
 
 Never type a password, one-time code, or card number. Call ask_human only for
 a login, a 2FA prompt, a captcha, a payment the agent must not complete, or
@@ -246,6 +248,7 @@ class Agent:
         self._last_observation = ""
         self._last_snap: Snapshot | None = None
         self._injection = False
+        self._crop_block: dict | None = None
         try:
             self._prepare()
             yield from self._drive(goal, started)
@@ -315,10 +318,10 @@ class Agent:
                 yield Event("needs_human", human)
                 return
 
-            image = self._vision_image(observation, snap)
+            images, note = self._vision_images(observation, snap)
             self._messages.append(Message(
                 role="user",
-                content=_user_content(observation, self._app_name(), image),
+                content=_user_content(observation, self._app_name(), images, note),
             ))
             screen = self._note_screen(digest)
             if screen == "fail":
@@ -489,7 +492,7 @@ class Agent:
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
-        if error and self.max_retries > 0:
+        if error and self.max_retries > 0 and requested.name != "crop":
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
             recovery.extend(retry_notes)
@@ -545,9 +548,13 @@ class Agent:
         feedback = _tool_feedback(executed, result, error, recovery, marker)
         if turn_stop:
             feedback = _with_stop_note(feedback, remaining, turn_stop)
+        content: str | list[dict] = feedback
+        if self._crop_block is not None and not error and executed.name == "crop":
+            content = [{"type": "text", "text": feedback}, self._crop_block]
+        self._crop_block = None
         self._messages.append(Message(
             role="tool",
-            content=feedback,
+            content=content,
             tool_call_id=call.id,
             name=executed.name,
         ))
@@ -768,6 +775,7 @@ class Agent:
     def _invoke(self, action: Action) -> tuple[str, str | None, outcome.ActionResult | None]:
         from a11y_computer_use.server import ActionRefused, error_text, refusal_text
 
+        self._crop_block = None
         try:
             tool, params = to_runtime_call(action, self._app_name())
             raw = self.runtime.call_tool(tool, params, confirm=self._safety_confirm)  # type: ignore[union-attr]
@@ -793,6 +801,8 @@ class Agent:
                 evidence=text,
             )
             return "", text, marker
+        if action.name == "crop":
+            self._crop_block = self._save_crop_block(raw, action)
         if isinstance(raw, outcome.ActionResult):
             return str(raw), None, raw
         return _stringify(raw), None, None
@@ -924,15 +934,57 @@ class Agent:
         if message:
             raise RuntimeError(message)
 
-    def _vision_image(self, observation: str, snap: Snapshot | None) -> dict | None:
+    def _vision_images(self, observation: str, snap: Snapshot | None) -> tuple[list[dict], str | None]:
+        """Crops of unnamed or opaque refs, then the whole-window screenshot.
+
+        A runtime with no ``crop`` method, or a crop that fails, is skipped.
+        The window image stays last so a capture-only double still ends the
+        observation with that shot. The library does not read the pixels.
+        """
         if not self.vision or not _needs_vision(observation, snap):
+            return [], None
+        images: list[dict] = []
+        if snap is not None:
+            for element in _opaque_elements(snap)[:4]:
+                n = len(self._digests) + 1
+                block = self._save_named_png(
+                    self._crop_png(element.ref), f"crop-{element.ref}-{n:04d}",
+                )
+                if block is not None:
+                    images.append(block)
+        window = self._save_named_png(self._grab(), f"observe-{len(self._digests) + 1:04d}")
+        if window is not None:
+            images.append(window)
+        note = None
+        if any("crop-" in str(block.get("path") or "") for block in images):
+            note = (
+                "PNG crops of unnamed or opaque elements are attached before the "
+                "window screenshot. Call crop(ref) with optional padding and scale "
+                "for another. The library does not read these pixels."
+            )
+        return images, note
+
+    def _crop_png(self, ref: str) -> object:
+        crop = getattr(self.runtime, "crop", None)
+        if not callable(crop):
             return None
-        png = _png_of(self._grab())
+        try:
+            return crop(ref)
+        except Exception:  # noqa: BLE001 - one opaque ref must not drop the window shot
+            return None
+
+    def _save_named_png(self, raw: object, stem: str) -> dict | None:
+        png = _png_of(raw)
         if not png or self.trace is None:
             return None
-        path = self.trace.dir / f"observe-{len(self._digests) + 1:04d}.png"
+        path = self.trace.dir / f"{stem}.png"
         path.write_bytes(png)
         return {"type": "image", "path": str(path), "mime": "image/png"}
+
+    def _save_crop_block(self, raw: object, action: Action) -> dict | None:
+        ref = str(action.args.get("ref") or "ref")
+        safe = "".join(ch if ch.isalnum() else "-" for ch in ref)[:32] or "ref"
+        return self._save_named_png(raw, f"crop-action-{len(self._steps) + 1:04d}-{safe}")
 
     def _grab(self) -> object:
         try:
@@ -1289,8 +1341,11 @@ def forced_method(
 
     Level 0 is the model's action. With no ``strategies``, the ladder is
     alternate ref, coordinate click, then a keyboard fallback. When the last
-    result named ``next``, that list is the ladder.
+    result named ``next``, that list is the ladder. ``crop`` stays a crop: a
+    failed crop is not turned into a click.
     """
+    if action.name == "crop":
+        return action, None
     if level <= 0:
         return action, None
     options: list[tuple[Action, str]] = []
@@ -1454,6 +1509,13 @@ def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
         if args.get("path"):
             params["path"] = args["path"]
         return "menu", params
+    if name == "crop":
+        params = {"ref": str(args["ref"])}
+        if args.get("padding") is not None:
+            params["padding"] = int(args["padding"])
+        if args.get("scale") is not None:
+            params["scale"] = float(args["scale"])
+        return "crop", params
     if name == "wait":
         if "condition" in args and isinstance(args["condition"], dict):
             return "wait_until", {
@@ -1531,26 +1593,36 @@ def _window_title(snap: Snapshot | None) -> str | None:
     return snap.app
 
 
-def _needs_vision(observation: str, snap: Snapshot | None) -> bool:
-    if "no interactive elements were found" in observation:
-        return True
-    if snap is None:
-        return False
+def _opaque_elements(snap: Snapshot) -> list:
+    """Untitled images, unknown widgets, and untitled clickable controls."""
     structural = {"axwindow", "axgroup", "axscrollarea", "axtoolbar", "axlayoutarea"}
+    found = []
     for element in snap.elements:
         if element.title:
             continue
         role = element.role.casefold()
         if role in {"aximage", "axunknown"} or (element.clickable and role not in structural):
-            return True
-    return False
+            found.append(element)
+    return found
 
 
-def _user_content(observation: str, app: str, image: dict | None) -> str | list[dict]:
+def _needs_vision(observation: str, snap: Snapshot | None) -> bool:
+    if "no interactive elements were found" in observation:
+        return True
+    if snap is None:
+        return False
+    return bool(_opaque_elements(snap))
+
+
+def _user_content(
+    observation: str, app: str, images: list[dict] | None, note: str | None = None,
+) -> str | list[dict]:
     text = f"Observation of {app}:\n{truncate_observation(observation)}"
-    if image is None:
+    if note:
+        text += "\n" + note
+    if not images:
         return text
-    return [{"type": "text", "text": text}, image]
+    return [{"type": "text", "text": text}, *images]
 
 
 def _action_key(action: Action) -> tuple:
@@ -1587,7 +1659,7 @@ def _is_verified(action: Action, before: str, after: str, error: str | None) -> 
     if error:
         return False
     verb = str(action.args.get("action") or "")
-    if action.name == "wait":
+    if action.name in {"wait", "crop"}:
         return True
     if action.name in {"app", "window", "menu"} and verb in {"list", "state"}:
         return True

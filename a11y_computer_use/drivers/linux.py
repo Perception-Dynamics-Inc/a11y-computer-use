@@ -1297,6 +1297,49 @@ class LinuxDriver:
 
         return _linux_system.app_at_point_id(point.x, point.y)
 
+    def occlusion(self, element: Element, app: str | None) -> str | None:
+        """None when the element's center belongs to ``app``.
+
+        A GTK process launched from Python has comm ``python3`` and an AT-SPI
+        name from ``GLib.set_prgname``. Comparing those strings would call the
+        app's own window a cover. The same pid is the same app. A different
+        pid is that window's comm (``covered by <comm>``). An unknown pid is
+        not a cover: a missing hit-test must not refuse the crop.
+        """
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        cx = float(bounds.x) + float(bounds.width) / 2.0
+        cy = float(bounds.y) + float(bounds.height) / 2.0
+        try:
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+        except Exception:  # noqa: BLE001 - no X hit-test
+            return None
+        if not owner_pid:
+            return None
+        app_pid = None
+        if app:
+            try:
+                root = self._run(lambda: _atspi.find_root(app, Scope.APP))
+                app_pid = _atspi.pid_of(root) if root is not None else None
+            except Exception:  # noqa: BLE001 - the bus may be down in a unit test
+                app_pid = None
+        if app_pid is not None and int(owner_pid) == int(app_pid):
+            return None
+        try:
+            owner = _linux_system._comm_for_pid(int(owner_pid))
+        except Exception:  # noqa: BLE001
+            owner = None
+        if app and owner and (
+            owner.casefold() == app.casefold()
+            or _linux_system._comm_matches_identifier(app, owner)
+            or _linux_system._comm_matches_identifier(owner, app)
+        ):
+            return None
+        if app_pid is None:
+            return None
+        return owner or "covered"
+
     def running_apps(self) -> list[dict]:
         from a11y_computer_use.drivers import _linux_system
 

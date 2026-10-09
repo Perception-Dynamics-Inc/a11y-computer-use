@@ -70,7 +70,7 @@ Each step records the planner's token usage for the turn that produced it (a tur
 
 ## Bounded context
 
-The planner always sees the newest observation in full. Older observations (the initial snapshot, `desktop_snapshot`, `find`, `screenshot`, `scroll_to_find`, `console`, `network` results, and the snapshot attached to a `stale_ref` error) collapse to a one-line placeholder once a newer one exists, and images outside the newest observation are dropped. This applies to providers that allow history edits (`openai`, `claude-cli`, `scripted`).
+The planner always sees the newest observation in full. Older observations (the initial snapshot, `desktop_snapshot`, `find`, `screenshot`, `zoom`, `crop`, `scroll_to_find`, `console`, `network` results, and the snapshot attached to a `stale_ref` error) collapse to a one-line placeholder once a newer one exists, and images outside the newest observation are dropped. This applies to providers that allow history edits (`openai`, `claude-cli`, `scripted`). `crop` returns the PNG of one ref's on-screen bounds plus the rectangle; the library does not read those pixels.
 
 The Anthropic provider never edits earlier turns, because current Claude models bind later thinking blocks to the exact conversation prefix. It replays its own assistant content verbatim and asks the API to clear old tool results server-side instead.
 

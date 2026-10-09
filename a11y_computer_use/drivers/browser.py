@@ -352,7 +352,8 @@ class BrowserDriver:
         absent from the frame tree. ``Target.setAutoAttach`` (flatten) attaches
         that target; its tree is read on the child session and grafted under
         the owner iframe. A frame that still cannot be read is skipped, so one
-        detached iframe does not fail the snapshot.
+        detached iframe does not fail the snapshot. ``crop`` uses the composed
+        box.
         """
         from a11y_computer_use.drivers import _cdp_frames
 
@@ -368,6 +369,7 @@ class BrowserDriver:
             fid = node.get("frame", {}).get("id")
             if not fid:
                 continue
+            owner = None
             try:
                 owner = sess.call("DOM.getFrameOwner", {"frameId": fid}).get("backendNodeId")
                 sub = sess.call("Accessibility.getFullAXTree", {"frameId": fid}).get("nodes", [])
@@ -910,6 +912,55 @@ class BrowserDriver:
     def app_at_point(self, point: Point) -> str | None:
         return self._target_id
 
+    def occlusion(self, element: Element, app: str | None) -> str | None:
+        """``off_screen`` or ``covered`` when the element's center is not visible.
+
+        The page's visual viewport is the screen. ``elementFromPoint`` names
+        what is painted there. An iframe whose box contains the point is the
+        cross-origin document, not a cover. A probe that cannot run returns
+        None so a crop is not refused for lack of a hit test.
+        """
+        del app
+        try:
+            metrics = self._connect().call("Page.getLayoutMetrics")
+        except ComputerUseError:
+            return None
+        viewport = metrics.get("cssVisualViewport") or {}
+        try:
+            page_x = float(viewport.get("pageX") or 0)
+            page_y = float(viewport.get("pageY") or 0)
+            view_w = float(viewport.get("clientWidth") or 0)
+            view_h = float(viewport.get("clientHeight") or 0)
+        except (TypeError, ValueError):
+            return None
+        if view_w <= 0 or view_h <= 0:
+            return None
+        bounds = element.bounds
+        left = max(float(bounds.x), page_x)
+        top = max(float(bounds.y), page_y)
+        right = min(float(bounds.x + bounds.width), page_x + view_w)
+        bottom = min(float(bounds.y + bounds.height), page_y + view_h)
+        if right <= left or bottom <= top:
+            return "off_screen"
+        vx = (left + right) / 2 - page_x
+        vy = (top + bottom) / 2 - page_y
+        target = (bounds.x - page_x, bounds.y - page_y, bounds.width, bounds.height)
+        expression = (
+            "(()=>{const x=%s,y=%s;const hit=document.elementFromPoint(x,y);"
+            "if(!hit)return{kind:'none'};const r=hit.getBoundingClientRect();"
+            "return{kind:'hit',tag:hit.tagName,x:r.x,y:r.y,w:r.width,h:r.height};})()"
+        ) % (vx, vy)
+        try:
+            reply = self._connect().call("Runtime.evaluate", {
+                "expression": expression, "returnByValue": True,
+            })
+        except ComputerUseError:
+            return None
+        value = (reply.get("result") or {}).get("value")
+        if not isinstance(value, dict):
+            return None
+        return _interpret_hit(value, target)
+
     def running_apps(self) -> list[dict]:
         from a11y_computer_use.drivers import _cdp
 
@@ -1042,6 +1093,37 @@ class BrowserDriver:
             ErrorCode.UNSUPPORTED,
             "clipboard write is not available through the browser backend",
         )
+
+
+def _interpret_hit(hit: dict, target: tuple[float, float, float, float]) -> str | None:
+    """Whether ``elementFromPoint`` shows ``target`` or something covering it.
+
+    ``target`` is ``(x, y, width, height)`` in viewport pixels. An iframe that
+    contains the target's center is the cross-origin document. A hit whose box
+    sits inside the target (the element or its child) is the element itself.
+    """
+    if hit.get("kind") == "none":
+        return "off_screen"
+    if hit.get("kind") != "hit":
+        return None
+    try:
+        hx, hy = float(hit["x"]), float(hit["y"])
+        hw, hh = float(hit["w"]), float(hit["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    tx, ty, tw, th = target
+    cx, cy = tx + tw / 2, ty + th / 2
+    tag = str(hit.get("tag") or "").upper()
+    if tag in {"IFRAME", "FRAME"} and hx <= cx <= hx + hw and hy <= cy <= hy + hh:
+        return None
+    slop = 8.0
+    inside = (
+        hx >= tx - slop and hy >= ty - slop
+        and hx + hw <= tx + tw + slop and hy + hh <= ty + th + slop
+    )
+    if inside:
+        return None
+    return "covered"
 
 
 def _looks_like_url(s: str) -> bool:

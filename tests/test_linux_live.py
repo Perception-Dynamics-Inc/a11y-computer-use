@@ -2413,6 +2413,7 @@ def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
         _stop(proc)
         log.close()
 
+
 _OUTCOME_APP = "cuaoutcome"
 
 _GTK_OUTCOME = textwrap.dedent(
@@ -2946,3 +2947,93 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
         else:
             os.environ["SAL_USE_VCLPLUGIN"] = previous
         _kill_libreoffice()
+
+
+_SWATCH = "cuaswatch"
+
+# CSS at user priority, not a cairo "draw" handler. The Linux CI image has no
+# cairo GI converter, so that handler raises and the theme paints the button.
+# Deprecated override_* colors are ignored by the same theme.
+_GTK_SWATCH = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+    GLib.set_prgname("cuaswatch")
+    win = Gtk.Window(title="cuaswatch")
+    btn = Gtk.Button()
+    btn.set_name("swatch")
+    btn.set_size_request(180, 120)
+    btn.get_accessible().set_name("Swatch")
+    css = Gtk.CssProvider()
+    css.load_from_data(b'''
+    window, #swatch {
+      background-color: #ff0000;
+      background-image: none;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      outline: none;
+      padding: 0;
+      margin: 0;
+    }
+    ''')
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER,
+    )
+    win.add(btn)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_crop_of_a_red_control_matches_size_and_color(tmp_path) -> None:
+    """crop(ref) returns the control's pixels. Size matches the snapshot bounds
+    and the dominant color is the red the widget painted. No OCR."""
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuaswatch.py"
+    script.write_text(_GTK_SWATCH)
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, _SWATCH)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                if any(el.title == "Swatch" and el.bounds.width > 1 for el in snap.elements):
+                    break
+            time.sleep(0.3)
+        assert snap is not None and any(el.title == "Swatch" for el in snap.elements)
+        runtime = _runtime_for(tmp_path, driver, _SWATCH)
+        runtime.desktop_snapshot(_SWATCH)
+        current = runtime._current
+        assert current is not None
+        swatch = next((el for el in current.elements if el.title == "Swatch"), None)
+        assert swatch is not None, [(el.role, el.title, el.bounds) for el in current.elements]
+        text, image = runtime.crop(swatch.ref)
+        assert "No text was read" in text
+        assert image.width == swatch.bounds.width
+        assert image.height == swatch.bounds.height
+        opened = Image.open(io.BytesIO(image.png)).convert("RGB")
+        assert opened.size == (swatch.bounds.width, swatch.bounds.height)
+        pixels = list(opened.getdata())
+        red = sum(1 for r, g, b in pixels if r > 200 and g < 50 and b < 50)
+        assert red > len(pixels) * 0.8, f"dominant color was not red ({red}/{len(pixels)})"
+    finally:
+        _stop(proc)

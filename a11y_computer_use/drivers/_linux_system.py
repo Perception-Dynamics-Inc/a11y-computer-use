@@ -278,8 +278,8 @@ def active_window() -> dict | None:
         return None
 
 
-def app_at_point_id(x: float, y: float) -> str | None:
-    """comm name of the topmost window containing a screen point (act-time hit-test)."""
+def _top_window_pid(x: float, y: float) -> int | None:
+    """Pid of the topmost client window containing a screen point, or None."""
     try:
         with _open_display() as d:
             for win in reversed(_managed_windows(d)):  # topmost first
@@ -288,10 +288,24 @@ def app_at_point_id(x: float, y: float) -> str | None:
                     continue
                 gx, gy, gw, gh = geom
                 if gx <= x < gx + gw and gy <= y < gy + gh:
-                    return _comm_for_pid(_pid_of(win, d))
+                    pid = _pid_of(win, d)
+                    return int(pid) if pid else None
     except Exception:
         return None
     return None
+
+
+def app_at_point_id(x: float, y: float) -> str | None:
+    """comm name of the topmost window containing a screen point (act-time hit-test)."""
+    pid = _top_window_pid(x, y)
+    if not pid:
+        return None
+    return _comm_for_pid(pid)
+
+
+def pid_at_point(x: float, y: float) -> int | None:
+    """Pid of the topmost client window containing a screen point."""
+    return _top_window_pid(x, y)
 
 
 def _launcher_comm(identifier: str, comm: str) -> bool:

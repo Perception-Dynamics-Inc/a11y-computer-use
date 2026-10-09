@@ -7,6 +7,16 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [Unreleased]
+
+### Added
+
+- `crop(ref)` returns a PNG of one element's on-screen bounds and text naming that rectangle. `padding` (0..512) grows the rect before it is clipped to the display. `scale` (greater than 0, at most 8) sizes the PNG; an integer scale uses nearest-neighbor so a solid color stays that color. The library does not OCR or recognize the pixels. An element that misses the display, or whose center is covered, is `not_visible` (`reason` `off_screen` or `covered`) and no image is taken. Padding does not pull a fully off-screen ref on screen. AT-SPI uses the snapshot bounds. On Linux a cover is another process: the window at the center is compared by pid, because a GTK app's AT-SPI name is not the process comm. A same-process iframe keeps the existing stitch. A cross-origin iframe is attached with `Target.setAutoAttach` (`flatten`), and its boxes are shifted by the iframe element's offset so `crop` uses that composed rectangle. If attach fails, that frame is skipped and the rest of the page still snapshots. A browser hit-test treats an iframe that contains the point as the document, not a cover. A ref outside the visual viewport is `off_screen`. The agent can call `crop`. A failed crop is not turned into a click or an Escape. With `vision=True`, the observation attaches up to four crops of unnamed images, unknown widgets, and unnamed clickables, then the whole-window screenshot. Hermetic tests cover padding, scale, a solid red crop, off-screen, covered, the composed cross-origin box, and the agent image block. A live GTK button named Swatch, under Xvfb and openbox, crops to a PNG whose size matches the ref bounds and whose dominant color is red (#116) (2026-10-09).
+
+### Fixed
+
+- The live Swatch button is painted with a GTK CSS provider at user priority. The Linux CI image has no cairo GI converter, so a cairo `draw` handler never paints, and that theme ignores the deprecated `override_background_color`. The crop's dominant color is the red the test checks (#116) (2026-10-09).
+
 ## [0.4.55] - 2026-10-09
 
 ### Added

@@ -346,6 +346,9 @@ class ErrorCode(str, Enum):
     DOMAIN_BLOCKED = "domain_blocked"
     """The action or navigation targets an origin outside the domain policy."""
 
+    NOT_VISIBLE = "not_visible"
+    """The ref is off-screen or another window covers its center. No crop was taken."""
+
 
 class ComputerUseError(Exception):
     """A structured failure carrying an `ErrorCode` plus machine-readable detail.

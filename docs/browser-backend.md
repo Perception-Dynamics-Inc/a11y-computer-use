@@ -40,7 +40,7 @@ JSONL audit, the same MCP surface.
 | Pixel fallback     | `Input.dispatchMouseEvent` (mouse/wheel), the vision path, viewport-mapped     |
 | Capture            | `Page.captureScreenshot` (+ `clip` for zoom), `captureBeyondViewport`           |
 | Navigate           | `launch_app(url)` = `Page.navigate` + wait for `document.readyState=="complete"` (load-aware, no fixed sleep). The browser analog of launching an app, so the existing `app` tool drives it with no new MCP surface |
-| Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document. A cross-origin (out-of-process) iframe is a separate target: `Target.setAutoAttach` with flatten reads that session's tree and layout, and the iframe element's box is the origin. A frame that still cannot be read is skipped, so one detached iframe does not fail the snapshot |
+| Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document. A cross-origin (out-of-process) iframe is a separate target: `Target.setAutoAttach` with flatten reads that session's tree and layout, and the iframe element's box is the origin, which `crop` uses. A frame that still cannot be read is skipped, so one detached iframe does not fail the snapshot |
 | Tabs               | page targets are modelled as apps/windows (`running_apps`/`windows`/`activate_app`) |
 | Console            | `console` tool (browser-only, tier `read`): console output + uncaught JS exceptions from `Runtime.consoleAPICalled`/`exceptionThrown`/`Log.entryAdded`. This is how the agent verifies an action worked, which a screenshot cannot show |
 | Network            | `network` tool (browser-only, tier `read`): completed request outcomes (status codes + failures) from `Network.responseReceived`/`loadingFailed`, joined by `requestId` ("did that POST return 200?"); the session event buffer is bounded so busy pages can't grow it |
@@ -63,7 +63,8 @@ All wire I/O sits behind `_cdp.Transport`, so the driver logic can be exercised
 in a container with a scripted fake transport (no browser): `tests/test_browser.py`
 covers snapshot and observe (geometry, roles, stable ids), accessibility-first
 press and focus, secure-field refusal, `set_value`, typing, key chords, navigate,
-screenshot, same-process iframe stitching, a skipped cross-origin frame,
+screenshot, same-process iframe stitching, an attached cross-origin frame whose
+boxes are the composed offset, a skipped cross-origin frame when attach fails,
 console, network, and the app/window/clipboard tools through the Runtime. Not
 covered by any test: coordinate `click`/`drag`/`scroll`
 (`Input.dispatchMouseEvent`) and the 24-frame stitching cap (`_MAX_FRAMES`).
