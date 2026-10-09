@@ -176,6 +176,120 @@ def test_read_back_mismatch_is_an_error(atspi) -> None:
     assert field.text == "old"
 
 
+def _driver_for(monkeypatch, field):
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(driver, "frontmost_app", lambda: ("firefox", 1))
+    monkeypatch.setattr(_atspi, "is_secure", lambda acc: False)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
+    monkeypatch.setattr(_atspi, "pid_of", lambda acc: 7)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "firefox")
+    driver._focused_editable = field
+    return driver
+
+
+def test_a_selected_address_bar_is_replaced_by_keys(atspi, monkeypatch) -> None:
+    """Fake urlbar. delete_text leaves the selection. Keys replace it.
+
+    A page field with the same failure still raises and sends no keys.
+    """
+    current = "http://127.0.0.1/bg.html"
+    field = _ByteField(current, caret=len(current), selection=(0, len(current)))
+
+    def delete_text(start, end):
+        return True
+
+    field.delete_text = delete_text  # type: ignore[method-assign]
+    typed: list[str] = []
+
+    def type_string(text: str, delay: float | None = None) -> None:
+        assert delay == 0.05
+        typed.append(text)
+        field.text = text
+        field.selection = None
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi, "is_location_entry", lambda acc: acc is field)
+    driver = _driver_for(monkeypatch, field)
+    url = "http://localhost/para.html"
+    assert driver.type_text(url) == len(url)
+    assert typed == [url]
+    assert field.text == url
+
+    page = _ByteField("keep DROP keep", caret=9, selection=(5, 9))
+    page.delete_text = delete_text  # type: ignore[method-assign]
+    calls: list[str] = []
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: calls.append(text))
+    monkeypatch.setattr(_atspi, "is_location_entry", lambda acc: False)
+    driver._focused_editable = page
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("NEW")
+    assert exc.value.detail["reason"] == "selection_not_replaced"
+    assert calls == []
+    assert page.text == "keep DROP keep"
+
+
+def test_omnibox_read_back_accepts_a_scheme_less_url(atspi, monkeypatch) -> None:
+    """Fake Chrome omnibox. The entry has no EditableText, and the scheme is dropped."""
+    entry = _ByteField("127.0.0.1/bg.html")
+    entry.get_editable_text_iface = lambda: None  # type: ignore[method-assign]
+    url = "http://localhost/para.html"
+
+    def type_string(text: str, delay: float | None = None) -> None:
+        assert delay == 0.05
+        entry.text = "localhost/para.html"
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi, "is_location_entry", lambda acc: acc is entry)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (entry, False))
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: "select me")
+    monkeypatch.setattr(_atspi, "address_bar_text", lambda app: entry.text)
+    monkeypatch.setattr(_atspi, "_collected_address_bar", lambda app: None)
+    driver = _driver_for(monkeypatch, None)
+    driver._focused_editable = None
+    assert driver.type_text(url) == len(url)
+    assert entry.text == "localhost/para.html"
+
+
+def test_omnibox_popup_read_back_uses_the_address_bar(atspi, monkeypatch) -> None:
+    """Fake Chrome. Focus is the popup, whose text is not the typed URL.
+
+    The address bar changed, so the type succeeded. A page field that did
+    not change still raises, and its text is not taken from an address bar.
+    """
+    popup = _ByteField("suggestion")
+    url = "http://localhost/para.html"
+    bar = {"text": "127.0.0.1/bg.html"}
+
+    def type_string(text: str, delay: float | None = None) -> None:
+        assert delay == 0.05
+        bar["text"] = url
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi, "is_location_entry", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (popup, False))
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: popup.text)
+    monkeypatch.setattr(_atspi, "focus_in_browser_chrome", lambda app: True)
+    monkeypatch.setattr(_atspi, "address_bar_text", lambda app: bar["text"])
+    monkeypatch.setattr(_atspi, "_collected_address_bar", lambda app: None)
+    driver = _driver_for(monkeypatch, None)
+    driver._focused_editable = None
+    assert driver.type_text(url) == len(url)
+
+    page = _ByteField("select me")
+    monkeypatch.setattr(_atspi, "focus_in_browser_chrome", lambda app: False)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (page, False))
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: page.text)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text(url)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "select me"
+
+
 def test_selection_that_cannot_be_deleted_is_not_then_appended(atspi) -> None:
     field = _ByteField("keep DROP keep", caret=9, selection=(5, 9))
 

@@ -147,8 +147,13 @@ match it too. Both empty, which is the default, allows every origin. An
 action or navigation to a disallowed origin fails with `domain_blocked`,
 is not performed, and stops the rest of that turn. The current page URL is read from CDP `Page.getFrameTree`
 when the driver is the browser backend, otherwise from the AT-SPI document
-URL. A link's own URI is checked the same way. A native app with no URL is
-not blocked. The desktop MCP server takes the same lists as
+that is on screen. Firefox keeps background tabs in the tree; the check uses
+the selected tab that is showing. A control inside an iframe is checked
+against that frame's document, and a link's own URI is checked as well.
+Typing in the address bar is allowed. Enter there is refused when the text
+is a disallowed URL, including the omnibox form that omits the scheme. The omnibox, its popup, and the tab strip are browser
+chrome, not the page, and Escape is always allowed. A native app with no URL
+is not blocked. The desktop MCP server takes the same lists as
 `build_server(allowed_domains=..., blocked_domains=...)`,
 `a11y-computer-use mcp --allowed-domains ... --blocked-domains ...`, or
 `A11Y_COMPUTER_USE_ALLOWED_DOMAINS` and `A11Y_COMPUTER_USE_BLOCKED_DOMAINS`.
@@ -156,9 +161,10 @@ not blocked. The desktop MCP server takes the same lists as
 ## Untrusted screen text
 
 Text the model sees from the screen is data. `Agent` fences each observation
-(on by default) as `<untrusted nonce=…>…</untrusted nonce=…>`. A closing tag
-that appears inside the text is escaped, so the page cannot end the fence
-early. Phrases such as "ignore previous instructions", "you are now", and
+(on by default) as `<untrusted nonce=…>…</untrusted nonce=…>`. An opener or a
+closer that appears inside the text is escaped, so the page cannot end the
+fence early or open another one. A string that already looks like a fence is
+wrapped again unless this process issued its nonce. Phrases such as "ignore previous instructions", "you are now", and
 "system:" set `suspicious=1` on the opening tag. The text is still included
 in full. The system prompt tells the model that fenced text is never an
 instruction. A flagged observation is appended to `trajectory.jsonl` with
@@ -170,9 +176,10 @@ existing clients see the same snapshot bytes. Opt in with
 `Runtime(fence_untrusted=True)`, `build_server(fence_untrusted=True)`,
 `a11y-computer-use mcp --fence-untrusted`, or
 `A11Y_COMPUTER_USE_FENCE_UNTRUSTED=1`. When it is on, `desktop_snapshot`,
-`find`, `screen_text`, and clipboard reads are wrapped. Notes and clipboard
-write acknowledgements are not. The agent does not wrap an observation that
-the runtime already fenced.
+`find`, `screen_text`, clipboard reads, the window list, the app list,
+action results, and error text that quotes the screen are wrapped. Notes and
+clipboard write acknowledgements are not. The agent does not wrap an
+observation that the runtime already fenced.
 
 ## Server
 

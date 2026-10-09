@@ -454,6 +454,12 @@ def _not_editable(element: Element) -> ComputerUseError:
     )
 
 
+def _named_browser(app_id: str | None) -> bool:
+    """True when ``app_id`` is Chrome or Firefox, which own an address bar."""
+    name = (app_id or "").lower()
+    return "chrome" in name or "chromium" in name or "firefox" in name
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -604,14 +610,21 @@ class LinuxDriver:
             return None
 
         def _do() -> str | None:
-            root = _atspi.find_root(app, Scope.WINDOW)
-            url = _atspi.document_url_of(root) if root is not None else None
+            window = _atspi.find_root(app, Scope.WINDOW)
+            url = _atspi.document_url_of(window) if window is not None else None
             if url:
                 return url
             app_root = _atspi.find_root(app, Scope.APP)
-            if app_root is None or app_root is root:
+            if app_root is None:
                 return None
-            return _atspi.document_url_of(app_root)
+            # The showing document may be invisible to a walk of the active
+            # frame. Collection on the application still lists it.
+            if app_root is not window:
+                url = _atspi._collected_content_document(app_root)
+                if url:
+                    return url
+                return _atspi.other_frame_document_url(app_root, window)
+            return None
 
         try:
             return self._run(_do)
@@ -629,6 +642,54 @@ class LinuxDriver:
         try:
             return self._run(lambda: _atspi.hyperlink_uri(handle))
         except Exception:  # noqa: BLE001 - no URI is "not a link", not a failure
+            return None
+
+    def element_document_url(self, element: Element) -> str | None:
+        """URL of the document that owns ``element``, including an iframe."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.document_url_for(handle))
+        except Exception:  # noqa: BLE001 - a missing document is not a failed action
+            return None
+
+    def element_in_browser_chrome(self, element: Element) -> bool:
+        """True when ``element`` is browser UI (the tab strip, the omnibox)."""
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.in_browser_chrome(handle)))
+        except Exception:  # noqa: BLE001 - unknown chrome is treated as page content
+            return False
+
+    def focus_in_browser_chrome(self, app: str) -> bool:
+        """True when keyboard focus is in browser UI rather than the page."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not app:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.focus_in_browser_chrome(app)))
+        except Exception:  # noqa: BLE001 - unknown focus falls through to the page URL
+            return False
+
+    def address_bar_text(self, app: str) -> str | None:
+        """Text of the address bar, read from the application tree."""
+        from a11y_computer_use.drivers import _atspi
+
+        if not app:
+            return None
+        try:
+            return self._run(lambda: _atspi.address_bar_text(app))
+        except Exception:  # noqa: BLE001 - an unreadable bar is not a destination
             return None
 
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
@@ -1300,6 +1361,13 @@ class LinuxDriver:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))
             except ComputerUseError as exc:
                 detail = exc.detail or {}
+                # Firefox selects the whole urlbar on ctrl+l and delete_text
+                # does not clear that selection. Keystrokes replace it. A page
+                # field, including a contenteditable, still raises.
+                if detail.get("reason") == "selection_not_replaced" and self._run(
+                    lambda: _atspi.is_location_entry(handle)
+                ):
+                    return self._replace_location_selection(handle, text, app_id)
                 # EditableText claimed the insert and the field did not change.
                 # Focus it and send the keys, then read this field back.
                 if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):
@@ -1350,8 +1418,30 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         app_id, _pid = self.frontmost_app()
-        before = self._typed_readback(app_id)
-        _linux_input.type_string(text)  # XTEST fallback — separate X connection, not marshaled
+        # Only a browser has an address bar. Asking LibreOffice for one walks
+        # Collection and drops the cell handles a later set_value still holds.
+        browser = _named_browser(app_id)
+        location = self._location_entry(app_id) if app_id and browser else None
+        # ctrl+l can leave a11y focus on the omnibox popup. The keys still
+        # land in the address bar. The popup's text is not that URL.
+        bar_before = None
+        if location is not None:
+            before = self._run(lambda: _atspi._readable_text(location))
+        elif browser and self._run(lambda: _atspi.focus_in_browser_chrome(app_id)):
+            bar_before = self._run(lambda: _atspi.address_bar_text(app_id))
+            before = bar_before
+        else:
+            # LibreOffice verifies against the open cell editor. Every other
+            # app uses the focused node's text.
+            before = self._typed_readback(app_id)
+        # Chrome's omnibox drops the tail of a URL at the default key pace.
+        # A contenteditable and a Calc cell keep that pace.
+        if location is not None or bar_before is not None:
+            _linux_input.type_string(text, delay=0.05)
+        else:
+            _linux_input.type_string(text)
+        if location is not None:
+            return self._location_read_back(location, before, text, app_id)
         after = self._typed_readback(app_id)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. LibreOffice already read the
@@ -1378,6 +1468,14 @@ class LinuxDriver:
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
         if after is not None and not _atspi._typed_visible(before, after, text):
+            if app_id and bar_before is not None:
+                bar_after = self._run(lambda: _atspi.address_bar_text(app_id))
+                if bar_after == bar_before:
+                    fresh = self._run(lambda: _atspi._collected_address_bar(app_id))
+                    if fresh:
+                        bar_after = fresh
+                if _atspi.location_shows_typed(bar_before, bar_after, text):
+                    return len(text)
             raise _atspi._text_mismatch(
                 "text_mismatch",
                 f"the text read back does not contain {text!r}",
@@ -1431,6 +1529,47 @@ class LinuxDriver:
             expected=value,
             actual=actual,
             formula=formula,
+        )
+
+    def _location_entry(self, app_id: str):
+        """The focused node when it is the address bar, else None."""
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            return self._run(lambda: _atspi.focused_location_entry(app_id))
+        except Exception:  # noqa: BLE001 - unknown focus is not the address bar
+            return None
+
+    def _replace_location_selection(self, handle, text: str, app_id: str | None) -> int:
+        """Replace a urlbar selection that EditableText would not delete."""
+        from a11y_computer_use.drivers import _atspi, _linux_input
+
+        before = self._run(lambda: _atspi._readable_text(handle))
+        _linux_input.type_string(text, delay=0.05)
+        return self._location_read_back(handle, before, text, app_id)
+
+    def _location_read_back(self, handle, before: str | None, text: str, app_id: str | None) -> int:
+        """Confirm ``text`` in the address bar, including a scheme-less omnibox."""
+        from a11y_computer_use.drivers import _atspi
+
+        after = self._run(lambda: _atspi._readable_text(handle))
+        if _atspi.location_shows_typed(before, after, text):
+            return len(text)
+        bar = None
+        if app_id:
+            bar = self._run(lambda: _atspi.address_bar_text(app_id))
+            if bar == after:
+                # The focused wrapper is stale. Collection may hold a fresh one.
+                root_text = self._run(lambda: _atspi._collected_address_bar(app_id))
+                if root_text:
+                    bar = root_text
+        if _atspi.location_shows_typed(before, bar, text):
+            return len(text)
+        raise _atspi._text_mismatch(
+            "text_mismatch",
+            f"the text read back does not contain {text!r}",
+            expected=text,
+            actual=after if after is not None else bar,
         )
 
     def _refuse_xtest_password_focus(self) -> None:

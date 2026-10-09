@@ -310,13 +310,16 @@ class _TempKeymap:
 # --- text ------------------------------------------------------------------
 
 
-def type_string(text: str) -> None:
+def type_string(text: str, *, delay: float | None = None) -> None:
     """Type with a stable keymap and paced keystrokes into the focused element.
 
     Bind the complete text before sending input: midstream MappingNotify events
     race client keymap refreshes. Pace mapped characters as well as Unicode;
     asynchronous input methods can otherwise commit Unicode before preceding
     ASCII that they requeue for the application. Prefer AT-SPI for bulk text.
+    ``delay`` is the pause after each character. The address bar needs a
+    longer one: Chrome's omnibox drops the tail of a URL typed at the
+    default pace.
     """
     if not text:
         return
@@ -341,7 +344,7 @@ def type_string(text: str) -> None:
                 needs_shift = False
             _tap_keycode(keycode, needs_shift)
             _flush()
-            time.sleep(0.012)  # let the client/input method dispatch this character
+            time.sleep(0.012 if delay is None else delay)
     finally:
         if pool is not None:
             pool.restore()

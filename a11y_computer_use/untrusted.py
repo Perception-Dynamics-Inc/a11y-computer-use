@@ -27,8 +27,15 @@ _FENCED = re.compile(
     r"^<untrusted nonce=([^\s>]+)( suspicious=1)?>(.*)</untrusted nonce=\1>\Z",
     re.DOTALL,
 )
-_CLOSER = re.compile(r"</untrusted", re.IGNORECASE)
-_ESCAPED_CLOSER = re.compile(r"&lt;/untrusted", re.IGNORECASE)
+# Openers and closers. A page that emits either one can forge a fence or
+# end one early. Case follows the tag the page wrote.
+_MARKER = re.compile(r"</?untrusted", re.IGNORECASE)
+_ESCAPED_MARKER = re.compile(r"&lt;/?untrusted", re.IGNORECASE)
+# Nonces this process wrapped. A fence is trusted only when its nonce is one
+# of these and its body has no raw marker. Clipboard text that already looks
+# like a fence is not in this set, so it is wrapped again.
+_ISSUED: dict[str, None] = {}
+_ISSUED_MAX = 256
 
 # Phrases that read like instructions to the model. Matched text is marked
 # and still returned in full.
@@ -60,14 +67,56 @@ def looks_like_url(value: str) -> bool:
     return "://" in text or text.startswith(("about:", "data:", "file:", "chrome:", "blob:"))
 
 
+def navigation_url(value: str) -> str | None:
+    """A URL to check, or None when ``value`` is not a navigation target.
+
+    The omnibox often shows the destination without a scheme
+    (``localhost:9/para.html``). That form is still the URL Enter would load.
+    A title or a placeholder is not.
+    """
+    text = value.strip()
+    if not text or any(char.isspace() for char in text):
+        return None
+    if looks_like_url(text):
+        return text
+    if "/" not in text and "." not in text and ":" not in text and text.lower() != "localhost":
+        return None
+    candidate = "http://" + text
+    host = urlparse(candidate).hostname
+    if not host:
+        return None
+    return candidate
+
+
 def escape_untrusted(text: str) -> str:
-    """Escape every closing untrusted tag so it cannot end the fence early."""
-    return _CLOSER.sub(lambda match: "&lt;/" + match.group(0)[2:], text)
+    """Escape every untrusted opener and closer so neither can forge a fence."""
+    return _MARKER.sub(lambda match: "&lt;" + match.group(0)[1:], text)
 
 
 def unescape_untrusted(text: str) -> str:
     """Reverse :func:`escape_untrusted`."""
-    return _ESCAPED_CLOSER.sub(lambda match: "</" + match.group(0)[5:], text)
+    return _ESCAPED_MARKER.sub(lambda match: "<" + match.group(0)[4:], text)
+
+
+def is_browser_chrome_url(url: str) -> bool:
+    """True for browser UI such as the omnibox popup, not a page the user opened.
+
+    ``chrome://settings`` is a page. ``chrome://omnibox-popup.top-chrome/`` is
+    the address-bar popup, and treating it as the document blocks every key.
+    """
+    text = url.strip().lower()
+    if not text:
+        return False
+    if ".top-chrome" in text:
+        return True
+    return text.startswith("chrome:") and "omnibox" in text
+
+
+def _remember_nonce(token: str) -> None:
+    _ISSUED.pop(token, None)
+    _ISSUED[token] = None
+    while len(_ISSUED) > _ISSUED_MAX:
+        _ISSUED.pop(next(iter(_ISSUED)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,23 +131,28 @@ class Fenced:
 def fence(text: str, *, nonce: str | None = None) -> Fenced:
     """Wrap ``text`` in ``<untrusted nonce=…>…</untrusted nonce=…>``.
 
-    A nonce that already occurs in ``text`` is replaced. Any closing tag
-    inside the body is escaped. Text that looks like an instruction is
-    marked ``suspicious=1`` on the opening tag and is not removed. A string
-    that is already fenced is returned as-is, with the flag added when the
-    body matches and the tag did not carry it.
+    A nonce that already occurs in ``text`` is replaced when this function
+    chooses it. Openers and closers inside the body are escaped, so a page
+    cannot end the fence early or open a second one. Text that looks like an
+    instruction is marked ``suspicious=1`` and is not removed.
+
+    A string is returned as-is only when this process issued its nonce and
+    the body contains no raw fence marker. Clipboard or UI text that already
+    looks like a fence is wrapped again, with a new nonce. The flag is added
+    to an issued fence when the body matches and the tag did not carry it.
     """
     existing = _FENCED.match(text)
     if existing is not None:
         found, flag, body = existing.group(1), existing.group(2), existing.group(3)
-        suspicious = flag is not None or looks_like_injection(unescape_untrusted(body))
-        if suspicious and flag is None:
-            text = text.replace(
-                f"<untrusted nonce={found}>",
-                f"<untrusted nonce={found} suspicious=1>",
-                1,
-            )
-        return Fenced(text, suspicious, found)
+        if found in _ISSUED and _MARKER.search(body) is None:
+            suspicious = flag is not None or looks_like_injection(unescape_untrusted(body))
+            if suspicious and flag is None:
+                text = text.replace(
+                    f"<untrusted nonce={found}>",
+                    f"<untrusted nonce={found} suspicious=1>",
+                    1,
+                )
+            return Fenced(text, suspicious, found)
 
     suspicious = looks_like_injection(text)
     token = nonce if nonce else _fresh_nonce(text)
@@ -107,6 +161,7 @@ def fence(text: str, *, nonce: str | None = None) -> Fenced:
     if suspicious:
         attrs += " suspicious=1"
     wrapped = f"<untrusted {attrs}>{body}</untrusted nonce={token}>"
+    _remember_nonce(token)
     return Fenced(wrapped, suspicious, token)
 
 
@@ -274,8 +329,10 @@ __all__ = [
     "escape_untrusted",
     "env_flag",
     "fence",
+    "is_browser_chrome_url",
     "looks_like_injection",
     "looks_like_url",
+    "navigation_url",
     "parse_domain_list",
     "unescape_untrusted",
     "unwrap",

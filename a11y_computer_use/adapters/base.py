@@ -359,7 +359,11 @@ class ComputerAdapter:
         try:
             return fn()
         except ComputerUseError as exc:
-            return Result(action, server.error_text(exc), error=exc.code.value)
+            text = server.error_text(exc)
+            fence = getattr(self.runtime, "_fence_ui", None)
+            if callable(fence):
+                text = fence(text)
+            return Result(action, text, error=exc.code.value)
         except server.ActionRefused as exc:
             return Result(action, server.refusal_text(exc.decision), error="refused")
         except (ValueError, KeyError, TypeError) as exc:

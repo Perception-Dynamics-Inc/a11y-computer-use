@@ -1744,6 +1744,12 @@ class _GeckoNode:
     def get_name(self):
         return self.name
 
+    def get_description(self):
+        return getattr(self, "description", "")
+
+    def get_attributes(self):
+        return getattr(self, "attributes", {})
+
     def get_toolkit_name(self):
         return getattr(self, "toolkit", "")
 
@@ -1824,6 +1830,85 @@ def _firefox_documents():
     }
 
 
+def test_document_url_follows_the_showing_tab_and_skips_browser_chrome(monkeypatch) -> None:
+    """Synthetic trees. The first document is not the page, and an omnibox URL is not either."""
+    from a11y_computer_use.drivers import _atspi
+
+    tree = _firefox_documents()
+    background = tree["products"].parent
+    form = tree["form"]
+    background.description = "http://localhost/para.html"
+    form.description = "http://127.0.0.1/bg.html"
+    panel = tree["panel"]
+    # The hidden tab's scroll pane is listed before the showing one.
+    panel.children = [panel.children[1], panel.children[0], panel.children[2]]
+    for child in panel.children:
+        child.parent = panel
+    assert _atspi.document_url_of(tree["frame"]) == "http://127.0.0.1/bg.html"
+    # Collection is what a live Firefox window answers. The child list can omit
+    # the document that Collection still returns.
+    empty = _GeckoNode("frame", "Bg Page — Mozilla Firefox", ("SHOWING", "VISIBLE"))
+    monkeypatch.setattr(
+        _atspi, "_collected_content_document",
+        lambda root: "http://127.0.0.1/bg.html" if root is empty else None,
+    )
+    assert _atspi.document_url_of(empty) == "http://127.0.0.1/bg.html"
+    monkeypatch.setattr(_atspi, "_collected_content_document", lambda _root: None)
+
+    app = _GeckoNode("application", "Google Chrome")
+    app.toolkit = "Chromium"
+    popup_doc = _GeckoNode("document web", "omnibox", ("SHOWING", "VISIBLE"))
+    popup_doc.description = "chrome://omnibox-popup.top-chrome/"
+    popup_doc.application = app
+    page = _GeckoNode("document web", "Bg Page", ("SHOWING", "VISIBLE"))
+    page.description = "http://127.0.0.1/bg.html"
+    page.application = app
+    button = _GeckoNode("push button", "Same frame button", ("SHOWING", "VISIBLE"))
+    inner = _GeckoNode("document web", "Frame Page", ("SHOWING", "VISIBLE"), [button])
+    inner.description = "http://localhost/frame.html"
+    inner.application = app
+    iframe = _GeckoNode("internal frame", "", ("SHOWING", "VISIBLE"), [inner])
+    iframe.application = app
+    top = _GeckoNode("document web", "Ifr Page", ("SHOWING", "VISIBLE"), [iframe])
+    top.description = "http://127.0.0.1/ifr.html"
+    top.application = app
+    entry = _GeckoNode("entry", "Address and search bar", ("SHOWING", "VISIBLE", "FOCUSED"))
+    entry.text = "http://localhost/para.html"
+    entry.application = app
+    bar = _GeckoNode("tool bar", "", ("SHOWING", "VISIBLE"), [entry])
+    popup = _GeckoNode("frame", "popup", ("SHOWING",), [popup_doc])
+    main = _GeckoNode("frame", "Chrome", ("SHOWING",), [bar, top])
+    for node in (popup, main, bar, entry, popup_doc):
+        node.application = app
+    root = _GeckoNode("application", "Google Chrome", (), [popup, main])
+    root.toolkit = "Chromium"
+    root.application = root
+    assert _atspi.document_url_of(popup) is None
+    assert _atspi.document_url_of(main) == "http://127.0.0.1/ifr.html"
+    assert _atspi.document_url_for(button) == "http://localhost/frame.html"
+    assert _atspi.document_url_for(entry) is None
+    assert _atspi.in_browser_chrome(entry) is True
+    assert _atspi.in_browser_chrome(button) is False
+    assert _atspi.is_location_entry(entry) is True
+    assert _atspi.address_bar_text_under(root) == "http://localhost/para.html"
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app: (entry, False))
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    assert _atspi.address_bar_text("chrome") == "http://localhost/para.html"
+    entry.text = "localhost:9/para.html"
+    assert _atspi.address_bar_text("chrome") == "localhost:9/para.html"
+    page_entry = _GeckoNode("entry", "Bravo", ("SHOWING", "VISIBLE"), )
+    page_entry.text = "http://localhost/nope.html"
+    page_entry.application = app
+    page_entry.parent = top
+    top.children.append(page_entry)
+    assert _atspi.is_location_entry(page_entry) is False
+    page = _GeckoNode("document web", "Bg Page", ("SHOWING", "VISIBLE", "FOCUSED"))
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(_atspi, "_focused_accessibles", lambda _root: [page, entry])
+    assert _atspi.focused_location_entry("chrome") is entry
+    assert _atspi.focus_in_browser_chrome("chrome") is True
+
+
 def test_firefox_hidden_documents_are_pruned_and_not_clickable(monkeypatch) -> None:
     """Synthetic tree. Not a live Firefox. Hidden documents have on-screen bounds
     in the real tree; here the filter is what drops them."""
@@ -1840,6 +1925,20 @@ def test_firefox_hidden_documents_are_pruned_and_not_clickable(monkeypatch) -> N
     tree["new_frame"].states.add("SHOWING")
     tree["new_pane"].states.add("SHOWING")
     assert accessor.children(tree["new_frame"]) == []
+
+    button = _GeckoNode("push button", "Same frame button", ("SHOWING", "VISIBLE"))
+    inner = _GeckoNode("document web", "Frame Page", ("VISIBLE",), [button])
+    inner.description = "http://localhost/frame.html"
+    iframe = _GeckoNode("internal frame", "Same frame", ("VISIBLE",), [inner])
+    top = _GeckoNode("document web", "Ifr Page", ("SHOWING", "VISIBLE"), [iframe])
+    top.description = "http://127.0.0.1/ifr.html"
+    for node in (button, inner, iframe, top):
+        node.application = tree["form"].application
+    assert _atspi.hidden_web_target(inner) is False
+    assert _atspi.hidden_web_target(button) is False
+    assert _atspi._hidden_gecko_browser(iframe) is False
+    assert accessor.children(top) == [iframe]
+    assert accessor.children(inner) == [button]
 
     from a11y_computer_use.schema import Bounds, Element
 
