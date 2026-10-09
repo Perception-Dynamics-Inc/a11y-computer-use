@@ -969,3 +969,100 @@ def test_gtk_launch_handle_names_the_desktop_app(tmp_path, monkeypatch) -> None:
     assert "real-app" in handle["names"]
     assert "RealApp" in handle["names"]
     assert "gtk-launch" not in handle["names"]
+
+
+def _hide_xlib(monkeypatch) -> None:
+    """Make ``import Xlib`` raise, including after the module was already loaded."""
+    import builtins
+    import sys
+
+    real = builtins.__import__
+
+    def blocked(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "Xlib" or name.startswith("Xlib."):
+            raise ModuleNotFoundError("No module named 'Xlib'")
+        return real(name, globals, locals, fromlist, level)
+
+    for key in list(sys.modules):
+        if key == "Xlib" or key.startswith("Xlib."):
+            monkeypatch.delitem(sys.modules, key, raising=False)
+    monkeypatch.setattr(builtins, "__import__", blocked)
+
+
+def _assert_missing_xlib(exc: ComputerUseError) -> None:
+    assert exc.code is ErrorCode.UNSUPPORTED
+    assert exc.detail["reason"] == "missing_dependency"
+    assert exc.detail["module"] == "Xlib"
+    assert exc.detail["hint"] == "pip install python-xlib"
+    assert "python-xlib is not installed" in exc.message
+    assert exc.detail["reason"] != "no_accessibility_bridge"
+    assert exc.detail["reason"] != "no_window"
+
+
+def test_missing_xlib_is_not_an_empty_confirmed_list(tmp_path, monkeypatch) -> None:
+    """A failed Xlib import is one typed error. It is not ``[]`` confirmed,
+    and LibreOffice is not blamed for a missing gtk3 bridge after 15s.
+
+    Synthetic. No display and no LibreOffice process. The registration
+    budget stays at 15s so a wait would show up in the elapsed time.
+    """
+    import time
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.doctor import _check_window_manager
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Scope
+
+    _hide_xlib(monkeypatch)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+
+    with pytest.raises(ComputerUseError) as apps:
+        _linux_system.running_apps()
+    _assert_missing_xlib(apps.value)
+    with pytest.raises(ComputerUseError) as wins:
+        _linux_system.windows()
+    _assert_missing_xlib(wins.value)
+
+    doctor = _check_window_manager()
+    assert doctor["ok"] is False
+    assert doctor["detail"].startswith("python-xlib is not installed")
+    assert "no EWMH window manager" not in doctor["detail"]
+    assert doctor["fix"] == "pip install python-xlib"
+
+    driver = LinuxDriver()
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("shell", safety.Tier.READ)
+    store.set_tier("LibreOffice", safety.Tier.READ)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "shell")
+
+    with pytest.raises(ComputerUseError) as listed_apps:
+        runtime.app("list")
+    _assert_missing_xlib(listed_apps.value)
+    with pytest.raises(ComputerUseError) as listed_windows:
+        runtime.window("list")
+    _assert_missing_xlib(listed_windows.value)
+
+    monkeypatch.setattr(server, "_running_app", lambda ident: (None, ident))
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as keyed:
+        runtime.key("pagedown", app="soffice")
+    assert time.monotonic() - started < 2
+    _assert_missing_xlib(keyed.value)
+
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: True)
+    monkeypatch.setattr(_atspi, "ATSPI_REGISTER_WAIT_S", 15.0)
+    monkeypatch.setattr(driver, "ensure_trusted", lambda: None)
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as found:
+        runtime.find("LibreOffice", text="SECOND-SLIDE")
+    assert time.monotonic() - started < 2
+    _assert_missing_xlib(found.value)
+
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as snap:
+        driver.snapshot(Scope.WINDOW, "LibreOffice")
+    assert time.monotonic() - started < 2
+    _assert_missing_xlib(snap.value)

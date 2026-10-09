@@ -24,15 +24,41 @@ import subprocess
 import time
 from contextlib import contextmanager
 
+from a11y_computer_use.schema import ComputerUseError
+
 
 # ---------------------------------------------------------------------------
 # X / EWMH plumbing (python-xlib, lazily imported)
 # ---------------------------------------------------------------------------
 
 
-def _display():
-    from Xlib import display as _xd
+def missing_xlib(exc: BaseException):
+    """Typed error for a process that cannot import python-xlib.
 
+    An empty app or window list used to be ``confirmed`` in this case, and a
+    LibreOffice snapshot waited out the registration budget and then blamed
+    the gtk3 bridge. The hint names the package a plain install already
+    depends on when the marker is honored.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "python-xlib is not installed, so X11 windows cannot be listed",
+        detail={
+            "reason": "missing_dependency",
+            "module": "Xlib",
+            "hint": "pip install python-xlib",
+            "error": str(exc),
+        },
+    )
+
+
+def _display():
+    try:
+        from Xlib import display as _xd
+    except ImportError as exc:
+        raise missing_xlib(exc) from exc
     return _xd.Display()
 
 
@@ -287,7 +313,10 @@ def frontmost_app_id() -> str:
 
     This is the process comm only. A window with no pid is not a frontmost
     app here, even when ``active_window`` can still name it by WM_CLASS.
+    A missing python-xlib is an error, not an empty frontmost app.
     """
+    from a11y_computer_use.schema import ComputerUseError
+
     try:
         with _open_display() as d:
             active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
@@ -295,6 +324,8 @@ def frontmost_app_id() -> str:
                 return ""
             win = d.create_resource_object("window", int(active[0]))
             return _comm_for_pid(_pid_of(win, d)) or ""
+    except ComputerUseError:
+        raise
     except Exception:
         return ""
 
@@ -320,6 +351,8 @@ def active_window() -> dict | None:
                 "pid": pid,
                 "title": _win_title(win, d),
             }
+    except ComputerUseError:
+        raise
     except Exception:
         return None
 
@@ -336,6 +369,8 @@ def _top_window_pid(x: float, y: float) -> int | None:
                 if gx <= x < gx + gw and gy <= y < gy + gh:
                     pid = _pid_of(win, d)
                     return int(pid) if pid else None
+    except ComputerUseError:
+        raise
     except Exception:
         return None
     return None
@@ -457,6 +492,8 @@ def resolve_app(identifier: str) -> str:
                     title = _win_title(win, d).lower()
                     if any(name and name in title for name in _identity_needles(identifier)):
                         by_title = comm
+    except ComputerUseError:
+        raise
     except Exception:
         pass
     return by_class or by_title or identifier
@@ -487,13 +524,21 @@ def pids_matching(identifier: str) -> set[int]:
                 comm = (_comm_for_pid(pid) or "").lower()
                 if _comm_matches_identifier(identifier, comm):
                     pids.add(pid)
+    except ComputerUseError:
+        raise
     except Exception:
         pass
     return pids
 
 
 def running_apps() -> list[dict]:
-    """Distinct apps with managed windows: {name, pid, frontmost}."""
+    """Distinct apps with managed windows: {name, pid, frontmost}.
+
+    A missing python-xlib raises ``missing_dependency``. It is not an empty
+    list: callers were reporting that list as confirmed.
+    """
+    from a11y_computer_use.schema import ComputerUseError
+
     out: list[dict] = []
     try:
         with _open_display() as d:
@@ -508,6 +553,8 @@ def running_apps() -> list[dict]:
                 seen.add(comm)
                 out.append({"bundle_id": comm, "name": comm, "pid": pid,
                             "frontmost": int(win.id) == active_id})
+    except ComputerUseError:
+        raise
     except Exception:
         return out
     return out
@@ -524,10 +571,14 @@ def windows() -> list[dict]:
     rect it had before it was iconified. ``bounds`` is the client window
     (inside the frame), the same origin ``move_window`` places.
     """
+    from a11y_computer_use.schema import ComputerUseError
+
     rows: list[dict] = []
     try:
         with _open_display() as d:
             rows = _window_rows(d)
+    except ComputerUseError:
+        raise
     except Exception:
         return rows
     return rows
@@ -579,6 +630,8 @@ def window_owner(window_id: int) -> str | None:
             if win is None:
                 return None
             return _app_id(win, d, settle=True)
+    except ComputerUseError:
+        raise
     except Exception:
         return None
 

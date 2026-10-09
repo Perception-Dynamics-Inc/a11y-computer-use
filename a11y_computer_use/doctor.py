@@ -339,6 +339,13 @@ def _check_window_manager() -> CheckResult:
             except Exception:
                 pass
         return {"check": "window_manager", "ok": True, "detail": f"EWMH window manager: {wm}", "fix": None}
+    except ImportError as exc:
+        return {
+            "check": "window_manager",
+            "ok": False,
+            "detail": f"python-xlib is not installed ({exc})",
+            "fix": "pip install python-xlib",
+        }
     except Exception as exc:  # noqa: BLE001 — failures are data
         return {
             "check": "window_manager",

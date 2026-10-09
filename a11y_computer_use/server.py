@@ -3830,7 +3830,11 @@ class Runtime:
         _running, bundle = self._resolve_app(identifier)
         try:
             rows = list(self.driver.windows() or [])
-        except (ComputerUseError, AttributeError, OSError):
+        except ComputerUseError as exc:
+            if (exc.detail or {}).get("reason") == "missing_dependency":
+                raise
+            rows = []
+        except (AttributeError, OSError):
             rows = []
         pids = _atspi_pids_for(identifier)
         # A launcher alias (google-chrome → chrome) may be the name on the bus.

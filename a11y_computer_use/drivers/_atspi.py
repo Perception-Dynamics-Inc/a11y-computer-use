@@ -1888,10 +1888,13 @@ def find_root(app: str, scope) -> object | None:
     # "cuatestapp"), while the Linux app id used for permissions is the window
     # owner's comm (e.g. "python3"); match by PID as well as by name so an id
     # resolved from X11 finds the same application on the a11y bus.
-    try:
-        from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
 
+    try:
         pids = _linux_system.pids_matching(app)
+    except ComputerUseError:
+        raise
     except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
         pids = set()
     best = None
@@ -3090,9 +3093,12 @@ def app_listed(identifier: str) -> bool:
     if not (identifier or "").strip():
         return False
     from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.schema import ComputerUseError
 
     try:
         apps = _linux_system.running_apps()
+    except ComputerUseError:
+        raise
     except Exception:
         apps = []
     for row in apps or []:
@@ -3103,6 +3109,8 @@ def app_listed(identifier: str) -> bool:
             return True
     try:
         rows = _linux_system.windows()
+    except ComputerUseError:
+        raise
     except Exception:
         rows = []
     for row in rows or []:

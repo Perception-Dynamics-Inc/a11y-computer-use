@@ -381,8 +381,8 @@ request replays the tool calls the model just made.
 environment variables are in `docs/agent-models.md`. A bad spec or a missing
 key raises `ModelError`. HTTP clients are an optional extra
 (`pip install 'a11y-computer-use[agent]'`). On Linux the desktop backend also
-needs PyGObject and python-xlib, which the `linux` extra names, plus the
-system AT-SPI packages:
+needs PyGObject, which the `linux` extra names. python-xlib is already a
+core dependency on Linux. The AT-SPI typelib is a system package:
 
 ```bash
 pip install 'a11y-computer-use[agent,linux]'
