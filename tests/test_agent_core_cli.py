@@ -122,6 +122,21 @@ def test_approve_and_auto_deny_together_exit_3(capsys):
     assert isinstance(payload["step_log"], list)
 
 
+def test_allow_exec_flag_is_off_unless_passed(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    off = cli._build_parser().parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    on = cli._build_parser().parse_args([
+        "run", "goal", "--model", f"scripted:{script}", "--allow-exec",
+        "--trace-dir", str(tmp_path / "trace"),
+    ])
+    assert off.allow_exec is False
+    assert on.allow_exec is True
+    agent = cli.build_agent(on)
+    assert agent.allow_exec is True
+    assert cli.build_agent(off).allow_exec is False
+
+
 def test_missing_model_exits_3():
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", "a goal"])

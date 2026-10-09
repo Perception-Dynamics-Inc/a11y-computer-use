@@ -49,6 +49,7 @@ def build_agent(args: argparse.Namespace):
         max_time_s=args.max_time_s,
         approve=approve,
         auto_deny=auto_deny,
+        allow_exec=bool(getattr(args, "allow_exec", False)),
         trace_dir=args.trace_dir,
     )
 
@@ -75,8 +76,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-time", type=float, default=900.0, dest="max_time_s", help="wall-clock budget in seconds")
     run.add_argument("--trace-dir", default=None, dest="trace_dir", help="directory for trajectory.jsonl and screenshots")
     run.add_argument("--json", action="store_true", help="print the result as one JSON object on stdout")
-    run.add_argument("--approve", action="store_true", help="prompt before quit, close, and submit")
-    run.add_argument("--auto-deny", action="store_true", help="skip quit, close, and submit (this is the default)")
+    run.add_argument("--approve", action="store_true", help="prompt before quit, close, submit, and exec")
+    run.add_argument("--auto-deny", action="store_true", help="skip quit, close, submit, and exec (this is the default)")
+    run.add_argument(
+        "--allow-exec",
+        action="store_true",
+        dest="allow_exec",
+        help="expose shell and python tools; each call is still approved or auto-denied",
+    )
     return parser
 
 
