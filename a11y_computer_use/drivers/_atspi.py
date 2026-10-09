@@ -2988,6 +2988,35 @@ def sheet_cell_matches(acc, value: str) -> bool:
     return formula == value or formula == wanted or ("=" + formula) == value
 
 
+def sheet_outcome_text(app: str, requested: str, cell=None) -> str | None:
+    """Read-back for a Calc type or set_value, or None to keep the snapshot value.
+
+    An open cell editor's paragraph is the in-progress type. A committed
+    formula is that formula, not the number the cell displays. A snapshot
+    value that already equals the request is left alone.
+    """
+    if not requested or not libreoffice_app(app or ""):
+        return None
+    # The focused node during a type is often the editor paragraph, not the
+    # cell. The paragraph is what holds the characters before Return.
+    editor = sheet_editor_text(app)
+    if editor:
+        normalized = _field_text_for_type(editor, requested)
+        if normalized and _typed_visible("", editor, requested):
+            return normalized
+    sheet = cell is not None and is_sheet_cell(cell)
+    if not sheet:
+        return None
+    shown = _full_text(cell)
+    if shown == requested:
+        return None
+    if not sheet_cell_matches(cell, requested):
+        return None
+    if not _sheet_formula(cell):
+        return None
+    return requested
+
+
 def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 

@@ -5091,6 +5091,103 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_sheet_outcome_reads_the_editor_or_the_formula_not_the_display(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic cell. The displayed number is not the formula read-back."""
+    cell = _Acc("table cell", name="F2")
+    cell.text = "42"
+    cell.get_attributes = lambda: {"formula": "E2+31"}
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    assert _atspi.sheet_outcome_text("soffice.bin", "=E2+31", cell) == "=E2+31"
+    assert _atspi.sheet_outcome_text("soffice.bin", "42", cell) is None
+    assert _atspi.sheet_outcome_text("soffice.bin", "=Z9", cell) is None
+    assert _atspi.sheet_outcome_text("gedit", "=E2+31", cell) is None
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: "Résumé ✓")
+    assert _atspi.sheet_outcome_text("soffice.bin", "Résumé ✓", cell) == "Résumé ✓"
+    plain = _Acc("table cell", name="D1")
+    plain.text = "setv"
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    assert _atspi.sheet_outcome_text("soffice.bin", "setv", plain) is None
+
+
+def test_outcome_confirms_a_calc_formula_the_cell_displays_as_a_number(
+    fake_atspi, monkeypatch
+) -> None:
+    """The snapshot value is the computed number. The outcome uses the formula."""
+    from a11y_computer_use import outcome, server
+    from a11y_computer_use.schema import Display, Snapshot
+
+    cell = _Acc("table cell", name="F2")
+    cell.text = "42"
+    cell.get_attributes = lambda: {"formula": "E2+31"}
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
+    element = Element(
+        "e2", "AXCell", "F2", "42", Bounds(0, 10, 10, 40, 16), "after",
+        path=("AXWindow", "AXCell"),
+    )
+    before_el = Element(
+        "e2", "AXCell", "F2", "", Bounds(0, 10, 10, 40, 16), "before",
+        path=("AXWindow", "AXCell"),
+    )
+
+    class _Driver:
+        name = "linux"
+
+        def snapshot(self, scope, app):
+            del scope, app
+            return Snapshot(
+                snapshot_id="after",
+                scope=Scope.WINDOW,
+                app="soffice.bin",
+                pid=1,
+                created_at=0.0,
+                displays=(Display(0, 800, 600, 1.0, True),),
+                elements=(element,),
+            )
+
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime.driver = _Driver()
+    runtime._current = before_el
+    before = {
+        "snap": Snapshot(
+            snapshot_id="before",
+            scope=Scope.WINDOW,
+            app="soffice.bin",
+            pid=1,
+            created_at=0.0,
+            displays=(Display(0, 800, 600, 1.0, True),),
+            elements=(before_el,),
+        ),
+        "state": "before",
+        "bounds": "before",
+        "pid": 1,
+        "app": "soffice.bin",
+        "pid_alive": False,
+    }
+    judged, evidence = runtime._judge_mutation(
+        "soffice.bin", before, before_el, "=E2+31", previous="",
+    )
+    assert judged == "confirmed", evidence
+    assert evidence == "read back '=E2+31'"
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: "Résumé ✓")
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: None)
+    typed, typed_evidence = runtime._judge_mutation(
+        "soffice.bin", before, None, "Résumé ✓", previous="",
+    )
+    assert typed == "confirmed", typed_evidence
+    assert "Résumé ✓" in typed_evidence
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
+    untouched, untouched_evidence = runtime._judge_mutation(
+        "soffice.bin", before, before_el, "=Z9", previous="",
+    )
+    assert untouched == "partial"
+    assert "42" in untouched_evidence
+    assert outcome.judge(changed=False, requested="=Z9", readback="42", before_value="")[0] == "partial"
+
+
 def test_huge_calc_table_uses_accessible_at(fake_atspi) -> None:
     """Synthetic table. Child count is INT_MAX; row-major children are not the cells."""
 

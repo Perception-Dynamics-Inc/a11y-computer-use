@@ -2255,18 +2255,28 @@ class Runtime:
                 changed = before["bounds"] != outcome.bounds_fingerprint(after)
         readback = None
         before_value = previous
+        anchor = None
         if requested is not None and after is not None:
             if element is not None:
-                match = self._element_like(element, after)
-                if match is not None:
-                    readback = "" if match.value is None else str(match.value)
+                anchor = self._element_like(element, after)
             else:
-                focused = self._focused_editable(after)
+                anchor = self._focused_editable(after)
                 earlier = self._focused_editable(before["snap"]) if before else None
-                if focused is not None:
-                    readback = "" if focused.value is None else str(focused.value)
                 if before_value is None and earlier is not None:
                     before_value = "" if earlier.value is None else str(earlier.value)
+            if anchor is not None:
+                readback = "" if anchor.value is None else str(anchor.value)
+            if getattr(self.driver, "name", None) == "linux":
+                from a11y_computer_use import observe
+                from a11y_computer_use.drivers import _atspi
+
+                if _atspi.libreoffice_app(app or ""):
+                    handle = None
+                    if anchor is not None:
+                        handle = observe.ax_handle_for(anchor.snapshot_id, anchor.ref)
+                    better = _atspi.sheet_outcome_text(app or "", requested, handle)
+                    if better is not None:
+                        readback = better
             if readback is None:
                 readable = False
         return outcome.judge(
