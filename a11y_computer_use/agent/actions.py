@@ -486,7 +486,9 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         '{"element": {"role", "name"}}, {"value": {"ref" or "name", "equals"}}, '
         '{"window_title_contains": text}, {"file_exists": path, "contains"?: text}. '
         "When the goal saves or creates a file, include file_exists, and contains "
-        "when the text is known. A window title alone does not prove a file was written.",
+        "when the text is known. contains on .odt, .ods, .docx, and .xlsx reads "
+        "the document text inside the zip, not the raw bytes. A window title "
+        "alone does not prove a file was written.",
         {
             "answer": _STR,
             "conditions": {

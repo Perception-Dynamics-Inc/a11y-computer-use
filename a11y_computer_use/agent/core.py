@@ -95,8 +95,9 @@ conditions the loop can see: an element role and name, a field value, a window
 title, or a file on disk. A condition that fails is rejected and you must
 continue. Do not claim success without one of those checks. When the goal
 saves or creates a file, one condition must be file_exists for that path,
-and it must include contains when the goal names the text. A window title
-is not evidence that the file was written.
+and it must include contains when the goal names the text. contains on
+.odt, .ods, .docx, and .xlsx reads the document text inside the zip, not
+the raw bytes. A window title is not evidence that the file was written.
 
 Each action result includes outcome (confirmed, suspected_noop, unverifiable,
 partial, or refused), evidence, and next. Follow next when outcome is not
@@ -1610,13 +1611,76 @@ def _file_condition(condition: dict) -> tuple[bool, str]:
     if not path:
         return False, "file exists but its path was not reported"
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            body = handle.read()
+        body = _file_text(path)
     except OSError as exc:
         return False, f"file exists but could not be read: {exc}"
     if str(contains) not in body:
         return False, f"file {path} does not contain {contains!r}"
     return True, f"{matched}; contains {contains!r}"
+
+
+_OFFICE_SUFFIXES = {".odt", ".ods", ".docx", ".xlsx"}
+
+
+def _file_text(path: str) -> str:
+    """Text ``contains`` searches.
+
+    Plain files are the raw bytes decoded as UTF-8. ``.odt`` and ``.ods``
+    contribute ``content.xml``. ``.docx`` contributes ``word/document.xml``.
+    ``.xlsx`` contributes ``xl/sharedStrings.xml`` and the sheet XML. A file
+    with one of those suffixes that is not that zip is read as plain text.
+    """
+    suffix = Path(path).suffix.lower()
+    if suffix in _OFFICE_SUFFIXES:
+        extracted = _office_document_text(path, suffix)
+        if extracted is not None:
+            return extracted
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
+def _office_document_text(path: str, suffix: str) -> str | None:
+    """Document text of a zipped office file, or None when it is not one."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            parts = _office_xml_parts(names, suffix)
+            if not parts:
+                return None
+            chunks: list[str] = []
+            for name in parts:
+                chunks.append(_xml_text(archive.read(name)))
+    except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError):
+        return None
+    return "\n".join(chunks)
+
+
+def _office_xml_parts(names: set[str], suffix: str) -> list[str]:
+    """XML members whose text is the document, in read order."""
+    if suffix in {".odt", ".ods"}:
+        return ["content.xml"] if "content.xml" in names else []
+    if suffix == ".docx":
+        return ["word/document.xml"] if "word/document.xml" in names else []
+    if suffix == ".xlsx":
+        parts: list[str] = []
+        if "xl/sharedStrings.xml" in names:
+            parts.append("xl/sharedStrings.xml")
+        parts.extend(sorted(
+            name for name in names
+            if name.startswith("xl/worksheets/") and name.endswith(".xml")
+        ))
+        return parts
+    return []
+
+
+def _xml_text(data: bytes) -> str:
+    """Character data of an XML document, in order, with the tags removed."""
+    import xml.etree.ElementTree as ET
+
+    return "".join(ET.fromstring(data).itertext())
 
 
 def forced_method(
