@@ -486,6 +486,10 @@ class LinuxDriver:
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
+        # ``find`` sets this around one snapshot so a GTK table row that is
+        # still off screen can be scrolled into the tree. A plain snapshot
+        # leaves it empty and does not move the view.
+        self._table_seek: str | None = None
 
     def _run(self, fn):
         """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
@@ -612,6 +616,7 @@ class LinuxDriver:
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
+            accessor._table_seek = self._table_seek
             return observe.build_snapshot(
                 root, accessor, scope=scope, app=resolved, pid=pid,
                 geometry=_atspi.primary_geometry(),

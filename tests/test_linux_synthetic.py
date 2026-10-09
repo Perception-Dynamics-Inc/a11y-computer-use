@@ -6531,3 +6531,303 @@ def test_sixty_scrolls_toward_item_0400_are_not_rows_stale(
     assert painted[0] == "ITEM-0301"
     assert "ITEM-0329" in painted
     assert "ITEM-0400" not in painted
+
+def _bind_gtk_app(node: _Acc) -> _Acc:
+    """Toolkit ``gtk`` so the table is not Qt, Chromium, or Firefox."""
+    app = getattr(node, "_gtk_app", None)
+    if app is None:
+        app = _Acc("application", name="treeprobe")
+        app.get_toolkit_name = lambda: "gtk"
+        node._gtk_app = app
+    node.get_application = lambda: app
+    return node
+
+
+def _gtk_tree_page():
+    """Synthetic 300×2 GTK tree. Not a live window.
+
+    Twenty rows fit in the 484px body. Cells outside that run sit at the
+    GTK off-screen sentinel. Child 0 is a column header, so a walk that
+    stops at child 250 never reaches row 281.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=180, height=24)
+        for name in ("Name", "Value")
+    ]
+    cells = [
+        [_Acc("table cell", name=f"ROW-{row:05d}" if col == 0 else f"val{row}", width=180, height=23)
+         for col in range(2)]
+        for row in range(300)
+    ]
+    action = _NS(get_n_actions=lambda: 1, get_action_name=lambda _index: "activate")
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+    ordered: list[_Acc] = list(headers)
+    for row in range(300):
+        for col in range(2):
+            cell = cells[row][col]
+            cell.get_action_iface = lambda action=action: action
+            cell.get_index_in_parent = lambda row=row, col=col: 2 + row * 2 + col
+            ordered.append(cell)
+    for index, header in enumerate(headers):
+        header.get_index_in_parent = lambda index=index: index
+    _adopt(table, *ordered)
+
+    def place(head: int) -> None:
+        state["head"] = head
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for row in range(300):
+            on_screen = head <= row < head + 20
+            for col in range(2):
+                y = 124 + (row - head) * 23 if on_screen else -2147483648
+                x = 110 + col * 200 if on_screen else -2147483648
+                _place_row(cells[row][col], x, y, 180, 23)
+
+    def scroll_to(_scroll_type, row: int) -> bool:
+        place(row)
+        return True
+
+    for row in range(300):
+        for col in range(2):
+            cells[row][col].component.scroll_to = lambda _scroll_type, row=row: scroll_to(_scroll_type, row)
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 124:
+            return headers[0]
+        slot = (y - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= 300:
+            return None
+        return cells[row][0]
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: 300
+    table.get_n_columns = lambda: 2
+    table.get_accessible_at = lambda row, col: cells[row][col]
+    table.get_column_header = lambda col: headers[col]
+
+    def row_at_index(index: int) -> int:
+        if index < 2:
+            return -1
+        return (index - 2) // 2
+
+    table.get_row_at_index = row_at_index
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    _bind_gtk_app(window)
+    _bind_gtk_app(scroll)
+    # Share the application the table already bound.
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place
+
+
+def _wire_gtk_tree(monkeypatch, window) -> LinuxDriver:
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: window)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    driver.menu_state = lambda _app: {"open": False, "path": []}
+    return driver
+
+
+def _gtk_row_titles(snap) -> list[str]:
+    return [el.title for el in snap.elements if el.title.startswith("ROW-")]
+
+
+def test_scrolled_gtk_tree_lists_the_painted_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic 300-row GTK tree, not a live window.
+
+    At the top the painted run is ROW-00000 through ROW-00019. After the
+    view moves to row 281, those cells are past child 250 and the rows
+    that were on screen are at the GTK sentinel. The snapshot lists the
+    painted run, including both columns, and does not drop the tail under
+    the dense child cap.
+    """
+    window, _table, _state, place = _gtk_tree_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    top = driver.snapshot(Scope.WINDOW, "treeprobe")
+    titles = _gtk_row_titles(top)
+    assert titles[0] == "ROW-00000"
+    assert "ROW-00019" in titles
+    assert "ROW-00020" not in titles
+    assert "val0" in [el.title for el in top.elements]
+    assert "Name" in [el.title for el in top.elements]
+    _assert_no_elision(top)
+    assert observe.interactive_count(top) > 0
+    place(281)
+    painted = driver.snapshot(Scope.WINDOW, "treeprobe")
+    late = _gtk_row_titles(painted)
+    assert "ROW-00281" in late
+    assert "ROW-00293" in late
+    assert "ROW-00299" in late
+    assert "ROW-00000" not in late
+    assert "val293" in [el.title for el in painted.elements]
+    _assert_no_elision(painted)
+    assert observe.interactive_count(painted) > 0
+    from a11y_computer_use import server
+
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    text = runtime.desktop_snapshot("treeprobe")
+    assert "ROW-00293" in text
+    assert "custom-drawn" not in text
+
+
+def test_find_reaches_a_gtk_tree_row_that_is_off_screen(fake_atspi, monkeypatch) -> None:
+    """Synthetic 300-row GTK tree, not a live window.
+
+    ROW-00293 is off screen at the top. ``find`` reads it through the Table
+    interface, scrolls it into view, and returns the on-screen cell.
+    ``scroll_to_find`` matches that cell once it is already painted, and a
+    name the table does not have does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, _table, state, place = _gtk_tree_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert "ROW-00000" in opening
+    assert "ROW-00293" not in opening
+    missed = runtime.find("treeprobe", text="ROW-00999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="row-00293")
+    assert "ROW-00293" in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    assert "ROW-00293" in _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    place(281)
+    landed = runtime.scroll_to_find("treeprobe", text="ROW-00293", max_scrolls=0)
+    assert landed.startswith("found after 0 scroll")
+    assert "ROW-00293" in landed
+
+
+def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupported(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic tree. GTK ``scroll_to`` returns false, including on screen.
+
+    The vertical bar is a pixel Value. ``find`` sets it from the row index
+    and the painted run then contains the name. Not a live window.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _gtk_tree_page()
+    for child in table.children:
+        if child.component is not None:
+            child.component.scroll_to = lambda *_args, **_kwargs: False
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * 299))
+        place(max(0, min(head, 299)))
+        return True
+
+    bar.on_value = on_value
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-00293")
+    assert "ROW-00293" in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    assert bar.value > 5000
+
+
+def test_short_gtk_tree_keeps_the_index_walk(fake_atspi, monkeypatch) -> None:
+    """Synthetic 5-row tree, not a live window. The visible-span walk is not used."""
+    table = _Acc("table", name="Rows", width=200, height=140)
+    _bind_gtk_app(table)
+    table.get_n_rows = lambda: 5
+    table.get_n_columns = lambda: 1
+    rows = []
+    for index, name in enumerate(("Row A", "Row B", "Row C", "Row D", "Row E")):
+        row = _Acc("table cell", name=name, width=180, height=20)
+        _place_row(row, 10, 20 + index * 20, 180, 20)
+        rows.append(row)
+    _adopt(table, *rows)
+    _place_row(table, 10, 10, 200, 140)
+
+    def boom(*_args):
+        raise AssertionError("a short tree was hit-tested")
+
+    table.component.get_accessible_at_point = boom
+    window = _Acc("frame", name="short", width=400, height=300)
+    _place_row(window, 0, 0, 400, 300)
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    titles = [el.title for el in driver.snapshot(Scope.WINDOW, "short").elements]
+    for name in ("Row A", "Row B", "Row C", "Row D", "Row E"):
+        assert name in titles
+
+
+def test_header_only_table_still_adds_its_body_cells(fake_atspi) -> None:
+    """Synthetic file list. No on-screen span, so the body still comes from the Table."""
+    header = _Acc("table column header", name="Name")
+    cells = [_Acc("table cell", name=f"file-{index}") for index in range(40)]
+    table = _Acc("table", name="Files")
+    _bind_gtk_app(table)
+    table.get_n_rows = lambda: 40
+    table.get_n_columns = lambda: 1
+    table.get_accessible_at = lambda row, _col: cells[row]
+    _adopt(table, header)
+    names = [kid.get_name() for kid in _atspi.ATSPIAccessor().children(table)]
+    assert names[0] == "Name"
+    assert "file-0" in names
+    assert "file-39" in names
+
+
+def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> None:
+    """Synthetic Qt grid, not a live Qt window. The GTK span walk is not used."""
+    table = _Acc("table", name="grid", width=200, height=400)
+    app = _Acc("application", name="qtprobe")
+    app.get_toolkit_name = lambda: "Qt"
+    table.get_application = lambda: app
+    table.get_n_rows = lambda: 40
+    table.get_n_columns = lambda: 1
+    rows = []
+    for index in range(40):
+        row = _Acc("table cell", name=f"R{index}", width=180, height=16)
+        _place_row(row, 8, 8 + index * 16, 180, 16)
+        rows.append(row)
+    _adopt(table, *rows)
+    _place_row(table, 8, 8, 200, 400)
+
+    def boom(*_args):
+        raise AssertionError("a Qt table was hit-tested as a GTK tree")
+
+    table.component.get_accessible_at_point = boom
+    window = _Acc("frame", name="qtprobe", width=400, height=700)
+    _place_row(window, 0, 0, 400, 700)
+    window.get_application = lambda: app
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    titles = [el.title for el in driver.snapshot(Scope.WINDOW, "qtprobe").elements]
+    assert "R0" in titles
+    assert "R11" in titles
