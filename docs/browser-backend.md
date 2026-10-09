@@ -40,13 +40,15 @@ JSONL audit, the same MCP surface.
 | Pixel fallback     | `Input.dispatchMouseEvent` (mouse/wheel), the vision path, viewport-mapped     |
 | Capture            | `Page.captureScreenshot` (+ `clip` for zoom), `captureBeyondViewport`           |
 | Navigate           | `launch_app(url)` = `Page.navigate` + wait for `document.readyState=="complete"` (load-aware, no fixed sleep). The browser analog of launching an app, so the existing `app` tool drives it with no new MCP surface |
-| Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document (same-process frames; cross-origin OOPIF skipped, never fatal) |
+| Iframes            | child frames stitched in: `getFrameTree` → per-frame `getFullAXTree` grafted under the owner `Iframe` node, geometry offset into the top document. A cross-origin (out-of-process) iframe is a separate target: `Target.setAutoAttach` with flatten reads that session's tree and layout, and the iframe element's box is the origin. A frame that still cannot be read is skipped, so one detached iframe does not fail the snapshot |
 | Tabs               | page targets are modelled as apps/windows (`running_apps`/`windows`/`activate_app`) |
 | Console            | `console` tool (browser-only, tier `read`): console output + uncaught JS exceptions from `Runtime.consoleAPICalled`/`exceptionThrown`/`Log.entryAdded`. This is how the agent verifies an action worked, which a screenshot cannot show |
 | Network            | `network` tool (browser-only, tier `read`): completed request outcomes (status codes + failures) from `Network.responseReceived`/`loadingFailed`, joined by `requestId` ("did that POST return 200?"); the session event buffer is bounded so busy pages can't grow it |
 
 `stable_id` is the backend DOM node id (stable across snapshots within a page,
-not across navigations). `BrowserDriver.resolve_ref` delegates to the shared
+not across navigations). A node inside an out-of-process iframe prefixes the
+CDP session id (`session:backend`) so it does not collide with a parent node
+that reused the same backend id. `BrowserDriver.resolve_ref` delegates to the shared
 `observe.rematch_ref`, whose matcher tries an exact (`stable_id`, role) match
 first, so a ref survives relayout and label changes while its DOM node persists.
 When that node is gone, the shared title/path/bounds ladder applies and may raise

@@ -789,15 +789,22 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
         # below still all have to be present; this only waits longer.
         deadline = time.monotonic() + 45
         snap = None
+        last_note = ""
         while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the form was exposed"
+                )
             try:
                 shot = driver.snapshot(Scope.WINDOW, "chrome")
             except ComputerUseError as exc:
                 if exc.code is not ErrorCode.APP_NOT_FOUND:
                     raise
+                last_note = exc.message
                 shot = None
             else:
                 rendered = observe.render_text(shot)
+                last_note = rendered[:400]
                 if (
                     "Kazakhstan" in rendered and "Italic toggle" in rendered
                     and "Seats" in rendered and "Guests" in rendered and "Colors" in rendered
@@ -806,7 +813,7 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
                     snap = shot
                     break
             time.sleep(0.5)
-        assert snap is not None, "Chrome did not expose the form through AT-SPI"
+        assert snap is not None, f"Chrome did not expose the form through AT-SPI\n{last_note}"
         rendered = observe.render_text(snap)
         assert "\ufffc" not in rendered, rendered
         assert "Kazakhstan" in rendered
@@ -2523,3 +2530,118 @@ def test_linux_click_that_exits_the_process_is_not_confirmed(tmp_path) -> None:
         assert proc.poll() is not None
     finally:
         _stop(proc)
+
+
+def _serve_html(html: str):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Quiet(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = self.server.html.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt, *args):
+            return
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Quiet)
+    httpd.html = html
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd
+
+
+def test_linux_chrome_cross_origin_iframe_checkbox(tmp_path) -> None:
+    """Click a checkbox inside a cross-origin iframe and read checked back.
+
+    The parent is ``http://127.0.0.1`` and the child is ``http://localhost``
+    on another port, so Chrome puts the child in an out-of-process iframe.
+    Released 0.4.45 already walks that frame on the AT-SPI path. This test
+    keeps that walk: no debugging port, and no third-party captcha host.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the cross-origin iframe test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    child = _serve_html(
+        "<!doctype html><meta charset=utf-8><title>oopif-child</title>"
+        "<label><input id=agree type=checkbox aria-label=Agree> Agree</label>"
+        "<button id=go type=button>InnerGo</button>"
+    )
+    child_port = child.server_address[1]
+    parent = _serve_html(
+        "<!doctype html><meta charset=utf-8><title>oopif-parent</title>"
+        "<button id=outer type=button>OuterBtn</button>"
+        f"<iframe title=guest src=\"http://localhost:{child_port}/\" "
+        "width=480 height=260></iframe>"
+    )
+    parent_port = parent.server_address[1]
+    profile = tmp_path / "chrome-oopif-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            f"http://127.0.0.1:{parent_port}/",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        box = None
+        shot = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the iframe checkbox was exposed"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                found = [
+                    el for el in shot.elements
+                    if el.title == "Agree" and el.role == "AXCheckBox"
+                ]
+                titles = {el.title for el in shot.elements}
+                if found and "OuterBtn" in titles and "InnerGo" in titles:
+                    box = found[0]
+                    break
+            time.sleep(0.5)
+        assert box is not None, [
+            (el.role, el.title, el.checked) for el in (shot.elements if shot else [])
+        ]
+        assert box.checked is not True
+        runtime = _runtime_for(tmp_path, driver, "chrome")
+        runtime._current = shot
+        clicked = runtime.click(box.ref)
+        assert "clicked" in clicked, clicked
+        deadline = time.monotonic() + 8
+        checked = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            again = next(
+                (el for el in shot.elements if el.title == "Agree" and el.role == "AXCheckBox"),
+                None,
+            )
+            checked = None if again is None else again.checked
+            if checked is True:
+                break
+            time.sleep(0.3)
+        assert checked is True, [
+            (el.role, el.title, el.checked) for el in shot.elements
+        ]
+    finally:
+        _stop(proc)
+        parent.shutdown()
+        child.shutdown()

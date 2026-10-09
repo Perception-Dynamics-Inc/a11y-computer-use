@@ -154,8 +154,8 @@ If the page has an iframe, the frame must forward clicks to the parent (see
 - Desktop applications. The head-to-head runs on the browser backend so it is
   reproducible in a container. Desktop observation cost is measured separately
   (`a11y-computer-use bench desktop`).
-- Cross-origin iframes. The browser backend skips out-of-process frames; the
-  suite only uses a same-origin frame.
+- Cross-origin iframes. The head-to-head fixtures only embed a same-origin
+  frame, so this table does not measure an out-of-process iframe page.
 - Statistical significance. One round per task is a single sample per cell. Use
   `--rounds` for more.
 - Planner quality in general. Results depend on the model; run the same suite
