@@ -5752,6 +5752,50 @@ def test_type_into_calc_reads_the_editor_and_a_terminal_still_mismatches(
     assert exc.value.detail["actual"] == "01"
 
 
+def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monkeypatch) -> None:
+    """Synthetic Calc. The editor can publish after the keys, then the cell.
+
+    A prefix does not end the poll. A sheet that never shows the text is a
+    mismatch. No live LibreOffice.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 6)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: True)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    editor_reads = iter(["4", "4", "42"])
+
+    def editor(_app):
+        try:
+            return next(editor_reads)
+        except StopIteration:
+            return "42"
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
+    assert driver.type_text("42") == 2
+
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
+    assert driver.type_text("42") == 2
+
+    monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("42")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] in {None, ""}
+
+
 def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
     """Synthetic. Chrome's Open File dialog has no AT-SPI entry.
 

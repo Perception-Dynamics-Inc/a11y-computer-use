@@ -3402,6 +3402,82 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def test_linux_calc_type_42_into_three_cells_is_not_a_secure_field(tmp_path) -> None:
+    """Live Calc. Typing 42 into a cell is not a password refusal.
+
+    The cell editor is not a password field. Each type is confirmed from
+    that editor or the cell value, including when the focus walk would
+    otherwise stop early. Return commits 42 into the cell. Three cells
+    cover the run that used to return secure_field on two of three tries.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-type-42"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                if (
+                    _cell(shot, "A1") is not None
+                    and _cell(shot, "B1") is not None
+                    and _cell(shot, "C1") is not None
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose A1, B1, and C1\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        for title in ("A1", "B1", "C1"):
+            runtime.desktop_snapshot("soffice")
+            current = runtime._current
+            assert current is not None
+            cell = _cell(current, title)
+            assert cell is not None, title
+            runtime.click(cell.ref)
+            typed = runtime.type_text("42", app="soffice")
+            assert typed.outcome == "confirmed", (title, typed, typed.evidence)
+            assert "42" in typed.evidence, (title, typed.evidence)
+            assert "secure" not in typed.evidence.casefold()
+            driver.key_chord("Return")
+            _wait_cell_value(driver, title, "42")
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 _WRITER_HTML = """<!doctype html><meta charset=utf-8>
 <h1>Quarterly Notes</h1>
 <p>Alpha paragraph WRITER-ONE with plain text.</p>

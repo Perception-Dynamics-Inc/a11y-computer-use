@@ -6113,7 +6113,10 @@ def build_server(
         after a coordinate click that did not remember a ref: the focused
         editable is looked up and inserted with the same helper. A CRLF is one
         newline; the reported count is the number of characters the field read
-        back, and a mismatch is an error rather than success. Chrome's address
+        back, and a mismatch is an error rather than success. LibreOffice Calc
+        is confirmed from the open cell editor or the selected cell's text.
+        That editor is not a password field. A sheet that does not show the
+        characters is a mismatch. Chrome's address
         bar is polled until the URL is visible or the bar settles on its own
         string; a settled rewrite is not a mismatch. The find bar already
         showing exactly that query is a match. An empty app is

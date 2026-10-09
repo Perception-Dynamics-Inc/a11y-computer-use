@@ -2185,14 +2185,26 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     (or a node had more than `_MAX_CHILDREN_FETCH` children) and no focused node
     was met, so focus is UNKNOWN; the caller must not type blind on None.
 
+    A truncated LibreOffice walk is not unknown when the open cell editor or
+    the selected sheet cell is in hand. The editor is a panel or group named
+    ``Cell A1`` and a paragraph under it, not a password field. It is True
+    only when that panel or its text child has the password-text role. A
+    password the walk itself reaches still wins.
+
     This is the check `LinuxDriver.type_text` runs before the XTEST path,
     which types into whatever holds focus."""
     acc, truncated = _focused_node(app, max_nodes=max_nodes)
-    if truncated:
-        return None
-    if acc is None:
-        return False
-    return is_secure(acc)
+    if not truncated:
+        if acc is None:
+            return False
+        return is_secure(acc)
+    editor = _cell_editor_is_secure(app)
+    if editor is not None:
+        return editor
+    cell = _selected_sheet_cell(app)
+    if cell is not None:
+        return is_secure(cell)
+    return None
 
 
 # Chrome UI fields whose text is not the web page. The address bar rewrites
@@ -3556,6 +3568,158 @@ def sheet_editor_text(app: str) -> str | None:
         if text:
             return text
     return None
+
+
+def _cell_editor_is_secure(app: str) -> bool | None:
+    """Whether the open Calc cell editor is a password field.
+
+    ``None`` when no editor is open, or ``app`` is not LibreOffice. The
+    editor is a panel or group named ``Cell A1`` and a paragraph under it.
+    Neither is a password field. ``True`` only when that panel or its text
+    child really has the password-text role.
+    """
+    if not libreoffice_app(app):
+        return None
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.APP)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    panel = _find_cell_editor(root, [160])
+    if panel is None:
+        return None
+    if is_secure(panel):
+        return True
+    count = min(_child_count(panel), 8)
+    for index in range(count):
+        child = _child_at(panel, index)
+        if child is not None and is_secure(child):
+            return True
+    return False
+
+
+def _selected_sheet_cell(app: str):
+    """The selected Calc cell, or None.
+
+    The selection call can throw. That is None, not an error, and the
+    sheet's cells are not indexed.
+    """
+    if not libreoffice_app(app):
+        return None
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    iface = _call_first(table, ("get_selection_iface", "get_selection"))
+    if iface is None:
+        return None
+    return _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+
+
+def selected_sheet_text(app: str) -> str | None:
+    """Text of the selected Calc cell, or None.
+
+    The cell editor is a sibling of the sheet. After Return the editor
+    closes and this text is the committed value. Empty text and a selection
+    that throws are None.
+    """
+    cell = _selected_sheet_cell(app)
+    if cell is None:
+        return None
+    text = _full_text(cell)
+    if text:
+        return text
+    return None
+
+
+def _find_spreadsheet(node, budget: list[int]):
+    """The Calc grid, without indexing its cells."""
+    if budget[0] <= 0 or node is None:
+        return None
+    if _spreadsheet_table(node):
+        return node
+    role = _role_name(node)
+    if role in {"table", "menu", "menu bar", "popup menu"}:
+        return None
+    budget[0] -= 1
+    count = min(_child_count(node), 40)
+    for index in range(count):
+        found = _find_spreadsheet(_child_at(node, index), budget)
+        if found is not None:
+            return found
+    return None
+
+
+def spreadsheet_open(app: str) -> bool:
+    """True when ``app`` is LibreOffice and a Calc grid is in the window."""
+    if not libreoffice_app(app):
+        return False
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return False
+    if root is None:
+        return False
+    return _find_spreadsheet(root, [80]) is not None
+
+
+def poll_sheet_type(
+    read_editor,
+    read_cell,
+    read_focused,
+    before: str | None,
+    text: str,
+    *,
+    sheet: bool,
+) -> str | None:
+    """Poll until ``text`` shows in the cell editor, the cell, or focus.
+
+    The editor opens after the first key, so an early empty read is not the
+    answer. A prefix is not returned into the settle check: ``4`` would
+    otherwise end the poll before ``42`` publishes. On a sheet the cell is
+    read once after the editor misses, because that value updates when the
+    editor is not what holds the characters. The last editor or cell string
+    is what a mismatch shows. A Writer paragraph has no sheet, so each read
+    is the focused text and the ordinary settle applies.
+    """
+    latest: str | None = None
+
+    def read():
+        nonlocal latest
+        editor = read_editor()
+        if editor and _typed_visible(before, editor, text):
+            return editor
+        if editor:
+            latest = editor
+        if not sheet:
+            focused = read_focused()
+            if focused:
+                latest = focused
+            return focused
+        return None
+
+    found = _poll_typed_text(read, before, text)
+    if _typed_visible(before, found, text):
+        return found
+    if sheet:
+        cell = read_cell()
+        if cell and _typed_visible(before, cell, text):
+            return cell
+        if cell:
+            latest = cell
+    return latest if latest is not None else found
 
 
 def control_kind(acc) -> str | None:
