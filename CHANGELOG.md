@@ -9,6 +9,10 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.55] - 2026-10-09
 
+### Fixed
+
+- The live Swatch button is painted with a GTK CSS provider at user priority. The Linux CI image has no cairo GI converter, so a cairo `draw` handler never paints, and that theme ignores the deprecated `override_background_color`. The crop's dominant color is the red the test checks (#116) (2026-10-09).
+
 ### Added
 
 - LibreOffice Calc table cells are `AXCell` with their text and address. An empty cell is not shown as `0.0`. A formula stored without a leading `=` is shown with `=` restored. Address-titled sheets keep cells through a cap of 96, on screen first, and a huge child count is read with `get_accessible_at` instead of walking every child. `set_value` on a sheet cell focuses it, types, commits with Return, and checks the cell text or the formula. It does not use the Value interface. `type` in LibreOffice verifies against the open cell editor, a node named `Cell F1`, because the focused node during typing is the table. A live `soffice --calc` with `SAL_USE_VCLPLUGIN=gtk3` exposes A1 and B2, accepts `setv`, `Résumé ✓`, `11`, and `=B1*2`. The same test then starts Calc with the gen plugin: after the registration wait, snapshot is `unsupported` and names `libreoffice-gtk3`, not `app_not_found`. Qt range values, and the refusal to read a bogus Qt Value, are unchanged (#132) (7c0e3a1, 2026-10-09).
