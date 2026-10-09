@@ -1231,18 +1231,66 @@ def _doc_url(acc) -> str | None:
     return None
 
 
+def _collected_content_document(root) -> str | None:
+    """On-screen content URL from Collection, or None when it has no documents.
+
+    Firefox's showing document is reachable from the focused node and from
+    Collection, and a child walk from the window often never meets it. The
+    same filter as the walk applies: a hidden tab is not the page, and an
+    iframe does not replace the top document.
+    """
+    if root is None:
+        return None
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    coll = _call_first(root, ("get_collection_iface", "get_collection"))
+    if coll is None:
+        return None
+    role_enum = getattr(Atspi, "Role", None)
+    roles = []
+    for name in ("DOCUMENT_WEB", "DOCUMENT_FRAME"):
+        role = getattr(role_enum, name, None)
+        if role is not None:
+            roles.append(role)
+    if not roles:
+        return None
+    try:
+        states = Atspi.StateSet.new([])
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(
+            states, mt.NONE, {}, mt.NONE, roles, mt.ANY, [], mt.NONE, False,
+        )
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 12, True)
+    except Exception:  # noqa: BLE001 - GTK and fakes expose no Collection
+        return None
+    held: list[tuple[object, str]] = []
+    for hit in hits or []:
+        url = _doc_url(hit)
+        if url and not is_browser_chrome_url(url):
+            held.append((hit, url))
+    return _pick_content_document(held)
+
+
 def document_url_of(root) -> str | None:
     """Content-document URL under ``root``.
 
     Firefox keeps every tab's document in the tree. The URL is the selected
-    tab that is SHOWING, not the first document a walk meets. A Chromium
-    omnibox popup is browser chrome and is not a page URL. An iframe's
-    document is nested; the page URL is the document that is not inside
-    another one. The walk is bounded so one policy check cannot become a
-    full tree walk.
+    tab that is SHOWING, not the first document a walk meets. Collection is
+    asked first, because that showing document is often missing from the
+    window's children. A Chromium omnibox popup is browser chrome and is not
+    a page URL. An iframe's document is nested; the page URL is the document
+    that is not inside another one. The walk is bounded so one policy check
+    cannot become a full tree walk.
     """
     if root is None:
         return None
+    collected = _collected_content_document(root)
+    if collected:
+        return collected
     from a11y_computer_use.untrusted import is_browser_chrome_url
 
     held: list[tuple[object, str]] = []
@@ -1498,23 +1546,213 @@ def address_bar_text_under(root) -> str | None:
     return None
 
 
+def location_text(node) -> str | None:
+    """Visible text of a location entry. A URL wins over the accessible name."""
+    from a11y_computer_use.untrusted import looks_like_url
+
+    if node is None:
+        return None
+    text = _node_plain_text(node).strip()
+    name = _node_name(node).strip()
+    if looks_like_url(text):
+        return text
+    if looks_like_url(name):
+        return name
+    return text or None
+
+
+def _location_entries(root) -> list:
+    """Location entries Collection can see under ``root``.
+
+    Chromium's address bar is the focused entry, and Collection lists it.
+    A child walk from the application often never meets that entry. A fake
+    has no Collection interface, so the caller also walks.
+    """
+    if root is None:
+        return []
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return []
+    coll = _call_first(root, ("get_collection_iface", "get_collection"))
+    if coll is None:
+        return []
+    role = getattr(getattr(Atspi, "Role", None), "ENTRY", None)
+    if role is None:
+        return []
+    try:
+        states = Atspi.StateSet.new([])
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(
+            states, mt.NONE, {}, mt.NONE, [role], mt.ANY, [], mt.NONE, False,
+        )
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, 12, True)
+    except Exception:  # noqa: BLE001 - GTK and fakes expose no Collection
+        return []
+    return [hit for hit in (hits or []) if is_location_entry(hit)]
+
+
 def address_bar_text(app: str) -> str | None:
     """The address bar under ``app``, including when the omnibox popup is focused.
 
     The popup window does not contain the entry that holds the typed URL.
-    The search starts at the application, not at the active popup.
+    The focused location entry is read first. Collection is next, because
+    Chromium does not put that entry where a child walk can see it. The
+    walk remains for a toolkit that has no Collection interface.
     """
     from a11y_computer_use.schema import Scope
 
     if not app:
         return None
-    return address_bar_text_under(find_root(app, Scope.APP))
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:  # noqa: BLE001 - an unreadable focus is not the bar
+        acc, truncated = None, False
+    if acc is not None and not truncated and is_location_entry(acc):
+        text = location_text(acc)
+        if text:
+            return text
+    root = find_root(app, Scope.APP)
+    collected = _collected_address_bar(app)
+    if collected:
+        return collected
+    return address_bar_text_under(root)
+
+
+def _collected_address_bar(app: str) -> str | None:
+    """The address bar as Collection reports it, ignoring keyboard focus.
+
+    The focused wrapper can still show the pre-type URL after the keys
+    landed in a newer accessible for the same entry.
+    """
+    from a11y_computer_use.schema import Scope
+
+    if not app:
+        return None
+    return _address_bar_from_entries(_location_entries_under(find_root(app, Scope.APP)))
+
+
+def _location_entries_under(root) -> list:
+    """Location entries on ``root`` and on each of its top-level frames."""
+    entries = _location_entries(root)
+    if entries or root is None:
+        return entries
+    count = _call_first(root, ("get_child_count",), default=0) or 0
+    for index in range(min(int(count), 6)):
+        frame = _call_first(root, ("get_child_at_index",), index)
+        entries.extend(_location_entries(frame))
+    return entries
+
+
+def _address_bar_from_entries(entries: list) -> str | None:
+    from a11y_computer_use.untrusted import looks_like_url
+
+    ordered = sorted(entries, key=lambda node: not _state_has(node, "FOCUSED"))
+    for node in ordered:
+        text = location_text(node)
+        if text and looks_like_url(text):
+            return text
+    for node in ordered:
+        text = location_text(node)
+        if text:
+            return text
+    return None
+
+
+def location_shows_typed(before: str | None, after: str | None, typed: str) -> bool:
+    """Whether ``typed`` landed in a location entry.
+
+    The omnibox often drops ``http://`` once the host matches the current
+    site. A page field does not use this. An entry that did not change is
+    not a success.
+    """
+    if _typed_visible(before, after, typed):
+        return True
+    if not after or not typed:
+        return False
+    bare = typed
+    lowered = typed.lower()
+    for prefix in ("https://", "http://"):
+        if lowered.startswith(prefix):
+            bare = typed[len(prefix):]
+            break
+    if bare == typed or not bare:
+        return False
+    if _typed_visible(before, after, bare):
+        return True
+    before_n = _norm_nbsp(before) or ""
+    after_n = _norm_nbsp(after) or ""
+    return bare in after_n and after_n != before_n
+
+
+def _focused_accessibles(root, limit: int = 6) -> list:
+    """Focused nodes Collection can see under ``root``.
+
+    Chromium can mark the address bar and the page focused at the same time
+    after ctrl+l. A query for one match may return the page. Callers that
+    care about the address bar have to see the whole set.
+    """
+    if root is None:
+        return []
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return []
+    st = getattr(Atspi, "StateType", None)
+    focused_state = getattr(st, "FOCUSED", None)
+    if focused_state is None:
+        return []
+    coll = _call_first(root, ("get_collection_iface", "get_collection"))
+    if coll is None:
+        return []
+    try:
+        states = Atspi.StateSet.new([focused_state])
+        mt = Atspi.CollectionMatchType
+        rule = Atspi.MatchRule.new(
+            states, mt.ALL, {}, mt.NONE, [], mt.NONE, [], mt.NONE, False,
+        )
+        hits = coll.get_matches(rule, Atspi.CollectionSortOrder.CANONICAL, limit, True)
+    except Exception:  # noqa: BLE001 - GTK and fakes expose no Collection
+        return []
+    return list(hits or [])
+
+
+def focused_location_entry(app: str):
+    """The focused address bar, even when the page is focused too."""
+    if not app:
+        return None
+    from a11y_computer_use.schema import Scope
+
+    try:
+        root = find_root(app, Scope.APP)
+    except Exception:  # noqa: BLE001 - no desktop is not an address bar
+        root = None
+    for hit in _focused_accessibles(root):
+        try:
+            if is_location_entry(hit):
+                return hit
+        except Exception:  # noqa: BLE001 - one bad node is not the bar
+            continue
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:  # noqa: BLE001 - unknown focus is not the address bar
+        return None
+    if acc is None or truncated:
+        return None
+    if is_location_entry(acc):
+        return acc
+    return None
 
 
 def focus_in_browser_chrome(app: str) -> bool:
     """True when keyboard focus is in browser UI rather than a page document."""
     if not app:
         return False
+    try:
+        if focused_location_entry(app) is not None:
+            return True
+    except Exception:  # noqa: BLE001 - fall through to the single focused node
+        pass
     try:
         acc, truncated = _focused_node(app)
     except Exception:
@@ -4489,7 +4727,10 @@ def _hidden_gecko_browser(node) -> bool:
             return False
         return _has_browser_frame(node)
     if role == "internal frame":
-        return not _state_has(node, "SHOWING")
+        if _state_has(node, "SHOWING"):
+            return False
+        # A frame inside the showing page is an iframe, not a background tab.
+        return not _nested_in_document(node)
     if role == "document web":
         return not _gecko_web_document_on_screen(node)
     return False

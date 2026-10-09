@@ -67,6 +67,27 @@ def looks_like_url(value: str) -> bool:
     return "://" in text or text.startswith(("about:", "data:", "file:", "chrome:", "blob:"))
 
 
+def navigation_url(value: str) -> str | None:
+    """A URL to check, or None when ``value`` is not a navigation target.
+
+    The omnibox often shows the destination without a scheme
+    (``localhost:9/para.html``). That form is still the URL Enter would load.
+    A title or a placeholder is not.
+    """
+    text = value.strip()
+    if not text or any(char.isspace() for char in text):
+        return None
+    if looks_like_url(text):
+        return text
+    if "/" not in text and "." not in text and ":" not in text and text.lower() != "localhost":
+        return None
+    candidate = "http://" + text
+    host = urlparse(candidate).hostname
+    if not host:
+        return None
+    return candidate
+
+
 def escape_untrusted(text: str) -> str:
     """Escape every untrusted opener and closer so neither can forge a fence."""
     return _MARKER.sub(lambda match: "&lt;" + match.group(0)[1:], text)
@@ -311,6 +332,7 @@ __all__ = [
     "is_browser_chrome_url",
     "looks_like_injection",
     "looks_like_url",
+    "navigation_url",
     "parse_domain_list",
     "unescape_untrusted",
     "unwrap",

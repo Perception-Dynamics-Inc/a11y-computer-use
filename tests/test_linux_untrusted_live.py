@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import threading
 import time
@@ -70,8 +71,18 @@ class _Pages(BaseHTTPRequestHandler):
         return
 
 
+class _DualServer(ThreadingHTTPServer):
+    """One port on IPv4 and IPv6. ``localhost`` is ``::1`` before ``127.0.0.1``."""
+
+    address_family = socket.AF_INET6
+
+    def server_bind(self) -> None:
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 def _origin_server() -> tuple[ThreadingHTTPServer, int]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Pages)
+    server = _DualServer(("::", 0), _Pages)
     port = server.server_address[1]
     allowed = f"http://127.0.0.1:{port}"
     blocked = f"http://localhost:{port}"
@@ -132,13 +143,20 @@ def _runtime(tmp_path, driver, *apps: str):
 
 def _launch(kind: str, profile, urls: list[str]) -> subprocess.Popen:
     if kind == "chrome":
-        binary = _chrome_binary()
+        # /usr/local/bin/google-chrome is a wrapper that pins a shared
+        # profile and a debugging port. A fresh profile has to be the real
+        # binary, or the active tab is that profile's startup page.
+        binary = "/usr/bin/google-chrome-stable"
+        if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
+            binary = _chrome_binary()
         if binary is None:
             pytest.fail("Chrome is not installed; the Linux live job provides it")
         argv = [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
-            "--disable-component-update", f"--user-data-dir={profile}",
+            "--disable-component-update", "--test-type",
+            "--disable-features=OmniboxPopup",
+            f"--user-data-dir={profile}",
             "--window-size=1100,800", *urls,
         ]
         return subprocess.Popen(
@@ -204,11 +222,59 @@ def _blocked(fn) -> ComputerUseError:
     return exc.value
 
 
-def _bar_enter(runtime, app: str, url: str) -> None:
+def _wait_chrome_page(driver, app: str):
+    """Wait until the local page is in the tree.
+
+    A fresh Chrome profile raises an update dialog over the first page and
+    the web contents stay out of the tree until that dialog is dismissed.
+    """
+    deadline = time.monotonic() + 30
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            shot = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            time.sleep(0.4)
+            continue
+        titles = [el.title or "" for el in shot.elements]
+        if any(_chrome_dialog(title) for title in titles):
+            driver.key_chord("Escape")
+            time.sleep(0.2)
+            driver.key_chord("Escape")
+            time.sleep(0.3)
+            continue
+        if "Hidden button" in titles or "Para button" in titles:
+            return shot
+        last = " ".join(titles[:8])
+        time.sleep(0.4)
+    raise AssertionError(f"chrome page did not appear; last={last!r}")
+
+
+def _chrome_dialog(title: str) -> bool:
+    """True when ``title`` is Chrome's update or unsupported-flag UI."""
+    return any(
+        bit in title
+        for bit in ("update Chrome", "command-line flag", "Reinstall Chrome", "Can't update")
+    )
+
+
+def _bar_enter(runtime, app: str, url: str, *, clear: bool) -> None:
+    """Replace the address bar and load ``url``.
+
+    ctrl+l selects the current URL. Firefox will not delete that selection
+    through EditableText, and the reported repro clears it with BackSpace
+    before typing. Chrome replaces the selection by typing, and BackSpace
+    there lets the update dialog take the keys. Return is what navigates.
+    """
     runtime.key("ctrl+l", app=app)
-    time.sleep(0.5)
+    time.sleep(0.7)
+    if clear:
+        runtime.key("BackSpace", app=app)
+        time.sleep(0.3)
     runtime.type_text(url, app=app)
-    time.sleep(0.3)
+    time.sleep(0.4)
     runtime.key("Return", app=app)
 
 
@@ -239,23 +305,57 @@ def _exercise(tmp_path, driver, kind: str, port: int) -> None:
     if kind == "firefox":
         urls = [f"{allowed}/bg.html", f"{blocked}/para.html"]
     else:
-        urls = [f"{allowed}/spoof.html"]
+        # A focused text field makes Chrome leave the omnibox mid-type.
+        # Start on the page the address-bar repro uses, and open the spoof
+        # page only after that typing is done.
+        urls = [f"{allowed}/bg.html"]
     proc = _launch(kind, profile, urls)
     try:
         app = "firefox" if kind == "firefox" else "chrome"
-        _wait_any(
-            driver, app,
-            ("Hidden button", "Para button") if kind == "firefox" else ("Spoof box",),
-        )
+        if kind == "chrome":
+            _wait_chrome_page(driver, app)
+        else:
+            _wait_any(driver, app, ("Hidden button", "Para button"))
         app = driver.activate_app(app)
         names = _browser_ids(driver, app, "firefox", "firefox-bin") if kind == "firefox" else _browser_ids(driver, app)
         runtime = _runtime(tmp_path, driver, *names)
 
         if kind == "firefox":
             _firefox_tabs(runtime, driver, app, allowed, blocked)
-            _bar_enter(runtime, app, f"{allowed}/spoof.html")
-            _wait_snapshot(driver, app, "Spoof box")
 
+        _bar_enter(runtime, app, f"{allowed}/ifr.html", clear=kind == "firefox")
+        _wait_snapshot(driver, app, "Same frame button")
+        _blocked(lambda: _click_titled(runtime, app, "Same frame button"))
+        runtime.desktop_snapshot(app)
+        field = next(el for el in runtime._current.elements if el.title == "Same frame input")
+        _blocked(lambda: runtime.set_value(field.ref, "nope"))
+
+        _bar_enter(runtime, app, f"{allowed}/bg.html", clear=kind == "firefox")
+        _wait_snapshot(driver, app, "Hidden button")
+        clicked = _click_titled(runtime, app, "Hidden button")
+        assert "clicked" in clicked
+
+        runtime.key("ctrl+l", app=app)
+        time.sleep(0.7)
+        # A different allowed URL, so a selected bar that already shows this
+        # page has to change. Typing the current URL back leaves the text
+        # identical, and that read-back is a miss.
+        typed = runtime.type_text(f"{allowed}/bg.html?stay=1", app=app)
+        assert "typed" in typed
+        escaped = runtime.key("Escape", app=app)
+        assert "pressed" in escaped
+        runtime.key("ctrl+l", app=app)
+        time.sleep(0.7)
+        runtime.type_text(f"{blocked}/para.html", app=app)
+        _blocked(lambda: runtime.key("Return", app=app))
+        time.sleep(0.6)
+        url = driver.document_url(app) or ""
+        assert url.startswith(allowed), url
+        _wait_snapshot(driver, app, "Hidden button")
+
+        _bar_enter(runtime, app, f"{allowed}/spoof.html", clear=kind == "firefox")
+        _wait_snapshot(driver, app, "Spoof box")
+        _assert_fenced_title(runtime.window("list"))
         _click_titled(runtime, app, "Spoof box")
         time.sleep(0.2)
         runtime.key("ctrl+a", app=app)
@@ -263,34 +363,6 @@ def _exercise(tmp_path, driver, kind: str, port: int) -> None:
         runtime.key("ctrl+c", app=app)
         time.sleep(0.4)
         _assert_fenced_spoof(runtime.clipboard("read"))
-        _assert_fenced_title(runtime.window("list"))
-
-        _bar_enter(runtime, app, f"{allowed}/ifr.html")
-        _wait_snapshot(driver, app, "Same frame button")
-        _blocked(lambda: _click_titled(runtime, app, "Same frame button"))
-        runtime.desktop_snapshot(app)
-        field = next(el for el in runtime._current.elements if el.title == "Same frame input")
-        _blocked(lambda: runtime.set_value(field.ref, "nope"))
-
-        _bar_enter(runtime, app, f"{allowed}/bg.html")
-        _wait_snapshot(driver, app, "Hidden button")
-        clicked = _click_titled(runtime, app, "Hidden button")
-        assert "clicked" in clicked
-
-        runtime.key("ctrl+l", app=app)
-        time.sleep(0.4)
-        typed = runtime.type_text(f"{allowed}/bg.html", app=app)
-        assert "typed" in typed
-        escaped = runtime.key("Escape", app=app)
-        assert "pressed" in escaped
-        runtime.key("ctrl+l", app=app)
-        time.sleep(0.4)
-        runtime.type_text(f"{blocked}/para.html", app=app)
-        _blocked(lambda: runtime.key("Return", app=app))
-        time.sleep(0.6)
-        url = driver.document_url(app) or ""
-        assert url.startswith(allowed), url
-        _wait_snapshot(driver, app, "Hidden button")
     finally:
         _stop_group(proc)
 

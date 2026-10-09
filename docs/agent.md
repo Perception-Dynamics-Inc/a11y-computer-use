@@ -151,7 +151,7 @@ that is on screen. Firefox keeps background tabs in the tree; the check uses
 the selected tab that is showing. A control inside an iframe is checked
 against that frame's document, and a link's own URI is checked as well.
 Typing in the address bar is allowed. Enter there is refused when the text
-is a disallowed URL. The omnibox, its popup, and the tab strip are browser
+is a disallowed URL, including the omnibox form that omits the scheme. The omnibox, its popup, and the tab strip are browser
 chrome, not the page, and Escape is always allowed. A native app with no URL
 is not blocked. The desktop MCP server takes the same lists as
 `build_server(allowed_domains=..., blocked_domains=...)`,

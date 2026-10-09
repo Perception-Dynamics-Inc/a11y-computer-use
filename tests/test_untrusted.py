@@ -23,8 +23,17 @@ from a11y_computer_use.untrusted import (
     escape_untrusted,
     fence,
     looks_like_injection,
+    navigation_url,
     unwrap,
 )
+
+
+def test_navigation_url_accepts_an_omnibox_without_a_scheme():
+    assert navigation_url("http://localhost/para.html") == "http://localhost/para.html"
+    assert navigation_url("localhost:9/para.html") == "http://localhost:9/para.html"
+    assert navigation_url("127.0.0.1:9/bg.html") == "http://127.0.0.1:9/bg.html"
+    assert navigation_url("Search or enter address") is None
+    assert navigation_url("") is None
 
 
 def test_fence_wraps_with_a_nonce_and_leaves_plain_text_intact():
@@ -402,6 +411,12 @@ def test_escape_omnibox_and_iframe_origins(tmp_path):
 
     driver.address_bar_text = lambda app: "http://127.0.0.1/bg.html"
     runtime._reject_domain(KeyChord(chord="Return"), app="chrome")
+    driver.address_bar_text = lambda app: "localhost:9/para.html"
+    with pytest.raises(ComputerUseError) as exc:
+        runtime._reject_domain(KeyChord(chord="Return"), app="chrome")
+    assert exc.value.code is ErrorCode.DOMAIN_BLOCKED
+    driver.address_bar_text = lambda app: "Search or enter address"
+    runtime._reject_domain(KeyChord(chord="Return"), app="chrome")
 
     driver.focus_in_browser_chrome = lambda app: False
     driver.document_url = lambda app=None: "http://127.0.0.1/ifr.html"
@@ -417,3 +432,34 @@ def test_escape_omnibox_and_iframe_origins(tmp_path):
     driver.document_url = lambda app=None: "http://127.0.0.1/bg.html"
     driver.element_in_browser_chrome = lambda el: False
     runtime._reject_domain(KeyChord(chord="Return"), app="chrome")
+
+
+def test_set_value_is_blocked_on_an_iframe_document(tmp_path, monkeypatch):
+    """The top page is allowed. The field's document is not. set_value refuses."""
+    element = Element(
+        ref="e4",
+        role="AXTextField",
+        title="Same frame input",
+        value=None,
+        bounds=Bounds(0, 0, 0, 10, 10),
+        snapshot_id="snap",
+    )
+    wrote: list[str] = []
+    driver = SimpleNamespace(
+        name="linux",
+        resolves_apps=False,
+        set_value=lambda el, value: wrote.append(value),
+        document_url=lambda app=None: "http://127.0.0.1/ifr.html",
+        focus_in_browser_chrome=lambda app: False,
+        address_bar_text=lambda app: None,
+        element_url=lambda el: None,
+        element_document_url=lambda el: "http://localhost/frame.html",
+        element_in_browser_chrome=lambda el: False,
+    )
+    runtime = _runtime(tmp_path, driver, allowed_domains=["127.0.0.1"])
+    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), (element,))
+    monkeypatch.setattr(runtime, "_resolve", lambda ref, kind: (snap, element))
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.set_value("e4", "nope")
+    assert exc.value.code is ErrorCode.DOMAIN_BLOCKED
+    assert wrote == []

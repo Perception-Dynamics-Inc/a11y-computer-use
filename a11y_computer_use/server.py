@@ -66,6 +66,7 @@ from a11y_computer_use.untrusted import (
     fence as fence_text,
     is_browser_chrome_url,
     looks_like_url,
+    navigation_url,
 )
 from a11y_computer_use.menus import parse_path as menus_parse
 
@@ -1854,8 +1855,9 @@ class Runtime:
         if isinstance(action, (TypeText, KeyChord)) and self.focus_in_browser_chrome(app):
             if isinstance(action, KeyChord) and _chord_main_key(action.chord) in _CONFIRM_KEYS:
                 typed = self.address_bar_text(app)
-                if typed and looks_like_url(typed):
-                    policy.check(typed)
+                destination = navigation_url(typed) if typed else None
+                if destination:
+                    policy.check(destination)
             return
         urls: list[str] = []
         element_docs: list[str] = []
@@ -4224,6 +4226,9 @@ class Runtime:
         landed: list[str] = []
 
         def execute() -> None:
+            # TypeText carries no element. The field's own document is the
+            # origin, so an iframe is not allowed just because the top page is.
+            self._reject_domain(Click(target=live), app=app)
             self._refuse_disabled(live, verb="set_value")
             result = self.driver.set_value(live, value)  # an AX write lands on this element only
             if result:

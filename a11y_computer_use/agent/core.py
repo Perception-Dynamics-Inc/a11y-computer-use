@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from a11y_computer_use import conditions, outcome
-from a11y_computer_use.untrusted import DomainPolicy, fence, looks_like_url
+from a11y_computer_use.untrusted import DomainPolicy, fence, looks_like_url, navigation_url
 from a11y_computer_use.agent.actions import (
     EXEC_ACTION_NAMES,
     Action,
@@ -940,8 +940,9 @@ class Agent:
         if main not in {"enter", "return", "kp_enter"}:
             return None
         typed = _runtime_url(self.runtime, "address_bar_text", self._app_name())
-        if typed and looks_like_url(typed):
-            return _policy_error(self.domain_policy, [typed])
+        destination = navigation_url(typed) if typed else None
+        if destination:
+            return _policy_error(self.domain_policy, [destination])
         return None
 
     def _desktop_overview(self) -> str:
