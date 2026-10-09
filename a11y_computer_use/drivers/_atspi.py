@@ -1123,6 +1123,30 @@ def _texts_match(got: str | None, wanted: str | None) -> bool:
     return _norm_nbsp(got) == _norm_nbsp(wanted)
 
 
+# A Writer paragraph break can come back as any of these. ``\r\n`` is one
+# break. A repeated break stays repeated, and a space is not a break.
+_PARAGRAPH_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029\ufffc]")
+
+
+def _normalize_paragraph_breaks(text: str) -> str:
+    """Map paragraph and line separators onto ``\\n``, one break each."""
+    return _PARAGRAPH_BREAK.sub("\n", text)
+
+
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    ``\\n``, ``\\r``, ``\\r\\n``, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    and ``a b`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+    left = _normalize_paragraph_breaks(_norm_nbsp(got) or "")
+    right = _normalize_paragraph_breaks(_norm_nbsp(wanted) or "")
+    return left == right
+
+
 def _text_is_blank(text: str | None) -> bool:
     """True when the snapshot read is empty, unreadable, or only whitespace.
 
@@ -4266,7 +4290,7 @@ def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -4553,6 +4577,88 @@ def writer_cell_text(acc) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def is_writer_document(acc) -> bool:
+    """A LibreOffice Writer document. Its text lives in paragraph children.
+
+    A GTK text view and a Mousepad buffer are not this node. Their own text
+    interface is the value.
+    """
+    try:
+        if _role_name(acc) != "document text":
+            return False
+    except Exception:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def _document_paragraphs(acc) -> list:
+    """Paragraph and heading children of a Writer document, in order.
+
+    Empty paragraphs stay, so two breaks are not read back as one. Bounded
+    so a document is not walked without a limit.
+    """
+    found = []
+    count = _child_count(acc)
+    if count < 0:
+        count = 0
+    for index in range(min(count, 256)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in {"paragraph", "heading"}:
+            found.append(child)
+    return found
+
+
+def writer_document_text(acc) -> str | None:
+    """Paragraph text of a Writer document, one line per paragraph.
+
+    None when ``acc`` is not that document. The document node's own text
+    is empty even after the paragraphs hold the value.
+    """
+    if not is_writer_document(acc):
+        return None
+    paragraphs = _document_paragraphs(acc)
+    if not paragraphs:
+        return _full_text(acc)
+    return "\n".join(_full_text(child) or "" for child in paragraphs)
+
+
+def writer_document_matches(acc, text: str) -> bool:
+    """True when the Writer paragraphs are ``text``, whatever the separator."""
+    shown = writer_document_text(acc)
+    if shown is None:
+        return False
+    return paragraph_breaks_match(shown, text)
+
+
+def _writer_document_landed(acc, text: str) -> bool:
+    """Poll the paragraphs. A Writer replace shows up a beat after the write."""
+    if not is_writer_document(acc):
+        return False
+    for attempt in range(8):
+        if writer_document_matches(acc, text):
+            return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def writer_document_outcome_text(requested: str, acc) -> str | None:
+    """The requested string when a Writer document's paragraphs now hold it.
+
+    None for any other node, and when a paragraph break is actually missing
+    or extra. The document node's snapshot value stays empty.
+    """
+    if not requested or acc is None:
+        return None
+    if not writer_document_matches(acc, requested):
+        return None
+    return requested
 
 
 def writer_cell_outcome_text(requested: str, cell) -> str | None:
@@ -6841,6 +6947,9 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
     if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
+        return True
+    # A Writer document's own text stays empty. The paragraphs hold the value.
+    if _writer_document_landed(acc, text):
         return True
     if current is None:
         return wrote

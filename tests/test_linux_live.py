@@ -4759,6 +4759,87 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
         _kill_libreoffice()
 
 
+def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> None:
+    """Live Writer. A multi-line set_value on a new document is confirmed.
+
+    The document node reads back empty. The paragraphs hold the lines.
+    ``soffice`` has to be installed; this does not skip when it is missing.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-writer is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    profile = tmp_path / "writer-doc"
+    _writer_profile(profile)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", "private:factory/swriter",
+        ],
+        env=env, start_new_session=True,
+    )
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    try:
+        deadline = time.monotonic() + 90
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                area = next(
+                    (
+                        el for el in shot.elements
+                        if el.role == "AXTextArea" and "Document" in (el.title or "")
+                    ),
+                    None,
+                )
+                if area is not None and "Tip of the Day" not in last:
+                    break
+            time.sleep(0.4)
+        assert area is not None, f"Writer did not expose the document\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea" and "Document" in (el.title or ""))
+        written = runtime.set_value(area.ref, value)
+        assert written.outcome == "confirmed", (written, written.evidence)
+        assert "Quarterly Update" in written.evidence
+        assert "text_mismatch" not in written.evidence
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        texts = [el.value or "" for el in current.elements if el.role == "AXStaticText"]
+        assert "Quarterly Update" in texts
+        assert "Revenue grew 12% compared with the previous quarter." in texts
+        assert "We will hire two engineers in November." in texts
+        document = next(el for el in current.elements if el.role == "AXTextArea")
+        assert not document.value
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
 def _soffice_displays() -> set[str]:
     found: set[str] = set()
     try:

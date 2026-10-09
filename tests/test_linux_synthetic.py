@@ -6318,6 +6318,61 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     assert _atspi.writer_text_cell(calc) is False
 
 
+def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
+    """Synthetic Writer document. The textarea node stays empty.
+
+    Paragraph breaks compare equal across newline, CR, U+2029, U+2028, and
+    U+FFFC. A repeated break, a missing break, and a space stay different.
+    A Mousepad document is not this path.
+    """
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.get_application = lambda: app
+    blank = _Acc("paragraph", name="")
+    blank.text = ""
+    _adopt(doc, blank)
+
+    def set_text_contents(text):
+        children = []
+        for line in text.split("\n"):
+            child = _Acc("paragraph", name="")
+            child.text = line
+            children.append(child)
+        _adopt(doc, *children)
+        return True
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.set_text_contents = set_text_contents
+    assert _atspi.set_text(doc, "68.3755") is True
+    assert _atspi.writer_document_text(doc) == "68.3755"
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    assert _atspi.set_text(doc, value) is True
+    assert doc.text == ""
+    assert _atspi.writer_document_outcome_text(value, doc) == value
+    assert _atspi.writer_document_matches(doc, value.replace("\n", "\r\n")) is True
+    assert _atspi.writer_document_matches(doc, value.replace("\n", "\u2029")) is True
+    assert _atspi.paragraph_breaks_match("a\r\nb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u2029b\u2028c", "a\nb\nc") is True
+    assert _atspi.paragraph_breaks_match("a\ufffcb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\n\nb", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a\r\n\nb", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a b", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("ab", "a\nb") is False
+    mousepad = _Acc("application", name="mousepad")
+    other = _Acc("document text", name="notes")
+    other.text = ""
+    other.get_application = lambda: mousepad
+    note = _Acc("paragraph", name="")
+    note.text = "68.3755"
+    _adopt(other, note)
+    assert _atspi.writer_document_text(other) is None
+    assert _atspi.writer_document_outcome_text("68.3755", other) is None
+
 def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:
     """The new paragraph in front of the old line is the committed edit.
 
