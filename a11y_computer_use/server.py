@@ -2302,16 +2302,28 @@ class Runtime:
         *,
         bounds: bool = False,
         previous: str | None = None,
+        key_focus: bool = False,
+        focus_before: tuple | None = None,
     ) -> tuple[str, str]:
         died = self._process_died(before)
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
         readable = after is not None and before is not None
         changed: bool | None = None
+        focus_note = None
         if readable and before is not None and after is not None:
             changed = outcome.relevant_state_changed(before["snap"], after, element)
             if bounds and not changed:
                 changed = before["bounds"] != outcome.bounds_fingerprint(after)
+            if key_focus and not changed:
+                focus_note = outcome.key_focus_evidence(
+                    focus_before,
+                    self._key_focus_probe(app),
+                    outcome.key_focus_rows(before["snap"]),
+                    outcome.key_focus_rows(after),
+                )
+                if focus_note:
+                    changed = True
         readback = None
         before_value = previous
         anchor = None
@@ -2343,7 +2355,7 @@ class Runtime:
             if readback is None:
                 readable = False
         self._remember_baseline(after)
-        return outcome.judge(
+        judged, evidence = outcome.judge(
             changed=changed,
             requested=requested,
             readback=readback,
@@ -2351,6 +2363,33 @@ class Runtime:
             process_died=died,
             readable=readable if requested is None else readback is not None or not died,
         )
+        if focus_note and judged == "confirmed" and evidence == "the accessibility state changed":
+            evidence = focus_note
+        return judged, evidence
+
+    def _key_focus_probe(self, app: str | None) -> tuple | None:
+        """Focused text, caret, selection, and sheet cell, or None off Linux.
+
+        The page fingerprint does not carry the caret or which cell is
+        current. This read is only for a key.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not app:
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.focused_key_evidence(app)
+
+        try:
+            if callable(runner):
+                found = runner(read)
+            else:
+                found = read()
+        except Exception:
+            return None
+        return found if isinstance(found, tuple) else None
 
     def _conclude(
         self,
@@ -2365,11 +2404,14 @@ class Runtime:
         bounds: bool = False,
         previous: str | None = None,
         verdict: tuple[str, str] | None = None,
+        key_focus: bool = False,
+        focus_before: tuple | None = None,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
+                key_focus=key_focus, focus_before=focus_before,
             )
         else:
             judged, evidence = verdict
@@ -3987,11 +4029,13 @@ class Runtime:
                 self.driver.key_chord(chord)
 
         before = self._capture(bundle)
+        focus_before = self._key_focus_probe(bundle)
         self._run_gated(action, bundle, execute)
         note = " (focused its window first)" if focused else ""
         return self._conclude(
             f"pressed {chord} in {bundle}{note}",
             tool="key", app=bundle, before=before,
+            key_focus=True, focus_before=focus_before,
         )
 
     @_serialized
@@ -4079,6 +4123,7 @@ class Runtime:
         before = self._capture()
         if target is not None:
             bundle, pid = target
+            focus_before = self._key_focus_probe(bundle)
 
             def execute_bg() -> None:
                 self._guard_user(bundle, addressed=True)
@@ -4088,6 +4133,7 @@ class Runtime:
             return self._conclude(
                 f"pressed {chord} in {bundle} (addressed to its process; nothing was activated)",
                 tool="key", app=bundle, before=before,
+                key_focus=True, focus_before=focus_before,
             )
         front = self._frontmost() or "unknown"
         # An open menu is the key target, including when the popup leaves the
@@ -4096,6 +4142,7 @@ class Runtime:
         # is what made Down leave the menu and Return insert a newline. type
         # and click still dismiss, so typed text does not fall into the menu.
         target = self._open_menu_app(front) or front
+        focus_before = self._key_focus_probe(target)
 
         def execute() -> None:
             self._guard_user(target)
@@ -4111,6 +4158,7 @@ class Runtime:
         return self._conclude(
             f"pressed {chord}{''.join(note)}",
             tool="key", app=target, before=before,
+            key_focus=True, focus_before=focus_before,
         )
 
     @_serialized
@@ -6160,7 +6208,9 @@ def build_server(
         app is still focus_changed. The app's own open menu counts as the key
         target, including when the frontmost name is empty. Gated at tier
         'full'. The text is unchanged. Structured content adds outcome, next,
-        and evidence."""
+        and evidence. A key is confirmed when the focused text, caret,
+        selection, or focused cell changes, including when the rest of the
+        page fingerprint does not."""
         return _publish(await run(runtime.key, chord, app, _outcome=True, _tool="key"))
 
     @server.tool(name="scroll")

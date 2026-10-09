@@ -360,6 +360,84 @@ def relevant_state_changed(before: object, after: object, target: object | None 
     return _page_rows(before, before_target) != _page_rows(after, after_target)
 
 
+# Text the user is editing, plus a spreadsheet cell. A tab strip or toolbar
+# around that text is not part of this record: Mousepad's document lives
+# under a tab group, which the page fingerprint skips.
+_KEY_TEXT_ROLES = frozenset({
+    "AXTextArea", "AXTextField", "AXSearchField", "AXComboBox", "AXCell",
+})
+_KEY_SELECTION_ROLES = frozenset({"AXCell", "AXRow", "AXOutlineRow"})
+
+
+def key_focus_rows(snap: object) -> tuple:
+    """Focused text and the selected cell or row.
+
+    The page fingerprint omits tab groups and toolbars, and it does not
+    include which cell is selected. A key is confirmed from this record
+    when that fingerprint stays still.
+    """
+    rows = []
+    for el in _snap_elements(snap):
+        role = getattr(el, "role", "")
+        title = getattr(el, "title", "") or ""
+        value = getattr(el, "value", None)
+        if bool(getattr(el, "focused", False)) and role in _KEY_TEXT_ROLES:
+            rows.append(("text", role, title, value))
+        if bool(getattr(el, "selected", False)) and role in _KEY_SELECTION_ROLES:
+            rows.append(("selection", role, title, value))
+    return tuple(sorted(rows, key=_sort_key))
+
+
+def _key_text_rows(rows: tuple) -> tuple:
+    return tuple(row for row in rows if row[0] == "text" and row[1] != "AXCell")
+
+
+def _key_cell_rows(rows: tuple) -> tuple:
+    return tuple(row for row in rows if row[1] == "AXCell" or row[0] == "selection")
+
+
+def key_focus_evidence(
+    before_live: tuple | None,
+    after_live: tuple | None,
+    before_rows: tuple,
+    after_rows: tuple,
+) -> str | None:
+    """Why a key changed the focused text, caret, selection, or cell.
+
+    ``None`` when those records match. A live record is ``(text, caret,
+    selection start, selection end, cell address)``. An unread live record
+    is not a change.
+    """
+    if before_rows != after_rows:
+        if _key_text_rows(before_rows) != _key_text_rows(after_rows):
+            return "the focused text changed"
+        if _key_cell_rows(before_rows) != _key_cell_rows(after_rows):
+            return "the focused cell changed"
+        return "the focused text changed"
+    if not _live_known(before_live) or not _live_known(after_live) or before_live == after_live:
+        return None
+    assert before_live is not None and after_live is not None
+    b_text, b_caret, b_start, b_end, b_cell = before_live
+    a_text, a_caret, a_start, a_end, a_cell = after_live
+    if b_text != a_text:
+        return "the focused text changed"
+    if b_cell != a_cell:
+        return "the focused cell changed"
+    if (b_start, b_end) != (a_start, a_end):
+        # A caret move keeps an empty selection on the caret. A range that
+        # grows, shrinks, or collapses is the selection itself.
+        if b_start == b_end and a_start == a_end:
+            return "the caret moved"
+        return "the selection changed"
+    if b_caret != a_caret:
+        return "the caret moved"
+    return None
+
+
+def _live_known(record: tuple | None) -> bool:
+    return record is not None and any(part is not None for part in record)
+
+
 def bounds_fingerprint(snap: object) -> str:
     """Digest of element rectangles, for scroll."""
     rows: list[str] = []
