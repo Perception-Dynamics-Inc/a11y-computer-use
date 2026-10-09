@@ -509,11 +509,25 @@ def _spawn_run(script, trace, home):
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
+    # A settle wait is gated on the frontmost app. macOS CI's frontmost app is
+    # not "unknown", so a grant for only that name refuses the wait at once
+    # and the next step has started before a poll can see this one. Grant the
+    # app NSWorkspace reports, which is the same app the wait checks.
+    child = (
+        "from a11y_computer_use.safety import PermissionStore, Tier, frontmost_app\n"
+        "store = PermissionStore()\n"
+        "store.set_tier('unknown', Tier.READ)\n"
+        "bundle, _pid = frontmost_app()\n"
+        "if bundle:\n"
+        "    store.set_tier(bundle, Tier.READ)\n"
+        "from a11y_computer_use.agent.cli import main\n"
+        "raise SystemExit(main())\n"
+    )
     return subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "from a11y_computer_use.agent.cli import main; raise SystemExit(main())",
+            child,
             "run",
             "wait a lot",
             "--model",

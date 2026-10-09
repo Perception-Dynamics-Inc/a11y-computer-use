@@ -268,11 +268,20 @@ def unwrap(text: str) -> str | None:
 
 
 def _fresh_nonce(text: str) -> str:
+    """A hex token that contains a letter.
+
+    Trace redaction treats a 13–19 digit run as a card number. An all-digit
+    nonce is replaced with ``[REDACTED]``, the fence no longer matches, and a
+    later pass wraps the text a second time.
+    """
     for _ in range(8):
         token = secrets.token_hex(8)
-        if token not in text:
+        if any(char.isalpha() for char in token) and token not in text:
             return token
-    return secrets.token_hex(16)
+    token = "a" + secrets.token_hex(8)
+    if token in text:
+        token = "a" + secrets.token_hex(16)
+    return token
 
 
 def parse_domain_list(value: str | object | None) -> tuple[str, ...]:
