@@ -606,6 +606,9 @@ class LinuxDriver:
         def _do() -> Snapshot:
             pid = _atspi.pid_of(root)
             accessor = _atspi.ATSPIAccessor()
+            accessor.libreoffice = (
+                _atspi.libreoffice_app(resolved) or _atspi.libreoffice_app(app or "")
+            )
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
@@ -851,6 +854,10 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
+        # A paragraph's activating action does not place the caret. The click
+        # path does, and confirming that click checks the caret afterwards.
+        if self._run(lambda: _atspi.is_libreoffice_text_paragraph(handle)):
+            return False
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -993,15 +1000,28 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("click")
-        from a11y_computer_use.drivers import _linux_input
+        from a11y_computer_use.drivers import _atspi, _linux_input
 
         self._focused_editable = None
+        handle = None
         if isinstance(target, Element):
             from a11y_computer_use import observe
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
         x, y = _point_of(target)
+        # A Writer paragraph click places the caret in that paragraph. The
+        # screen point is one title bar high, so a pointer click lands in
+        # the paragraph above and the following type confirms the miss.
+        if (
+            handle is not None
+            and button is MouseButton.LEFT
+            and count == 1
+            and not modifiers
+            and self._run(lambda: _atspi.place_paragraph_caret(handle, x, y))
+        ):
+            self._focused_editable = handle
+            return None
         with _linux_input.held(modifiers):
             _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
         return None

@@ -3402,6 +3402,158 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
         _kill_libreoffice()
 
 
+_WRITER_HTML = """<!doctype html><meta charset=utf-8>
+<h1>Quarterly Notes</h1>
+<p>Alpha paragraph WRITER-ONE with plain text.</p>
+<p>Beta paragraph WRITER-TWO here.</p>
+<p>Gamma WRITER-THREE end.</p>
+"""
+
+_WRITER_REGISTRY = """<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.VCL/Settings/org.openoffice.VCL:ConfigurableSettings['Accessibility']"><prop oor:name="EnableATToolSupport" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="ShowTipOfTheDay" oor:op="fuse"><value>false</value></prop></item>
+</oor:items>
+"""
+
+
+def _writer_profile(path) -> None:
+    user = path / "user"
+    user.mkdir(parents=True)
+    (user / "registrymodifications.xcu").write_text(_WRITER_REGISTRY)
+
+
+def _paragraph(snap, needle: str):
+    for el in snap.elements:
+        text = el.value or ""
+        if needle in text and el.role == "AXStaticText":
+            return el
+    return None
+
+
+def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
+    """Live. A ref click on a Writer paragraph puts the caret in that paragraph.
+
+    LibreOffice's screen extents sit one title bar above the text, so a
+    pointer click on the published box used to land in the paragraph above
+    and still report confirmed. The snapshot shifts the box by the X client
+    origin, the click places the caret in the target, and the outcome is
+    confirmed only because the caret is there. Typing then lands in Beta,
+    not in Alpha.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    html = doc / "notes.html"
+    html.write_text(_WRITER_HTML)
+    conv = tmp_path / "conv-profile"
+    _writer_profile(conv)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    converted = subprocess.run(
+        [
+            binary, "--headless", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{conv}",
+            "--convert-to", "odt", str(html), "--outdir", str(doc),
+        ],
+        env=env, capture_output=True, text=True, timeout=90,
+    )
+    odt = doc / "notes.odt"
+    assert odt.is_file(), converted.stderr[-500:]
+    _kill_libreoffice()
+    time.sleep(0.3)
+    profile = tmp_path / "writer-profile"
+    _writer_profile(profile)
+    proc = subprocess.Popen(
+        [
+            binary, "--writer", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(odt),
+        ],
+        env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:800]
+                if _paragraph(shot, "WRITER-TWO") is not None and "Tip of the Day" not in last:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Writer did not expose the Beta paragraph\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        beta = _paragraph(current, "WRITER-TWO")
+        alpha = _paragraph(current, "WRITER-ONE")
+        assert beta is not None and alpha is not None, observe.render_text(current)[:800]
+        handle = observe.ax_handle_for(current.snapshot_id, beta.ref)
+        assert handle is not None
+
+        def measure():
+            screen = _atspi._raw_rect(handle, "SCREEN")
+            window = _atspi._raw_rect(handle, "WINDOW")
+            frame = _atspi._frame_ancestor(handle)
+            frame_screen = None if frame is None else _atspi._raw_rect(frame, "SCREEN")
+            frame_window = None if frame is None else _atspi._raw_rect(frame, "WINDOW")
+            return screen, window, frame_screen, frame_window
+
+        screen, window, frame_screen, frame_window = driver._run(measure)
+        assert screen is not None and window is not None and frame_screen is not None
+        title = ""
+        frame = driver._run(lambda: _atspi._frame_ancestor(handle))
+        if frame is not None:
+            title = driver._run(lambda: str(_atspi._call_first(frame, ("get_name",), default="") or ""))
+        origin = _linux_system.client_origin_for_outer_frame(
+            int(frame_screen[0]), int(frame_screen[1]),
+            int(frame_screen[2]), int(frame_screen[3]), title=title,
+        )
+        assert origin is not None, (frame_screen, frame_window)
+        assert abs(beta.bounds.y - (origin[1] + window[1])) <= 1, (
+            beta.bounds.y, origin, window, screen, frame_screen, frame_window,
+        )
+        assert beta.bounds.y > screen[1] + 8
+        clicked = runtime.click(beta.ref)
+        assert clicked.outcome == "confirmed", (clicked, clicked.evidence)
+        assert "caret is in the target paragraph" in clicked.evidence
+        typed = runtime.type_text(" INSERTED")
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        beta_after = _paragraph(current, "WRITER-TWO")
+        alpha_after = _paragraph(current, "WRITER-ONE")
+        rendered = observe.render_text(current)
+        assert beta_after is not None and beta_after.value is not None, rendered[:800]
+        assert beta_after.value.count("INSERTED") == 1, (typed, typed.evidence, beta_after.value)
+        assert beta_after.value.startswith("Beta paragraph WRITER-TWO here.")
+        assert alpha_after is not None and "INSERTED" not in (alpha_after.value or "")
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
 

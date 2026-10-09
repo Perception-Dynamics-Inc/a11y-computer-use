@@ -3654,11 +3654,42 @@ class Runtime:
         msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
+        verdict = None
+        if isinstance(target, Element):
+            verdict = self._paragraph_click_verdict(target)
         return self._conclude(
             text, tool="click", app=app, before=before,
             element=target if isinstance(target, Element) else None,
             had_ref=ref is not None,
+            verdict=verdict,
         )
+
+    def _paragraph_click_verdict(self, element: Element) -> tuple[str, str] | None:
+        """Caret check for a LibreOffice paragraph click. None for every other target.
+
+        A pointer click on Writer text moves focus, so the accessibility
+        state changes even when the caret lands in the paragraph above.
+        That state change is not confirmation.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.paragraph_click_verdict(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
 
     @_serialized
     def hover(
@@ -6038,7 +6069,8 @@ def build_server(
         On Linux a Qt table cell is clicked at its center. That click is
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
-        reported as success."""
+        reported as success. A click on a LibreOffice text paragraph is
+        confirmed only when the caret is in that paragraph."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
