@@ -497,6 +497,18 @@ def _spawn_run(script, trace, home):
     env["HOME"] = str(home)
     env.pop("DISPLAY", None)
     env.pop("WAYLAND_DISPLAY", None)
+    kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    # Ctrl+Break reaches a Windows child only when it is its own process
+    # group. POSIX uses a new session so the signal hits this process.
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
     return subprocess.Popen(
         [
             sys.executable,
@@ -514,12 +526,60 @@ def _spawn_run(script, trace, home):
             "--trace-dir",
             str(trace),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        env=env,
+        **kwargs,
     )
+
+
+def _deliver(proc, sig_name: str) -> None:
+    """Deliver one cooperative cancel signal to a running agent process.
+
+    Windows cannot deliver SIGTERM to a Python handler. Ctrl+Break reaches
+    the SIGBREAK handler in a child started with ``CREATE_NEW_PROCESS_GROUP``.
+    """
+    import signal
+    import sys
+
+    if sys.platform == "win32":
+        if sig_name == "SIGTERM":
+            raise AssertionError("SIGTERM is not a cooperative cancel on Windows")
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+        return
+    proc.send_signal(getattr(signal, sig_name))
+
+
+def test_second_cancel_signal_exits_3(monkeypatch) -> None:
+    """The second signal must not fall through to the default SIGINT death."""
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    flag = __import__("threading").Event()
+    cancelled = {"n": 0}
+
+    class _Agent:
+        _signal_cancel = flag
+
+        def cancel(self) -> None:
+            cancelled["n"] += 1
+
+    hits = [0]
+    try:
+        cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert flag.is_set()
+        assert cancelled["n"] == 1
+        assert codes == []
+        with pytest.raises(SystemExit):
+            cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert codes == [3]
+        assert hits[0] == 2
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def _wait_for_steps(trace, count: int, timeout: float) -> None:
@@ -536,16 +596,14 @@ def _wait_for_steps(trace, count: int, timeout: float) -> None:
     raise AssertionError(f"trace did not record {count} steps")
 
 
-@pytest.mark.skipif(
-    __import__("sys").platform == "win32",
-    reason="os.kill cannot deliver SIGINT to a Python handler on Windows",
-)
 @pytest.mark.parametrize("sig_name", ["SIGINT", "SIGTERM"])
 def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
     """A real process, signalled mid-wait, prints cancelled JSON and exits 3."""
-    import signal
+    import sys
     import time
 
+    if sys.platform == "win32" and sig_name == "SIGTERM":
+        pytest.skip("Windows TerminateProcess does not run a Python SIGTERM handler")
     script = tmp_path / "turns.json"
     trace = tmp_path / "trace"
     _waits(script, [0.3, 3.0, 30.0])
@@ -553,7 +611,7 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
     try:
         _wait_for_steps(trace, 1, 20)
         signalled = time.monotonic()
-        proc.send_signal(getattr(signal, sig_name))
+        _deliver(proc, sig_name)
         out, err = proc.communicate(timeout=15)
     finally:
         if proc.poll() is None:
@@ -577,13 +635,8 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
     assert payload["trace_dir"] == str(trace)
 
 
-@pytest.mark.skipif(
-    __import__("sys").platform == "win32",
-    reason="os.kill cannot deliver SIGINT to a Python handler on Windows",
-)
 def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
     """A second Ctrl+C leaves the process immediately, still with code 3."""
-    import signal
     import time
 
     script = tmp_path / "turns.json"
@@ -593,9 +646,9 @@ def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
     try:
         _wait_for_steps(trace, 1, 20)
         started = time.monotonic()
-        proc.send_signal(signal.SIGINT)
+        _deliver(proc, "SIGINT")
         time.sleep(0.2)
-        proc.send_signal(signal.SIGINT)
+        _deliver(proc, "SIGINT")
         _out, err = proc.communicate(timeout=8)
     finally:
         if proc.poll() is None:

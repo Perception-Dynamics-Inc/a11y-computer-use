@@ -55,6 +55,7 @@ sleep, which is clipped to the time left.
 
 from __future__ import annotations
 
+import errno
 import glob
 import http.client
 import ipaddress
@@ -585,6 +586,39 @@ def _url_status(url: object, timeout_s: float) -> int | None:
     return status
 
 
+def _sleep(seconds: float) -> None:
+    """Sleep for ``seconds``, retrying when a signal interrupts the syscall.
+
+    ``time.sleep`` retries ``EINTR`` when the Python handler does not raise
+    (PEP 475). On macOS a ``SIGTERM`` during that sleep can still surface as
+    ``InterruptedError``. Retrying keeps the wait on the current step so the
+    agent can finish it and then honour cancel, instead of recording a failed
+    run. A syscall that keeps failing ends the slice so the wait can poll
+    again instead of spinning.
+    """
+    if seconds <= 0:
+        return
+    deadline = time.monotonic() + seconds
+    interruptions = 0
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return
+        try:
+            time.sleep(left)
+            return
+        except InterruptedError:
+            interruptions += 1
+        except OSError as exc:
+            if exc.errno != errno.EINTR:
+                raise
+            interruptions += 1
+        if interruptions >= 3:
+            while time.monotonic() < deadline:
+                pass
+            return
+
+
 class Checker:
     """Evaluate one condition repeatedly until it holds or the deadline passes.
 
@@ -721,7 +755,7 @@ class Checker:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._raise_timeout(condition, started, polls, state, timeout_s)
-            time.sleep(min(poll_s, remaining))
+            _sleep(min(poll_s, remaining))
 
     def _raise_timeout(self, condition: dict, started: float, polls: int, state: dict, timeout_s: float) -> None:
         detail: dict[str, object] = {

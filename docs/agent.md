@@ -168,9 +168,15 @@ Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`)
 `2` needs_human, `3` error or cancel.
 
 SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
-step. The trace write for that step is closed, and `--json` prints one object
-with `status` `cancelled` and `reason` `cancelled`. The process exits 3. A
-second SIGINT or SIGTERM exits 3 immediately and does not print a traceback.
+step. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
+`SIGTERM` there ends the process without a Python handler, so it is not a
+cooperative cancel. The handler is installed before the first step. A signal
+that arrives inside a blocking call (`sleep`, `select`, or a subprocess) still
+ends the run as `cancelled` when that call raises `InterruptedError` or
+`KeyboardInterrupt`. The trace write for the step is closed, and `--json`
+prints one object with `status` `cancelled` and `reason` `cancelled`. The
+process exits 3. A second cancel signal exits 3 immediately and does not
+print a traceback.
 
 `--model-timeout` is the limit for one model call, in seconds. The default is
 120. It is not the time left in `--max-time`. The loop checks the run budget

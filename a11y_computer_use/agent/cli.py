@@ -3,7 +3,9 @@
 ``a11y-agent run`` prints one JSON object on stdout when ``--json`` is set.
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
 SIGINT and SIGTERM cancel after the current step (status ``cancelled``,
-exit 3). A second signal exits 3 immediately and does not print a traceback.
+exit 3). On Windows, Ctrl+C (SIGINT) and Ctrl+Break (SIGBREAK) do; SIGTERM
+there is TerminateProcess and is not a cooperative cancel. A second signal
+exits 3 immediately and does not print a traceback.
 ``--approve-policy deny`` is the default for risky actions. ``--approve``
 prompts on the terminal (stderr or the tty, never stdout).
 
@@ -15,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
+import threading
 from collections.abc import Sequence
 
 from a11y_computer_use.agent.actions import Action, risk_category
@@ -93,31 +97,82 @@ def build_agent(args: argparse.Namespace):
     )
 
 
-def _run_until_cancelled(agent: object, goal: str):
-    """Run ``goal``. SIGINT and SIGTERM cancel after the current step.
+def _cancel_signals() -> list[int]:
+    """Signals that cancel ``a11y-agent run`` on this operating system.
 
-    The first signal calls ``agent.cancel`` and returns to the loop, so the
-    step in progress finishes, the trace write closes, and ``run`` returns a
-    cancelled result. A second signal raises ``SystemExit(3)`` with no
-    traceback. Handlers are restored when the run returns.
+    POSIX delivers SIGINT (Ctrl+C) and SIGTERM to a Python handler. Windows
+    delivers SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break). ``os.kill(SIGTERM)``
+    on Windows calls TerminateProcess and never enters the handler, so it is
+    not installed there.
     """
-    hits = 0
-    saved: list[tuple[int, object]] = []
+    names = ("SIGINT", "SIGBREAK") if sys.platform == "win32" else ("SIGINT", "SIGTERM")
+    found: list[int] = []
+    for name in names:
+        value = getattr(signal, name, None)
+        if isinstance(value, int):
+            found.append(value)
+    return found
 
-    def handler(signum, frame) -> None:
-        nonlocal hits
-        del signum, frame
-        hits += 1
-        cancel = getattr(agent, "cancel", None)
-        if callable(cancel):
+
+def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object) -> None:
+    """First signal cancels after the current step. The second exits 3.
+
+    The handler is re-armed before it does anything else. A second SIGINT
+    that arrives while the first is still tripped can leave the process on
+    the default handler; that path is an uncaught KeyboardInterrupt and the
+    process dies with status ``-SIGINT`` (-2) and a traceback. Re-arming
+    keeps this function installed. The second hit uses ``os._exit`` so
+    finalization cannot turn the exit into that signal death.
+    """
+    del frame
+    try:
+        signal.signal(signum, lambda sig, frm: _on_cancel_signal(agent, hits, sig, frm))
+    except (OSError, ValueError):
+        pass
+    hits[0] += 1
+    flag = getattr(agent, "_signal_cancel", None)
+    if flag is not None and hasattr(flag, "set"):
+        try:
+            flag.set()
+        except Exception:  # noqa: BLE001 - a signal handler must not raise
+            pass
+    cancel = getattr(agent, "cancel", None)
+    if callable(cancel):
+        try:
             cancel()
-        if hits >= 2:
-            raise SystemExit(3)
+        except Exception:  # noqa: BLE001 - a signal handler must not raise
+            pass
+    if hits[0] >= 2:
+        os._exit(3)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+def _run_until_cancelled(agent: object, goal: str):
+    """Run ``goal``. The platform's cancel signals stop it after this step.
+
+    Handlers are installed before ``run``, so a signal during startup is
+    recorded on ``agent._signal_cancel`` and still cancels after ``_loop``
+    clears the ordinary cancel event. The first signal returns into the
+    step. The trace write for that step closes, and ``run`` returns a
+    cancelled result. A second signal exits 3 with no traceback.
+    """
+    hits = [0]
+    saved: list[tuple[int, object]] = []
+    flag = getattr(agent, "_signal_cancel", None)
+    if flag is None:
+        try:
+            agent._signal_cancel = threading.Event()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
+            pass
+
+    def handler(signum: int, frame: object) -> None:
+        _on_cancel_signal(agent, hits, signum, frame)
+
+    for sig in _cancel_signals():
         try:
             saved.append((sig, signal.getsignal(sig)))
             signal.signal(sig, handler)
+            if hasattr(signal, "siginterrupt"):
+                signal.siginterrupt(sig, True)
         except (OSError, ValueError):
             continue
     try:

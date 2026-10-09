@@ -410,6 +410,80 @@ def test_max_time_zero_stops_immediately():
     assert called["n"] == 0
 
 
+def test_signal_cancel_set_before_the_loop_still_cancels():
+    """``_loop`` clears ``_cancel``. A CLI signal flag must survive that."""
+    import threading
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    agent = Agent(
+        ScriptedModel([turn(ToolCall("click", {"ref": "e2"}))]),
+        runtime=runtime,
+    )
+    agent._signal_cancel = threading.Event()
+    agent._signal_cancel.set()
+    result = agent.run("click save")
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+    assert runtime.calls == []
+
+
+def test_interrupted_blocking_call_after_cancel_is_cancelled():
+    """A signal during sleep/select raises InterruptedError after cancel()."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    class _Interrupted:
+        name = "interrupted"
+        supports_images = False
+
+        def __init__(self, agent_box: dict) -> None:
+            self._agent_box = agent_box
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            self._agent_box["agent"].cancel()
+            raise InterruptedError("[Errno 4] Interrupted system call")
+
+    holder: dict = {}
+    agent = Agent(_Interrupted(holder), runtime=FakeRuntime(elements))
+    holder["agent"] = agent
+    result = agent.run("click save")
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+
+
+def test_interrupted_error_without_cancel_is_still_failed():
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    class _Interrupted:
+        name = "interrupted"
+        supports_images = False
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            raise InterruptedError("[Errno 4] Interrupted system call")
+
+    result = Agent(_Interrupted(), runtime=FakeRuntime(elements)).run("click save")
+    assert result.status == "failed"
+    assert result.reason.startswith("error: InterruptedError:")
+
+
+def test_keyboard_interrupt_in_the_loop_is_cancelled():
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    class _Hit:
+        name = "hit"
+        supports_images = False
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            raise KeyboardInterrupt
+
+    result = Agent(_Hit(), runtime=FakeRuntime(elements)).run("click save")
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+
+
 def test_cancel_before_the_click():
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     holder: dict = {}
