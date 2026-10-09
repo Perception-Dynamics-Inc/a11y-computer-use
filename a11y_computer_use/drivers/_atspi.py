@@ -771,6 +771,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         # Text is present and empty. Value 0.0 is the number field's default,
         # not a number the user entered. A slider has no text interface
         # (count is None) and still falls through to Value.
+        # A Chrome date, time, or month segment also has empty text. Its
+        # Value interface is not that segment: an empty one stays 0.0, and a
+        # filled date can publish one float across the segments. The segment
+        # is the valuetext attribute ("17", "1994", "March").
+        if role_name == "spin button" and _chrome_date_segment(acc):
+            return _date_segment_text(acc)
         return None
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
@@ -1975,6 +1981,35 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     return is_secure(acc)
 
 
+# Chrome UI fields whose text is not the web page. The address bar rewrites
+# while suggestions settle. The find bar reopens with the previous query
+# selected, so typing that query again leaves the same string.
+_CHROME_REWRITE_NAMES = frozenset({"Address and search bar", "Find"})
+
+
+def _chrome_rewrite_field(acc) -> bool:
+    """True for the Chrome address bar or find bar, not a web input."""
+    try:
+        if not _chromium_app(acc):
+            return False
+    except Exception:
+        return False
+    if _get_attributes(acc).get("tag"):
+        return False
+    return _node_name(acc) in _CHROME_REWRITE_NAMES
+
+
+def focused_chrome_rewrite(app: str, *, max_nodes: int = 400):
+    """The focused address bar or find bar, else None."""
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    except Exception:
+        return None
+    if truncated or acc is None or not _chrome_rewrite_field(acc):
+        return None
+    return acc
+
+
 def _focused_contenteditable(app: str, *, max_nodes: int = 400):
     """The focused node when it is a Chrome contenteditable, else None.
 
@@ -2073,7 +2108,10 @@ def _typed_visible(before: str | None, after: str | None, text: str, *, chrome: 
     NBSP compares as a space, and one trailing contenteditable newline is
     not part of the value. ``chrome`` also accepts the typed text with its
     trailing spaces removed, which is the string Chrome keeps. A field that
-    settled without the characters is not a match.
+    settled without the characters is not a match. A field whose whole text
+    is already exactly the typed string is a match: Chrome's find bar
+    reopens with that query selected, and typing it again does not change
+    the string.
     """
     before_n = _field_text_for_type(before, text)
     after_n = _field_text_for_type(after, text)
@@ -2083,7 +2121,11 @@ def _typed_visible(before: str | None, after: str | None, text: str, *, chrome: 
     if before_n is None:
         return True
     if after_n == before_n:
-        return False
+        # The field already showed exactly the typed text. Chrome's find bar
+        # reopens with that query selected, and typing it again leaves the
+        # same string. That is the text landing. A longer field that did not
+        # change still does not count: the needle is only a piece of it.
+        return any(needle and after_n == needle for needle in needles)
     for needle in needles:
         if needle and (after_n.endswith(needle) or after_n == (before_n + needle)):
             return True
@@ -2692,6 +2734,134 @@ def _confirm_text(acc, text: str) -> bool:
     return False
 
 
+_DATE_INPUT_TYPES = frozenset({"date", "time", "month", "week", "datetime-local"})
+_MONTH_NAMES = (
+    "", "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)
+_DATE_SEGMENT_POLLS = 16
+_DATE_SEGMENT_PAUSE_S = 0.05
+
+
+def _chrome_date_segment(acc) -> bool:
+    """True for one segment of a Chrome date, time, or month input.
+
+    The role is ``spin button``. The Value interface is not the segment.
+    On Chrome 148 ``set_current_value`` leaves an empty segment at 0.0.
+    On the Chrome that filed #146 the year read back as ``171994.0`` after
+    the day and the year were written. A number input and a GTK spin button
+    are not this. ``week`` and ``datetime-local`` use the same editor.
+    """
+    try:
+        if _role_name(acc) != "spin button" or _number_input(acc) or not _chromium_app(acc):
+            return False
+    except Exception:
+        return False
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None:
+            return False
+        if _role_name(parent) == "date editor":
+            kind = str(_get_attributes(parent).get("text-input-type") or "").lower()
+            return kind in _DATE_INPUT_TYPES or kind == ""
+        node = parent
+    return False
+
+
+def _date_segment_text(acc) -> str | None:
+    """The segment's displayed text, or None when it is unset.
+
+    Chrome publishes ``valuetext``. An unset segment is ``"0"``. A minute
+    the user set to zero is ``"00"``. ``"0"`` is not a value the field holds.
+    """
+    raw = _get_attributes(acc).get("valuetext")
+    if not isinstance(raw, str):
+        return None
+    shown = raw.strip()
+    if shown in {"", "0"}:
+        return None
+    return shown
+
+
+def _segment_matches(requested: str, shown: str | None) -> bool:
+    """True when ``shown`` is the segment ``requested`` asked for.
+
+    Compared as text. ``"03"`` matches ``"3"``. ``"03"`` matches ``"March"``
+    because a month input displays the month name. The Value interface's
+    float is not an argument to this comparison.
+    """
+    if requested == "":
+        return shown is None
+    if shown is None:
+        return False
+    want = requested.strip()
+    got = shown.strip()
+    if want.casefold() == got.casefold():
+        return True
+
+    def _whole(text: str) -> float | None:
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        if abs(number - round(number)) >= 1e-9:
+            return None
+        return number
+
+    left = _whole(want)
+    right = _whole(got)
+    if left is not None and right is not None and left == right:
+        return True
+    if left is not None:
+        index = int(round(left))
+        if 1 <= index <= 12 and got.casefold() == _MONTH_NAMES[index]:
+            return True
+    return False
+
+
+def _set_chrome_date_segment(acc, value: str) -> bool:
+    """Type ``value`` into one date, time, or month segment.
+
+    Success is ``valuetext``, not ``Value.get_current_value``. A float such
+    as ``171994.0`` is never the read-back. An empty string clears the
+    segment. Raises ``text_mismatch`` with the displayed text when the
+    segment does not show ``value``.
+    """
+    if _segment_matches(value, _date_segment_text(acc)):
+        return True
+    if not _x11_keys_available():
+        shown = _date_segment_text(acc) or ""
+        raise _text_mismatch(
+            "text_mismatch",
+            f"the value read back {shown!r} does not match {value!r}",
+            expected=value,
+            actual=shown,
+        )
+    grab_focus(acc)
+    _click_center(acc)
+    if value == "":
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.press_chord("ctrl+a")
+        _linux_input.press_chord("backspace")
+        _linux_input.press_chord("delete")
+    else:
+        _type_string(value)
+    for attempt in range(_DATE_SEGMENT_POLLS):
+        if _segment_matches(value, _date_segment_text(acc)):
+            return True
+        if attempt + 1 < _DATE_SEGMENT_POLLS:
+            time.sleep(_DATE_SEGMENT_PAUSE_S)
+    shown = _date_segment_text(acc) or ""
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {shown!r} does not match {value!r}",
+        expected=value,
+        actual=shown,
+    )
+
+
 def _number_input(acc) -> bool:
     """True when object attributes say this is ``<input type=number>``."""
     attrs = _get_attributes(acc)
@@ -3106,6 +3276,10 @@ def control_kind(acc) -> str | None:
             span = _value_range(acc)
             if span is not None and _sane_range(*span):
                 return "value"
+        return None
+    # A Chrome date segment is a spin button whose Value interface is not the
+    # segment text. set_text types the segment and reads valuetext.
+    if _chrome_date_segment(acc):
         return None
     if role in {"spin button", "slider"} or _number_input(acc):
         return "value"
@@ -4179,7 +4353,11 @@ def set_text(acc, text: str) -> bool:
     BackSpace, and Delete, then a poll. A newline left by ``<br>`` is empty.
     Words that remain are ``text_mismatch``, and the previous text stays.
     An input, a textarea, and a GTK field do not use that clear.
+    A Chrome date, time, or month segment is typed and checked against
+    ``valuetext``. The Value interface is not that check.
     """
+    if _chrome_date_segment(acc):
+        return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
         return _clear_contenteditable(acc)
     eti = _editable_iface(acc)

@@ -5888,7 +5888,10 @@ def build_server(
         after a coordinate click that did not remember a ref: the focused
         editable is looked up and inserted with the same helper. A CRLF is one
         newline; the reported count is the number of characters the field read
-        back, and a mismatch is an error rather than success. An empty app is
+        back, and a mismatch is an error rather than success. Chrome's address
+        bar is polled until the URL is visible or the bar settles on its own
+        string; a settled rewrite is not a mismatch. The find bar already
+        showing exactly that query is a match. An empty app is
         invalid_arguments. Gated at tier 'full' against the target app; refuses
         with secure_field when a password field has focus — secrets are typed
         by the human, never by this tool. The text is unchanged. Structured
@@ -6026,7 +6029,9 @@ def build_server(
         a value that is not one of the options is invalid_arguments and lists
         them. A spin button, slider, or other Value control is set through that
         interface; a number outside the minimum and maximum is invalid_arguments
-        and includes both. An editable Linux field succeeds when the value read
+        and includes both. A Chrome date, time, or month segment is typed, and
+        the read-back is that segment's displayed text, not the Value float.
+        An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success. Gated at tier 'full';
         refuses secure/password fields (secrets are entered by the human, never
         this tool). Ideal for filling forms fast. The text is unchanged.

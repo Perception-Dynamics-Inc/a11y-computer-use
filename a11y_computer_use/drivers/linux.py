@@ -1444,7 +1444,8 @@ class LinuxDriver:
             return self._location_read_back(location, before, text, app_id)
         after = self._typed_readback(app_id)
         # A Chrome contenteditable can publish the keys after that first
-        # read. Poll until the text settles. LibreOffice already read the
+        # read. Poll until the text settles. The address bar does too: the
+        # first read can be a truncated URL. LibreOffice already read the
         # open cell editor, so it does not take this poll. Any other focused
         # control keeps the single read. No readable text is still not a mismatch.
         if (
@@ -1464,6 +1465,26 @@ class LinuxDriver:
                     chrome=True,
                 )
                 if _atspi._typed_visible(before, after, text, chrome=True):
+                    return len(text)
+            elif self._run(lambda: _atspi.focused_chrome_rewrite(app_id)) is not None:
+                # The address bar publishes a short URL while suggestions
+                # settle, then the whole string. Poll that field. A settled
+                # value that changed and still is not the request is Chrome's
+                # own formatting: not a hard mismatch. The outcome judge
+                # reads whatever the field shows. The find bar that already
+                # equals the typed text is a match above and does not poll.
+                polled = _atspi._poll_typed_text(
+                    lambda: self._run(lambda: _atspi.focused_text(app_id)),
+                    before,
+                    text,
+                )
+                if _atspi._typed_visible(before, polled, text):
+                    return len(text)
+                if polled is not None:
+                    after = polled
+                settled = _atspi._field_text_for_type(after, text)
+                earlier = _atspi._field_text_for_type(before, text)
+                if settled is not None and settled != earlier:
                     return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
