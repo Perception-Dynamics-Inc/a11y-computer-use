@@ -448,7 +448,10 @@ def test_menu_state_without_a_bus_does_not_raise(monkeypatch) -> None:
     assert driver.menu_close("mousepad") == []
     with pytest.raises(ComputerUseError) as exc:
         driver.menu_items("mousepad", None)
-    assert exc.value.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "missing_dependency"
+    assert "System Settings" not in exc.value.detail["hint"]
+    assert "python3-gi" in exc.value.detail["hint"]
 
 
 def test_file_dialog_names_the_linux_limit() -> None:
