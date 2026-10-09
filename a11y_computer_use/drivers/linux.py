@@ -434,9 +434,11 @@ def _secure_focus_error(api: str) -> ComputerUseError:
 def _accepts_text(element: Element) -> bool:
     """True when ``set_value`` may write ``element``.
 
-    The snapshot sets ``editable`` from the role. A synthetic element can name
-    an editable role without that flag; the role set is the one the pruner
-    uses. A menu, static text, or button is not in it.
+    The snapshot sets ``editable`` from the role, and from AT-SPI
+    ``STATE_EDITABLE`` or an EditableText interface on a container. A
+    synthetic element can name an editable role without that flag; the role
+    set is the one the pruner uses. A menu, static text, or button is not
+    in it unless the snapshot flag is set.
     """
     if element.editable:
         return True

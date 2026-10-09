@@ -198,6 +198,11 @@ class RawNode:
     #: do not grow a new signal. A zero-size web wrapper that can take focus
     #: stays a control; a plain div that cannot does not.
     focusable: bool = False
+    #: Platform text-entry signal independent of role. AT-SPI sets this from
+    #: ``STATE_EDITABLE``, or from an EditableText interface on a section,
+    #: paragraph, or panel. Default false, so macOS, Windows, and the browser
+    #: stay editable only when the role is a text field.
+    editable: bool = False
 
 
 class TreeAccessor(Protocol):
@@ -1395,10 +1400,15 @@ def _empty_text_container(raw: RawNode) -> bool:
 
 
 def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
-    """Derive (clickable, editable, secure) from role/subrole/actions."""
+    """Derive (clickable, editable, secure) from role/subrole/actions.
+
+    ``raw.editable`` is the platform signal (AT-SPI ``STATE_EDITABLE`` or
+    EditableText). A group with that signal is editable even though its role
+    is not a text field.
+    """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES
-    editable = secure or raw.role in _EDITABLE_ROLES
+    editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
     return clickable, editable, secure
 
 

@@ -1405,6 +1405,132 @@ def test_linux_chrome_paragraph_label_and_contenteditable(tmp_path) -> None:
         _stop(proc)
 
 
+_ROLELESS_PAGE = """<!doctype html><meta charset=utf-8><title>cuaroleless</title>
+<style>body{margin:16px;font:16px sans-serif} div{margin:12px 0;min-height:28px}</style>
+<div contenteditable="true" aria-label="Notes box">old note</div>
+<div contenteditable="true">plain editable</div>
+<div contenteditable="true" role="textbox" aria-multiline="true" aria-label="Rich box">rich old</div>
+"""
+
+
+def _shown_text(element) -> str:
+    if element is None or element.value is None:
+        return ""
+    return str(element.value).replace("\u00a0", " ").replace("\n", " ").strip()
+
+
+def _wait_roleless_value(driver, app: str, title: str, wanted: str):
+    from a11y_computer_use import observe
+
+    deadline = time.monotonic() + 6
+    last = None
+    shown = None
+    while time.monotonic() < deadline:
+        last = driver.snapshot(Scope.WINDOW, app)
+        editor = next((el for el in last.elements if el.title == title), None)
+        shown = _shown_text(editor)
+        if editor is not None and editor.editable and shown == wanted:
+            return last
+        if wanted == "" and (editor is None or shown == "") and title not in {
+            el.title for el in last.elements if _shown_text(el)
+        }:
+            rendered = observe.render_text(last)
+            if wanted == "" and title == "Notes box" and "new note" not in rendered and "old note" not in rendered:
+                return last
+        time.sleep(0.25)
+    raise AssertionError(f"{title} read {shown!r}\n{observe.render_text(last)}")
+
+
+def test_linux_chrome_roleless_contenteditable(tmp_path) -> None:
+    """Live Chrome. A contenteditable with no textbox role is editable, and set_value replaces it.
+
+    The section is listed with ``edit``. ``set_value`` replaces the text and
+    an empty value clears it. The ``role=textbox`` editor on the same page
+    still accepts ``set_value``. Skips only when no Chrome binary is on PATH.
+    The Linux CI image has one, so this test is not skipped there.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the roleless contenteditable test")
+    page = tmp_path / "cuaroleless.html"
+    page.write_text(_ROLELESS_PAGE)
+    profile = tmp_path / "chrome-roleless"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--disable-component-update", f"--user-data-dir={profile}",
+            "--window-size=1100,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                last = observe.render_text(snap)
+                if "Notes box" in last and "Rich box" in last and "plain editable" in last:
+                    break
+            time.sleep(0.5)
+        else:
+            raise AssertionError(f"chrome did not expose the roleless editors\n{last}")
+        app = driver.activate_app("chrome")
+        runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app))
+        snap = driver.snapshot(Scope.WINDOW, app)
+        rendered = observe.render_text(snap)
+        notes = next(el for el in snap.elements if el.title == "Notes box")
+        rich = next(el for el in snap.elements if el.title == "Rich box")
+        plain = next(
+            el for el in snap.elements
+            if el.editable and "plain editable" in f"{el.title} {el.value or ''}"
+        )
+        assert notes.editable, rendered
+        assert plain.editable, rendered
+        assert rich.editable and rich.role == "AXTextField", rendered
+        assert "edit" in observe.render_text(snap, mode="full")
+        notes_line = next(line for line in rendered.splitlines() if "Notes box" in line)
+        plain_line = next(line for line in rendered.splitlines() if "plain editable" in line)
+        assert "edit" in notes_line, notes_line
+        assert "edit" in plain_line, plain_line
+        runtime._current = snap
+        for editor, value in ((notes, "new note"), (plain, "plain new"), (rich, "rich new")):
+            result = runtime.set_value(editor.ref, value)
+            assert result.startswith("set "), result
+        _wait_roleless_value(driver, app, "Notes box", "new note")
+        shot = driver.snapshot(Scope.WINDOW, app)
+        plain_now = next(
+            el for el in shot.elements
+            if el.editable and (
+                el.title == plain.title and plain.title
+                or "plain new" in f"{el.title} {el.value or ''}"
+            )
+        )
+        assert _shown_text(plain_now) == "plain new", observe.render_text(shot)
+        rich_now = next(el for el in shot.elements if el.title == "Rich box")
+        assert _shown_text(rich_now) == "rich new", observe.render_text(shot)
+        runtime._current = shot
+        notes_now = next(el for el in shot.elements if el.title == "Notes box" and el.editable)
+        cleared = runtime.set_value(notes_now.ref, "")
+        assert cleared.startswith("set "), cleared
+        _wait_roleless_value(driver, app, "Notes box", "")
+    finally:
+        _stop(proc)
+
+
 def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
     """Live Firefox AT-SPI: the same local page, including the empty-label checkbox click.
 
