@@ -5935,3 +5935,172 @@ def test_linux_mousepad_backspace_and_calc_down_are_confirmed(tmp_path) -> None:
     finally:
         _stop_group(calc)
         _kill_libreoffice()
+
+
+_CALC_BUS_TRIALS = 10
+
+
+def _calc_window_visible() -> bool:
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        rows = _linux_system.windows()
+    except ComputerUseError:
+        raise
+    except Exception:
+        return False
+    for row in rows:
+        if _linux_system._comm_matches_identifier("Calc", str(row.get("app") or "")):
+            return True
+        if "libreoffice" in str(row.get("title") or "").lower():
+            return True
+    return False
+
+
+def _wait_calc_window(present: bool, timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _calc_window_visible() == present:
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"Calc window present={present} did not happen within {timeout_s}s")
+
+
+def _launch_calc(home, binary: str) -> subprocess.Popen:
+    profile = home / "lo-profile"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    return subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _pid_with_marker(marker: str) -> int | None:
+    token = marker.encode()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/environ", "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if token in raw:
+            return int(entry)
+    return None
+
+
+def test_linux_mcp_server_survives_calc_snapshots_in_a_fresh_home(tmp_path) -> None:
+    """Live. Ten Calc launches, each in a fresh HOME, snapshotted over MCP stdio.
+
+    The first snapshot after Calc registers used to drop the last reference on
+    a still-connected AT-SPI socket. libdbus logged "The last reference on a
+    connection was dropped" and the MCP process exited, so the client saw a
+    closed pipe and no tool result. The server has to answer every call and
+    still be alive after the tenth.
+    """
+    import asyncio
+    import uuid
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    from a11y_computer_use import safety
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    server_home = tmp_path / "mcp-home"
+    server_home.mkdir()
+    store = safety.PermissionStore(server_home / ".a11y-computer-use" / "permissions.json")
+    store.set_tier("calc", safety.Tier.READ)
+    marker = f"a11y-cu-mcp-{uuid.uuid4().hex}"
+    err_path = tmp_path / "mcp-stderr.txt"
+    forwarded = {
+        "HOME": str(server_home),
+        "PATH": os.environ.get("PATH", ""),
+        "DISPLAY": os.environ.get("DISPLAY", ""),
+        "A11Y_CU_MCP_MARKER": marker,
+        "DBUS_FATAL_WARNINGS": "1",
+    }
+    for key in ("DBUS_SESSION_BUS_ADDRESS", "XAUTHORITY", "XDG_RUNTIME_DIR", "AT_SPI_BUS_ADDRESS"):
+        if os.environ.get(key):
+            forwarded[key] = os.environ[key]
+
+    async def _run() -> None:
+        err_fh = err_path.open("w", encoding="utf-8")
+        try:
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "a11y_computer_use", "mcp"],
+                env=forwarded,
+            )
+            async with stdio_client(params, errlog=err_fh) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    pid = _pid_with_marker(marker)
+                    assert pid, "MCP server process was not found"
+                    for index in range(_CALC_BUS_TRIALS):
+                        _kill_libreoffice()
+                        _wait_calc_window(False, 8)
+                        home = tmp_path / f"calc-home-{index}"
+                        home.mkdir()
+                        proc = _launch_calc(home, binary)
+                        try:
+                            _wait_calc_window(True, 45)
+                            result = await asyncio.wait_for(
+                                session.call_tool("desktop_snapshot", {"app": "Calc"}),
+                                75,
+                            )
+                        finally:
+                            _stop_group(proc)
+                            _kill_libreoffice()
+                        assert _pid_with_marker(marker) == pid, f"server exited on trial {index}"
+                        text = "".join(getattr(block, "text", "") for block in (result.content or []))
+                        assert text, f"trial {index} returned no tool text"
+                        lowered = text.lower()
+                        assert "traceback" not in lowered, text
+                        assert "internal_error" not in lowered, text
+                        assert "needs_permission" not in lowered, text
+                        if result.isError:
+                            assert (
+                                "bus_disconnected" in text or "no_accessibility_bridge" in text
+                            ), text
+        finally:
+            err_fh.close()
+
+    def _flatten(exc: BaseException) -> str:
+        nested = getattr(exc, "exceptions", ())
+        lines = [f"{type(exc).__name__}: {exc}"]
+        for sub in nested:
+            lines.append(_flatten(sub))
+        return "\n".join(lines)
+
+    try:
+        asyncio.run(asyncio.wait_for(_run(), 1100))
+    except Exception as exc:
+        stderr = err_path.read_text(encoding="utf-8", errors="replace") if err_path.exists() else ""
+        raise AssertionError(f"{_flatten(exc)}\nMCP server stderr:\n{stderr}") from exc
+    stderr = err_path.read_text(encoding="utf-8", errors="replace")
+    assert "last reference on a connection was dropped" not in stderr, stderr
+

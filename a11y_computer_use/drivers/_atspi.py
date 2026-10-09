@@ -160,6 +160,11 @@ def _atspi():
         raise ImportError("the AT-SPI2 typelib is not available") from exc
 
     if not _inited:
+        # Before the first bus connection: a last-unref inside libatspi must
+        # not abort this process. See drivers/_dbus_guard.py.
+        from a11y_computer_use.drivers import _dbus_guard
+
+        _dbus_guard.install()
         _safe(Atspi.init)  # 0 = ok, 1 = already running; both fine
         # Per-call D-Bus wait is 300ms. The second argument is the startup
         # grace: while an app is younger than that, libatspi waits the grace

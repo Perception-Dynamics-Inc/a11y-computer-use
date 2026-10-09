@@ -33,6 +33,12 @@ import sys
 import threading
 from collections.abc import Sequence
 
+# libdbus caches DBUS_FATAL_WARNINGS on the first warning and aborts when it
+# is 1. libatspi can emit that warning while an app registers. Force it off
+# before any D-Bus library is used so the MCP server stays up.
+if sys.platform.startswith("linux"):
+    os.environ["DBUS_FATAL_WARNINGS"] = "0"
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse ``argv`` (defaults to ``sys.argv[1:]``) and dispatch a subcommand.
@@ -283,7 +289,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
     from a11y_computer_use import server
+    from a11y_computer_use.drivers import _dbus_guard
 
+    # Patch libatspi before the first tool. A bus error must not exit stdio.
+    _dbus_guard.install()
     server.build_server(
         fence_untrusted=True if args.fence_untrusted else None,
         allowed_domains=args.allowed_domains,

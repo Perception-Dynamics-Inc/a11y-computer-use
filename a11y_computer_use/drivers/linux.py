@@ -518,10 +518,17 @@ class LinuxDriver:
         in (A11Y_COMPUTER_USE_ATSPI_EVENTS=1) — on the shared a11y thread so libatspi's
         read cache is trusted (~1.8x faster snapshots) and stays single-threaded.
         Only libatspi ops go through here; XTEST input uses a separate X
-        connection and is unaffected."""
-        from a11y_computer_use.drivers import _atspi_events
+        connection and is unaffected.
 
-        return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+        A dropped accessibility bus reconnects once. The outermost call retries,
+        so a snapshot walks the tree again instead of reusing a disposed node.
+        """
+        from a11y_computer_use.drivers import _atspi_events, _dbus_guard
+
+        def once():
+            return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+
+        return _dbus_guard.call_with_reconnect(once)
 
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:
@@ -572,6 +579,17 @@ class LinuxDriver:
 
     # -- observe (AT-SPI2) --------------------------------------------------
     def snapshot(self, scope: Scope, app: str) -> Snapshot:
+        """Pruned snapshot of ``app``.
+
+        If the accessibility bus drops while LibreOffice is registering, the
+        walk is retried once on a new connection. A second failure is a
+        retryable ``timeout`` with reason ``bus_disconnected``.
+        """
+        from a11y_computer_use.drivers import _dbus_guard
+
+        return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
+
+    def _snapshot(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 

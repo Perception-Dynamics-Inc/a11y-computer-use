@@ -89,6 +89,9 @@ def _run() -> None:
     from gi.repository import Atspi
 
     try:
+        from a11y_computer_use.drivers import _dbus_guard
+
+        _dbus_guard.install()
         Atspi.init()
         # Same bound as `_atspi._atspi`: 300ms per call, no 15s startup grace.
         Atspi.set_timeout(300, 0)
