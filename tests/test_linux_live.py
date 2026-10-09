@@ -1301,6 +1301,24 @@ def _para_page_edits_contenteditable(driver, runtime, app: str) -> None:
     runtime.click(other.ref)
     typed = runtime.type_text("ZZ")
     assert "typed" in typed, typed
+    # Ten more types. On 0.4.52 one of twelve Chrome contenteditable types
+    # reported text_mismatch while the characters had landed: the first
+    # AT-SPI read was still the old text. Each call has to succeed, and
+    # every token has to be in the snapshot.
+    runtime._current = shot
+    runtime.click(other.ref)
+    runtime.key("ctrl+end")
+    for index in range(10):
+        typed = runtime.type_text(f" m{index} ")
+        assert "typed" in typed, (index, typed)
+    shot = driver.snapshot(Scope.WINDOW, app)
+    blob = " ".join(
+        f"{el.title} {el.value or ''}".replace("\u00a0", " ")
+        for el in shot.elements
+        if el.title in {"Editor B", "Editor A"} or "m0" in f"{el.title} {el.value or ''}"
+    )
+    missing = [f"m{index}" for index in range(10) if f"m{index}" not in blob]
+    assert not missing, (missing, blob)
     shot = driver.snapshot(Scope.WINDOW, app)
     blob = " ".join(
         f"{el.title} {el.value or ''}" for el in shot.elements if el.title in {"Editor B", "Editor A"} or "ZZ" in f"{el.title} {el.value or ''}"

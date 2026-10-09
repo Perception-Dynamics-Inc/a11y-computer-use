@@ -1390,6 +1390,21 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
     return is_secure(acc)
 
 
+def _focused_contenteditable(app: str, *, max_nodes: int = 400):
+    """The focused node when it is a Chrome contenteditable, else None.
+
+    The XTEST type path uses this to decide whether a late AT-SPI read
+    should be polled. An input, a textarea, and a GTK field are None.
+    """
+    try:
+        acc, truncated = _focused_node(app, max_nodes=max_nodes)
+    except Exception:
+        return None
+    if truncated or acc is None or not _chromium_contenteditable(acc):
+        return None
+    return acc
+
+
 def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
     """Text of the focused node, or None when that text cannot be read.
 
@@ -1431,16 +1446,33 @@ def _readable_text(acc) -> str | None:
     return raw.replace("\u00a0", " ")
 
 
+def _field_text_for_type(text: str | None, typed: str) -> str | None:
+    """The field text a type read-back compares.
+
+    NBSP is a space: Chrome stores the edge spaces of a contenteditable as
+    U+00A0. One trailing newline is the empty paragraph's ``<br>`` and is
+    not part of the value, unless the typed text itself ends in a newline.
+    Interior spaces stay, so a missing space is still a mismatch.
+    """
+    if text is None:
+        return None
+    normalized = text.replace("\u00a0", " ")
+    if normalized.endswith("\n") and not (typed or "").replace("\u00a0", " ").endswith("\n"):
+        normalized = normalized[:-1]
+    return normalized
+
+
 def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
     """Whether ``text`` showed up in the focused text.
 
     A readable field that still shows the pre-type text, or that shows the
     case-inverted string, does not count. A suffix or an insertion does.
-    NBSP compares as a space, so Chrome's contenteditable edge spaces match
-    the spaces that were typed.
+    NBSP compares as a space, and one trailing contenteditable newline is
+    not part of the value. A field that settled without the characters is
+    not a match.
     """
-    before_n = _norm_nbsp(before)
-    after_n = _norm_nbsp(after)
+    before_n = _field_text_for_type(before, text)
+    after_n = _field_text_for_type(after, text)
     text_n = _norm_nbsp(text) or ""
     if after_n is None or text_n not in after_n:
         return False
@@ -1451,6 +1483,44 @@ def _typed_visible(before: str | None, after: str | None, text: str) -> bool:
     if after_n.endswith(text_n) or after_n == (before_n + text_n):
         return True
     return before_n in after_n or len(after_n) > len(before_n)
+
+
+# Chrome publishes a contenteditable's new characters a beat after the keys.
+# Sixteen reads, 50ms apart, cover that gap. A value that changed and then
+# stayed wrong is settled: more waiting would not turn it into the request.
+_TYPE_SETTLE_POLLS = 16
+_TYPE_SETTLE_PAUSE_S = 0.05
+_TYPE_SETTLE_STABLE = 2
+
+
+def _poll_typed_text(read, before: str | None, text: str) -> str | None:
+    """Poll ``read`` until ``text`` is visible or the field settles.
+
+    ``read`` returns the current readable text. The first hit wins. A read
+    that is still the pre-type text is not settled: the update can still be
+    in flight. A read that changed to something else and stays there is
+    settled, and the caller reports ``text_mismatch`` when the characters
+    are absent. The last read is what the caller shows.
+    """
+    last: str | None = None
+    stable = 0
+    seen: str | None = None
+    before_n = _field_text_for_type(before, text)
+    for attempt in range(_TYPE_SETTLE_POLLS):
+        seen = read()
+        if _typed_visible(before, seen, text):
+            return seen
+        norm = _field_text_for_type(seen, text)
+        if norm is not None and norm == last and norm != before_n:
+            stable += 1
+            if stable >= _TYPE_SETTLE_STABLE:
+                return seen
+        else:
+            stable = 0
+        last = norm
+        if attempt + 1 < _TYPE_SETTLE_POLLS:
+            time.sleep(_TYPE_SETTLE_PAUSE_S)
+    return seen
 
 
 def focused_editable(app: str, *, max_nodes: int = 400):
@@ -1672,6 +1742,14 @@ def insert_text(acc, text: str) -> int | None:
     # asked for: GetText stops at a NUL, so the readable text can match
     # while the widget is longer.
     after_readable = _readable_text(acc)
+    if (
+        not _typed_visible(before_readable, after_readable, typed)
+        and _chromium_contenteditable(acc)
+    ):
+        # The first AT-SPI read can still be the pre-type text. Wait until
+        # the field settles. A settled read that lacks the characters is
+        # still a mismatch, and a Firefox field is not delayed here.
+        after_readable = _poll_typed_text(lambda: _readable_text(acc), before_readable, typed)
     if _typed_visible(before_readable, after_readable, typed) and _qt_text_count_matches(acc, expected):
         return len(typed)
     actual = _full_text(acc)
@@ -1807,6 +1885,25 @@ def _confirm_text_landed(acc, text: str) -> bool:
         if attempt + 1 < 16:
             time.sleep(0.05)
     return False
+
+
+def chromium_contenteditable_type(acc, text: str) -> bool | None:
+    """Type ``text`` into a Chrome contenteditable and wait for the read.
+
+    ``None`` means this is not the path: ``acc`` is not a Chrome
+    contenteditable, or XTEST cannot reach the session. ``True`` means a
+    settled read contains ``text``. ``False`` means the read settled without
+    those characters. That is a mismatch, not a success. NBSP is a space
+    and one trailing newline is the ``<br>``. An input, a textarea, and a
+    GTK field are not this path.
+    """
+    if not _chromium_contenteditable(acc) or not _x11_keys_available():
+        return None
+    grab_focus(acc)
+    before = _readable_text(acc)
+    _type_string(text)
+    after = _poll_typed_text(lambda: _readable_text(acc), before, text)
+    return bool(_typed_visible(before, after, text))
 
 
 def focus_and_type_into(acc, text: str) -> bool:
