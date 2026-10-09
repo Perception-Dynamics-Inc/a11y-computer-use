@@ -5107,6 +5107,35 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
+    """Synthetic AT-SPI nodes. Not a live LibreOffice.
+
+    A dialog and a checkbox whose CurrentValue is a subnormal double publish
+    no value. Zero, 0.001, and 1e-6 stay. A slider at 0 and a spin button at
+    0.001 stay. A filler keeps the subnormal, because that role is not a
+    dialog or a checkbox.
+    """
+    junk = 6.9305862814588e-310
+    dialog = _Acc("dialog", name="Text Import", value=junk)
+    box = _Acc("check box", name="Comma", value=junk)
+    assert _atspi._value_text(dialog, "AXDialog", "dialog") is None
+    assert _atspi._value_text(box, "AXCheckBox", "check box") is None
+    dialog.value = 0.0
+    box.value = 0.001
+    assert _atspi._value_text(dialog, "AXDialog", "dialog") == 0.0
+    assert _atspi._value_text(box, "AXCheckBox", "check box") == 0.001
+    tip = _Acc("alert", name="Tip of the Day", value=1e-6)
+    assert _atspi._value_text(tip, "AXDialog", "alert") == 1e-6
+    broken = _Acc("dialog", name="Broken", value=float("nan"))
+    assert _atspi._value_text(broken, "AXDialog", "dialog") is None
+    slider = _Acc("slider", name="Volume", value=0.0, minimum=0.0, maximum=1.0)
+    assert _atspi._value_text(slider, "AXSlider", "slider") == 0.0
+    spin = _Acc("spin button", name="Count", value=0.001, minimum=0.0, maximum=10.0)
+    assert _atspi._value_text(spin, "AXSpinButton", "spin button") == 0.001
+    filler = _Acc("filler", name="Meter", value=junk)
+    assert _atspi._value_text(filler, "AXGroup", "filler") == junk
+
+
 def test_sheet_outcome_reads_the_editor_or_the_formula_not_the_display(
     fake_atspi, monkeypatch
 ) -> None:

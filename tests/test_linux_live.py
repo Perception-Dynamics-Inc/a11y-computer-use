@@ -3109,6 +3109,85 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def test_linux_calc_text_import_dialog_has_no_uninitialized_value(tmp_path) -> None:
+    """Live LibreOffice Calc, gtk3. Opening a CSV shows the Text Import dialog.
+
+    The dialog and the Comma checkbox must not publish an uninitialized
+    double (about 6.93e-310). A missing soffice binary fails. Zero and small
+    normalized values are not this reading.
+    """
+    import sys
+
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    csv_path = tmp_path / "sample.csv"
+    csv_path.write_text("a,b,c\n1,2,3\n4,5,6\n")
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-import"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+            str(csv_path),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                last = " ".join(sorted(title for title in titles if title))[:800]
+                if "Comma" in titles or any("Import" in title for title in titles):
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Text Import dialog did not appear\n{last}"
+
+        def junk(value: object) -> bool:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return False
+            number = float(value)
+            return number != 0.0 and abs(number) < sys.float_info.min
+
+        bad = [
+            (el.role, el.title, el.value)
+            for el in snap.elements
+            if junk(el.value)
+        ]
+        assert not bad, bad
+        dialogs = [el for el in snap.elements if el.role == "AXDialog"]
+        boxes = [el for el in snap.elements if el.title == "Comma" and el.role == "AXCheckBox"]
+        shown = [(el.role, el.title, el.value) for el in snap.elements]
+        assert dialogs, shown
+        assert boxes, shown
+        for el in dialogs + boxes:
+            assert el.value is None, (el.role, el.title, el.value, el.checked)
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 _SWATCH = "cuaswatch"
 
 # CSS at user priority, not a cairo "draw" handler. The Linux CI image has no
