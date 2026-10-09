@@ -461,6 +461,49 @@ def test_file_exists_contains(tmp_path, monkeypatch):
     assert "hello" in result.conditions[0]["detail"]
 
 
+def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkeypatch):
+    """A saved-file goal is not proven by the window title. Not a named task."""
+    from a11y_computer_use.agent.core import file_evidence_error, goal_writes_a_file, known_file_text
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "report.txt"
+    path.write_text("quarterly numbers", encoding="utf-8")
+    assert goal_writes_a_file("Save the notes to report.txt containing quarterly numbers")
+    assert goal_writes_a_file('Create a file "out.csv"')
+    assert goal_writes_a_file("Export the spreadsheet")
+    assert not goal_writes_a_file("confirm the Save button is visible")
+    assert known_file_text('Save "hello" to "notes.txt"') == ["hello"]
+    title_only = [{"window_title_contains": "Demo"}]
+    assert file_evidence_error(
+        "Save the notes to report.txt containing quarterly numbers", title_only,
+    )
+    assert file_evidence_error(
+        "Save the notes to report.txt containing quarterly numbers",
+        [{"file_exists": str(path)}],
+    ) == "file_exists must contain 'quarterly numbers'"
+    assert file_evidence_error(
+        "confirm the Save button is visible", title_only,
+    ) is None
+
+    elements = window(title="Demo")
+    goal = "Save the notes to report.txt containing quarterly numbers"
+    weak = ScriptedModel([
+        turn(done("saved", [{"window_title_contains": "Demo"}])),
+        turn(done("saved", [{"file_exists": str(path), "contains": "quarterly numbers"}])),
+    ])
+    runtime = FakeRuntime(elements)
+    events: list = []
+    agent = Agent(weak, runtime=runtime, trace_dir=tmp_path / "trace", on_event=events.append)
+    result = agent.run(goal)
+    assert result.status == "success", result
+    assert result.reason == "done"
+    assert result.steps == 2
+    assert result.step_log[0].verified is False
+    assert "file_exists" in (result.step_log[0].result or "")
+    assert "window title" in (result.step_log[0].result or "")
+    assert result.step_log[1].verified is True
+
+
 def test_file_exists_outside_home_is_refused(tmp_path, monkeypatch):
     monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", raising=False)
     # The runner's tmp dir is under the real home on Windows

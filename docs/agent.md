@@ -51,6 +51,10 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 9. Done. `done` must carry an answer and 1 to 3 conditions. The loop
    re-checks them on a fresh snapshot before it accepts success. A failed
    check is rejected and the model continues, until a limit stops the run.
+   When the goal saves or creates a file, one condition has to be
+   `file_exists`, and `contains` when the goal names the text. A window
+   title is not accepted as proof the file was written. The rule is the
+   wording of the goal, not a named benchmark task.
 
 `stream` yields `observation`, `plan`, `step_started`, `action`,
 `step_finished`, `needs_human`, `done`, `error`, and `stuck`. `cancel()` is

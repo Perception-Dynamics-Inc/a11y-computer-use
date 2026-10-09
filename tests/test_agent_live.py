@@ -1165,6 +1165,95 @@ def test_agent_empty_desktop_first_observation_is_usable(tmp_path, isolated_home
 
 
 @requires_display
+def test_agent_file_save_done_rejects_a_matching_window_title(tmp_path, isolated_home) -> None:
+    """Live GTK. A window title that matches is not proof a file was saved.
+
+    The scripted model first sends only window_title_contains. That title is
+    on screen. The loop rejects it. The next turn's file_exists contains the
+    text the goal named, and that one is accepted.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    saved = isolated_home / "saved-note.txt"
+    saved.write_text("hello-bench", encoding="utf-8")
+    script_path = tmp_path / "cuasaved.py"
+    script_path.write_text(
+        "import gi\n"
+        "gi.require_version('Gtk', '3.0')\n"
+        "from gi.repository import GLib, Gtk\n"
+        "GLib.set_prgname('cuasaved')\n"
+        "window = Gtk.Window(title='cuasaved')\n"
+        "window.set_default_size(320, 80)\n"
+        "window.add(Gtk.Label(label='cuasaved'))\n"
+        "window.connect('destroy', Gtk.main_quit)\n"
+        "window.show_all()\n"
+        "window.present()\n"
+        "Gtk.main()\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen([sys.executable, str(script_path)], env=env)
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        from a11y_computer_use.schema import Scope
+
+        deadline = time.monotonic() + 15
+        seen = False
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuasaved")
+            except Exception:
+                snap = None
+            if snap is not None and any("cuasaved" in (el.title or "") for el in snap.elements):
+                seen = True
+                break
+            time.sleep(0.2)
+        assert seen, "the titled window never appeared"
+        _grant("cuasaved", "python3", "python")
+
+        calls = {"n": 0}
+
+        def script(messages):
+            del messages
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ModelTurn(calls=[ToolCall(
+                    name="done",
+                    args={
+                        "answer": "the title says saved",
+                        "conditions": [{"window_title_contains": "cuasaved"}],
+                    },
+                )])
+            return ModelTurn(calls=[ToolCall(
+                name="done",
+                args={
+                    "answer": "the file is on disk",
+                    "conditions": [{"file_exists": str(saved), "contains": "hello-bench"}],
+                },
+            )])
+
+        result = _run_agent(
+            Agent,
+            ScriptedModel(script),
+            "Save the notes to a file containing hello-bench.",
+            trace,
+            approve=None,
+            auto_deny=True,
+            max_steps=4,
+        )
+        assert result.status == "success", result
+        assert result.steps == 2, result.step_log
+        assert result.step_log[0].verified is False
+        assert "window title" in (result.step_log[0].result or "")
+        assert result.step_log[1].verified is True
+    finally:
+        stop_process(proc)
+
+
+@requires_display
 def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
     """A grant for the real binary covers Files and Terminal."""
     import shutil

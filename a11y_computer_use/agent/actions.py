@@ -288,7 +288,9 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "Finish the goal. conditions is 1 to 3 checks the loop re-runs against a fresh "
         "snapshot or the filesystem before it accepts success. Each condition is one of "
         '{"element": {"role", "name"}}, {"value": {"ref" or "name", "equals"}}, '
-        '{"window_title_contains": text}, {"file_exists": path, "contains"?: text}.',
+        '{"window_title_contains": text}, {"file_exists": path, "contains"?: text}. '
+        "When the goal saves or creates a file, include file_exists, and contains "
+        "when the text is known. A window title alone does not prove a file was written.",
         {
             "answer": _STR,
             "conditions": {
