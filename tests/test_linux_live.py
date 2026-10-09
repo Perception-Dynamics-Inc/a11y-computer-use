@@ -3546,10 +3546,11 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
 
     The page is served over HTTP. Chrome exposes the control as a button named
     ``Upload: No file chosen``, not the aria-label alone. The chooser is the
-    GTK dialog Chrome opens in-process. Chrome sets ``NO_AT_BRIDGE`` before
-    GTK init, so that dialog is an X window and not an AT-SPI tree. The test
-    moves it on screen, types the path with Ctrl+L, and clicks Open. It does
-    not use a portal, and it does not skip when the dialog is up.
+    GTK dialog Chrome opens in-process. That dialog is an X window and not an
+    AT-SPI tree, so the page focus stays empty after Ctrl+L. ``type`` still
+    reads the location entry the keys landed in. The test moves the dialog on
+    screen, types the path, and clicks Open. It does not use a portal, and it
+    does not skip when the dialog is up.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -3646,14 +3647,10 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
         time.sleep(0.15)
         runtime.key("ctrl+l")
         time.sleep(0.15)
-        try:
-            runtime.type_text(str(target))
-        except ComputerUseError as exc:
-            # The keys are already on the wire. Chrome's dialog is not an
-            # AT-SPI editable, so the read-back looks at the page and misses
-            # the path. A different error is a real failure.
-            if (exc.detail or {}).get("reason") != "text_mismatch":
-                raise
+        typed = runtime.type_text(str(target))
+        assert str(typed).startswith("typed "), typed
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert str(target) in typed.evidence
         time.sleep(0.15)
         runtime.click(
             x=int(bounds["x"] + bounds["width"] - 40),

@@ -5299,6 +5299,65 @@ def test_type_into_calc_reads_the_editor_and_a_terminal_still_mismatches(
     assert exc.value.detail["actual"] == "01"
 
 
+def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
+    """Synthetic. Chrome's Open File dialog has no AT-SPI entry.
+
+    The page focus stays empty. The location field is read by select-all and
+    copy. Right then collapses that selection so the Open button is not left
+    under the popup, and the clipboard from before the read is restored. A
+    window that is not that dialog still mismatches on the empty page focus.
+    """
+    from a11y_computer_use.drivers import _linux_input, _linux_system
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("chrome", 1)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "focused_location_entry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focus_in_browser_chrome", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "libreoffice_app", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "_focused_contenteditable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_chrome_rewrite", lambda *_args, **_kwargs: None)
+    window = {"title": "Open File", "app": "chrome"}
+    monkeypatch.setattr(_linux_system, "active_window", lambda: window)
+    board = {"value": "keep-me"}
+    chords: list[str] = []
+
+    def write_clipboard(text: str) -> None:
+        board["value"] = text
+
+    def read_clipboard() -> str:
+        return board["value"]
+
+    def press_chord(chord: str) -> None:
+        chords.append(chord)
+        if chord == "ctrl+c":
+            board["value"] = "/tmp/notes/draft.txt"
+
+    monkeypatch.setattr(_linux_system, "write_clipboard", write_clipboard)
+    monkeypatch.setattr(_linux_system, "read_clipboard", read_clipboard)
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    assert driver.type_text("/tmp/notes/draft.txt") == len("/tmp/notes/draft.txt")
+    assert driver._chooser_readback == "/tmp/notes/draft.txt"
+    assert chords == ["ctrl+a", "ctrl+c", "right"]
+    assert board["value"] == "keep-me"
+
+    window["title"] = "cuaprobe - Google Chrome"
+    board["value"] = "keep-me"
+    chords.clear()
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("/tmp/notes/draft.txt")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == ""
+    assert chords == []
+    assert board["value"] == "keep-me"
+
+
 def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) -> None:
     """Synthetic cell. No keystroke reaches an X server."""
     from a11y_computer_use.drivers import _linux_input

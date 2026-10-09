@@ -2270,6 +2270,10 @@ class Runtime:
                 from a11y_computer_use import observe
                 from a11y_computer_use.drivers import _atspi
 
+                copied = getattr(self.driver, "_chooser_readback", None)
+                if isinstance(copied, str) and copied and requested and requested in copied:
+                    readback = copied
+                    self.driver._chooser_readback = None
                 if _atspi.libreoffice_app(app or ""):
                     handle = None
                     if anchor is not None:
