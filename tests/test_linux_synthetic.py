@@ -121,7 +121,9 @@ def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     assert snap.app == "gedit" and snap.pid == 42
 
 
-def _lo_node(role, name, screen, window, parent=None):
+def _lo_node(role, name, screen, window, parent=None, children=()):
+    kids = list(children)
+
     class _Node:
         def get_role_name(self):
             return role
@@ -131,6 +133,12 @@ def _lo_node(role, name, screen, window, parent=None):
 
         def get_parent(self):
             return parent
+
+        def get_child_count(self):
+            return len(kids)
+
+        def get_child_at_index(self, index):
+            return kids[int(index)]
 
         def get_component_iface(self):
             return self
@@ -232,33 +240,88 @@ def test_offscreen_extents_distinguish_a_scrolled_box_from_zero_and_on_screen(mo
     assert driver.alive_offscreen(issued, "e9") is None
 
 
-def test_libreoffice_paragraph_bounds_add_the_title_bar(monkeypatch) -> None:
-    """A fresh Writer document reports screen coordinates that omit the title bar.
+def test_libreoffice_paragraph_bounds_follow_the_frame_insets(monkeypatch) -> None:
+    """LibreOffice content uses the coord frame that matches the client area.
 
-    The paragraph's screen box matches its window box, one title bar too high.
-    The published position is the X client origin plus the window box. The
-    frame's own screen rectangle stays the outer window.
+    When the root pane's SCREEN top is still the outer frame, the paragraph's
+    SCREEN and WINDOW points omit the title bar and the published point is
+    the X client origin plus that box. When the root pane sits on the X
+    client origin, the paragraph's SCREEN point is already on the pixels and
+    the client origin is not added again. A node whose SCREEN point is
+    already the client origin plus its WINDOW point stays there. The frame's
+    own screen rectangle stays the outer window. A frame with no matching X
+    window is not shifted.
     """
     from a11y_computer_use.drivers import _linux_system
 
-    frame = _lo_node("frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 773), (0, 0, 1280, 773))
-    paragraph = _lo_node(
-        "paragraph", "Beta", (194, 286, 816, 37), (194, 286, 816, 37), parent=frame,
-    )
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
 
     def origin(x, y, width, height, title=""):
-        del title
-        if (x, y, width, height) == (0, 0, 1280, 773):
+        del width, height, title
+        if (x, y) == (0, 0):
             return (0, 28)
+        if (x, y) == (100, 80):
+            return (100, 104)
+        if (x, y) == (150, 90):
+            return (155, 114)
         return None
 
     monkeypatch.setattr(_linux_system, "client_origin_for_outer_frame", origin)
     accessor = _atspi.ATSPIAccessor()
     accessor.libreoffice = True
+
+    # Client-relative: the root pane's SCREEN top is the outer frame, not the client.
+    pane = _lo_node("root pane", "client", (0, 0, 1280, 745), (0, 0, 1280, 745))
+    frame = _lo_node(
+        "frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 773), (0, -28, 1280, 801),
+        children=[pane],
+    )
+    paragraph = _lo_node(
+        "paragraph", "Beta", (194, 286, 816, 37), (194, 286, 816, 37), parent=frame,
+    )
     raw = accessor.read(paragraph)
     assert raw.position == (194.0, 314.0)
     assert raw.size == (816.0, 37.0)
+    frame_box = accessor.read(frame)
+    assert frame_box.position == (0.0, 0.0)
+
+    # Already on the screen: the root pane sits on the X client origin, so 268 stays 268.
+    on_screen = _lo_node("root pane", "client", (0, 28, 1280, 752), (0, 28, 1280, 752))
+    absolute = _lo_node(
+        "frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 800), (0, -28, 1280, 800),
+        children=[on_screen],
+    )
+    low = _lo_node(
+        "paragraph", "Beta", (207, 268, 793, 18), (207, 268, 793, 18), parent=absolute,
+    )
+    assert accessor.read(low).position == (207.0, 268.0)
+
+    # This node already stored the client origin in SCREEN. Do not add it twice.
+    mixed = _lo_node(
+        "paragraph", "Beta", (194, 314, 816, 37), (194, 286, 816, 37), parent=frame,
+    )
+    assert accessor.read(mixed).position == (194.0, 314.0)
+
+    # Moved window, still client-relative. Outer (100, 80), client (100, 104).
+    moved_pane = _lo_node("root pane", "client", (100, 80, 800, 560), (0, 0, 800, 560))
+    moved = _lo_node(
+        "frame", "moved", (100, 80, 800, 600), (0, -24, 800, 624), children=[moved_pane],
+    )
+    inside = _lo_node(
+        "paragraph", "Beta", (30, 40, 200, 18), (30, 40, 200, 18), parent=moved,
+    )
+    assert accessor.read(inside).position == (130.0, 144.0)
+
+    # Moved window whose client area is already on the screen.
+    # Client is (155, 114): adding it would publish (385, 394).
+    screen_pane = _lo_node("root pane", "client", (155, 114, 690, 470), (155, 114, 690, 470))
+    screen_frame = _lo_node(
+        "frame", "moved", (150, 90, 700, 500), (150, 90, 700, 500), children=[screen_pane],
+    )
+    screen_para = _lo_node(
+        "paragraph", "Beta", (230, 280, 200, 18), (230, 280, 200, 18), parent=screen_frame,
+    )
+    assert accessor.read(screen_para).position == (230.0, 280.0)
 
     agreed = _lo_node("frame", "plain", (10, 20, 400, 300), (10, 20, 400, 300))
     child = _lo_node("paragraph", "Beta", (30, 40, 80, 18), (30, 40, 80, 18), parent=agreed)
@@ -268,6 +331,96 @@ def test_libreoffice_paragraph_bounds_add_the_title_bar(monkeypatch) -> None:
     accessor.libreoffice = False
     untouched = accessor.read(paragraph)
     assert untouched.position == (194.0, 286.0)
+
+
+def test_libreoffice_pointer_shift_is_the_title_bar_only_on_24() -> None:
+    """The published box stays on the pixels. The pointer moves on 24.2 only.
+
+    LibreOffice 24.2 hit-tests one title bar above a SCREEN point that
+    already includes that bar. The event is shifted by the inset. LibreOffice
+    25 hit-tests the point, and a client-relative frame already published the
+    inset in the box, so the event is not shifted again.
+    """
+    delta = _atspi._libreoffice_pointer_delta
+    assert delta(True, 24, (0, 21), (0, 0, 1280, 800)) == (0.0, 21.0)
+    assert delta(True, 25, (0, 24), (0, 0, 1280, 800)) == (0.0, 0.0)
+    assert delta(True, None, (0, 21), (0, 0, 1280, 800)) == (0.0, 0.0)
+    assert delta(False, 24, (0, 28), (0, 0, 1280, 773)) == (0.0, 0.0)
+    assert delta(True, 24, (100, 104), (100, 80, 800, 600)) == (0.0, 24.0)
+
+
+def test_libreoffice_pointer_shift_applies_once_per_process(monkeypatch) -> None:
+    """The title-bar inset is for the first pointer event in that soffice.
+
+    LibreOffice 24.2 moves its published extents into the hit-test after
+    that event. A second click in the same process uses the new box. A
+    later process on the same screen rectangle still gets the first inset.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    _atspi._lo_pointer_aligned.clear()
+    frame = object()
+
+    def at(x, y, current=frame):
+        del x, y
+        return current
+
+    keys = {"pid": 4242}
+
+    def align_key(node):
+        del node
+        return (keys["pid"], 0, 0, 1280, 800)
+
+    monkeypatch.setattr(_atspi, "_libreoffice_frame_at", at)
+    monkeypatch.setattr(_atspi, "_libreoffice_frame_key", lambda node: (0, 0, 1280, 800))
+    monkeypatch.setattr(_atspi, "_libreoffice_align_key", align_key)
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda node, coord: (0, 0, 1280, 800))
+    monkeypatch.setattr(_atspi, "libreoffice_major", lambda: 24)
+    monkeypatch.setattr(_atspi, "_client_area_is_on_screen", lambda *args: True)
+    monkeypatch.setattr(
+        _linux_system, "client_origin_for_outer_frame", lambda *args, **kwargs: (0, 21),
+    )
+    try:
+        assert _atspi.libreoffice_pointer_shift(168, 216) == (0.0, 21.0)
+        _atspi.note_libreoffice_pointer(168, 216)
+        assert _atspi.libreoffice_pointer_shift(180, 200) == (0.0, 0.0)
+        keys["pid"] = 9999
+        assert _atspi.libreoffice_pointer_shift(168, 216) == (0.0, 21.0)
+    finally:
+        _atspi._lo_pointer_aligned.clear()
+
+
+def test_linux_drag_keeps_one_libreoffice_delta(monkeypatch) -> None:
+    """A drag shifts every point by the start inset, then notes once."""
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Point
+
+    driver = LinuxDriver()
+    calls: list[tuple[int, int]] = []
+    noted: list[tuple[int, int]] = []
+    captured: dict[str, object] = {}
+
+    def pointer(self, x, y):
+        del self
+        calls.append((x, y))
+        return x, y + 21
+
+    def note(self, x, y):
+        del self
+        noted.append((x, y))
+
+    def drag(x1, y1, x2, y2, *, button="left", path=()):
+        captured["drag"] = (x1, y1, x2, y2, button, list(path))
+
+    monkeypatch.setattr(LinuxDriver, "_pointer", pointer)
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", note)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "drag", drag)
+    driver.drag(Point(1, 10, 20), Point(1, 30, 40), path=(Point(1, 15, 25),))
+    assert calls == [(10, 20)]
+    assert captured["drag"] == (10, 41, 30, 61, "left", [(15, 46)])
+    assert noted == [(10, 20)]
 
 
 def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -> None:

@@ -3689,12 +3689,13 @@ def _paragraph(snap, needle: str):
 def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
     """Live. A ref click on a Writer paragraph puts the caret in that paragraph.
 
-    LibreOffice's screen extents sit one title bar above the text, so a
-    pointer click on the published box used to land in the paragraph above
-    and still report confirmed. The snapshot shifts the box by the X client
-    origin, the click places the caret in the target, and the outcome is
-    confirmed only because the caret is there. Typing then lands in Beta,
-    not in Alpha.
+    A pointer click on a box one title bar off used to land in the paragraph
+    above and still report confirmed. The click places the caret in the
+    target, and the outcome is confirmed only because the caret is there.
+    Typing then lands in Beta, not in Alpha. The published box is the raw
+    SCREEN top when the client area already includes the title bar, and the
+    client origin plus WINDOW when that area is still reported at the outer
+    frame.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers import _atspi, _linux_system
@@ -3786,10 +3787,10 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
             int(frame_screen[2]), int(frame_screen[3]), title=title,
         )
         assert origin is not None, (frame_screen, frame_window)
-        assert abs(beta.bounds.y - (origin[1] + window[1])) <= 1, (
+        shifted = origin[1] + window[1]
+        assert abs(beta.bounds.y - screen[1]) <= 1 or abs(beta.bounds.y - shifted) <= 1, (
             beta.bounds.y, origin, window, screen, frame_screen, frame_window,
         )
-        assert beta.bounds.y > screen[1] + 8
         clicked = runtime.click(beta.ref)
         assert clicked.outcome == "confirmed", (clicked, clicked.evidence)
         assert "caret is in the target paragraph" in clicked.evidence
@@ -3804,6 +3805,233 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
         assert beta_after.value.count("INSERTED") == 1, (typed, typed.evidence, beta_after.value)
         assert beta_after.value.startswith("Beta paragraph WRITER-TWO here.")
         assert alpha_after is not None and "INSERTED" not in (alpha_after.value or "")
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
+def _dark_rows(png: bytes) -> list[int]:
+    """Rows in a crop that contain the paragraph's ink.
+
+    The page is light and the glyphs are dark. A row of the next paragraph
+    is not in this crop when the box sits on the target line.
+    """
+    import io
+
+    from PIL import Image
+
+    opened = Image.open(io.BytesIO(png)).convert("RGB")
+    width, height = opened.size
+    rows = []
+    for y in range(height):
+        dark = 0
+        for x in range(width):
+            red, green, blue = opened.getpixel((x, y))
+            if red < 100 and green < 100 and blue < 100:
+                dark += 1
+        if dark > 8:
+            rows.append(y)
+    return rows
+
+
+def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_path) -> None:
+    """Live Writer. The published box is that paragraph, and a double-click edits it.
+
+    The crop of the Beta ref contains the first glyph of Beta and not the
+    next paragraph. A double-click on the Beta ref is confirmed from the
+    caret in Beta, and the following type lands in Beta.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    html = doc / "notes.html"
+    # Beta is long enough that the published centre sits on glyphs. The
+    # short line used by the caret test ends before that centre.
+    html.write_text(
+        _WRITER_HTML.replace(
+            "Beta paragraph WRITER-TWO here.",
+            "Beta paragraph WRITER-TWO here continues across the line so the "
+            "centre of the published box is still on this paragraph.",
+        )
+    )
+    conv = tmp_path / "conv-profile"
+    _writer_profile(conv)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    converted = subprocess.run(
+        [
+            binary, "--headless", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{conv}",
+            "--convert-to", "odt", str(html), "--outdir", str(doc),
+        ],
+        env=env, capture_output=True, text=True, timeout=90,
+    )
+    odt = doc / "notes.odt"
+    assert odt.is_file(), converted.stderr[-500:]
+    _kill_libreoffice()
+    time.sleep(0.3)
+    profile = tmp_path / "writer-profile"
+    _writer_profile(profile)
+    proc = subprocess.Popen(
+        [
+            binary, "--writer", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(odt),
+        ],
+        env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:800]
+                if _paragraph(shot, "WRITER-TWO") is not None and "Tip of the Day" not in last:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Writer did not expose the Beta paragraph\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        driver.activate_app("soffice")
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        beta = _paragraph(current, "WRITER-TWO")
+        gamma = _paragraph(current, "WRITER-THREE")
+        assert beta is not None and gamma is not None, observe.render_text(current)[:800]
+        handle = observe.ax_handle_for(current.snapshot_id, beta.ref)
+        assert handle is not None and beta.bounds is not None and gamma.bounds is not None
+
+        def glyph():
+            Atspi = _atspi._atspi()
+            rect = Atspi.Text.get_character_extents(handle, 0, Atspi.CoordType.SCREEN)
+            return int(rect.x), int(rect.y), int(rect.width), int(rect.height)
+
+        gx, gy, gw, gh = driver._run(glyph)
+        assert gw > 0 and gh > 0, (gx, gy, gw, gh)
+        # The first glyph of Beta starts inside the published box. A box shifted
+        # down by the title bar starts below that glyph.
+        assert beta.bounds.y - 2 <= gy <= beta.bounds.y + beta.bounds.height - 2, (
+            beta.bounds, gamma.bounds, (gx, gy, gw, gh),
+        )
+        glyph_mid = gy + gh / 2
+        assert not (gamma.bounds.y <= glyph_mid <= gamma.bounds.y + gamma.bounds.height), (
+            beta.bounds, gamma.bounds, (gx, gy, gw, gh),
+        )
+        _beta_text, beta_image = runtime.crop(beta.ref, padding=0)
+        ink = _dark_rows(beta_image.png)
+        top = gy - beta.bounds.y
+        assert any(top - 2 <= row <= top + gh + 2 for row in ink), (
+            ink, top, gh, beta.bounds, gamma.bounds,
+        )
+
+        clicked = runtime.click(beta.ref, count=2)
+        assert clicked.outcome == "confirmed", (clicked, clicked.evidence)
+        assert "caret is in the target paragraph" in clicked.evidence
+        runtime.type_text("QQEDIT")
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        hits = [
+            el.value or ""
+            for el in current.elements
+            if el.role == "AXStaticText" and "QQEDIT" in (el.value or "")
+        ]
+        assert len(hits) == 1, hits
+        assert "WRITER-ONE" not in hits[0]
+        assert "WRITER-THREE" not in hits[0]
+        assert "Gamma" not in hits[0]
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
+def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
+    """Live Calc. A coordinate click on B4's published centre selects B4.
+
+    The reported box used to sit one title bar below the row, so the centre
+    click selected B5. Typing after the click lands in B4, not in B3 or B5.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-b4"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError:
+                shot = None
+            else:
+                if _cell(shot, "B4") is not None and _cell(shot, "B5") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Calc did not expose B4 and B5"
+        b4 = _cell(snap, "B4")
+        b5 = _cell(snap, "B5")
+        assert b4 is not None and b5 is not None and b4.bounds is not None and b5.bounds is not None
+        assert b4.bounds.y < b5.bounds.y
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        driver.activate_app("soffice")
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        b4 = _cell(current, "B4")
+        assert b4 is not None and b4.bounds is not None, observe.render_text(current)[:400]
+        x = int(b4.bounds.center.x)
+        y = int(b4.bounds.center.y)
+        runtime.click(x=x, y=y)
+        runtime.type_text("7")
+        runtime.key("Return")
+        shot = _wait_cell_value(driver, "B4", "7")
+        for title in ("B2", "B3", "B5", "B6"):
+            other = _cell(shot, title)
+            assert other is None or other.value in (None, ""), (title, None if other is None else other.value, x, y, b4.bounds)
     finally:
         _stop_group(proc)
         _kill_libreoffice()
