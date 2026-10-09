@@ -3822,3 +3822,180 @@ def test_linux_qt_table_and_tree_cells_are_findable_and_clickable(tmp_path) -> N
     finally:
         _stop(proc)
         log.close()
+
+
+_QT_MENU_APP = "cuqtmenu"
+
+_QT_MENU_FIXTURE = textwrap.dedent(
+    r"""
+    import os
+    import sys
+
+    state_path = sys.argv[1]
+    os.environ["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+
+    def load():
+        errors = []
+        for name in ("PyQt6", "PySide6", "PyQt5"):
+            try:
+                widgets = __import__(name + ".QtWidgets", fromlist=["QtWidgets"])
+                gui = __import__(name + ".QtGui", fromlist=["QtGui"])
+                core = __import__(name + ".QtCore", fromlist=["QtCore"])
+                return widgets, gui, core
+            except Exception as exc:
+                errors.append("%s: %s" % (name, exc))
+        sys.stderr.write("no Qt binding\n" + "\n".join(errors) + "\n")
+        raise SystemExit(2)
+
+    widgets, gui, core = load()
+    QApplication = widgets.QApplication
+    QMainWindow = widgets.QMainWindow
+    QAction = gui.QAction
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("cuqtmenu")
+    try:
+        app.setDesktopFileName("cuqtmenu")
+    except Exception:
+        pass
+
+    win = QMainWindow()
+    win.setWindowTitle("cuqtmenu")
+    win.setAccessibleName("cuqtmenu")
+    tools = win.menuBar().addMenu("&Tools")
+    do = QAction("Do Thing", win)
+    option = QAction("Option X", win)
+    option.setCheckable(True)
+    tools.addAction(do)
+    tools.addAction(option)
+
+    def dump(on):
+        temporary = state_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(("1" if on else "0") + "\n")
+        os.replace(temporary, state_path)
+
+    option.toggled.connect(dump)
+    dump(option.isChecked())
+    win.resize(480, 320)
+    win.move(60, 40)
+    win.show()
+    win.raise_()
+    run = getattr(app, "exec", None)
+    if run is None:
+        run = app.exec_
+    sys.exit(run())
+    """
+)
+
+
+def _menu_rows(runtime, path: str) -> list[dict]:
+    import json
+
+    raw = runtime.menu(_QT_MENU_APP, path=path, action="list")
+    rows = json.loads(str(raw))
+    assert isinstance(rows, list), raw
+    return rows
+
+
+def test_linux_qt_checkable_menu_action_reports_checked(tmp_path) -> None:
+    """A checkable Qt menu item lists the real checked state.
+
+    The fixture writes the X root property AT_SPI_BUS before Qt starts and
+    does not export AT_SPI_BUS_ADDRESS. The action's toggled signal is the
+    widget state. A bridge that sets CHECKABLE lists false, then true, then
+    false. Qt 6.4 publishes CHECKED and not CHECKABLE, so the off list is
+    null and the on list is true.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    state = tmp_path / "menu_state.txt"
+    script = tmp_path / "cuqtmenu.py"
+    script.write_text(_QT_MENU_FIXTURE)
+    log_path = tmp_path / "menu.log"
+    log = open(log_path, "w", encoding="utf-8")
+    env = os.environ.copy()
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    env.pop("AT_SPI_BUS_ADDRESS", None)
+    _publish_atspi_bus()
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(state)],
+        env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        rows = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError("Qt menu fixture exited\n" + _qt_log(log_path))
+            try:
+                rows = driver.menu_items(_QT_MENU_APP, "Tools")
+            except (ComputerUseError, AssertionError, ValueError):
+                rows = None
+            else:
+                titles = {row.get("title") for row in rows}
+                if {"Do Thing", "Option X"} <= titles:
+                    break
+            time.sleep(0.4)
+        else:
+            raise AssertionError(f"Tools menu did not list Option X: {rows}\n{_qt_log(log_path)}")
+        driver.activate_app(_QT_MENU_APP)
+        runtime = _runtime_for(tmp_path, driver, _QT_MENU_APP)
+
+        def option(items: list[dict]) -> dict:
+            return next(row for row in items if row["title"] == "Option X")
+
+        listed = _menu_rows(runtime, "Tools")
+        first = option(listed)
+        plain = next(row for row in listed if row["title"] == "Do Thing")
+        assert plain["checked"] is None, listed
+        assert state.read_text(encoding="utf-8").strip() == "0"
+        assert first["checked"] in (False, None), listed
+        publishes_checkable = first["checked"] is False
+
+        pressed = runtime.menu(_QT_MENU_APP, path="Tools > Option X", action="press")
+        assert "Option X" in pressed, pressed
+        deadline = time.monotonic() + 4
+        widget = ""
+        while time.monotonic() < deadline:
+            widget = state.read_text(encoding="utf-8").strip()
+            if widget == "1":
+                break
+            time.sleep(0.05)
+        assert widget == "1", state.read_text(encoding="utf-8")
+
+        again = None
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            again = option(_menu_rows(runtime, "Tools"))
+            if again["checked"] is True:
+                break
+            time.sleep(0.2)
+        assert again is not None and again["checked"] is True, again
+
+        pressed = runtime.menu(_QT_MENU_APP, path="Tools > Option X", action="press")
+        assert "Option X" in pressed, pressed
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            widget = state.read_text(encoding="utf-8").strip()
+            if widget == "0":
+                break
+            time.sleep(0.05)
+        assert widget == "0", widget
+        off = None
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            off = option(_menu_rows(runtime, "Tools"))
+            if publishes_checkable and off["checked"] is False:
+                break
+            if not publishes_checkable and off["checked"] is None:
+                break
+            time.sleep(0.2)
+        expected = False if publishes_checkable else None
+        assert off is not None and off["checked"] is expected, off
+    finally:
+        _stop(proc)
+        log.close()
