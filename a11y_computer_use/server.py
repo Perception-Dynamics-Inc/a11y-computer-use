@@ -1402,8 +1402,14 @@ def _linux_point_matches_snapshot_pid(runtime, target: Target) -> bool:
     point = target if isinstance(target, Point) else getattr(getattr(target, "bounds", None), "center", None)
     if point is None:
         return False
+    # The linux hit-test, not `_system_ops()`. A driver named linux is the
+    # AT-SPI stack even when this process is not the linux CI job, and the
+    # unit test patches `_linux_system.pid_at_point`. The Windows module
+    # would answer for the desktop under the point instead.
     try:
-        found = _system_ops().pid_at_point(point.x, point.y)
+        from a11y_computer_use.drivers import _linux_system
+
+        found = _linux_system.pid_at_point(point.x, point.y)
     except Exception:
         return False
     return bool(found) and int(found) == int(pid)

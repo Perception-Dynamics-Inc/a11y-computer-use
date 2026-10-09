@@ -399,6 +399,13 @@ class _Input:
 
 def _runtime(tmp_path, driver, monkeypatch):
     monkeypatch.setattr(server, "_frontmost_bundle", lambda: "demo")
+    # An on-screen Linux button is a pointer click. The recheck must not
+    # hit-test the machine running the suite: the snapshot pid is this
+    # process, and no other app owns the point.
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 1)
     store = safety.PermissionStore(tmp_path / "permissions.json")
     store.set_tier("demo", safety.Tier.FULL)
     rt = server.Runtime(driver=driver, store=store, audit=safety.AuditLog(tmp_path / "audit"))

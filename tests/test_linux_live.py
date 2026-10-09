@@ -3382,37 +3382,51 @@ def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> Non
 
 
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
-    """A Chrome file input's picker is not a single disabled group.
+    """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
 
-    Live Chrome. Skips when no Chrome binary is on PATH, and when the picker
-    is not an in-process chooser (this image has no xdg-desktop-portal).
+    The page is served over HTTP. Chrome exposes the control as a button named
+    ``Upload: No file chosen``, not the aria-label alone. The chooser is the
+    GTK dialog Chrome opens in-process. Chrome sets ``NO_AT_BRIDGE`` before
+    GTK init, so that dialog is an X window and not an AT-SPI tree. The test
+    moves it on screen, types the path with Ctrl+L, and clicks Open. It does
+    not use a portal, and it does not skip when the dialog is up.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     binary = _chrome_binary()
-    if binary is None:
-        pytest.skip("no Chrome/Chromium binary for the upload-picker test")
+    assert binary, "Chrome/Chromium is required for the upload-picker test"
     driver = LinuxDriver()
     _require_bus(driver)
-    page = tmp_path / "upload.html"
-    page.write_text(
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    httpd = _serve_html(
         "<!doctype html><meta charset=utf-8><title>cuaupload</title>"
-        "<input type=file aria-label=Upload>"
+        "<style>body{margin:48px;font:18px sans-serif}"
+        "input[type=file]{font-size:18px}</style>"
+        "<h1>Upload a file</h1>"
+        "<input id=file type=file aria-label=Upload>"
     )
+    port = httpd.server_address[1]
     profile = tmp_path / "chrome-upload-profile"
     profile.mkdir()
+    env = os.environ.copy()
+    env["GTK_USE_PORTAL"] = "0"
     proc = subprocess.Popen(
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={profile}", "--window-size=800,600", page.resolve().as_uri(),
+            "--disable-features=UseXdgDesktopPortal,XdgFileChooserPortal",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            f"http://127.0.0.1:{port}/",
         ],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )
     try:
         deadline = time.monotonic() + 45
         snap = None
         while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the file input")
             try:
                 shot = driver.snapshot(Scope.WINDOW, "chrome")
             except ComputerUseError as exc:
@@ -3420,39 +3434,82 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
                     raise
                 shot = None
             else:
-                if any(el.title == "Upload" for el in shot.elements):
+                if any(
+                    el.role == "AXButton" and (el.title or "").startswith("Upload")
+                    for el in shot.elements
+                ):
                     snap = shot
                     break
             time.sleep(0.4)
-        if snap is None:
-            pytest.skip("Chrome did not expose the file input")
+        assert snap is not None, [
+            (el.role, el.title) for el in (shot.elements if shot else ())
+        ]
         runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
         runtime._current = snap
-        upload = next(el for el in snap.elements if el.title == "Upload" and (el.clickable or el.editable))
-        runtime.click(upload.ref)
-        chooser = None
-        deadline = time.monotonic() + 8
-        apps = ("chrome", "xdg-desktop-portal-gtk", "xdg-desktop-portal")
-        while time.monotonic() < deadline:
-            for name in apps:
-                try:
-                    shot = _snap_within(driver, name, Scope.APP, limit_s=5)
-                except ComputerUseError as exc:
-                    if exc.code is not ErrorCode.APP_NOT_FOUND:
-                        raise
-                    continue
-                titles = _titles(shot)
-                if "Open" in titles and "Cancel" in titles:
-                    chooser = shot
-                    break
-            if chooser is not None:
-                break
-            time.sleep(0.3)
-        if chooser is None:
-            pytest.skip("the upload picker is not an in-process GTK file chooser on this machine")
-        assert len(chooser.elements) > 1
-        assert not (
-            len(chooser.elements) == 1 and chooser.elements[0].role == "AXGroup"
+        upload = next(
+            el for el in snap.elements
+            if el.role == "AXButton" and (el.title or "").startswith("Upload") and el.clickable
         )
+        runtime.click(upload.ref)
+        dialog = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            dialog = next(
+                (
+                    row for row in driver.windows()
+                    if row.get("title") == "Open File" and row.get("bounds")
+                ),
+                None,
+            )
+            if dialog is not None:
+                break
+            time.sleep(0.15)
+        assert dialog is not None, [row.get("title") for row in driver.windows()]
+        driver.move_window(dialog["window_id"], 40, 40)
+        bounds = None
+        window_id = dialog["window_id"]
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            moved = next(
+                (
+                    row for row in driver.windows()
+                    if row.get("window_id") == window_id and row.get("bounds")
+                ),
+                None,
+            )
+            if moved is not None and abs(moved["bounds"]["x"] - 40) < 80:
+                bounds = moved["bounds"]
+                break
+            time.sleep(0.05)
+        assert bounds is not None, "the Open File dialog did not move on screen"
+        driver.focus_window(window_id)
+        time.sleep(0.15)
+        runtime.key("ctrl+l")
+        time.sleep(0.15)
+        try:
+            runtime.type_text(str(target))
+        except ComputerUseError as exc:
+            # The keys are already on the wire. Chrome's dialog is not an
+            # AT-SPI editable, so the read-back looks at the page and misses
+            # the path. A different error is a real failure.
+            if (exc.detail or {}).get("reason") != "text_mismatch":
+                raise
+        time.sleep(0.15)
+        runtime.click(
+            x=int(bounds["x"] + bounds["width"] - 40),
+            y=int(bounds["y"] + bounds["height"] - 20),
+            display_id=int(bounds["display_id"]),
+        )
+        deadline = time.monotonic() + 6
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = " ".join(el.title or "" for el in shot.elements)
+            if "picked.txt" in shown:
+                break
+            time.sleep(0.2)
+        assert "picked.txt" in shown, shown
+        assert "Open File" not in {row.get("title") for row in driver.windows()}
     finally:
         _stop(proc)
+        httpd.shutdown()

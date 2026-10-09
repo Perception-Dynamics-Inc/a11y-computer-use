@@ -176,7 +176,8 @@ jobs:
       # driver imports (Atspi, Gtk3), apt's PyGObject (python3-gi), a virtual X
       # server + D-Bus session for the live run, a real window manager (openbox)
       # so focus and pointer semantics resemble a desktop, xdotool/x11-utils for
-      # the pointer checks, and xclip for the clipboard. python3-pyqt6 is the
+      # the pointer checks, and xclip for the clipboard. libreoffice-calc and
+      # libreoffice-gtk3 are the Calc cell test. python3-pyqt6 is the
       # Qt fixture for the live line-edit, combo, and value test. The fixture
       # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's
       # Qt 5 build ships no AT-SPI adaptor, so a PyQt5 window never appears
