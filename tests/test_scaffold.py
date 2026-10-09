@@ -61,6 +61,7 @@ def test_error_codes_are_wire_stable() -> None:
         "user_active",
         "element_disabled",
         "domain_blocked",
+        "not_visible",
     }
 
 
