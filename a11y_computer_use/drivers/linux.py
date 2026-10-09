@@ -2043,6 +2043,15 @@ class LinuxDriver:
                 time.sleep(0.1)
         actual = self._run(lambda: _atspi._full_text(handle))
         formula = self._run(lambda: _atspi._sheet_formula(handle))
+        # A range colon is escaped in the Formula attribute and the value is
+        # split there, so SUM(A1:A3) arrives as SUM(A1\. The editor has the
+        # formula that committed.
+        if _atspi._formula_needs_editor(formula, value):
+            opened = self._run(lambda: _atspi.committed_sheet_formula(handle))
+            if opened and _atspi.formulas_match(opened, value):
+                return
+            if opened:
+                formula = opened
         raise _atspi._text_mismatch(
             "text_mismatch",
             f"the value read back does not match {value!r}",
