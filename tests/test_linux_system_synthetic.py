@@ -475,6 +475,220 @@ def test_absolute_path_matches_wm_class_when_the_comm_is_the_interpreter(monkeyp
     assert _linux_system.pids_matching(path) == set()
 
 
+def test_focus_retries_until_the_active_window_stays(monkeypatch) -> None:
+    """Synthetic X. Not a live window manager.
+
+    The first ``_NET_ACTIVE_WINDOW`` is ignored, the way a second client's
+    present() can leave the previous window active. The next request is
+    recorded as the active window, and focus returns once two reads agree.
+    A root with no such property still sends one message and does not poll.
+    """
+    other = _FakeXWin(4, 0, 0, 10, 10, pid=1)
+    target = _FakeXWin(7, 0, 0, 10, 10, pid=2)
+    state = {"active": other.id, "sends": 0, "sleeps": 0}
+
+    class _Root(_FakeXRoot):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[state["active"]])
+            return super().get_full_property(atom, kind)
+
+        def send_event(self, event, event_mask):
+            return None
+
+    root = _Root([other, target])
+    by_id = {win.id: win for win in (other, target)}
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: by_id[int(wid)],
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "gedit" if pid == 2 else "other")
+    monkeypatch.setattr(_linux_system.time, "sleep", lambda _seconds: state.__setitem__("sleeps", state["sleeps"] + 1))
+
+    def send(_d, win):
+        state["sends"] += 1
+        if state["sends"] >= 2:
+            state["active"] = int(win.id)
+
+    monkeypatch.setattr(_linux_system, "_send_active_window", send)
+    assert _linux_system.focus_window(7) is True
+    assert state["sends"] == 2
+    assert state["active"] == 7
+    assert state["sleeps"] == 2
+
+    state["sends"] = 0
+    state["sleeps"] = 0
+    state["active"] = 7
+
+    def send_once(_d, win):
+        state["sends"] += 1
+        state["active"] = int(win.id)
+
+    monkeypatch.setattr(_linux_system, "_send_active_window", send_once)
+    assert _linux_system.raise_window(7) is True
+    assert state["sends"] == 1
+    assert state["sleeps"] == 1
+
+    bare = _FakeXRoot([target])
+    bare_display = _NS(
+        screen=lambda: _NS(root=bare),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: target,
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: bare_display)
+    state["sends"] = 0
+    state["sleeps"] = 0
+    assert _linux_system.focus_window(7) is True
+    assert state["sends"] == 1
+    assert state["sleeps"] == 0
+
+
+def test_window_list_waits_for_a_late_pid_and_a_missing_one_waits_once(monkeypatch) -> None:
+    """Synthetic X. Not a live window manager.
+
+    ``_NET_WM_PID`` shows up after the window is already listed. The list
+    waits and reports that pid. A window that never sets it is pid 0, and
+    the next list does not wait again.
+    """
+    _linux_system._pid_absent.clear()
+    clock = {"t": 0.0}
+    state = {"sleeps": 0, "pid": 0}
+
+    def sleep(seconds):
+        state["sleeps"] += 1
+        clock["t"] += seconds
+        if state["sleeps"] >= 2:
+            state["pid"] = 42
+
+    class _Root(_FakeXRoot):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[1])
+            return super().get_full_property(atom, kind)
+
+    class _PidWin(_FakeXWin):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_WM_PID":
+                return _NS(value=[state["pid"]]) if state["pid"] else None
+            if atom == "WM_CLASS":
+                return _NS(value=b"a11yprobe\x00A11yProbe\x00")
+            return None
+
+    window = _PidWin(7, 10, 20, 180, 90, pid=0)
+    root = _Root([window])
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: window,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_comm_for_pid", lambda pid: "a11yprobe" if pid == 42 else None)
+    monkeypatch.setattr(_linux_system.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(_linux_system.time, "sleep", sleep)
+    rows = _linux_system.windows()
+    assert rows[0]["pid"] == 42
+    assert rows[0]["app"] == "a11yprobe"
+    assert state["sleeps"] >= 2
+
+    state["pid"] = 0
+    state["sleeps"] = 0
+    clock["t"] = 0.0
+    bare = _PidWin(8, 10, 20, 180, 90, pid=0)
+    bare_root = _Root([bare])
+    monkeypatch.setattr(
+        _linux_system, "_display",
+        lambda: _NS(
+            screen=lambda: _NS(root=bare_root),
+            intern_atom=lambda name: name,
+            create_resource_object=lambda kind, wid: bare,
+        ),
+    )
+
+    def never(seconds):
+        state["sleeps"] += 1
+        clock["t"] += seconds
+
+    monkeypatch.setattr(_linux_system.time, "sleep", never)
+    assert _linux_system.windows()[0]["pid"] == 0
+    waited = state["sleeps"]
+    assert waited > 0
+    assert _linux_system.windows()[0]["pid"] == 0
+    assert state["sleeps"] == waited
+    _linux_system._pid_absent.clear()
+
+
+def test_minimize_and_move_retry_until_the_window_matches(monkeypatch) -> None:
+    """Synthetic X. The first client message is ignored. The next one lands."""
+    window = _FakeXWin(7, 10, 20, 180, 90, pid=1)
+    sends: list[str] = []
+    hidden = {"value": False}
+
+    class _Root(_FakeXRoot):
+        def get_full_property(self, atom, kind):
+            if atom == "_NET_ACTIVE_WINDOW":
+                return _NS(value=[1])
+            return super().get_full_property(atom, kind)
+
+    root = _Root([window])
+    display = _NS(
+        screen=lambda: _NS(root=root),
+        intern_atom=lambda name: name,
+        create_resource_object=lambda kind, wid: window,
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(_linux_system, "_display", lambda: display)
+    monkeypatch.setattr(_linux_system, "_is_hidden", lambda win, d: hidden["value"])
+    clock = {"t": 0.0}
+    monkeypatch.setattr(_linux_system.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(
+        _linux_system.time, "sleep", lambda seconds: clock.__setitem__("t", clock["t"] + seconds),
+    )
+
+    def client(_d, _win, atom, _data):
+        sends.append(atom)
+        if atom == "WM_CHANGE_STATE" and sends.count("WM_CHANGE_STATE") >= 2:
+            hidden["value"] = True
+        if atom == "_NET_MOVERESIZE_WINDOW" and sends.count("_NET_MOVERESIZE_WINDOW") >= 2:
+            window.x, window.y = 300, 180
+
+    monkeypatch.setattr(_linux_system, "_client_message", client)
+    assert _linux_system.minimize_window(7) is True
+    assert sends.count("WM_CHANGE_STATE") == 2
+    assert hidden["value"] is True
+
+    sends.clear()
+    assert _linux_system.move_window(7, 300, 180) is True
+    assert sends.count("_NET_MOVERESIZE_WINDOW") == 2
+    assert (window.x, window.y) == (300, 180)
+
+    class _BareRoot(_FakeXRoot):
+        def send_event(self, event, event_mask):
+            return None
+
+    bare = _BareRoot([window])
+    monkeypatch.setattr(
+        _linux_system, "_display",
+        lambda: _NS(
+            screen=lambda: _NS(root=bare),
+            intern_atom=lambda name: name,
+            create_resource_object=lambda kind, wid: window,
+            flush=lambda: None,
+        ),
+    )
+    once: list[str] = []
+
+    def client_once(_d, _win, atom, _data):
+        once.append(atom)
+
+    monkeypatch.setattr(_linux_system, "_client_message", client_once)
+    assert _linux_system.minimize_window(7) is True
+    assert once == ["WM_CHANGE_STATE", "_NET_WM_STATE"]
+
+
 def test_activate_app_with_no_window_is_app_not_found(monkeypatch) -> None:
     """A granted name with no window is not activated. Synthetic window list."""
     monkeypatch.setattr(_linux_system, "_display", lambda: object())

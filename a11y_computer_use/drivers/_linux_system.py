@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 
 
@@ -88,9 +89,53 @@ def _comm_for_pid(pid: int) -> str | None:
         return None
 
 
-def _pid_of(win, d) -> int:
+# A client can map a window before ``_NET_WM_PID`` is visible on another
+# connection. One read then reports pid 0 and the app id falls back to
+# WM_CLASS. Wait once per window id, then remember that it stayed unset so
+# a later list does not pay the wait again. A display with no window
+# manager does not wait.
+_PID_WAIT_S = 0.4
+_PID_POLL_S = 0.02
+_pid_absent: set[int] = set()
+
+
+def _read_pid(win, d) -> int:
     val = _prop(win, d, "_NET_WM_PID")
-    return int(val[0]) if val else 0
+    if not val:
+        return 0
+    try:
+        return int(val[0]) or 0
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+def _pid_of(win, d) -> int:
+    """``_NET_WM_PID``, or 0 when the window has none.
+
+    Callers that only record the property monkeypatch this function as
+    ``_pid_of(win, d)``. The window list waits in ``_settled_pid`` instead,
+    so that patch keeps working.
+    """
+    return _read_pid(win, d)
+
+
+def _settled_pid(win, d) -> int:
+    """``_pid_of``, after a short re-read when the property is still missing."""
+    pid = _pid_of(win, d)
+    if pid:
+        _pid_absent.discard(int(win.id))
+        return pid
+    wid = int(win.id)
+    if wid in _pid_absent or _active_window_property(d) is None:
+        return 0
+    deadline = time.monotonic() + _PID_WAIT_S
+    while time.monotonic() < deadline:
+        time.sleep(_PID_POLL_S)
+        pid = _pid_of(win, d)
+        if pid:
+            return pid
+    _pid_absent.add(wid)
+    return 0
 
 
 def _wm_class_strings(win, d) -> tuple[str, str]:
@@ -148,9 +193,10 @@ def _is_dialog_window(win, d) -> bool:
         return True
 
 
-def _app_id(win, d) -> str:
+def _app_id(win, d, *, settle: bool = False) -> str:
     """Permission-keying app id: process comm, else the WM_CLASS instance."""
-    return _comm_for_pid(_pid_of(win, d)) or _wm_class_instance(win, d)
+    pid = _settled_pid(win, d) if settle else _pid_of(win, d)
+    return _comm_for_pid(pid) or _wm_class_instance(win, d)
 
 
 def _atom_is(candidate, expected) -> bool:
@@ -455,8 +501,8 @@ def running_apps() -> list[dict]:
             active_id = int(active[0]) if active else 0
             seen: set[str] = set()
             for win in _managed_windows(d):
-                pid = _pid_of(win, d)
-                comm = _app_id(win, d)
+                pid = _settled_pid(win, d)
+                comm = _app_id(win, d, settle=True)
                 if not comm or comm in seen:
                     continue
                 seen.add(comm)
@@ -471,7 +517,9 @@ def windows() -> list[dict]:
     """Managed windows: {window_id, app, title, pid, bounds, on_screen}.
 
     ``app`` is the process comm, or the WM_CLASS instance when the window has
-    no pid. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
+    no pid. A missing ``_NET_WM_PID`` is read again before that fallback, so
+    a window that has just mapped does not list pid 0 while the property is
+    still arriving. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
     ``on_screen`` false and ``bounds`` null, so a caller does not aim at the
     rect it had before it was iconified. ``bounds`` is the client window
     (inside the frame), the same origin ``move_window`` places.
@@ -488,7 +536,7 @@ def windows() -> list[dict]:
 def _window_rows(d) -> list[dict]:
     rows: list[dict] = []
     for win in _managed_windows(d):
-        pid = _pid_of(win, d)
+        pid = _settled_pid(win, d)
         hidden = _is_hidden(win, d)
         geom = None if hidden else _geometry_on_root(win, d)
         bounds = None
@@ -498,7 +546,7 @@ def _window_rows(d) -> list[dict]:
         instance, klass = _wm_class_strings(win, d)
         rows.append({
             "window_id": int(win.id),
-            "app": _app_id(win, d),
+            "app": _app_id(win, d, settle=True),
             "title": _win_title(win, d),
             "pid": pid,
             "bounds": bounds,
@@ -521,16 +569,16 @@ def _window_by_id(d, window_id: int):
 def window_owner(window_id: int) -> str | None:
     """App id of managed window ``window_id`` (the permission-keying name).
 
-    The process comm wins. A window with no pid uses its WM_CLASS instance.
-    "" when neither can be read. None when no managed window has that id
-    (or X is unreachable).
+    The process comm wins. A missing ``_NET_WM_PID`` is read again before
+    the WM_CLASS fallback. "" when neither can be read. None when no managed
+    window has that id (or X is unreachable).
     """
     try:
         with _open_display() as d:
             win = _window_by_id(d, window_id)
             if win is None:
                 return None
-            return _app_id(win, d)
+            return _app_id(win, d, settle=True)
     except Exception:
         return None
 
@@ -553,6 +601,143 @@ def _send_active_window(d, win) -> None:
     from Xlib import X
 
     _client_message(d, win, "_NET_ACTIVE_WINDOW", [1, X.CurrentTime, 0, 0, 0])
+
+
+# A second client's present() can land after one activation and leave the
+# previous window in _NET_ACTIVE_WINDOW. Poll that property and send again
+# until this window is what two reads in a row report. 5s is the same budget
+# the live app= focus wait uses. A display with no such property does not wait.
+_ACTIVATE_WAIT_S = 5.0
+_ACTIVATE_POLL_S = 0.05
+_ACTIVATE_SETTLE_HITS = 2
+_ACTIVATE_MAX_POLLS = 120
+
+
+def _active_window_property(d):
+    """The root ``_NET_ACTIVE_WINDOW`` property, or None when it is absent."""
+    try:
+        return d.screen().root.get_full_property(_atom(d, "_NET_ACTIVE_WINDOW"), 0)
+    except Exception:
+        return None
+
+
+def _active_window_id(d) -> int | None:
+    """The window id in ``_NET_ACTIVE_WINDOW``, or None when nothing is active."""
+    active = _prop(d.screen().root, d, "_NET_ACTIVE_WINDOW")
+    if not active:
+        return None
+    try:
+        value = int(active[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return value or None
+
+
+def _request_activation(d, win, *, restore: bool) -> None:
+    """Send ``_NET_ACTIVE_WINDOW``. ``restore`` uniconifies a minimized window first."""
+    if restore:
+        _restore_if_hidden(d, win)
+    _send_active_window(d, win)
+
+
+def _activate_and_settle(d, win, *, restore: bool) -> None:
+    """Activate ``win`` and wait until ``_NET_ACTIVE_WINDOW`` stays on it.
+
+    Openbox applies ``_NET_ACTIVE_WINDOW`` in ``client_activate``. Focus
+    stealing can drop that message when another client presents in the same
+    moment, and the previous window stays active. A minimized window is
+    uniconified first when ``restore`` is set, because that same path
+    uniconifies only when the focus change is allowed. The uniconify
+    messages do not depend on it.
+
+    Two consecutive reads of this window mean the activation settled. A
+    read of a different window sends the request again. A root that does
+    not answer ``_NET_ACTIVE_WINDOW`` (no window manager, or a caller that
+    only records the client message) gets the one request and does not wait.
+    """
+    if _active_window_property(d) is None:
+        _request_activation(d, win, restore=restore)
+        return
+    target = int(win.id)
+    hits = 0
+    deadline = time.monotonic() + _ACTIVATE_WAIT_S
+    for _ in range(_ACTIVATE_MAX_POLLS):
+        if hits == 0:
+            _request_activation(d, win, restore=restore)
+        if _active_window_id(d) == target:
+            hits += 1
+            if hits >= _ACTIVATE_SETTLE_HITS:
+                return
+        else:
+            hits = 0
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(_ACTIVATE_POLL_S)
+
+
+# A move, resize, minimize, maximize, or close can be sent before Openbox
+# has finished managing the window. The message is then ignored and the
+# window list still shows the old state. Send again until the list matches,
+# on the same budget as activation. A display that does not publish
+# _NET_ACTIVE_WINDOW still gets one message and does not poll.
+_GEOMETRY_SLOP = 8
+
+
+def _effect_observable(d) -> bool:
+    """True when a window manager publishes ``_NET_ACTIVE_WINDOW``."""
+    return _active_window_property(d) is not None
+
+
+def _retry_until(d, send, done) -> None:
+    """Call ``send`` until ``done`` is true, when a window manager is listening."""
+    if not _effect_observable(d):
+        send()
+        return
+    deadline = time.monotonic() + _ACTIVATE_WAIT_S
+    for _ in range(_ACTIVATE_MAX_POLLS):
+        if done():
+            return
+        send()
+        if done():
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(_ACTIVATE_POLL_S)
+
+
+def _geometry_matches(win, d, *, x=None, y=None, width=None, height=None) -> bool:
+    """True when the client geometry is within ``_GEOMETRY_SLOP`` of the request."""
+    geom = _geometry_on_root(win, d)
+    if geom is None:
+        return False
+    gx, gy, gw, gh = geom
+    if x is not None and abs(gx - int(x)) > _GEOMETRY_SLOP:
+        return False
+    if y is not None and abs(gy - int(y)) > _GEOMETRY_SLOP:
+        return False
+    if width is not None and abs(gw - int(width)) > _GEOMETRY_SLOP:
+        return False
+    if height is not None and abs(gh - int(height)) > _GEOMETRY_SLOP:
+        return False
+    return True
+
+
+def _is_maximized(win, d) -> bool:
+    """True when both EWMH maximized atoms are set."""
+    atoms = _prop(win, d, "_NET_WM_STATE")
+    if not atoms:
+        return False
+    try:
+        vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
+        horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
+    except Exception:
+        return False
+    try:
+        has_vert = any(_atom_is(item, vert) for item in atoms)
+        has_horz = any(_atom_is(item, horz) for item in atoms)
+    except Exception:
+        return False
+    return has_vert and has_horz
 
 
 @contextmanager
@@ -590,14 +775,15 @@ def _restore_if_hidden(d, win) -> None:
 def raise_window(window_id: int) -> bool:
     """Activate managed window ``window_id`` via ``_NET_ACTIVE_WINDOW``.
 
-    A minimized window is uniconified first. Returns False when no managed
-    window has that id.
+    A minimized window is uniconified first. The request is sent again until
+    ``_NET_ACTIVE_WINDOW`` stays on this window, so a present() from another
+    client in the same moment does not leave the previous window active.
+    Returns False when no managed window has that id.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _restore_if_hidden(d, win)
-        _send_active_window(d, win)
+        _activate_and_settle(d, win, restore=True)
         return True
 
 
@@ -607,6 +793,7 @@ def focus_window(window_id: int) -> bool:
     Under a standard EWMH window manager activation raises and focuses.
     Openbox does not uniconify when focus-stealing prevention refuses that
     message, so a minimized window is restored before the activate message.
+    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
     The verb is still distinct so the caller can say which one it asked for.
     Returns False when no managed window has that id.
     """
@@ -616,25 +803,39 @@ def focus_window(window_id: int) -> bool:
 def minimize_window(window_id: int) -> bool:
     """Iconify ``window_id``: ICCCM ``WM_CHANGE_STATE`` plus ``_NET_WM_STATE_HIDDEN``.
 
-    Returns False when no managed window has that id.
+    The request is sent again until the window is hidden. A message sent
+    before the window manager has finished managing the window is ignored,
+    and the list would still show it on screen. Returns False when no
+    managed window has that id.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _client_message(d, win, "WM_CHANGE_STATE", [3, 0, 0, 0, 0])  # IconicState
-        hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
-        _client_message(d, win, "_NET_WM_STATE", [1, hidden, 0, 1, 0])  # _NET_WM_STATE_ADD
+
+        def send() -> None:
+            _client_message(d, win, "WM_CHANGE_STATE", [3, 0, 0, 0, 0])  # IconicState
+            hidden = _atom(d, "_NET_WM_STATE_HIDDEN")
+            _client_message(d, win, "_NET_WM_STATE", [1, hidden, 0, 1, 0])  # _NET_WM_STATE_ADD
+
+        _retry_until(d, send, lambda: _is_hidden(win, d))
         return True
 
 
 def maximize_window(window_id: int) -> bool:
-    """Maximize ``window_id`` vertically and horizontally in one ``_NET_WM_STATE``."""
+    """Maximize ``window_id`` vertically and horizontally in one ``_NET_WM_STATE``.
+
+    The request is sent again until both maximized atoms are set.
+    """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
-        horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
-        _client_message(d, win, "_NET_WM_STATE", [1, vert, horz, 1, 0])
+
+        def send() -> None:
+            vert = _atom(d, "_NET_WM_STATE_MAXIMIZED_VERT")
+            horz = _atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ")
+            _client_message(d, win, "_NET_WM_STATE", [1, vert, horz, 1, 0])
+
+        _retry_until(d, send, lambda: _is_maximized(win, d))
         return True
 
 
@@ -671,19 +872,24 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     back by ``_NET_FRAME_EXTENTS`` (left, top). A move to (100, 80) with a
     5px border and a 29px title bar sends the frame to (95, 51), and the
     client then lists at (100, 80). Only the X and Y flags are set, so the
-    window manager keeps the current size. Returns False when the id is not
-    managed.
+    window manager keeps the current size. The request is sent again, with
+    fresh frame extents, until the client origin is that point. Returns
+    False when the id is not managed.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _restore_if_hidden(d, win)
-        left, top = _frame_insets(win, d)
-        # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-        _client_message(
-            d, win, "_NET_MOVERESIZE_WINDOW",
-            [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
-        )
+
+        def send() -> None:
+            _restore_if_hidden(d, win)
+            left, top = _frame_insets(win, d)
+            # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
+            _client_message(
+                d, win, "_NET_MOVERESIZE_WINDOW",
+                [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
+            )
+
+        _retry_until(d, send, lambda: _geometry_matches(win, d, x=x, y=y))
         return True
 
 
@@ -692,22 +898,42 @@ def resize_window(window_id: int, width: int, height: int) -> bool:
 
     A minimized window is uniconified first. Openbox applies the size, and
     ``window list`` only reports bounds for a window that is on screen.
+    The request is sent again until the client size is the one asked for.
     """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _restore_if_hidden(d, win)
-        # Flags Width=4 and Height=8.
-        _client_message(d, win, "_NET_MOVERESIZE_WINDOW", [1 | (12 << 8), 0, 0, int(width), int(height)])
+
+        def send() -> None:
+            _restore_if_hidden(d, win)
+            # Flags Width=4 and Height=8.
+            _client_message(
+                d, win, "_NET_MOVERESIZE_WINDOW",
+                [1 | (12 << 8), 0, 0, int(width), int(height)],
+            )
+
+        _retry_until(
+            d, send, lambda: _geometry_matches(win, d, width=width, height=height),
+        )
         return True
 
 
 def close_window(window_id: int) -> bool:
-    """Ask the window manager to close ``window_id`` (``_NET_CLOSE_WINDOW``)."""
+    """Ask the window manager to close ``window_id`` (``_NET_CLOSE_WINDOW``).
+
+    The request is sent again until the window leaves the managed list.
+    """
     with _with_window(window_id) as (d, win):
         if win is None:
             return False
-        _client_message(d, win, "_NET_CLOSE_WINDOW", [0, 1, 0, 0, 0])
+
+        def send() -> None:
+            current = _window_by_id(d, window_id)
+            if current is None:
+                return
+            _client_message(d, current, "_NET_CLOSE_WINDOW", [0, 1, 0, 0, 0])
+
+        _retry_until(d, send, lambda: _window_by_id(d, window_id) is None)
         return True
 
 
@@ -924,6 +1150,7 @@ def activate_app(identifier: str) -> str:
     """Raise+focus a window whose comm/title matches ``identifier`` (EWMH
     _NET_ACTIVE_WINDOW client message). Returns the resolved app id.
 
+    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on that window.
     No matching window is ``app_not_found``. The call does not report that
     it activated an app that was never launched. That answer does not build
     an X client message, so a desktop with no matching window does not need
@@ -953,7 +1180,7 @@ def activate_app(identifier: str) -> str:
                 f"no running application matches {identifier!r}",
                 detail={"app": identifier},
             )
-        _send_active_window(d, matched)
+        _activate_and_settle(d, matched, restore=False)
         return resolved
 
 

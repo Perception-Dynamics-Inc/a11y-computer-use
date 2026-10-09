@@ -1800,15 +1800,24 @@ class LinuxDriver:
         return owner
 
     def raise_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
+
+        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        """
         self._ewmh(window_id, "raise_window", lambda sys: sys.raise_window(window_id))
 
     def focus_window(self, window_id: int) -> None:
-        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first."""
+        """EWMH ``_NET_ACTIVE_WINDOW``. A minimized window is uniconified first.
+
+        The request is retried until ``_NET_ACTIVE_WINDOW`` stays on this window.
+        """
         self._ewmh(window_id, "focus_window", lambda sys: sys.focus_window(window_id))
 
     def minimize_window(self, window_id: int) -> None:
-        """ICCCM iconic state plus ``_NET_WM_STATE_HIDDEN``."""
+        """ICCCM iconic state plus ``_NET_WM_STATE_HIDDEN``.
+
+        The request is retried until the window is hidden.
+        """
         self._ewmh(window_id, "minimize_window", lambda sys: sys.minimize_window(window_id))
 
     def maximize_window(self, window_id: int) -> None:
@@ -1829,7 +1838,7 @@ class LinuxDriver:
         self._ewmh(window_id, "resize_window", lambda sys: sys.resize_window(window_id, width, height))
 
     def close_window(self, window_id: int) -> None:
-        """``_NET_CLOSE_WINDOW`` client message."""
+        """``_NET_CLOSE_WINDOW`` client message, retried until the window is gone."""
         self._ewmh(window_id, "close_window", lambda sys: sys.close_window(window_id))
 
     def _ewmh(self, window_id: int, op: str, call) -> None:
