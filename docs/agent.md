@@ -295,6 +295,14 @@ page whose text contains an injection string and a link to
 `https://blocked.example/`. The scripted agent fences that text and completes
 the legitimate goal. Clicking the link and launching the blocked URL both
 return `domain_blocked`. That test uses `ScriptedModel`, not a live LLM.
+The document URL on that page comes from AT-SPI.
+
+Live, headless Chromium when a CDP endpoint is up
+(`tests/test_browser.py::test_live_cdp_reads_document_url_and_link_href`):
+`document_url` is the `file:` page from `Page.getFrameTree`, and
+`element_url` on the link is `https://blocked.example/phish`. The browser
+CI job starts that endpoint. Hermetic runs with nothing listening on the
+default port skip the test.
 
 Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 
