@@ -1645,6 +1645,7 @@ def _firefox_documents():
         "new_tab": new_tab,
         "new_frame": new_frame,
         "new_pane": new_pane,
+        "background": background,
         "frame": frame,
     }
 
@@ -1684,6 +1685,63 @@ def test_firefox_hidden_documents_are_pruned_and_not_clickable(monkeypatch) -> N
         driver.click(element)
     assert exc.value.detail["reason"] == "not_showing"
     assert tree["products"].pressed is False
+
+
+def _attach_gecko(owner, *nodes):
+    for node in nodes:
+        node.application = owner.application
+
+
+def test_titled_iframe_document_stays_when_its_tab_is_selected() -> None:
+    """Synthetic tree. Not a live Firefox.
+
+    A child frame whose page has its own title used to be dropped: the
+    active-tab title match ran on that document and it was not the tab.
+    An untitled child frame already stayed. A titled frame inside a
+    background tab, including one that reports SHOWING, still goes.
+    """
+    tree = _firefox_documents()
+    agree = _GeckoNode("check box", "Agree", ("SHOWING", "VISIBLE", "FOCUSABLE", "CHECKABLE"))
+    titled = _GeckoNode("document web", "Titled Child", ("SHOWING", "VISIBLE"), [agree])
+    titled_frame = _GeckoNode("internal frame", "Titled Child", ("SHOWING", "VISIBLE"), [titled])
+    inner = _GeckoNode("push button", "InnerGo", ("SHOWING", "VISIBLE"))
+    untitled = _GeckoNode("document web", "", ("SHOWING", "VISIBLE"), [inner])
+    untitled_frame = _GeckoNode("internal frame", "", ("SHOWING", "VISIBLE"), [untitled])
+    hidden_link = _GeckoNode("link", "HiddenInner", ("SHOWING", "VISIBLE", "FOCUSABLE"))
+    hidden_doc = _GeckoNode("document web", "Secret Frame", ("SHOWING", "VISIBLE"), [hidden_link])
+    hidden_frame = _GeckoNode("internal frame", "Secret Frame", ("SHOWING", "VISIBLE"), [hidden_doc])
+    _attach_gecko(
+        tree["form"], agree, titled, titled_frame, inner, untitled, untitled_frame,
+        hidden_link, hidden_doc, hidden_frame,
+    )
+    tree["form"].children.extend([titled_frame, untitled_frame])
+    titled_frame.parent = tree["form"]
+    untitled_frame.parent = tree["form"]
+    tree["background"].children.append(hidden_frame)
+    hidden_frame.parent = tree["background"]
+
+    accessor = _atspi.ATSPIAccessor()
+    assert accessor.children(titled_frame) == [titled]
+    assert accessor.children(titled) == [agree]
+    assert accessor.children(untitled_frame) == [untitled]
+    assert _atspi.hidden_web_target(agree) is False
+    assert _atspi.hidden_web_target(inner) is False
+    assert accessor.children(hidden_frame) == []
+    assert _atspi.hidden_web_target(hidden_link) is True
+
+    # The background document itself is SHOWING, and so is its titled iframe.
+    # The tab is still not selected, so the iframe document is not the page.
+    tree["background"].states.add("SHOWING")
+    tree["new_tab"].states.add("SHOWING")
+    nested_btn = _GeckoNode("push button", "NewTabInner", ("SHOWING", "VISIBLE"))
+    nested_doc = _GeckoNode("document web", "New Tab Frame", ("SHOWING", "VISIBLE"), [nested_btn])
+    nested_frame = _GeckoNode("internal frame", "New Tab Frame", ("SHOWING", "VISIBLE"), [nested_doc])
+    _attach_gecko(tree["new_tab"], nested_btn, nested_doc, nested_frame)
+    tree["new_tab"].children.append(nested_frame)
+    nested_frame.parent = tree["new_tab"]
+    assert accessor.children(nested_frame) == []
+    assert _atspi.hidden_web_target(nested_btn) is True
+    assert accessor.children(titled_frame) == [titled]
 
 
 def test_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monkeypatch) -> None:

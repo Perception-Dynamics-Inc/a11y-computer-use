@@ -3899,20 +3899,51 @@ def _names_match_tab(title: str, tab: str) -> bool:
     return len(short) >= 8 and long.startswith(short)
 
 
+def _enclosing_tab_document(doc):
+    """The tab's own document web, not an iframe document nested under it.
+
+    Firefox gives a child frame the ``<title>`` of the page inside the
+    frame. That name is not the selected tab. The title match belongs to
+    the outermost document web under the window. An iframe's document web
+    has that outer document as an ancestor.
+    """
+    current = doc
+    outer = doc
+    seen: set[int] = set()
+    for _ in range(24):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        role = _role_name(current)
+        if role in {"frame", "window", "application"}:
+            break
+        if role == "document web":
+            outer = current
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            break
+        current = parent
+    return outer
+
+
 def _gecko_web_document_on_screen(doc) -> bool:
     """True when this document web is the one the user can see.
 
     The frame hierarchy has to be SHOWING. When the window has a selected
-    page tab, the document title has to be that tab. A preloaded New Tab
-    that is not the selected tab is not on screen, and neither is a
-    background tab whose frame is only VISIBLE.
+    page tab, the tab's own document title has to be that tab. A preloaded
+    New Tab that is not the selected tab is not on screen, and neither is a
+    background tab whose frame is only VISIBLE. A child frame's document
+    keeps its own ``<title>``. That title is not compared to the tab: the
+    match uses the enclosing tab document, so a titled iframe in the active
+    tab stays, and one in a background tab does not.
     """
     if not _frame_hierarchy_showing(doc):
         return False
     tab = _selected_tab_name(doc)
     if not tab:
         return True
-    return _names_match_tab(_node_name(doc), tab)
+    owner = _enclosing_tab_document(doc)
+    return _names_match_tab(_node_name(owner), tab)
 
 
 def _has_browser_frame(node, depth: int = 0) -> bool:
@@ -3935,7 +3966,9 @@ def _hidden_gecko_browser(node) -> bool:
     A scroll pane that is not SHOWING and wraps an internal frame is a
     background tab or the preloaded New Tab browser. An internal frame
     without SHOWING is the same. A document web is hidden when its frame
-    hierarchy is not SHOWING, or when it is not the selected tab.
+    hierarchy is not SHOWING, or when the tab that encloses it is not the
+    selected tab. An iframe document whose title differs from the tab is
+    not hidden for that reason.
     """
     role = _role_name(node)
     if role == "scroll pane":
