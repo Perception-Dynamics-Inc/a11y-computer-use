@@ -4542,16 +4542,47 @@ def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> Non
         _stop(proc)
 
 
+def _chrome_page_value(port: int, expression: str):
+    """Evaluate ``expression`` in the first Chrome page target. Returns the value."""
+    import json
+    import urllib.request
+
+    import websocket
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5) as handle:
+        targets = json.load(handle)
+    page = next(item for item in targets if item.get("type") == "page")
+    ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=5)
+    try:
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {"expression": expression, "returnByValue": True},
+        }))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            message = json.loads(ws.recv())
+            if message.get("id") == 1:
+                result = message.get("result", {}).get("result", {})
+                if "value" not in result:
+                    raise AssertionError(result)
+                return result["value"]
+    finally:
+        ws.close()
+    raise AssertionError(f"no CDP result for {expression}")
+
+
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
-    """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
+    """A file input's GTK chooser attaches the typed path. The page says so.
 
     The page is served over HTTP. Chrome exposes the control as a button named
     ``Upload: No file chosen``, not the aria-label alone. The chooser is the
     GTK dialog Chrome opens in-process. That dialog is an X window and not an
-    AT-SPI tree, so the page focus stays empty after Ctrl+L. ``type`` still
-    reads the location entry the keys landed in. The test moves the dialog on
-    screen, types the path, and clicks Open. It does not use a portal, and it
-    does not skip when the dialog is up.
+    AT-SPI tree, so the page focus stays empty after Ctrl+L. ``type`` reads
+    the location entry the keys landed in. Return in that entry is swallowed
+    by GTK, so it clicks Open. ``input.files[0].name`` is the attachment, not
+    the button's accessible name. It does not use a portal, and it does not
+    skip when the dialog is up.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -4573,12 +4604,14 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     profile.mkdir()
     env = os.environ.copy()
     env["GTK_USE_PORTAL"] = "0"
+    debug_port = 23000 + (os.getpid() % 10000)
     proc = subprocess.Popen(
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
             "--disable-features=UseXdgDesktopPortal,XdgFileChooserPortal",
             f"--user-data-dir={profile}", "--window-size=1000,700",
+            f"--remote-debugging-port={debug_port}", "--remote-allow-origins=*",
             f"http://127.0.0.1:{port}/",
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -4653,20 +4686,20 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
         assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
         assert str(target) in typed.evidence
         time.sleep(0.15)
-        runtime.click(
-            x=int(bounds["x"] + bounds["width"] - 40),
-            y=int(bounds["y"] + bounds["height"] - 20),
-            display_id=int(bounds["display_id"]),
-        )
+        runtime.key("Return")
+        attached = ""
         deadline = time.monotonic() + 6
-        shown = ""
         while time.monotonic() < deadline:
-            shot = driver.snapshot(Scope.WINDOW, "chrome")
-            shown = " ".join(el.title or "" for el in shot.elements)
-            if "picked.txt" in shown:
+            attached = _chrome_page_value(
+                debug_port,
+                "(() => { const input = document.querySelector('#file');"
+                " const file = input && input.files && input.files[0];"
+                " return file ? file.name : ''; })()",
+            )
+            if attached == target.name:
                 break
             time.sleep(0.2)
-        assert "picked.txt" in shown, shown
+        assert attached == target.name, attached
         assert "Open File" not in {row.get("title") for row in driver.windows()}
     finally:
         _stop(proc)

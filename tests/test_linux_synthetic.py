@@ -6034,6 +6034,7 @@ def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypat
     monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
     assert driver.type_text("/tmp/notes/draft.txt") == len("/tmp/notes/draft.txt")
     assert driver._chooser_readback == "/tmp/notes/draft.txt"
+    assert driver._chooser_commit == "/tmp/notes/draft.txt"
     assert chords == ["ctrl+a", "ctrl+c", "right"]
     assert board["value"] == "keep-me"
 
@@ -6044,8 +6045,72 @@ def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypat
         driver.type_text("/tmp/notes/draft.txt")
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] == ""
+    assert driver._chooser_commit is None
     assert chords == []
     assert board["value"] == "keep-me"
+
+
+def test_return_in_chromes_open_dialog_clicks_open_for_a_typed_file(tmp_path, monkeypatch) -> None:
+    """Return after a chooser commit clicks Open. It does not send the key.
+
+    GTK's location entry swallows Return, so the file input stays empty.
+    The outcome judge clears the read-back; the commit path is what Return
+    still has. A directory path still sends Return, so the dialog can enter
+    that folder. No X server.
+    """
+    from a11y_computer_use.drivers import _linux_input, _linux_system
+
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    driver = LinuxDriver()
+    driver._chooser_readback = None
+    driver._chooser_commit = str(target)
+    clicks: list[tuple[int, int]] = []
+    pressed: list[str] = []
+    window = {
+        "title": "Open File",
+        "app": "chrome",
+        "bounds": {"x": 40, "y": 57, "width": 720, "height": 480},
+    }
+    monkeypatch.setattr(_linux_system, "active_window", lambda: window)
+    monkeypatch.setattr(_linux_input, "click", lambda x, y, **_kwargs: clicks.append((x, y)))
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: pressed.append(chord))
+    driver.key_chord("Return")
+    assert clicks == [(720, 517)]
+    assert pressed == []
+    assert driver._chooser_readback is None
+    assert driver._chooser_commit is None
+
+    driver._chooser_commit = str(tmp_path)
+    driver.key_chord("Return")
+    assert clicks == [(720, 517)]
+    assert pressed == ["Return"]
+
+    # The live active window has an id and no rect. The click uses the
+    # matching window-list bounds.
+    driver._chooser_readback = None
+    driver._chooser_commit = str(target)
+    monkeypatch.setattr(
+        _linux_system,
+        "active_window",
+        lambda: {"window_id": 7, "title": "Open File", "app": "chrome"},
+    )
+    monkeypatch.setattr(
+        _linux_system,
+        "windows",
+        lambda: [{
+            "window_id": 7,
+            "title": "Open File",
+            "app": "chrome",
+            "bounds": {"x": 10, "y": 20, "width": 400, "height": 300},
+        }],
+    )
+    driver.key_chord("Return")
+    assert clicks == [(720, 517), (370, 300)]
+    assert pressed == ["Return"]
+    assert driver._chooser_commit is None
 
 
 def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) -> None:

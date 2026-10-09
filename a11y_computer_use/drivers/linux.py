@@ -503,8 +503,11 @@ class LinuxDriver:
 
     def __init__(self) -> None:
         # Set when a file-chooser type was confirmed from the location entry
-        # rather than the page. The outcome judge reads it once.
+        # rather than the page. The outcome judge reads it once and clears it.
         self._chooser_readback: str | None = None
+        # The same path, kept after the judge clears the read-back, so Return
+        # can still click Open. The next type_text replaces it.
+        self._chooser_commit: str | None = None
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -1456,6 +1459,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._chooser_commit = None
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -1656,6 +1660,7 @@ class LinuxDriver:
             copied = self._chooser_location_text(app_id, text)
             if copied is not None and _atspi._typed_visible(None, copied, text):
                 self._chooser_readback = copied
+                self._chooser_commit = copied
                 return len(text)
             raise _atspi._text_mismatch(
                 "text_mismatch",
@@ -1664,6 +1669,64 @@ class LinuxDriver:
                 actual=after,
             )
         return len(text)
+
+    def _accept_typed_chooser_file(self, chord: str) -> bool:
+        """Click Open when Return would not commit a typed chooser path.
+
+        The location entry keeps the key, and the dialog stays up with
+        ``input.files`` empty. Open is the bottom-right button. A directory
+        path is not clicked, so Return can still enter that folder, and the
+        read-back stays so a later Return on a file can still commit it.
+        """
+        name = chord.strip().casefold().replace(" ", "")
+        if name not in {"return", "kp_enter", "enter"}:
+            return False
+        # The outcome judge consumes _chooser_readback. The commit path is
+        # what Return still has after that type call returns.
+        text = self._chooser_commit or self._chooser_readback
+        if not text:
+            return False
+        from pathlib import Path
+
+        path = Path(str(text).strip())
+        if not path.is_file():
+            return False
+        from a11y_computer_use.drivers import _linux_input, _linux_system
+
+        active = _linux_system.active_window()
+        if not active:
+            return False
+        title = " ".join(str(active.get("title") or "").casefold().split())
+        if title != "open file":
+            return False
+        owner = str(active.get("app") or "")
+        if owner and _browser_family(owner) != "chrome":
+            return False
+        bounds = active.get("bounds") or {}
+        # active_window() names the X window and does not carry a rect.
+        # window list does: the client origin, inside the frame.
+        if not bounds.get("width") or not bounds.get("height"):
+            window_id = active.get("window_id")
+            if window_id is not None:
+                listed = next(
+                    (
+                        row for row in _linux_system.windows()
+                        if row.get("window_id") == window_id and row.get("bounds")
+                    ),
+                    None,
+                )
+                if listed:
+                    bounds = listed["bounds"]
+        width = bounds.get("width")
+        height = bounds.get("height")
+        origin_x = bounds.get("x")
+        origin_y = bounds.get("y")
+        if not width or not height or origin_x is None or origin_y is None:
+            return False
+        _linux_input.click(int(origin_x) + int(width) - 40, int(origin_y) + int(height) - 20)
+        self._chooser_readback = None
+        self._chooser_commit = None
+        return True
 
     def _chooser_location_text(self, app_id: str | None, text: str) -> str | None:
         """Text in the active file chooser's location entry, or None.
@@ -1856,6 +1919,11 @@ class LinuxDriver:
         if printable_chord(chord):
             self._refuse_xtest_password_focus()
         self._focused_editable = None
+        # GTK's location entry swallows Return, so Chrome's file input stays
+        # empty. A path just read back from that entry is committed by clicking
+        # Open, which is what actually sets input.files.
+        if self._accept_typed_chooser_file(chord):
+            return None
         _linux_input.press_chord(chord)
         return None
 
