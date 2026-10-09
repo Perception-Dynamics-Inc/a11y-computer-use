@@ -1164,6 +1164,9 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        entry = editable_entry(
+            node, role_str=role_str, attrs=attrs, state_editable=state_editable,
+        )
         return RawNode(
             role=role,
             subrole=None,
@@ -1181,9 +1184,8 @@ class ATSPIAccessor:
             expanded=expanded,
             stable_id=_stable_id(node, attrs),
             atspi_web=atspi_web_kind(role_str),
-            editable=editable_entry(
-                node, role_str=role_str, attrs=attrs, state_editable=state_editable,
-            ),
+            editable=entry,
+            platform_editable=entry,
         )
 
     def children(self, node: object) -> Sequence[object]:
@@ -2550,6 +2552,10 @@ _STATIC_REPLACE_ROLES = frozenset({
 })
 _ENTRY_ROLE_NAMES = frozenset({
     "entry", "password text", "text", "editable text", "terminal", "document text",
+    # A GTK spin and an <input type=number> are spin buttons. They are entries
+    # only when this node itself is STATE_EDITABLE. A date segment is still
+    # written by set_text; the block check lets that through.
+    "spin button",
 })
 _CONTENTEDITABLE_TAGS = frozenset({"div", "span"})
 
@@ -2563,15 +2569,18 @@ def editable_entry(
 ) -> bool:
     """True when this node itself is an editable text entry.
 
-    Firefox reports ``STATE_EDITABLE``, and exposes EditableText, on
-    document and static nodes. Those are not entries. A paragraph, panel,
-    document, or combo/select is not an entry. A read-only node is not.
+    The positive signal is ``STATE_EDITABLE`` on this node. EditableText
+    support is not that signal: Firefox exposes the interface on paragraphs,
+    documents, and address-bar wrappers that are not editors. A paragraph,
+    panel, document, or combo/select is not an entry even when it reports
+    ``STATE_EDITABLE``. A read-only node is not.
 
-    An entry, password, or text role is an entry when it has EditableText or
-    ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
-    whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
-    Chromium often has no EditableText (#221). Firefox's own roleless
-    contenteditable has EditableText. A paragraph is not that section.
+    An entry, password, text, or spin-button role is an entry only when this
+    node is ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
+    whose tag is ``div`` or ``span`` and whose own state is ``EDITABLE``.
+    Chromium often has no EditableText (#221). Firefox's roleless
+    contenteditable is the same section and does not need the interface
+    either. A paragraph is not that section.
     """
     if acc is None:
         return False
@@ -2583,9 +2592,7 @@ def editable_entry(
             return False
         if state_editable is None:
             state_editable = _state_has(acc, "EDITABLE")
-        if state_editable:
-            return True
-        return _editable_iface(acc) is not None
+        return bool(state_editable)
     if role != "section":
         return False
     if attrs is None:
@@ -2600,9 +2607,7 @@ def editable_entry(
         state_editable = _state_has(acc, "EDITABLE")
     if not state_editable or _state_has(acc, "READ_ONLY"):
         return False
-    if _chromium_app(acc):
-        return True
-    return bool(_gecko_app(acc) and _editable_iface(acc) is not None)
+    return bool(_chromium_app(acc) or _gecko_app(acc))
 
 
 def _blocks_text_replace(acc) -> bool:
@@ -2610,15 +2615,26 @@ def _blocks_text_replace(acc) -> bool:
 
     A role-less object is a synthetic field. A paragraph, panel, document,
     or combo is blocked even when it exposes EditableText or
-    ``STATE_EDITABLE``. A contenteditable section and a real entry are not.
+    ``STATE_EDITABLE``. An entry role is blocked unless this node's own
+    ``STATE_EDITABLE`` is set. A Chrome contenteditable entry and a Chrome
+    date segment stay writable. A contenteditable section is not blocked.
     """
     role = _role_name(acc)
     if role == "":
+        return False
+    if _chrome_date_segment(acc):
         return False
     if role in _STATIC_REPLACE_ROLES:
         return True
     if role == "section":
         return not (editable_entry(acc) or _chromium_contenteditable(acc))
+    if role in _ENTRY_ROLE_NAMES and role != "spin button":
+        # A spin button's own EditableText is the number field, not the
+        # page. Clearing one must stay on set_text. An entry or text role
+        # without STATE_EDITABLE is a wrapper and is not typed into.
+        if _chromium_contenteditable(acc):
+            return False
+        return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
 
@@ -4994,7 +5010,128 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     return False
 
 
+_TEXT_POINT_STOP = frozenset({
+    "frame", "window", "application", "dialog", "alert", "desktop frame",
+})
+
+
+def _text_point_readable(acc) -> bool:
+    """True when ``acc`` might expose AT-SPI Text. A bare object does not."""
+    if acc is None:
+        return False
+    return any(
+        hasattr(acc, name)
+        for name in ("get_role_name", "get_text", "text", "get_editable_text_iface", "get_editable_text")
+    )
+
+
+def _read_text_point(acc):
+    """(caret, ranges) for ``acc``, or None when it has no Text interface.
+
+    A missing method is not a caret. Offsets come from ``get_caret_offset``
+    and ``get_selection``. No keys are sent.
+    """
+    if not _text_point_readable(acc):
+        return None
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    caret_ok = isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0
+    count_ok = isinstance(count, int) and not isinstance(count, bool) and count >= 0
+    if not caret_ok and not count_ok:
+        return None
+    ranges: list[tuple[int, int]] = []
+    if count_ok and int(count) > 0:
+        for index in range(min(int(count), 8)):
+            bounds = _selection_bounds(
+                _safe(lambda index=index: Atspi.Text.get_selection(acc, index))
+            )
+            if bounds is None:
+                continue
+            start, end = int(bounds[0]), int(bounds[1])
+            if end < start:
+                start, end = end, start
+            ranges.append((start, end))
+    return (int(caret) if caret_ok else None, tuple(ranges))
+
+
+def _capture_text_points(acc) -> list:
+    """Caret and selections on ``acc`` and the document ancestors above it.
+
+    ctrl+a on a Firefox paragraph selects the document web, not only the
+    paragraph. The frame, window, and application are not text targets.
+    """
+    saved = []
+    node = acc
+    seen: set[int] = set()
+    for _depth in range(12):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        role = _role_name(node)
+        if node is not acc and role in _TEXT_POINT_STOP:
+            break
+        point = _read_text_point(node)
+        if point is not None:
+            saved.append((node, point[0], point[1]))
+        if role in _TEXT_POINT_STOP:
+            break
+        node = _parent_of(node)
+    return saved
+
+
+def _restore_text_points(saved) -> None:
+    """Put a captured caret and selection back. No keys.
+
+    Current selections are removed first, including a select-all that
+    landed on the document. The saved ranges are written back, then the
+    caret. A node whose Text methods are missing is left as it is.
+    """
+    if not saved:
+        return
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return
+    for acc, caret, ranges in saved:
+        count = _safe(lambda acc=acc: Atspi.Text.get_n_selections(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            for index in range(int(count) - 1, -1, -1):
+                _safe(lambda acc=acc, index=index: Atspi.Text.remove_selection(acc, index))
+        for slot, (start, end) in enumerate(ranges):
+            placed = _safe(
+                lambda acc=acc, slot=slot, start=start, end=end: Atspi.Text.set_selection(
+                    acc, slot, start, end,
+                )
+            )
+            if not placed:
+                _safe(lambda acc=acc, start=start, end=end: Atspi.Text.add_selection(acc, start, end))
+        if caret is not None:
+            _safe(lambda acc=acc, caret=caret: Atspi.Text.set_caret_offset(acc, caret))
+
+
 def set_text(acc, text: str) -> bool:
+    """Replace the element's whole text via AT-SPI EditableText.
+
+    A false return restores the caret and text selection captured on this
+    node and its document ancestors before the write. That restore sends
+    no keys. Success leaves the caret where the write put it.
+    """
+    saved = _capture_text_points(acc)
+    try:
+        ok = _set_text_body(acc, text)
+    except Exception:
+        _restore_text_points(saved)
+        raise
+    if not ok:
+        _restore_text_points(saved)
+    return bool(ok)
+
+
+def _set_text_body(acc, text: str) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
     GTK's ``set_text_contents`` replaces, and the snapshot read then equals
