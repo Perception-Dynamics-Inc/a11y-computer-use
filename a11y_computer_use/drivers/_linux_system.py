@@ -906,29 +906,69 @@ def maximize_window(window_id: int) -> bool:
         return True
 
 
-def _frame_insets(win, d) -> tuple[int, int]:
-    """(left, top) of the window-manager frame around the client window.
+def _frame_extent_box(win, d) -> tuple[int, int, int, int]:
+    """(left, right, top, bottom) from ``_NET_FRAME_EXTENTS``.
 
-    ``_NET_FRAME_EXTENTS`` is left, right, top, bottom. Missing or unreadable
-    extents are (0, 0): every client under Xvfb with no frame, and a window
-    the manager has not decorated yet.
+    Missing or unreadable extents are zeros: a client under Xvfb with no
+    frame, and a window the manager has not decorated yet.
     """
     val = _prop(win, d, "_NET_FRAME_EXTENTS")
     if not val:
-        return 0, 0
+        return 0, 0, 0, 0
     try:
-        items = list(val)
-    except TypeError:
-        return 0, 0
-    if len(items) < 4:
-        return 0, 0
-    try:
-        left, top = int(items[0]), int(items[2])
+        items = [int(part) for part in list(val)[:4]]
     except (TypeError, ValueError):
-        return 0, 0
-    if left < 0 or top < 0:
-        return 0, 0
+        return 0, 0, 0, 0
+    if len(items) < 4 or any(part < 0 for part in items):
+        return 0, 0, 0, 0
+    return items[0], items[1], items[2], items[3]
+
+
+def _frame_insets(win, d) -> tuple[int, int]:
+    """(left, top) of the window-manager frame around the client window."""
+    left, _right, top, _bottom = _frame_extent_box(win, d)
     return left, top
+
+
+def client_origin_for_outer_frame(
+    x: int, y: int, width: int, height: int, title: str = "",
+) -> tuple[int, int] | None:
+    """Client origin whose outer frame matches an AT-SPI frame rectangle.
+
+    LibreOffice's frame ``SCREEN`` rectangle is the outer window, including
+    the title bar. ``WINDOW`` coordinates are relative to the X client
+    window, which starts below that bar. The caller adds this origin to
+    each element's window position. A title match wins when two frames
+    share a rectangle. None when no managed window sits on that outer frame.
+    """
+    want = " ".join(str(title).casefold().split())
+    try:
+        with _open_display() as d:
+            best: tuple[int, int] | None = None
+            best_key: tuple[int, int] | None = None
+            for win in _managed_windows(d):
+                geom = _geometry_on_root(win, d)
+                if geom is None:
+                    continue
+                cx, cy, cw, ch = geom
+                left, right, top, bottom = _frame_extent_box(win, d)
+                ox, oy = cx - left, cy - top
+                ow, oh = cw + left + right, ch + top + bottom
+                if abs(ox - int(x)) > 4 or abs(oy - int(y)) > 4:
+                    continue
+                # The AT-SPI frame height can omit the title bar the X outer
+                # frame includes. Origin and width still identify the window.
+                if abs(ow - int(width)) > 48 or abs(oh - int(height)) > 48:
+                    continue
+                label = " ".join(_win_title(win, d).casefold().split())
+                title_rank = 0 if want and (want in label or label in want) else 1
+                key = (title_rank, abs(ox - int(x)) + abs(oy - int(y)))
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best = (int(cx), int(cy))
+            return best
+    except Exception:
+        return None
 
 
 def move_window(window_id: int, x: int, y: int) -> bool:

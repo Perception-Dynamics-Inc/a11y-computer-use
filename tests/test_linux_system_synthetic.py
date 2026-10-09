@@ -1070,3 +1070,23 @@ def test_missing_xlib_is_not_an_empty_confirmed_list(tmp_path, monkeypatch) -> N
         driver.snapshot(Scope.WINDOW, "LibreOffice")
     assert time.monotonic() - started < 2
     _assert_missing_xlib(snap.value)
+
+
+def test_client_origin_is_the_window_inside_the_matching_frame(monkeypatch) -> None:
+    """The outer frame is the client origin minus the title bar and borders."""
+    from contextlib import nullcontext
+
+    win = object()
+    monkeypatch.setattr(_linux_system, "_open_display", lambda: nullcontext(object()))
+    monkeypatch.setattr(_linux_system, "_managed_windows", lambda _display: [win])
+    monkeypatch.setattr(_linux_system, "_geometry_on_root", lambda _win, _display: (0, 28, 1280, 772))
+    monkeypatch.setattr(_linux_system, "_frame_extent_box", lambda _win, _display: (0, 0, 28, 0))
+    monkeypatch.setattr(_linux_system, "_win_title", lambda _win, _display: "notes.odt — LibreOffice Writer")
+    assert _linux_system.client_origin_for_outer_frame(
+        0, 0, 1280, 800, title="notes.odt — LibreOffice Writer",
+    ) == (0, 28)
+    # Writer's frame screen height can be short of the outer frame by the title bar.
+    assert _linux_system.client_origin_for_outer_frame(
+        0, 0, 1280, 773, title="notes.odt — LibreOffice Writer",
+    ) == (0, 28)
+    assert _linux_system.client_origin_for_outer_frame(40, 40, 200, 100, title="other") is None

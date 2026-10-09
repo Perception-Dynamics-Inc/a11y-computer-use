@@ -121,6 +121,27 @@ def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     assert snap.app == "gedit" and snap.pid == 42
 
 
+def _lo_node(role, name, screen, window, parent=None):
+    class _Node:
+        def get_role_name(self):
+            return role
+
+        def get_name(self):
+            return name
+
+        def get_parent(self):
+            return parent
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, coord):
+            raw = screen if coord == 0 else window
+            return _NS(x=raw[0], y=raw[1], width=raw[2], height=raw[3])
+
+    return _Node()
+
+
 def test_extents_pass_gtks_negative_sentinel_through_and_drop_zero_size(monkeypatch) -> None:
     class _Rect:
         def __init__(self, x, y, w, h): self.x, self.y, self.width, self.height = x, y, w, h
@@ -209,6 +230,96 @@ def test_offscreen_extents_distinguish_a_scrolled_box_from_zero_and_on_screen(mo
     monkeypatch.setattr(_atspi, "offscreen_extents", lambda acc: None)
     assert driver.alive_offscreen(issued, "e3") is None
     assert driver.alive_offscreen(issued, "e9") is None
+
+
+def test_libreoffice_paragraph_bounds_add_the_title_bar(monkeypatch) -> None:
+    """A fresh Writer document reports screen coordinates that omit the title bar.
+
+    The paragraph's screen box matches its window box, one title bar too high.
+    The published position is the X client origin plus the window box. The
+    frame's own screen rectangle stays the outer window.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    frame = _lo_node("frame", "notes.odt — LibreOffice Writer", (0, 0, 1280, 773), (0, 0, 1280, 773))
+    paragraph = _lo_node(
+        "paragraph", "Beta", (194, 286, 816, 37), (194, 286, 816, 37), parent=frame,
+    )
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+
+    def origin(x, y, width, height, title=""):
+        del title
+        if (x, y, width, height) == (0, 0, 1280, 773):
+            return (0, 28)
+        return None
+
+    monkeypatch.setattr(_linux_system, "client_origin_for_outer_frame", origin)
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(paragraph)
+    assert raw.position == (194.0, 314.0)
+    assert raw.size == (816.0, 37.0)
+
+    agreed = _lo_node("frame", "plain", (10, 20, 400, 300), (10, 20, 400, 300))
+    child = _lo_node("paragraph", "Beta", (30, 40, 80, 18), (30, 40, 80, 18), parent=agreed)
+    same = accessor.read(child)
+    assert same.position == (30.0, 40.0)
+
+    accessor.libreoffice = False
+    untouched = accessor.read(paragraph)
+    assert untouched.position == (194.0, 286.0)
+
+
+def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -> None:
+    class _Acc:
+        role = "paragraph"
+        caret = -1
+        n = 31
+
+        def get_role_name(self):
+            return self.role
+
+        def get_application(self):
+            return self
+
+        def get_name(self):
+            return "soffice"
+
+    acc = _Acc()
+
+    class _Text:
+        @staticmethod
+        def get_character_count(node):
+            return node.n
+
+        @staticmethod
+        def get_offset_at_point(node, x, y, coord):
+            del node, x, y, coord
+            return -1
+
+        @staticmethod
+        def set_caret_offset(node, offset):
+            node.caret = offset
+            return True
+
+        @staticmethod
+        def get_caret_offset(node):
+            return node.caret
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0), Text=_Text))
+    monkeypatch.setattr(_atspi, "grab_focus", lambda node: True)
+    assert _atspi.place_paragraph_caret(acc, 10, 10) is True
+    assert acc.caret == 31
+    assert _atspi.paragraph_click_verdict(acc) == (
+        "confirmed", "the caret is in the target paragraph",
+    )
+    acc.caret = -1
+    assert _atspi.paragraph_click_verdict(acc) == (
+        "partial", "the caret is not in the target paragraph",
+    )
+    acc.role = "push button"
+    assert _atspi.place_paragraph_caret(acc, 10, 10) is False
+    assert _atspi.paragraph_click_verdict(acc) is None
 
 
 def test_hollow_page_tab_keeps_the_document_below_it() -> None:

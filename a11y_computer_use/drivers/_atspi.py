@@ -273,6 +273,60 @@ def _extents(acc, *, keep_zero: bool = False):
     return (float(getattr(rect, "x", 0) or 0), float(getattr(rect, "y", 0) or 0)), (w, h)
 
 
+def _raw_rect(acc, coord_name: str):
+    """(x, y, width, height) in one AT-SPI coord type, or None.
+
+    ``SCREEN`` uses coord 0 when the binding has no ``CoordType``. A missing
+    ``WINDOW`` type is None rather than a second screen read. The GTK
+    no-allocation sentinel is returned as-is. This does not add the
+    LibreOffice title-bar shift.
+    """
+    Atspi = _atspi()
+    comp = _component(acc)
+    if comp is None:
+        return None
+    coord_type = getattr(Atspi, "CoordType", None)
+    coord = getattr(coord_type, coord_name, None) if coord_type is not None else None
+    if coord is None:
+        if coord_name != "SCREEN":
+            return None
+        coord = 0
+    rect = _safe(lambda: comp.get_extents(coord))
+    if rect is None:
+        return None
+    return (
+        float(getattr(rect, "x", 0) or 0),
+        float(getattr(rect, "y", 0) or 0),
+        float(getattr(rect, "width", 0) or 0),
+        float(getattr(rect, "height", 0) or 0),
+    )
+
+
+def _frame_ancestor(acc):
+    """The top-level frame that contains ``acc``, or ``acc`` when it is one."""
+    node = acc
+    for _ in range(32):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role == "frame":
+            return node
+        if role == "application":
+            return None
+        node = _call_first(node, ("get_parent", "getParent"))
+    return None
+
+
+def _usable_window_rect(rect) -> bool:
+    """False for a missing box, a zero box, or GTK's off-screen sentinel."""
+    if rect is None:
+        return False
+    x, y, width, height = rect
+    if width <= 0 or height <= 0:
+        return False
+    return x > -1_000_000 and y > -1_000_000
+
+
 def _action_iface(acc):
     return _call_first(acc, ("get_action_iface", "get_action"))
 
@@ -1039,6 +1093,10 @@ class ATSPIAccessor:
         self._visible_children: dict[int, list] = {}
         self._visible_bounds: dict[int, tuple] = {}
         self._gecko: bool | None = None
+        # Set by the Linux snapshot when the tree is LibreOffice. Screen
+        # extents on that tree ignore the window-manager title bar.
+        self.libreoffice = False
+        self._lo_clients: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -1077,6 +1135,10 @@ class ATSPIAccessor:
             # Keep a 0-height section's size. Hit-testing still treats it as
             # no box; only the snapshot walk needs the zero extent.
             position, size = _extents(node, keep_zero=True)
+            if self.libreoffice:
+                shifted = self._libreoffice_position(node, position, size)
+                if shifted is not None:
+                    position = shifted
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
@@ -1152,6 +1214,55 @@ class ATSPIAccessor:
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
         return _with_table_body(node, kids)
+
+    def _lo_client_origin(self, frame) -> tuple[int, int] | None:
+        """X client origin for the outer frame ``frame``'s screen rectangle.
+
+        The lookup is cached for the rest of this snapshot. None when no
+        managed window sits on that rectangle.
+        """
+        screen = _raw_rect(frame, "SCREEN")
+        if screen is None or screen[2] <= 0 or screen[3] <= 0:
+            return None
+        key = (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
+        if key in self._lo_clients:
+            return self._lo_clients[key]
+        from a11y_computer_use.drivers import _linux_system
+
+        title = str(_call_first(frame, ("get_name",), default="") or "")
+        origin = _linux_system.client_origin_for_outer_frame(
+            key[0], key[1], key[2], key[3], title=title,
+        )
+        self._lo_clients[key] = origin
+        return origin
+
+    def _libreoffice_position(self, node, position, size):
+        """Screen top-left with the window-manager frame added, or None.
+
+        On a fresh document LibreOffice reports the same point for ``SCREEN``
+        and ``WINDOW``, and that point omits the title bar. The real screen
+        position is the X client origin plus the window-relative box. The
+        frame's own ``SCREEN`` rectangle is already the outer window, so it
+        is left alone.
+        """
+        if position is None or size is None:
+            return None
+        if size[0] < 0 or size[1] < 0:
+            return None
+        if position[0] < -1_000_000 or position[1] < -1_000_000:
+            return None
+        if _role_name(node) == "frame":
+            return None
+        frame = _frame_ancestor(node)
+        if frame is None:
+            return None
+        client = self._lo_client_origin(frame)
+        if client is None:
+            return None
+        window = _raw_rect(node, "WINDOW")
+        if not _usable_window_rect(window):
+            return None
+        return (float(client[0] + window[0]), float(client[1] + window[1]))
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:
@@ -2255,6 +2366,79 @@ def grab_focus(acc) -> bool:
     if comp is None:
         return False
     return bool(_call_first(comp, ("grab_focus", "grabFocus"), default=False))
+
+
+_TEXT_CARET_ROLES = frozenset({"paragraph", "heading"})
+
+
+def is_libreoffice_text_paragraph(acc) -> bool:
+    """A Writer paragraph or heading. A click on one has to land the caret there."""
+    if acc is None or _role_name(acc) not in _TEXT_CARET_ROLES:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def place_paragraph_caret(acc, x: int, y: int) -> bool:
+    """Put the caret in this paragraph. False when ``acc`` is not one.
+
+    A coordinate click uses LibreOffice screen extents, which sit about one
+    title bar above the text, so the pointer lands in the paragraph above.
+    ``set_caret_offset`` addresses the paragraph itself. A point inside that
+    paragraph's text uses that character. Any other point uses the end,
+    which is where a following ``type`` appends.
+    """
+    if not is_libreoffice_text_paragraph(acc):
+        return False
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return False
+    grab_focus(acc)
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        text = _full_text(acc)
+        if text is None:
+            return False
+        count = len(text)
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    point = _safe(lambda: Atspi.Text.get_offset_at_point(acc, int(x), int(y), coord))
+    offset = count
+    if isinstance(point, int) and not isinstance(point, bool) and 0 <= point <= count:
+        offset = point
+    wrote = _safe(lambda: Atspi.Text.set_caret_offset(acc, int(offset)))
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    if isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0:
+        return True
+    return bool(wrote)
+
+
+def paragraph_click_verdict(acc) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for a paragraph click, or None for any other target.
+
+    Confirmed only when the caret is in that paragraph. A click that changes
+    focus and leaves the caret in the line above is not confirmed.
+    """
+    if not is_libreoffice_text_paragraph(acc):
+        return None
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+
+    def read():
+        return _safe(lambda: Atspi.Text.get_caret_offset(acc))
+
+    caret = read()
+    if isinstance(caret, bool) or not isinstance(caret, int) or caret < 0:
+        time.sleep(0.05)
+        caret = read()
+    if isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0:
+        return "confirmed", "the caret is in the target paragraph"
+    return "partial", "the caret is not in the target paragraph"
 
 
 def _editable_iface(acc):

@@ -309,6 +309,47 @@ def test_click_that_changes_the_tree_is_confirmed(tmp_path) -> None:
     assert "changed" in result.evidence
 
 
+def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path, monkeypatch) -> None:
+    """A Writer click that only changes focus is not confirmed.
+
+    The caret has to be in the paragraph that was clicked. A state change
+    alone used to confirm a click that landed in the paragraph above.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    driver.name = "linux"
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        if element.ref == "e4":
+            driver._replace("e5", title="focused")
+            return True
+        return False
+
+    driver.press_element = press  # type: ignore[method-assign]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot_id, ref: object() if ref == "e4" else None)
+    monkeypatch.setattr(
+        _atspi, "paragraph_click_verdict",
+        lambda handle: ("partial", "the caret is not in the target paragraph"),
+    )
+    runtime = _runtime(tmp_path, driver)
+    missed = runtime.click("e4")
+    assert missed.outcome == "partial"
+    assert missed.evidence == "the caret is not in the target paragraph"
+    assert "changed" not in missed.evidence
+
+    monkeypatch.setattr(
+        _atspi, "paragraph_click_verdict",
+        lambda handle: ("confirmed", "the caret is in the target paragraph"),
+    )
+    driver._replace("e5", title="ready")
+    landed = runtime.click("e4")
+    assert landed.outcome == "confirmed"
+    assert landed.evidence == "the caret is in the target paragraph"
+
+
 def test_click_on_an_inert_label_is_suspected_noop(tmp_path) -> None:
     driver = TreeDriver()
     runtime = _runtime(tmp_path, driver)
