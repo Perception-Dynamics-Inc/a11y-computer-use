@@ -1434,6 +1434,21 @@ def _collected_content_document(root) -> str | None:
     return _pick_content_document(held)
 
 
+def _libreoffice_accessible(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice.
+
+    The application name is ``soffice`` (the frame title also says
+    LibreOffice). A browser window whose page title mentions LibreOffice is
+    not this: its application name is Firefox or Chrome.
+    """
+    if acc is None:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    target = app if app is not None else acc
+    name = _call_first(target, ("get_name", "getName"), default="") or ""
+    return libreoffice_app(str(name))
+
+
 def document_url_of(root) -> str | None:
     """Content-document URL under ``root``.
 
@@ -1444,8 +1459,14 @@ def document_url_of(root) -> str | None:
     a page URL. An iframe's document is nested; the page URL is the document
     that is not inside another one. The walk is bounded so one policy check
     cannot become a full tree walk.
+
+    LibreOffice has no page URL. Collection ``get_matches`` on a Calc sheet
+    walks the table (about a million by sixteen thousand cells, child count
+    2**31, ``MANAGES_DESCENDANTS``) and wedges that app's accessibility
+    connection: the next child count is -1 and the following snapshot spends
+    the per-call timeout on every read. Return None before any of that.
     """
-    if root is None:
+    if root is None or _libreoffice_accessible(root):
         return None
     collected = _collected_content_document(root)
     if collected:
@@ -2065,6 +2086,30 @@ def _focused_via_collection(root, Atspi, focused_state):
     return True, (hits[0] if hits else None)
 
 
+def _focused_sheet_selection(table):
+    """The focused selected cell of a spreadsheet table, or None.
+
+    ``Selection.get_selected_child`` is one round-trip. Indexing the table
+    is not: Calc's child count is 2**31 and the cells are row-major.
+    """
+    iface = _call_first(table, ("get_selection_iface", "get_selection"))
+    if iface is None:
+        return None
+    child = _call_first(iface, ("get_selected_child", "getSelectedChild"), 0)
+    if child is None:
+        return None
+    sset = _call_first(child, ("get_state_set",))
+    if sset is None:
+        return None
+    try:
+        focused = _atspi().StateType.FOCUSED
+    except Exception:
+        return None
+    if not _safe(lambda state=sset: state.contains(focused), False):
+        return None
+    return child
+
+
 def _focused_node(app: str, *, max_nodes: int = 400):
     """(focused accessible or None, truncated).
 
@@ -2101,6 +2146,23 @@ def _focused_node(app: str, *, max_nodes: int = 400):
         if sset is not None and _safe(lambda state=sset: state.contains(focused_state), False):
             return acc, False
         n = int(_call_first(acc, ("get_child_count",), default=0) or 0)
+        # A Calc table reports 2**31 children. Indexing them materializes
+        # cells and, past the first row, never reaches the focused cell.
+        # The table or its selected cell is the focus target. A closed menu
+        # is the same kind of skip: its items are in the tree while it is
+        # shut, and walking them spends the node budget before the sheet.
+        if _spreadsheet_table(acc) and n > _MAX_CHILDREN_FETCH:
+            selected = _focused_sheet_selection(acc)
+            if selected is not None:
+                return selected, False
+            continue
+        role = _role_name(acc)
+        if role in {"menu", "popup menu"} and not (
+            _state_has(acc, "EXPANDED")
+            or _state_has(acc, "FOCUSED")
+            or _state_has(acc, "SELECTED")
+        ):
+            continue
         if n > _MAX_CHILDREN_FETCH:
             truncated = True
         for j in range(min(n, _MAX_CHILDREN_FETCH)):

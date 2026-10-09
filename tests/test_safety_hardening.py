@@ -402,6 +402,39 @@ def test_atspi_focused_secure_respects_the_node_bound(fake_atspi, monkeypatch) -
     assert _atspi.focused_secure("app", max_nodes=10_000) is None
 
 
+def test_focus_walk_skips_a_calc_sheet_and_still_sees_a_later_password(fake_atspi, monkeypatch) -> None:
+    """A closed menu bar plus a 2**31-cell sheet must not exhaust the probe.
+
+    The focused password is a sibling after the sheet. Indexing the sheet
+    would spend the child cap and report the walk exhausted.
+    """
+    class _Sheet(_FakeAcc):
+        def __init__(self):
+            super().__init__("table")
+            self.parent = _FakeAcc("spreadsheet")
+            self.indexed = 0
+
+        def get_child_count(self):
+            return 2**31 - 1
+
+        def get_child_at_index(self, _index):
+            self.indexed += 1
+            raise AssertionError("sheet cell indexed")
+
+        def get_parent(self):
+            return self.parent
+
+    items = [_FakeAcc("menu item") for _ in range(40)]
+    menus = [_FakeAcc("menu", children=list(items)) for _ in range(12)]
+    bar = _FakeAcc("menu bar", children=menus)
+    sheet = _Sheet()
+    password = _FakeAcc("password text", focused=True)
+    root = _FakeAcc("frame", children=[bar, sheet, password])
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: root)
+    assert _atspi.focused_secure("app") is True
+    assert sheet.indexed == 0
+
+
 def test_atspi_focused_secure_asks_the_collection_interface_first(fake_atspi, monkeypatch) -> None:
     """GTK3/Chromium/Firefox/Electron frames expose org.a11y.atspi.Collection: one
     round-trip finds the FOCUSED node wherever it sits, so a login form behind a

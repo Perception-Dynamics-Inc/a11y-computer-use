@@ -3554,6 +3554,89 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> None:
+    """Live Calc. Click, type, and key each finish in under five seconds.
+
+    The agent reads the document URL before every action. On a sheet that
+    search used to walk the table and wedge the accessibility bus, so the
+    next snapshot took about ten seconds and a later type reported that the
+    focus walk was exhausted. The URL read, the snapshot after it, and each
+    of click, type, and key stay under five seconds, and the typed value
+    lands in the cell.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-bound"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    bound = 5.0
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError:
+                shot = None
+            else:
+                if _cell(shot, "A1") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Calc did not expose A1"
+        a1 = _cell(snap, "A1")
+        assert a1 is not None
+
+        started = time.monotonic()
+        assert driver.document_url("soffice.bin") is None
+        assert time.monotonic() - started < bound
+
+        started = time.monotonic()
+        after = driver.snapshot(Scope.WINDOW, "soffice")
+        assert time.monotonic() - started < bound
+        assert _cell(after, "A1") is not None
+        assert len(after.elements) > 50
+
+        a1 = _cell(after, "A1")
+        assert a1 is not None
+        driver.activate_app("soffice")
+        started = time.monotonic()
+        driver.click(a1)
+        assert time.monotonic() - started < bound
+
+        started = time.monotonic()
+        typed = driver.type_text("42")
+        assert time.monotonic() - started < bound
+        assert typed == 2
+
+        started = time.monotonic()
+        driver.key_chord("Return")
+        assert time.monotonic() - started < bound
+        _wait_cell_value(driver, "A1", "42")
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
 
