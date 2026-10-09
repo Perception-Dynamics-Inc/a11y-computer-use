@@ -2,10 +2,14 @@
 
 A grant stored under one name covers the same app asked for under another:
 case, a desktop-file id, an executable basename, a WM_CLASS, or a known
-alias. ``Files`` is nautilus or thunar, ``Terminal`` is gnome-terminal or
-xterm, and ``libreoffice calc`` is soffice. Alias matches are exact tokens.
-They are not substrings, so ``Files`` does not match an unrelated name that
-merely contains those letters.
+alias. ``Files`` is nautilus, thunar, or pcmanfm. ``Text Editor`` is
+mousepad, gedit, or gnome-text-editor. ``google-chrome``, ``chrome``,
+``chromium``, and ``chromium-browser`` are one app. ``libreoffice calc`` is
+soffice. A terminal grant matches that binary's own aliases only:
+``gnome-terminal`` covers ``gnome-terminal-server``, and it does not cover
+``xterm``. The label ``Terminal`` still launches the one granted terminal.
+Alias matches are exact tokens. They are not substrings, so ``Files`` does
+not match an unrelated name that merely contains those letters.
 """
 
 from __future__ import annotations
@@ -25,17 +29,32 @@ _GROUPS: tuple[frozenset[str], ...] = (
         "org.gnome.nautilus",
     }),
     frozenset({
-        "terminal",
+        "text editor",
+        "mousepad",
+        "gedit",
+        "gnome-text-editor",
+        "org.gnome.gedit",
+        "org.gnome.texteditor",
+        "org.xfce.mousepad",
+    }),
+    frozenset({
+        "google-chrome",
+        "google-chrome-stable",
+        "chrome",
+        "chromium",
+        "chromium-browser",
+    }),
+    frozenset({
         "gnome-terminal",
         "gnome-terminal-server",
-        "xfce4-terminal",
-        "xterm",
-        "konsole",
-        "kitty",
-        "alacritty",
-        "tilix",
         "org.gnome.terminal",
     }),
+    frozenset({"xfce4-terminal"}),
+    frozenset({"xterm"}),
+    frozenset({"konsole"}),
+    frozenset({"kitty"}),
+    frozenset({"alacritty"}),
+    frozenset({"tilix"}),
     frozenset({
         "libreoffice calc",
         "libreoffice-calc",
@@ -52,10 +71,28 @@ _GROUPS: tuple[frozenset[str], ...] = (
 _LABELS = frozenset({
     "files",
     "terminal",
+    "text editor",
     "libreoffice calc",
     "libreoffice-calc",
     "calc",
 })
+
+#: Executable names of terminal apps. The label ``Terminal`` is not in here.
+_TERMINAL_BINS = frozenset({
+    "gnome-terminal",
+    "gnome-terminal-server",
+    "xfce4-terminal",
+    "xterm",
+    "konsole",
+    "kitty",
+    "alacritty",
+    "tilix",
+})
+
+
+def _terminal_binary(name: str) -> bool:
+    """True when ``name`` is one terminal executable, not the ``Terminal`` label."""
+    return bool(tokens(name) & _TERMINAL_BINS)
 
 
 def normalize(name: str) -> str:
@@ -278,6 +315,18 @@ def resolve_launch(
             concrete = hit
         if not concrete and running and normalize(running) not in _LABELS:
             concrete = running
+        if not concrete and normalize(name) == "terminal":
+            granted_terms = [key for key in granted if _terminal_binary(key)]
+            for entry in matched:
+                exe = str(entry.get("exec") or "")
+                for key in granted_terms:
+                    if exe and (same_app(exe, key) or normalize(exe) == normalize(key)):
+                        concrete = key
+                        break
+                if concrete:
+                    break
+            if not concrete and len(granted_terms) == 1:
+                concrete = granted_terms[0]
         if not concrete:
             for entry in matched:
                 exe = str(entry.get("exec") or "")
