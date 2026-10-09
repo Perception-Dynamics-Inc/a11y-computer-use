@@ -357,12 +357,33 @@ def test_file_exists_contains(tmp_path, monkeypatch):
 
 def test_file_exists_outside_home_is_refused(tmp_path, monkeypatch):
     monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", raising=False)
+    # The runner's tmp dir is under the real home on Windows
+    # (C:\\Users\\...\\AppData\\Local\\Temp). Point ~ at a sibling directory
+    # so the file under tmp_path is outside home on every OS.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    def expanduser(path):
+        text = path.decode() if isinstance(path, (bytes, bytearray)) else str(path)
+        if text == "~" or text.startswith("~/") or text.startswith("~\\"):
+            suffix = text[2:] if len(text) > 1 else ""
+            expanded = str(home / suffix) if suffix else str(home)
+            return expanded.encode() if isinstance(path, (bytes, bytearray)) else expanded
+        return path
+
+    monkeypatch.setattr(os.path, "expanduser", expanduser)
     path = tmp_path / "outside.txt"
     path.write_text("secret note", encoding="utf-8")
     # The checker refuses this even though the file is there.
     assert not str(path).startswith(str(os.path.expanduser("~")))
     result, _events, _runtime, _agent = run(
-        ScriptedModel([turn(done("wrote", [{"file_exists": str(path), "contains": "secret"}]))]),
+        ScriptedModel([
+            turn(done("wrote", [{"file_exists": str(path), "contains": "secret"}])),
+            turn(),
+            turn(),
+        ]),
         window(),
         trace_dir=tmp_path / "trace",
     )
