@@ -59,7 +59,7 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 `stream` yields `observation`, `plan`, `step_started`, `action`,
 `step_finished`, `needs_human`, `done`, `error`, and `stuck`. `cancel()` is
 safe to call from another thread; the run stops before the next action with
-`reason` `cancelled`.
+`status` `cancelled` and `reason` `cancelled`.
 
 `file_exists` conditions go through `conditions.Checker`, including its rule
 that paths outside the home directory are refused unless
@@ -142,7 +142,7 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 
 | Field | Meaning |
 |---|---|
-| `status` | `success`, `failed`, or `needs_human` |
+| `status` | `success`, `failed`, `needs_human`, or `cancelled` |
 | `answer` | The `done` answer, or `""` |
 | `steps` | Count of actions in `step_log` |
 | `elapsed_s` | Wall clock for the run |

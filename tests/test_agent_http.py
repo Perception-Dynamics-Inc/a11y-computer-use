@@ -356,6 +356,7 @@ def test_cancel_before_the_action(tmp_path: Path) -> None:
         code, body = _request(port, "POST", f"/runs/{started['id']}/cancel", {})
         assert code == 202 and body["cancel"] is True
         result = _wait(port, started["id"])
+        assert result["status"] == "cancelled"
         assert result["reason"] == "cancelled"
         assert runtime.calls == []
     finally:

@@ -294,7 +294,7 @@ class Agent:
             self._prepare()
             yield from self._drive(goal, started)
         except _Cancelled:
-            self._result = self._build("failed", "", "cancelled", started)
+            self._result = self._build("cancelled", "", "cancelled", started)
             yield Event("error", {"reason": "cancelled"})
         except Exception as exc:  # a broken runtime must still produce a result
             reason = f"error: {type(exc).__name__}: {exc}"
