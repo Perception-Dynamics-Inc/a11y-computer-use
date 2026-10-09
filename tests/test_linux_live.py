@@ -1112,6 +1112,7 @@ h1{font-size:14px}
 <label>Form name <input id=formname></label>
 </div>
 <p>The <a href="#a">quick brown</a> fox <b>jumps</b> over the <em>lazy</em> dog.</p>
+<div id=d1>Div with <span>span text</span> and <a href="#b">a link</a> inside.</div>
 <div class=row>
 <div id=ed contenteditable=true role=textbox aria-label="Editor A">Hello world</div>
 <div contenteditable=true aria-label="Editor B"><p>First para</p><p>Second <b>bold</b> para</p></div>
@@ -1224,8 +1225,14 @@ def _para_page_lists_controls(driver, runtime, app: str) -> None:
         assert not missing, f"{app} {mode} missing {missing}\n{rendered}"
     sentence = "The quick brown fox jumps over the lazy dog."
     assert any(sentence in str(el.value or "") for el in snap.elements), observe.render_text(snap)
+    div_sentence = "Div with span text and a link inside."
+    assert any(div_sentence in str(el.value or "") for el in snap.elements), observe.render_text(snap)
     runtime._current = snap
-    for text in ("Bravo", "Para button", "quick brown fox", "The quick", "Verify you are human", "Accept terms"):
+    for text in (
+        "Bravo", "Para button", "quick brown fox", "The quick",
+        "Verify you are human", "Accept terms",
+        "Div with span", "span text and", "a link inside", "Div with",
+    ):
         found = runtime.find(app, text=text)
         assert "no elements match" not in found, found
     boxes = runtime.find(app, role="checkbox")

@@ -88,6 +88,13 @@ _INLINE_SKIP = frozenset({
     "disclosuretriangle",
 })
 
+#: Pieces of a div that is one inline sentence. Anything else (a paragraph,
+#: a heading, a control) means the div is layout and keeps no joined value.
+_INLINE_PIECE = frozenset({
+    "StaticText", "InlineTextBox", "text", "link",
+    "emphasis", "strong", "mark", "span", "generic", "group",
+})
+
 
 def _prop(node: dict) -> dict:
     """Flatten an AX node's ``properties`` list into ``{name: value}``."""
@@ -147,6 +154,14 @@ class CDPAccessor:
             value = value.replace("\ufffc", "").strip() or None
         if raw_role == "paragraph":
             sentence = self._inline_sentence(node).replace("\u00a0", " ").strip()
+            if sentence:
+                value = sentence
+        elif raw_role in {"generic", "group", "section"} and not value:
+            # A div is generic. Its words are child static texts and links,
+            # the same fragments a paragraph used to be. A container that
+            # also holds a control or a block stays valueless, so a button
+            # wrapper still collapses onto the button.
+            sentence = self._flat_inline_sentence(node)
             if sentence:
                 value = sentence
         if value in (None, "") and raw_role in {"combobox", "listbox", "ListBox"}:
@@ -215,6 +230,44 @@ class CDPAccessor:
                 continue
             parts.append(self._inline_sentence(child, depth + 1))
         return "".join(parts)
+
+    def _flat_inline_sentence(self, node: dict, depth: int = 0) -> str | None:
+        """The joined text of a div whose children are only inline pieces.
+
+        Static text, links, emphasis, and a span (itself a generic) count.
+        A button, a field, a paragraph, or any other block means this node
+        is layout, and it gets no sentence of its own. ``None`` is that
+        case, and also a node with no inline words.
+        """
+        if depth > 6:
+            return None
+        children = list(self.children(node))
+        if not children:
+            return None
+        parts: list[str] = []
+        for child in children:
+            role = child.get("role", {}).get("value") or "generic"
+            if role in _INLINE_SKIP or role not in _INLINE_PIECE:
+                return None
+            if role in {"StaticText", "InlineTextBox", "text", "link"}:
+                name = child.get("name", {}).get("value") or ""
+                if not isinstance(name, str):
+                    name = ""
+                name = name.replace("\ufffc", "")
+                if name:
+                    parts.append(name)
+                    continue
+                inner = self._flat_inline_sentence(child, depth + 1)
+                if not inner:
+                    return None
+                parts.append(inner)
+                continue
+            inner = self._flat_inline_sentence(child, depth + 1)
+            if not inner:
+                return None
+            parts.append(inner)
+        sentence = "".join(parts).replace("\u00a0", " ").strip()
+        return sentence or None
 
     def _selected_option_text(self, node: dict) -> str | None:
         labels: list[str] = []

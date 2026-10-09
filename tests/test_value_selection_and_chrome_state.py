@@ -959,7 +959,22 @@ def test_chrome_snapshot_reports_selected_text_pressed_and_empty_number(monkeypa
     second = _Node("paragraph", "", text="Second bold para", y=420)
     editor = _Node("section", "Editor B", text="\ufffc\ufffc", y=400)
     editor.links = [first, second]
+    link_only = _Node("link", "a link", text="a link", y=460)
+    div = _Node(
+        "section", "", text="Div with span text and \ufffc inside.", y=460, w=500,
+        attrs={"tag": "div", "id": "d1"},
+    )
+    div.links = [link_only]
+    button_only = _Node(
+        "section", "", text="\ufffc", y=490, attrs={"tag": "div"},
+        children=[_Node("push button", "Div button", text="Div button")],
+    )
+    button_only.links = [button_only.children[0]]
+    panel = _Node("panel", "", text="\ufffc\ufffc\ufffc", y=520)
     assert accessor.read(fox).value == "The quick brown fox jumps over the lazy dog."
+    assert accessor.read(div).value == "Div with span text and a link inside."
+    assert accessor.read(button_only).value is None
+    assert accessor.read(panel).value is None
     assert accessor.read(named).value == "Bravo"
     assert accessor.read(bare_para).value == "Bare para input"
     assert accessor.read(country_label).value == "Country"

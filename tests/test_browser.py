@@ -716,6 +716,60 @@ def test_cdp_paragraph_value_includes_inline_children() -> None:
     assert any(el.title == "Verify you are human" and el.role == "AXCheckBox" for el in snap.elements)
 
 
+def test_cdp_div_value_includes_inline_children() -> None:
+    """Synthetic AX tree. A div's words are fragments; the group value is the sentence.
+
+    A div that only wraps a button stays empty so the button is the node find
+    matches. A div that contains a paragraph is layout and is not one sentence.
+    """
+    nodes = [
+        _ax("1", "RootWebArea", "page", backend=1, children=["2", "3", "4"]),
+        _ax("2", "generic", "", backend=2, parent="1", children=["21", "22", "23", "24", "25"]),
+        _ax("21", "StaticText", "Div with ", backend=21, parent="2"),
+        _ax("22", "generic", "", backend=22, parent="2", children=["221"]),
+        _ax("221", "StaticText", "span text", backend=221, parent="22"),
+        _ax("23", "StaticText", " and ", backend=23, parent="2"),
+        _ax("24", "link", "a link", backend=24, parent="2"),
+        _ax("25", "StaticText", " inside.", backend=25, parent="2"),
+        _ax("3", "generic", "", backend=3, parent="1", children=["31"]),
+        _ax("31", "button", "Div button", backend=31, parent="3"),
+        _ax("4", "generic", "", backend=4, parent="1", children=["41"]),
+        _ax("41", "paragraph", "", backend=41, parent="4", children=["411"]),
+        _ax("411", "StaticText", "Block text", backend=411, parent="41"),
+    ]
+    from a11y_computer_use import observe
+    from tests.fixtures.trees import GEOMETRY
+
+    geometry = {
+        1: (0.0, 0.0, 800.0, 600.0),
+        2: (8.0, 8.0, 500.0, 24.0),
+        21: (8.0, 8.0, 70.0, 24.0),
+        22: (78.0, 8.0, 70.0, 24.0),
+        221: (78.0, 8.0, 70.0, 24.0),
+        23: (148.0, 8.0, 40.0, 24.0),
+        24: (188.0, 8.0, 50.0, 24.0),
+        25: (238.0, 8.0, 60.0, 24.0),
+        3: (8.0, 40.0, 120.0, 30.0),
+        31: (8.0, 40.0, 100.0, 30.0),
+        4: (8.0, 80.0, 200.0, 24.0),
+        41: (8.0, 80.0, 200.0, 24.0),
+        411: (8.0, 80.0, 200.0, 24.0),
+    }
+    acc = _cdp_ax.CDPAccessor(nodes, geometry, frozenset())
+    assert acc.read(nodes[1]).value == "Div with span text and a link inside."
+    assert acc.read(nodes[8]).value in (None, "")
+    assert acc.read(nodes[10]).value in (None, "")
+    snap = observe.build_snapshot(
+        acc.root(), acc, scope=Scope.WINDOW, app="tab", pid=1, geometry=GEOMETRY,
+    )
+    sentence = "Div with span text and a link inside."
+    assert any(sentence in str(el.value or "") for el in snap.elements)
+    for text in ("Div with span", "span text and", "a link inside", "Div with"):
+        assert observe.find_elements(snap, text=text), text
+    assert any(el.title == "Div button" for el in snap.elements)
+    assert any(el.title == "Block text" or (el.value and "Block text" in str(el.value)) for el in snap.elements)
+
+
 def test_browser_type_dry_run_and_empty_are_noops() -> None:
     d, t = _driver_on()
     d.type_text("", dry_run=False)
