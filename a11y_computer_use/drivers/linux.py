@@ -460,6 +460,16 @@ def _named_browser(app_id: str | None) -> bool:
     return "chrome" in name or "chromium" in name or "firefox" in name
 
 
+def _browser_family(app_id: str | None) -> str:
+    """``chrome`` or ``firefox`` for those apps, otherwise the name itself."""
+    name = (app_id or "").casefold()
+    if "chrom" in name:
+        return "chrome"
+    if "firefox" in name:
+        return "firefox"
+    return name
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -468,6 +478,9 @@ class LinuxDriver:
     quit_chord = "ctrl+q"
 
     def __init__(self) -> None:
+        # Set when a file-chooser type was confirmed from the location entry
+        # rather than the page. The outcome judge reads it once.
+        self._chooser_readback: str | None = None
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -1328,6 +1341,7 @@ class LinuxDriver:
         """
         if dry_run or not text:
             return None
+        self._chooser_readback = None
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -1497,6 +1511,13 @@ class LinuxDriver:
                         bar_after = fresh
                 if _atspi.location_shows_typed(bar_before, bar_after, text):
                     return len(text)
+            # Chrome's GTK Open File dialog is an X window. Its location entry
+            # is not an AT-SPI node, so the page focus stays empty after the
+            # keys land. The entry's own text is the read-back.
+            copied = self._chooser_location_text(app_id, text)
+            if copied is not None and _atspi._typed_visible(None, copied, text):
+                self._chooser_readback = copied
+                return len(text)
             raise _atspi._text_mismatch(
                 "text_mismatch",
                 f"the text read back does not contain {text!r}",
@@ -1504,6 +1525,72 @@ class LinuxDriver:
                 actual=after,
             )
         return len(text)
+
+    def _chooser_location_text(self, app_id: str | None, text: str) -> str | None:
+        """Text in the active file chooser's location entry, or None.
+
+        The dialog has keyboard focus and no accessibility entry. Select-all
+        and copy read the field the keystrokes went to. Selecting that entry
+        also pops a list over the Open and Cancel buttons, so Right collapses
+        the selection before returning and those buttons stay clickable. A
+        sentinel is written first so a clipboard that already held ``text``
+        cannot count, and the previous clipboard is put back.
+        """
+        if not text or not _named_browser(app_id):
+            return None
+        from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+
+        active = _linux_system.active_window()
+        if not active:
+            return None
+        title = " ".join(str(active.get("title") or "").casefold().split())
+        if title not in {"open file", "save file", "save as"}:
+            return None
+        owner = str(active.get("app") or "")
+        if app_id and owner and _browser_family(owner) != _browser_family(app_id):
+            return None
+        saved = None
+        restore = False
+        try:
+            saved = _linux_system.read_clipboard()
+            restore = True
+        except ComputerUseError:
+            saved = None
+        token = f"cu-chooser-{time.monotonic_ns()}"
+        try:
+            _linux_system.write_clipboard(token)
+        except ComputerUseError:
+            return None
+        try:
+            _linux_input.press_chord("ctrl+a")
+            _linux_input.press_chord("ctrl+c")
+            deadline = time.monotonic() + 0.5
+            got = None
+            while True:
+                try:
+                    got = _linux_system.read_clipboard()
+                except ComputerUseError:
+                    got = None
+                if isinstance(got, str) and got != token:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
+            if isinstance(got, str) and _atspi._typed_visible(None, got, text):
+                return got.replace("\u00a0", " ").strip("\n")
+            return None
+        finally:
+            # Select-all leaves a popup over the action buttons. Collapse the
+            # selection so a later click can hit Open.
+            try:
+                _linux_input.press_chord("right")
+            except Exception:
+                pass
+            if restore:
+                try:
+                    _linux_system.write_clipboard(saved or "")
+                except ComputerUseError:
+                    pass
 
     def _typed_readback(self, app_id: str | None) -> str | None:
         """Text used to verify a keystroke type.
