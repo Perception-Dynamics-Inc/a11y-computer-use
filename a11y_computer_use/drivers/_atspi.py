@@ -2285,6 +2285,71 @@ def libreoffice_without_bridge(app: str) -> bool:
     return libreoffice_app(app) and libreoffice_process_running()
 
 
+# LibreOffice's X window shows up in app list and window list while AT-SPI is
+# still registering. That gap was 3–13 s. Snapshot polls until this deadline,
+# then reports the app missing (or the missing gtk3 bridge).
+ATSPI_REGISTER_WAIT_S = 15.0
+ATSPI_REGISTER_POLL_S = 0.25
+
+
+def app_listed(identifier: str) -> bool:
+    """True when app list or window list already shows ``identifier``.
+
+    App list keys the row by process comm. Window list uses that comm, the
+    WM_CLASS, and the title. Those are the same names ``resolve_app`` uses,
+    so a snapshot of ``LibreOffice`` sees the ``soffice.bin`` row the list
+    already returned.
+    """
+    if not (identifier or "").strip():
+        return False
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        apps = _linux_system.running_apps()
+    except Exception:
+        apps = []
+    for row in apps or []:
+        if not isinstance(row, dict):
+            continue
+        comm = str(row.get("bundle_id") or row.get("name") or "")
+        if _linux_system._comm_matches_identifier(identifier, comm):
+            return True
+    try:
+        rows = _linux_system.windows()
+    except Exception:
+        rows = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        comm = str(row.get("app") or "")
+        if comm and _linux_system._comm_matches_identifier(identifier, comm):
+            return True
+        if _linux_system._class_matches_identifier(
+            identifier,
+            str(row.get("wm_class") or ""),
+            str(row.get("wm_class_class") or ""),
+        ):
+            return True
+        title = str(row.get("title") or "").lower()
+        if title and any(
+            name and name in title for name in _linux_system._identity_needles(identifier)
+        ):
+            return True
+    return False
+
+
+def should_wait_for_atspi(identifier: str) -> bool:
+    """True when snapshot should wait for this app to appear on the AT-SPI bus.
+
+    The app is already in the app list or the window list, or a LibreOffice
+    process is running and has not registered yet. A name that is in neither
+    place, and is not that process, is ``app_not_found`` on the first look.
+    """
+    if app_listed(identifier):
+        return True
+    return libreoffice_app(identifier) and libreoffice_process_running()
+
+
 def _table_dimensions(acc) -> tuple[int | None, int | None]:
     try:
         Atspi = _atspi()

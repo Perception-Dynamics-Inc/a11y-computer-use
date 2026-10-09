@@ -2907,3 +2907,42 @@ def test_linux_calc_cells_expose_text_and_accept_set_value_and_type(tmp_path) ->
     with pytest.raises(ComputerUseError) as stopped:
         driver.snapshot(Scope.WINDOW, "soffice")
     assert stopped.value.code is ErrorCode.APP_NOT_FOUND
+
+
+def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
+    """Live. Launch LibreOffice, then snapshot it once. No poll in the test.
+
+    ``app launch`` returns when the first window is up. AT-SPI can still be
+    registering for several seconds after that, which is when app list and
+    window list already show ``soffice.bin``. The snapshot must not answer
+    ``app_not_found``.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v libreoffice"], capture_output=True, text=True)
+    assert found.stdout.strip(), "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    previous = os.environ.get("SAL_USE_VCLPLUGIN")
+    os.environ["SAL_USE_VCLPLUGIN"] = "gtk3"
+    os.environ["GTK_MODULES"] = "gail:atk-bridge"
+    os.environ["NO_AT_BRIDGE"] = "0"
+    runtime = _runtime_for(tmp_path, driver, "libreoffice", "soffice", "soffice.bin")
+    try:
+        launched = runtime.app("launch", "libreoffice", activate=False)
+        assert "first window:" in launched, launched
+        text = runtime.desktop_snapshot("LibreOffice", mode="interactive")
+        assert text
+        assert "app_not_found" not in text
+        again = runtime.desktop_snapshot("soffice.bin", mode="interactive")
+        assert again
+        third = runtime.desktop_snapshot("libreoffice", mode="interactive")
+        assert third
+    finally:
+        if previous is None:
+            os.environ.pop("SAL_USE_VCLPLUGIN", None)
+        else:
+            os.environ["SAL_USE_VCLPLUGIN"] = previous
+        _kill_libreoffice()

@@ -4880,9 +4880,14 @@ def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) ->
 def test_soffice_without_a_bridge_is_unsupported_and_other_apps_stay_missing(
     fake_atspi, monkeypatch
 ) -> None:
-    """Synthetic. The process check is stubbed; nothing is launched."""
+    """Synthetic. The process check is stubbed; nothing is launched.
+
+    The registration wait is zero here. A live soffice process with no
+    AT-SPI root is the missing bridge, and this case does not sleep.
+    """
     monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: True)
+    monkeypatch.setattr(_atspi, "ATSPI_REGISTER_WAIT_S", 0.0)
     driver = LinuxDriver()
     with pytest.raises(ComputerUseError) as missing_bridge:
         driver.snapshot(Scope.WINDOW, "soffice")
@@ -4897,6 +4902,156 @@ def test_soffice_without_a_bridge_is_unsupported_and_other_apps_stay_missing(
     with pytest.raises(ComputerUseError) as stopped:
         driver.snapshot(Scope.WINDOW, "libreoffice")
     assert stopped.value.code is ErrorCode.APP_NOT_FOUND
+
+
+def test_app_listed_matches_the_app_list_and_the_window_list(monkeypatch) -> None:
+    """Synthetic lists. ``LibreOffice`` is the same row as ``soffice.bin``."""
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(
+        _linux_system, "running_apps",
+        lambda: [{"bundle_id": "soffice.bin", "name": "soffice.bin", "pid": 9, "frontmost": True}],
+    )
+    monkeypatch.setattr(
+        _linux_system, "windows",
+        lambda: [{
+            "app": "soffice.bin",
+            "title": "LibreOffice",
+            "wm_class": "libreoffice",
+            "wm_class_class": "libreoffice-startcenter",
+        }],
+    )
+    assert _atspi.app_listed("soffice.bin")
+    assert _atspi.app_listed("LibreOffice")
+    assert _atspi.app_listed("libreoffice")
+    assert not _atspi.app_listed("gedit")
+
+
+def test_snapshot_resolves_like_the_app_list_and_waits_for_atspi(fake_atspi, monkeypatch) -> None:
+    """Synthetic. The clock is fake, so the wait does not take 15 seconds.
+
+    The first two lookups miss. The third finds the app under the comm the
+    app list would have shown.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    class _Office:
+        def get_toolkit_name(self):
+            return "gtk"
+
+        def get_name(self):
+            return "soffice.bin"
+
+    window = _Acc("frame", name="LibreOffice", width=640, height=480)
+    window.get_application = lambda: _Office()
+    seen: list[str] = []
+
+    def find_root(app, _scope):
+        seen.append(app)
+        if len(seen) >= 3 and app == "soffice.bin":
+            return window
+        return None
+
+    clock = {"t": 50.0}
+
+    def monotonic():
+        return clock["t"]
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+
+    monkeypatch.setattr(_atspi, "find_root", find_root)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(
+        _linux_system, "resolve_app",
+        lambda identifier: "soffice.bin" if "libre" in identifier.lower() else identifier,
+    )
+    monkeypatch.setattr(_atspi, "should_wait_for_atspi", lambda _name: True)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", monotonic)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "LibreOffice")
+    assert snap.app == "soffice.bin"
+    assert seen[:3] == ["soffice.bin", "soffice.bin", "soffice.bin"]
+    assert clock["t"] == pytest.approx(50.5)
+
+
+def test_snapshot_stops_when_the_listed_app_goes_away(fake_atspi, monkeypatch) -> None:
+    """Synthetic. One poll, then the list no longer shows the app.
+
+    The deadline is not used up. The result is app_not_found.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 10.0}
+    listed = {"on": True}
+
+    def monotonic():
+        return clock["t"]
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+        listed["on"] = False
+
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: False)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: listed["on"])
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", monotonic)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "mousepad")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert exc.value.detail["app"] == "mousepad"
+    assert clock["t"] == pytest.approx(10.25)
+
+
+def test_snapshot_reports_the_bridge_after_the_register_deadline(fake_atspi, monkeypatch) -> None:
+    """Synthetic clock. The process stays up and never joins the bus.
+
+    The wait runs out at 15 s, then the error names the gtk3 bridge.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+
+    def monotonic():
+        return clock["t"]
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: True)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", monotonic)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "soffice.bin")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "no_accessibility_bridge"
+    assert clock["t"] == pytest.approx(15.0)
+
+
+def test_unlisted_app_does_not_wait_for_atspi(fake_atspi, monkeypatch) -> None:
+    """Synthetic. gedit is not listed and is not LibreOffice. No sleep."""
+    from a11y_computer_use.drivers import _linux_system
+
+    slept = {"n": 0}
+
+    def sleep(seconds):
+        slept["n"] += 1
+
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: False)
+    monkeypatch.setattr(_atspi, "libreoffice_process_running", lambda: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "gedit")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert slept["n"] == 0
 
 
 def test_tools_for_an_app_that_is_not_running_return_app_not_found(

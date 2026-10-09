@@ -38,6 +38,19 @@ from a11y_computer_use.schema import (
 )
 
 
+def _resolved_app(identifier: str) -> str:
+    """The app id app list would show for ``identifier``.
+
+    A window title, a process comm, and a WM_CLASS all resolve to the comm,
+    the same way ``resolve_app`` does before an app-list row is built. An
+    unmatched name is returned unchanged.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    found = _linux_system.resolve_app(identifier)
+    return found or identifier
+
+
 def _point_of(target: Target) -> tuple[int, int]:
     """Screen (x, y) for a coordinate action: a Point directly, else an
     Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1)."""
@@ -249,36 +262,59 @@ class LinuxDriver:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
-        def _do() -> Snapshot:
-            root = _atspi.find_root(app, scope)
-            # An empty tree is a running app with nothing to show. No AT-SPI
-            # application at all is the same answer menu list already gives:
-            # the app is not running. An empty snapshot there told the agent
-            # the app was open and custom-drawn.
-            if root is None:
-                if _atspi.libreoffice_without_bridge(app):
-                    raise ComputerUseError(
-                        ErrorCode.UNSUPPORTED,
-                        "LibreOffice is running without an accessibility bridge. "
-                        "Install libreoffice-gtk3 and start it with SAL_USE_VCLPLUGIN=gtk3.",
-                        detail={
-                            "app": app,
-                            "reason": "no_accessibility_bridge",
-                            "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
-                        },
-                    )
+        resolved = _resolved_app(app)
+        root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+        # The X window is in app list and window list before the application
+        # accessible exists. LibreOffice's gap was 3–13 s. Wait only while
+        # the list still shows the app, or a LibreOffice process is up, and
+        # stop at ATSPI_REGISTER_WAIT_S. A name that is not listed does not
+        # wait. The missing gtk3 bridge is reported after that deadline, not
+        # during the registration gap.
+        if root is None and (
+            _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
+        ):
+            deadline = time.monotonic() + _atspi.ATSPI_REGISTER_WAIT_S
+            while root is None and time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(_atspi.ATSPI_REGISTER_POLL_S, remaining))
+                resolved = _resolved_app(app)
+                if not (
+                    _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
+                ):
+                    break
+                root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+        # An empty tree is a running app with nothing to show. No AT-SPI
+        # application at all is the same answer menu list already gives:
+        # the app is not running. An empty snapshot there told the agent
+        # the app was open and custom-drawn.
+        if root is None:
+            if _atspi.libreoffice_without_bridge(resolved):
                 raise ComputerUseError(
-                    ErrorCode.APP_NOT_FOUND,
-                    f"no running application matches {app!r}",
-                    detail={"app": app},
+                    ErrorCode.UNSUPPORTED,
+                    "LibreOffice is running without an accessibility bridge. "
+                    "Install libreoffice-gtk3 and start it with SAL_USE_VCLPLUGIN=gtk3.",
+                    detail={
+                        "app": resolved,
+                        "reason": "no_accessibility_bridge",
+                        "hint": "apt install libreoffice-gtk3 && SAL_USE_VCLPLUGIN=gtk3 soffice --calc",
+                    },
                 )
-            pid = _atspi.pid_of(root) if root is not None else None
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"no running application matches {resolved!r}",
+                detail={"app": resolved},
+            )
+
+        def _do() -> Snapshot:
+            pid = _atspi.pid_of(root)
             accessor = _atspi.ATSPIAccessor()
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
             return observe.build_snapshot(
-                root, accessor, scope=scope, app=app, pid=pid,
+                root, accessor, scope=scope, app=resolved, pid=pid,
                 geometry=_atspi.primary_geometry(),
             )
 
