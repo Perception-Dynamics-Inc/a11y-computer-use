@@ -158,6 +158,10 @@ class TreeDriver:
     def key_chord(self, chord: str, **kwargs) -> None:
         del kwargs
         self.calls.append(("key", chord))
+        effect = getattr(self, "key_effect", None)
+        if callable(effect):
+            effect(chord)
+            return
         if chord == "ctrl+s":
             self._replace("e5", title="keyed")
 
@@ -629,6 +633,89 @@ def test_key_confirms_when_the_tree_changes(tmp_path) -> None:
     quiet = runtime.key("ctrl+a")
     assert quiet == "pressed ctrl+a"
     assert quiet.outcome == "suspected_noop"
+
+
+def test_key_confirms_text_under_a_tab_group_and_the_selected_cell(tmp_path) -> None:
+    """The page fingerprint skips a tab group and does not record selection.
+
+    Mousepad's document is under a tab group, so BackSpace used to look like
+    a noop. A spreadsheet Down only moves which cell is selected. Toolbar
+    text still does not confirm a key.
+    """
+    driver = TreeDriver()
+    driver.elements = [
+        _element("w", "AXWindow", "Untitled 1 - Mousepad", path=("AXWindow",)),
+        _element(
+            "tab", "AXTabGroup", "", parent="w",
+            path=("AXWindow", "AXGroup", "AXTabGroup"),
+        ),
+        _element(
+            "doc", "AXTextArea", "", parent="tab",
+            path=("AXWindow", "AXGroup", "AXTabGroup", "AXButton", "AXTextArea"),
+            value="ab0", focused=True, editable=True,
+        ),
+    ]
+
+    def effect(chord: str) -> None:
+        if chord == "BackSpace":
+            driver._replace("doc", value="ab")
+        elif chord == "Down":
+            driver._replace("a1", selected=False, focused=False)
+            driver._replace("a2", selected=True, focused=True)
+
+    driver.key_effect = effect
+    before = driver.snapshot(Scope.WINDOW, APP)
+    driver._replace("doc", value="ab")
+    after = driver.snapshot(Scope.WINDOW, APP)
+    assert outcome.relevant_state_changed(before, after, None) is False
+    assert outcome.key_focus_evidence(
+        None, None, outcome.key_focus_rows(before), outcome.key_focus_rows(after),
+    ) == "the focused text changed"
+    driver._replace("doc", value="ab0")
+
+    runtime = _runtime(tmp_path, driver)
+    pressed = runtime.key("BackSpace")
+    assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+    assert pressed.evidence == "the focused text changed"
+
+    driver.elements = _chrome_page()
+
+    def churn(_chord: str) -> None:
+        status = next(item for item in driver.elements if item.ref == "status")
+        driver._replace("status", title="tock" if status.title == "tick" else "tick")
+
+    driver.key_effect = churn
+    runtime.desktop_snapshot(APP)
+    quiet = runtime.key("F5")
+    assert quiet.outcome == "suspected_noop", (quiet.outcome, quiet.evidence)
+
+    driver.elements = [
+        _element("w", "AXWindow", "Calc", path=("AXWindow",)),
+        _element(
+            "a1", "AXCell", "A1", parent="w",
+            path=("AXWindow", "AXTable", "AXCell"), selected=True, focused=True,
+        ),
+        _element(
+            "a2", "AXCell", "A2", parent="w",
+            path=("AXWindow", "AXTable", "AXCell"),
+        ),
+    ]
+    driver.key_effect = effect
+    runtime.desktop_snapshot(APP)
+    moved = runtime.key("Down")
+    assert moved.outcome == "confirmed", (moved.outcome, moved.evidence)
+    assert moved.evidence == "the focused cell changed"
+
+    assert outcome.key_focus_evidence(
+        ("ab", 3, 3, 3, None), ("ab", 2, 2, 2, None), (), (),
+    ) == "the caret moved"
+    assert outcome.key_focus_evidence(
+        ("ab", 2, 0, 2, None), ("ab", 2, 2, 2, None), (), (),
+    ) == "the selection changed"
+    assert outcome.key_focus_evidence(
+        (None, None, None, None, "A1"), (None, None, None, None, "A2"), (), (),
+    ) == "the focused cell changed"
+    assert outcome.key_focus_evidence(None, ("ab", 1, 1, 1, None), (), ()) is None
 
 
 def test_scroll_uses_bounds_and_set_value_uses_readback(tmp_path) -> None:

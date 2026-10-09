@@ -3740,6 +3740,67 @@ def poll_sheet_type(
     return latest if latest is not None else found
 
 
+def selected_sheet_address(app: str) -> str | None:
+    """The selected Calc cell's address, or None.
+
+    ``Selection.get_selected_child`` is one round-trip. The cell does not
+    have to be the focused accessible: while the grid holds focus, Down
+    still moves this address.
+    """
+    cell = _selected_sheet_cell(app)
+    if cell is None:
+        return None
+    name = _node_name(cell)
+    if _SHEET_ADDRESS.match(name):
+        return name
+    return None
+
+
+def focused_key_evidence(app: str) -> tuple:
+    """``(text, caret, selection start, selection end, cell address)``.
+
+    Text is the focused node's text. An open Calc cell editor replaces it,
+    because the grid's own text stays empty while the digits are in the
+    editor. The cell address is the selected sheet cell. Missing pieces
+    are None. This is not a password check.
+    """
+    text = None
+    caret = start = end = None
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        acc, truncated = None, True
+    if acc is not None and not truncated:
+        try:
+            text = _readable_text(acc)
+        except Exception:
+            text = None
+        try:
+            Atspi = _atspi()
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                nchars = count
+            else:
+                nchars = len(text or "")
+            caret, start, end = _caret_and_selection(acc, nchars)
+        except Exception:
+            caret = start = end = None
+    if libreoffice_app(app):
+        try:
+            editor = sheet_editor_text(app)
+        except Exception:
+            editor = None
+        if editor:
+            text = editor
+    cell = None
+    if libreoffice_app(app):
+        try:
+            cell = selected_sheet_address(app)
+        except Exception:
+            cell = None
+    return (text, caret, start, end, cell)
+
+
 def control_kind(acc) -> str | None:
     """``combo``, ``value``, or None when ``set_text`` is the writer.
 

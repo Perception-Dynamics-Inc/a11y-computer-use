@@ -5524,3 +5524,131 @@ def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None
         if cover is not None:
             _stop(cover)
         _stop_group(proc)
+
+
+def test_linux_mousepad_backspace_and_calc_down_are_confirmed(tmp_path) -> None:
+    """Live Mousepad and Calc. A key that edits text or moves the cell is confirmed.
+
+    Mousepad's document is under a tab group, so the page fingerprint does
+    not see the deleted character. Calc Down changes the selected cell, not
+    the page's values.
+    """
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v mousepad"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "mousepad is not installed"
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "mousepad-config")
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [binary, "--disable-server"], env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "mousepad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None:
+                last = " ".join(
+                    f"{el.role}:{el.title}" for el in shot.elements[:12]
+                )
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                if area is not None:
+                    break
+            time.sleep(0.3)
+        assert area is not None, f"mousepad did not expose its document ({proc.poll()}): {last}"
+        runtime = _runtime_for(tmp_path, driver, "mousepad")
+        runtime.desktop_snapshot("mousepad")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea")
+        runtime.click(area.ref)
+        typed = runtime.type_text("ab0", app="mousepad")
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        pressed = runtime.key("BackSpace", app="mousepad")
+        assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence)
+        assert pressed.evidence == "the focused text changed", (pressed.outcome, pressed.evidence)
+        shown = _atspi.focused_key_evidence("mousepad")
+        assert shown[0] == "ab", shown
+        assert shown[1] == 2, shown
+    finally:
+        _stop_group(proc)
+
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-key"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    calc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = ""
+                if _cell(shot, "A1") is not None and _cell(shot, "A2") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose A1 and A2\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        a1 = _cell(current, "A1")
+        assert a1 is not None
+        runtime.click(a1.ref)
+        before_shot = driver.snapshot(Scope.WINDOW, "soffice")
+        pressed = runtime.key("Down", app="soffice")
+        after_shot = driver.snapshot(Scope.WINDOW, "soffice")
+
+        def current_cells(shot):
+            return [
+                (el.title, el.focused, el.selected)
+                for el in shot.elements
+                if el.role == "AXCell" and (el.focused or el.selected)
+            ]
+
+        before_cells = current_cells(before_shot)
+        after_cells = current_cells(after_shot)
+        assert before_cells != after_cells, (before_cells, after_cells, pressed.evidence)
+        assert pressed.outcome == "confirmed", (pressed.outcome, pressed.evidence, before_cells, after_cells)
+        assert pressed.evidence == "the focused cell changed", (
+            pressed.outcome, pressed.evidence, before_cells, after_cells,
+        )
+    finally:
+        _stop_group(calc)
+        _kill_libreoffice()
