@@ -3657,6 +3657,13 @@ _WRITER_HTML = """<!doctype html><meta charset=utf-8>
 <p>Gamma WRITER-THREE end.</p>
 """
 
+_WRITER_TABLE_HTML = """<!doctype html><meta charset=utf-8>
+<table>
+<tr><td>A1text</td><td>B1text</td></tr>
+<tr><td>A2text</td><td>Cell B2</td></tr>
+</table>
+"""
+
 _WRITER_REGISTRY = """<?xml version="1.0" encoding="UTF-8"?>
 <oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 <item oor:path="/org.openoffice.VCL/Settings/org.openoffice.VCL:ConfigurableSettings['Accessibility']"><prop oor:name="EnableATToolSupport" oor:op="fuse"><value>true</value></prop></item>
@@ -3880,6 +3887,106 @@ def test_linux_calc_click_type_and_key_finish_within_five_seconds(tmp_path) -> N
         driver.key_chord("Return")
         assert time.monotonic() - started < bound
         _wait_cell_value(driver, "A1", "42")
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
+def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> None:
+    """Live Writer. set_value on cell B2 replaces the paragraph and confirms.
+
+    The cell node has no text of its own. Typing into it used to insert a
+    new line and then refuse with an empty read-back. The paragraph is now
+    the value, once, and the cell above it is unchanged.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    doc = tmp_path / "doc"
+    doc.mkdir()
+    html = doc / "table.html"
+    html.write_text(_WRITER_TABLE_HTML)
+    conv = tmp_path / "conv-profile"
+    _writer_profile(conv)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    converted = subprocess.run(
+        [
+            binary, "--headless", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{conv}",
+            "--convert-to", "odt", str(html), "--outdir", str(doc),
+        ],
+        env=env, capture_output=True, text=True, timeout=90,
+    )
+    odt = doc / "table.odt"
+    assert odt.is_file(), converted.stderr[-500:]
+    _kill_libreoffice()
+    time.sleep(0.3)
+    profile = tmp_path / "writer-profile"
+    _writer_profile(profile)
+    proc = subprocess.Popen(
+        [
+            binary, "--writer", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(odt),
+        ],
+        env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        shot = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                rendered = observe.render_text(shot)
+                last = rendered[:1200]
+                has_cell = _cell(shot, "B2") is not None
+                has_text = any("Cell B2" in (el.value or "") for el in shot.elements)
+                if has_cell and has_text and "Tip of the Day" not in rendered:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, (
+            "Writer did not expose cell B2\n"
+            + last
+            + "\ncells: "
+            + ", ".join(
+                el.title for el in (shot.elements if shot is not None else [])
+                if "ell" in el.role or el.title in {"A1", "B2", "A2", "B1"}
+            )
+        )
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        cell = _cell(current, "B2")
+        assert cell is not None and cell.role == "AXCell", observe.render_text(current)[:800]
+        written = runtime.set_value(cell.ref, "NEWB2-1")
+        assert written.outcome == "confirmed", (written, written.evidence)
+        assert "NEWB2-1" in written.evidence
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        texts = [el.value or "" for el in current.elements if el.role == "AXStaticText"]
+        assert texts.count("NEWB2-1") == 1, texts
+        assert "Cell B2" not in texts
+        assert "A1text" in texts
     finally:
         _stop_group(proc)
         _kill_libreoffice()

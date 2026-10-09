@@ -2350,6 +2350,8 @@ class Runtime:
                     if anchor is not None:
                         handle = observe.ax_handle_for(anchor.snapshot_id, anchor.ref)
                     better = _atspi.sheet_outcome_text(app or "", requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.writer_cell_outcome_text(requested, handle)
                     if better is not None:
                         readback = better
             if readback is None:

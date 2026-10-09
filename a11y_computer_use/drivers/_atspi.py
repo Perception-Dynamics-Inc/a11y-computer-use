@@ -3295,13 +3295,120 @@ def is_sheet_cell(acc) -> bool:
     """True for a Calc cell: address title, or a non-empty Formula attribute.
 
     A GTK tree cell and an HTML table cell are not addresses, so they stay
-    on the path they already had.
+    on the path they already had. A Writer text-table cell is also named
+    like an address. ``writer_text_cell`` tells those apart: its parent is
+    a small table, not a spreadsheet.
     """
     if _role_name(acc) != "table cell":
         return False
     if _SHEET_ADDRESS.match(_node_name(acc)):
         return True
     return _sheet_formula(acc) is not None
+
+
+def _writer_paragraphs(acc) -> list:
+    """Paragraph and heading children. The cell node itself has no text."""
+    found = []
+    count = _child_count(acc)
+    if count < 0:
+        count = 0
+    for index in range(min(count, 16)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in {"paragraph", "heading"}:
+            found.append(child)
+    return found
+
+
+def writer_text_cell(acc) -> bool:
+    """A Writer table cell whose text lives in a child paragraph.
+
+    The name is a spreadsheet address, so ``is_sheet_cell`` is true, and
+    typing into the cell inserts a new paragraph in front of the old text.
+    A Calc cell's parent table is a spreadsheet. This is not that cell.
+    """
+    if not is_sheet_cell(acc):
+        return False
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) != "table":
+        return False
+    if _spreadsheet_table(parent):
+        return False
+    return bool(_writer_paragraphs(acc))
+
+
+def writer_cell_text(acc) -> str:
+    """The paragraph text of a Writer table cell, one line per paragraph."""
+    parts = []
+    for child in _writer_paragraphs(acc):
+        text = _full_text(child)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def writer_cell_outcome_text(requested: str, cell) -> str | None:
+    """The requested string when a Writer cell's paragraph now holds it.
+
+    The cell node's own text stays empty, so the snapshot value cannot
+    confirm the write. None for a Calc cell and when the paragraph does
+    not match.
+    """
+    if not requested or cell is None or not writer_text_cell(cell):
+        return None
+    if writer_cell_text(cell) == requested:
+        return requested
+    return None
+
+
+def replace_writer_cell_text(acc, value: str) -> None:
+    """Replace the paragraph text of a Writer table cell.
+
+    ``set_text`` on the first paragraph replaces that paragraph. Extra
+    paragraphs are cleared only after that replace is the cell's text.
+    When the read-back is not ``value``, each paragraph is put back to
+    the text it had before this call, and this raises ``text_mismatch``.
+    A miss does not leave the new line in front of the old one.
+    """
+    paragraphs = _writer_paragraphs(acc)
+    if not paragraphs:
+        raise _text_mismatch(
+            "text_mismatch",
+            f"the value read back does not match {value!r}",
+            expected=value,
+            actual="",
+            formula=None,
+        )
+    originals = [(_full_text(child) or "") for child in paragraphs]
+
+    def parts_of(node) -> list[str]:
+        return [text for text in ((_full_text(child) or "") for child in _writer_paragraphs(node)) if text]
+
+    def matches() -> bool:
+        parts = parts_of(acc)
+        if value == "":
+            return parts == []
+        return parts == [value] or parts == value.split("\n")
+
+    if matches():
+        return
+    set_text(paragraphs[0], value)
+    if matches():
+        for extra in paragraphs[1:]:
+            if (_full_text(extra) or "") != "":
+                set_text(extra, "")
+        if matches():
+            return
+    current = _writer_paragraphs(acc)
+    for child, original in zip(current, originals):
+        if (_full_text(child) or "") != original:
+            set_text(child, original)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back does not match {value!r}",
+        expected=value,
+        actual=writer_cell_text(acc),
+        formula=None,
+    )
 
 
 def libreoffice_app(app: str) -> bool:

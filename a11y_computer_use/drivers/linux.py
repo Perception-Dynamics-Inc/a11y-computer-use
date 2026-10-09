@@ -954,6 +954,12 @@ class LinuxDriver:
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
+            # A Writer table cell is named like a Calc address, but typing
+            # into it inserts a paragraph and the cell node reads back empty.
+            # Replace the child paragraph, and put the old text back on a miss.
+            if self._run(lambda: _atspi.writer_text_cell(handle)):
+                self._run(lambda: _atspi.replace_writer_cell_text(handle, value))
+                return True
             # Not the Value interface: that range is a double and rejects text.
             # Focus, type (a selected cell replaces), commit with Return, then
             # the cell text or the formula attribute has to match.
