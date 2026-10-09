@@ -6269,7 +6269,11 @@ def build_server(
         an editable element from the latest desktop_snapshot/find. Falls back to
         focus+type when the app exposes no settable value. On Linux, a ref that
         is not an editable text element is an error saying it is not editable,
-        and that call sends no keystrokes, clicks, or focus changes. A combo or
+        and that call sends no keystrokes, clicks, or focus changes. A Firefox
+        paragraph, document, or select is not an editable entry, even when
+        AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
+        before any select-all. A select is still set as a combo. A Chrome or
+        Firefox contenteditable section stays editable. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
         them. A spin button, slider, or other Value control is set through that

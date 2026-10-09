@@ -432,13 +432,15 @@ def _secure_focus_error(api: str) -> ComputerUseError:
 
 
 def _accepts_text(element: Element) -> bool:
-    """True when ``set_value`` may write ``element``.
+    """True when the snapshot says ``set_value`` may write ``element``.
 
-    The snapshot sets ``editable`` from the role, and from AT-SPI
-    ``STATE_EDITABLE`` or an EditableText interface on a container. A
-    synthetic element can name an editable role without that flag; the role
-    set is the one the pruner uses. A menu, static text, or button is not
-    in it unless the snapshot flag is set.
+    The snapshot sets ``editable`` from a text-field role, or from an AT-SPI
+    editable entry (not a paragraph, document, or combo). A synthetic element
+    can name an editable role without that flag; the role set is the one the
+    pruner uses. A menu, static text, button, or combo is not in it unless
+    the snapshot flag is set. A combo is written earlier, through its own
+    items. A live handle that is not an editable entry is refused even when
+    this flag is set, before any select-all.
     """
     if element.editable:
         return True
@@ -980,13 +982,22 @@ class LinuxDriver:
                         f"{element.ref} ({element.role}) has no Value interface",
                         detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
                     )
-        # A menu, heading, label, or button is not a text target. Raising
-        # here is what stops the Runtime from focusing it and typing the
-        # value into whatever is frontmost. No key, click, or focus is sent.
+        # A menu, heading, label, button, paragraph, or select is not a text
+        # target. Raising here is what stops the Runtime from focusing it and
+        # typing the value into whatever is frontmost. No key, click, or focus
+        # is sent. The snapshot flag is not enough: Firefox reports
+        # STATE_EDITABLE and EditableText on static nodes, and selecting one
+        # selects the page. The live node has to be an editable entry.
         if not _accepts_text(element):
             raise _not_editable(element)
         if handle is None:
             return False
+        # A synthetic field has no AT-SPI role and stays on set_text. A
+        # paragraph, panel, document, combo, or read-only node is refused
+        # here, before set_text can select it. A contenteditable section and
+        # a Chrome date segment are not refused.
+        if self._run(lambda: _atspi._blocks_text_replace(handle)):
+            raise _not_editable(element)
         # EditableText replace, or X11 clear-and-type when that interface is
         # missing. Success is the snapshot text read (Text.get_text 0, -1),
         # not a bounded read that can echo the request. A write that does not

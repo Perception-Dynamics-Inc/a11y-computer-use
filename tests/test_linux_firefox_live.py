@@ -16,6 +16,11 @@ or in find. A click on a link in the hidden tab is an error, not "clicked".
 #151: type into a Firefox contenteditable reports success when the text landed.
 The key fallback's read-back treats NBSP as a space and U+FFFC as the child
 text, and set_value replaces Editor A instead of leaving it empty.
+
+#243: a static paragraph and a select are not edit. find(editable=true) does not
+return them. set_value on the paragraph is not_editable and does not select
+the page. A real input and a contenteditable stay editable and accept
+set_value. The select still changes through the combo path.
 """
 
 from __future__ import annotations
@@ -826,3 +831,203 @@ def test_linux_firefox_crop_of_a_scrolled_off_button_is_off_screen(tmp_path) -> 
             raise AssertionError("crop of a scrolled-off button must be not_visible")
     finally:
         _stop(proc)
+
+
+_EDIT_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>ffedit243</title></head>
+    <body>
+    <label>Name <input id="name" aria-label="Name"></label>
+    <button type="button" id="go">Submit</button>
+    <p id="out">idle</p>
+    <select id="color" aria-label="Color"><option>Red</option><option>Green</option></select>
+    <div id="notes" contenteditable="true" aria-label="Notes box">old note</div>
+    <div id="rich" contenteditable="true" role="textbox" aria-label="Rich box">rich old</div>
+    </body>
+    </html>
+    """
+)
+
+
+def _text_selections(driver) -> list[str]:
+    """Non-empty AT-SPI text selections in the Firefox window.
+
+    A refused set_value must not leave one. The paragraph's EditableText
+    select, and ctrl+a, select the document.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def collect() -> list[str]:
+        Atspi = _atspi._atspi()
+        root = _atspi.find_root("firefox", Scope.WINDOW)
+        found: list[str] = []
+
+        def walk(node, depth: int) -> None:
+            if node is None or depth > 22 or len(found) > 16:
+                return
+            role = _atspi._role_name(node)
+            if role in {"paragraph", "document web", "section", "panel", "entry", "text"}:
+                count = _atspi._safe(lambda: Atspi.Text.get_n_selections(node))
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    bounds = _atspi._selection_bounds(
+                        _atspi._safe(lambda: Atspi.Text.get_selection(node, 0))
+                    )
+                    if bounds is not None and int(bounds[1]) > int(bounds[0]):
+                        found.append(f"{role}:{int(bounds[0])}-{int(bounds[1])}")
+            count_children = _atspi._child_count(node)
+            if not isinstance(count_children, int) or isinstance(count_children, bool):
+                return
+            for index in range(min(count_children, 48)):
+                walk(_atspi._child_at(node, index), depth + 1)
+
+        walk(root, 0)
+        return found
+
+    return driver._run(collect)
+
+
+def _shown(element) -> str:
+    if element is None or element.value is None:
+        return ""
+    return str(element.value).replace("\u00a0", " ").replace("\n", " ").strip()
+
+
+def test_linux_firefox_paragraph_and_select_are_not_editable(tmp_path) -> None:
+    """Live Firefox. A paragraph and a select are not edit. An input and a contenteditable are.
+
+    set_value on the paragraph is not_editable and leaves no text selection.
+    set_value still writes the input, the select, and both contenteditables.
+    A missing Firefox binary fails. This test does not skip.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "ffedit243.html"
+    page.write_text(_EDIT_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                snap = runtime._current
+                last = observe.render_text(snap)
+                titles = {el.title for el in snap.elements}
+                if {"Name", "Color", "Notes box", "Rich box", "Submit"} <= titles and any(
+                    _shown(el) == "idle" and el.role == "AXStaticText" for el in snap.elements
+                ):
+                    break
+            time.sleep(0.4)
+        else:
+            log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            raise AssertionError(f"Firefox did not expose the edit page\n{last}\n{log}")
+
+        rendered = observe.render_text(snap)
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        select = next(el for el in snap.elements if el.title == "Color" and el.role == "AXComboBox")
+        name = next(el for el in snap.elements if el.title == "Name" and el.role == "AXTextField")
+        notes = next(el for el in snap.elements if el.title == "Notes box")
+        rich = next(el for el in snap.elements if el.title == "Rich box")
+        para_line = next(line for line in rendered.splitlines() if '="idle"' in line)
+        color_line = next(line for line in rendered.splitlines() if "Color" in line and "combobox" in line)
+        assert paragraph.editable is False, para_line
+        assert "edit" not in para_line, para_line
+        assert select.editable is False, color_line
+        assert "edit" not in color_line, color_line
+        assert name.editable is True, rendered
+        assert notes.editable is True, rendered
+        assert rich.editable is True, rendered
+
+        found = runtime.find("firefox", editable=True)
+        assert "idle" not in found, found
+        assert "Color" not in found, found
+        assert "Name" in found, found
+        assert "Notes box" in found, found
+        assert "Rich box" in found, found
+
+        snap = runtime._current
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        runtime._current = snap
+        before = _text_selections(driver)
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(paragraph.ref, "nope")
+        assert exc.value.detail.get("reason") == "not_editable", exc.value
+        assert _text_selections(driver) == before
+        snap = driver.snapshot(Scope.WINDOW, "firefox")
+        paragraph = next(
+            el for el in snap.elements if el.role == "AXStaticText" and _shown(el) == "idle"
+        )
+        assert _shown(paragraph) == "idle", observe.render_text(snap)
+
+        name = next(el for el in snap.elements if el.title == "Name" and el.editable)
+        runtime._current = snap
+        assert runtime.set_value(name.ref, "Ada").startswith("set ")
+        select = next(el for el in driver.snapshot(Scope.WINDOW, "firefox").elements
+                      if el.title == "Color" and el.role == "AXComboBox")
+        runtime._current = driver.snapshot(Scope.WINDOW, "firefox")
+        select = next(el for el in runtime._current.elements if el.title == "Color" and el.role == "AXComboBox")
+        assert runtime.set_value(select.ref, "Green").startswith("set ")
+        deadline = time.monotonic() + 6
+        shown = ""
+        last_shot = runtime._current
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+            select = next(
+                (el for el in last_shot.elements if el.title == "Color" and el.role == "AXComboBox"),
+                None,
+            )
+            shown = "" if select is None else _shown(select)
+            name_now = next((el for el in last_shot.elements if el.title == "Name"), None)
+            if shown == "Green" and _shown(name_now) == "Ada":
+                break
+            time.sleep(0.25)
+        assert shown == "Green", observe.render_text(last_shot)
+        assert _shown(next(el for el in last_shot.elements if el.title == "Name")) == "Ada"
+
+        notes = next(el for el in last_shot.elements if el.title == "Notes box" and el.editable)
+        runtime._current = last_shot
+        assert runtime.set_value(notes.ref, "new note").startswith("set ")
+        rich = next(el for el in driver.snapshot(Scope.WINDOW, "firefox").elements if el.title == "Rich box" and el.editable)
+        runtime._current = driver.snapshot(Scope.WINDOW, "firefox")
+        rich = next(el for el in runtime._current.elements if el.title == "Rich box" and el.editable)
+        assert runtime.set_value(rich.ref, "rich new").startswith("set ")
+        deadline = time.monotonic() + 6
+        notes_shown = rich_shown = ""
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "firefox")
+            notes_now = next((el for el in last_shot.elements if el.title == "Notes box"), None)
+            rich_now = next((el for el in last_shot.elements if el.title == "Rich box"), None)
+            notes_shown = _shown(notes_now)
+            rich_shown = _shown(rich_now)
+            if notes_shown == "new note" and rich_shown == "rich new":
+                break
+            time.sleep(0.25)
+        assert notes_shown == "new note", observe.render_text(last_shot)
+        assert rich_shown == "rich new", observe.render_text(last_shot)
+        assert not any(
+            el.editable and el.role == "AXStaticText" and _shown(el) == "idle"
+            for el in last_shot.elements
+        )
+        color = next(el for el in last_shot.elements if el.title == "Color" and el.role == "AXComboBox")
+        assert color.editable is False
+    finally:
+        _stop(proc)
+        proc._log.close()

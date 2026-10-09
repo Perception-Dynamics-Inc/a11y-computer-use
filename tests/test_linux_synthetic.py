@@ -448,16 +448,29 @@ class _Section:
         return dict(self.attrs)
 
 
-def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch) -> None:
-    """A section with STATE_EDITABLE is a group the snapshot marks editable.
+def _toolkit_app(toolkit: str, name: str):
+    class _App:
+        def get_toolkit_name(self):
+            return toolkit
 
-    Not a browser. The role stays a group. The edit flag comes from the
-    state, not from a textbox role. A section with neither the state nor
-    EditableText stays non-editable. EditableText alone is enough.
+        def get_name(self):
+            return name
+
+    return _App()
+
+
+def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch) -> None:
+    """A Chromium contenteditable section is a group the snapshot marks editable.
+
+    The role stays a group. The edit flag comes from STATE_EDITABLE on a
+    div section, not from a textbox role and not from EditableText alone.
+    A section with neither the state nor a browser toolkit stays non-editable.
     """
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10.0, 20.0), (240.0, 48.0)))
     monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
-    raw = _atspi.ATSPIAccessor().read(_Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"}))
+    notes = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    notes.get_application = lambda: _toolkit_app("Chromium", "Google Chrome")
+    raw = _atspi.ATSPIAccessor().read(notes)
     assert raw.role == "AXGroup"
     assert raw.editable is True
     assert raw.value == "old note"
@@ -474,7 +487,12 @@ def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch)
 
     via = _Section("Iface", "typed", {"ENABLED"})
     via.get_editable_text_iface = lambda: object()
-    assert _atspi.ATSPIAccessor().read(via).editable is True
+    assert _atspi.ATSPIAccessor().read(via).editable is False
+
+    gecko = _Section("Notes box", "old note", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    gecko.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    gecko.get_editable_text_iface = lambda: object()
+    assert _atspi.ATSPIAccessor().read(gecko).editable is True
 
 
 def test_roleless_contenteditable_set_text_clears_then_types(fake_atspi, monkeypatch) -> None:
@@ -532,6 +550,7 @@ def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
     field.get_attributes = lambda: dict(field.attrs)
     field.get_role_name = lambda: "section"
     field.get_editable_text_iface = None
+    field.get_state_set = lambda: _States({"EDITABLE", "ENABLED", "FOCUSABLE"})
     sent: list[str] = []
 
     def press_chord(chord: str) -> None:
@@ -562,6 +581,126 @@ def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
     assert exc.value.detail["reason"] == "not_editable"
     assert sent == []
     assert field.text == "new note"
+
+
+class _Tagged:
+    """One AT-SPI node with a role, a tag, and optional EditableText."""
+
+    def __init__(self, role: str, name: str, text: str, states: set[str], tag: str,
+                 toolkit: str = "", app_name: str = ""):
+        self.role = role
+        self.name = name
+        self.text = text
+        self.states = set(states)
+        self.attrs = {"tag": tag}
+        self.toolkit = toolkit
+        self.app_name = app_name
+        self.iface = None
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        return _States(self.states)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+    def get_application(self):
+        if not self.toolkit and not self.app_name:
+            return None
+        return _toolkit_app(self.toolkit, self.app_name)
+
+    def get_editable_text_iface(self):
+        return self.iface
+
+
+def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monkeypatch) -> None:
+    """A paragraph or select is not an edit target. An entry and a contenteditable are.
+
+    EditableText or STATE_EDITABLE on a paragraph, panel, or document does not
+    set the flag. set_value on a paragraph raises not_editable and sends no
+    select-all, even when the snapshot flag was wrong. A read-only entry is
+    not an entry. A combo is not edit; its role no longer implies the flag.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (180.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+
+    def read(node: _Tagged):
+        return _atspi.ATSPIAccessor().read(node)
+
+    paragraph = _Tagged(
+        "paragraph", "", "idle", {"ENABLED", "SENSITIVE", "SHOWING"}, "p", "Gecko", "Firefox",
+    )
+    paragraph.iface = object()
+    assert read(paragraph).editable is False
+    paragraph.states.add("EDITABLE")
+    raw_p = read(paragraph)
+    assert raw_p.editable is False
+    assert raw_p.role == "AXStaticText"
+    snap = build_snapshot(
+        (raw_p, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert snap.elements[0].editable is False
+    assert "edit" not in observe.render_text(snap)
+
+    panel = _Tagged("panel", "", "bar", {"EDITABLE", "ENABLED"}, "div", "Gecko", "Firefox")
+    panel.iface = object()
+    assert read(panel).editable is False
+    document = _Tagged("document web", "ffedit", "", {"EDITABLE", "ENABLED"}, "", "Gecko", "Firefox")
+    document.iface = object()
+    assert read(document).editable is False
+
+    select = _Tagged("combo box", "Color", "Red", {"ENABLED", "SHOWING"}, "select", "Gecko", "Firefox")
+    raw_s = read(select)
+    assert raw_s.editable is False
+    assert raw_s.role == "AXComboBox"
+    combo_snap = build_snapshot(
+        (raw_s, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert combo_snap.elements[0].editable is False
+    assert "edit" not in observe.render_text(combo_snap)
+
+    entry = _Tagged(
+        "entry", "Name", "", {"EDITABLE", "ENABLED", "SINGLE_LINE"}, "input", "Gecko", "Firefox",
+    )
+    entry.iface = object()
+    raw_e = read(entry)
+    assert raw_e.editable is True
+    assert raw_e.role == "AXTextField"
+    entry_snap = build_snapshot(
+        (raw_e, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert entry_snap.elements[0].editable is True
+
+    frozen = _Tagged(
+        "entry", "Locked", "no", {"EDITABLE", "READ_ONLY", "ENABLED"}, "input", "Gecko", "Firefox",
+    )
+    frozen.iface = object()
+    assert read(frozen).editable is False
+
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    box = Bounds(0, 8, 40, 200, 20)
+    wrongly = Element(
+        "e9", "AXStaticText", "", "idle", box, "snap-1", editable=True,
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(wrongly, "nope")
+    assert exc.value.detail["reason"] == "not_editable"
+    assert sent == []
+    assert paragraph.text == "idle"
+    assert _atspi.set_text(paragraph, "nope") is False
+    assert sent == []
+    assert paragraph.text == "idle"
 
 
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
