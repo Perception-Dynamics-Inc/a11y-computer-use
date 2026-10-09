@@ -1015,9 +1015,9 @@ def test_missing_xlib_is_not_an_empty_confirmed_list(tmp_path, monkeypatch) -> N
     from a11y_computer_use.schema import Scope
 
     _hide_xlib(monkeypatch)
-    # The typed error is Linux-only in production. macOS and Windows CI do
-    # not install python-xlib, and the rest of this file's fakes rely on
-    # that import failing softly. Force the gate so this case still runs there.
+    # The autouse fixture turns the check off when Xlib cannot be imported,
+    # so the other synthetic cases keep app_not_found and the gtk3-bridge
+    # error. This case is the real import path: force the check back on.
     monkeypatch.setattr(_linux_system, "xlib_required", lambda: True)
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
 
