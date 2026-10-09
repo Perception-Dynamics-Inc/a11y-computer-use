@@ -341,6 +341,47 @@ async def test_permission_error_surfaces_code_and_doctor_hint(
     assert "request_permission(kind='accessibility')" in text  # the one-step grant hint
 
 
+async def test_missing_gi_on_linux_is_a_package_hint_not_a_macos_grant(tmp_path, monkeypatch) -> None:
+    """A Linux venv without PyGObject must not tell the model to open System Settings.
+
+    ``gi`` is hidden the way a venv that did not use ``--system-site-packages``
+    fails the import. Snapshot and find, and doctor, share one install hint.
+    """
+    from a11y_computer_use import doctor
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setitem(sys.modules, "gi", None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    with server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    ) as runtime:
+        mcp = server.build_server(runtime=runtime)
+        for name, args in (
+            ("desktop_snapshot", {"app": "LibreOffice"}),
+            ("find", {"app": "LibreOffice", "text": "WRITER-TWO"}),
+        ):
+            result = await call_tool(mcp, name, args)
+            assert result.isError
+            text = result.content[0].text
+            assert "unsupported: AT-SPI2 Python bindings are missing" in text
+            assert "permission_denied_accessibility" not in text
+            assert '"reason": "missing_dependency"' in text
+            assert "System Settings" not in text
+            assert "request_permission" not in text
+            assert doctor.ATSPI_BINDINGS_FIX in text
+    bindings = doctor._check_atspi_bindings()
+    bus = doctor._check_a11y_bus()
+    assert bindings["ok"] is False and bindings["fix"] == doctor.ATSPI_BINDINGS_FIX
+    assert bus["ok"] is False and bus["fix"] == doctor.ATSPI_BINDINGS_FIX
+    hint = doctor.ATSPI_BINDINGS_FIX
+    assert "python3-gi" in hint
+    assert "PyGObject" in hint
+    assert "--system-site-packages" in hint
+    assert "[linux]" in hint
+    assert "libgirepository" in hint
+    assert "cairo" in hint
+
+
 async def test_ref_before_any_snapshot_is_stale(mcp_server, mocked_driver) -> None:
     result = await call_tool(mcp_server, "click", {"ref": "e2"})
     assert result.isError

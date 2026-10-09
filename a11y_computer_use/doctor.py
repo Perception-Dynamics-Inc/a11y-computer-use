@@ -358,6 +358,17 @@ def _check_window_manager() -> CheckResult:
         }
 
 
+#: Shared with the snapshot/find error. A missing ``gi`` is a package, not a
+#: macOS Accessibility grant.
+ATSPI_BINDINGS_FIX = (
+    "PyGObject (gi) is not installed. apt install python3-gi gir1.2-atspi-2.0 "
+    "at-spi2-core, then create the venv with --system-site-packages so it can "
+    "import apt's python3-gi. Or pip install 'a11y-computer-use[linux]' "
+    "(PyGObject) after apt install libgirepository-2.0-dev libcairo2-dev "
+    "pkg-config python3-dev, the headers that source build needs."
+)
+
+
 def _check_atspi_bindings() -> CheckResult:
     try:
         import gi
@@ -369,10 +380,7 @@ def _check_atspi_bindings() -> CheckResult:
             "check": "atspi_bindings",
             "ok": False,
             "detail": f"AT-SPI2 GI bindings unavailable: {exc}",
-            "fix": (
-                "apt install at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi, then create the venv "
-                "with --system-site-packages (or pip install PyGObject)."
-            ),
+            "fix": ATSPI_BINDINGS_FIX,
         }
     return {"check": "atspi_bindings", "ok": True, "detail": "gi + Atspi 2.0 typelib import cleanly", "fix": None}
 
@@ -389,6 +397,14 @@ def _check_a11y_bus() -> CheckResult:
 
         count = Atspi.get_desktop(0).get_child_count()
     except Exception as exc:  # noqa: BLE001
+        detail = getattr(exc, "detail", None)
+        if isinstance(detail, dict) and detail.get("reason") == "missing_dependency":
+            return {
+                "check": "a11y_bus",
+                "ok": False,
+                "detail": f"AT-SPI2 GI bindings unavailable: {str(exc).splitlines()[0][:200]}",
+                "fix": str(detail.get("hint") or ATSPI_BINDINGS_FIX),
+            }
         return {
             "check": "a11y_bus",
             "ok": False,

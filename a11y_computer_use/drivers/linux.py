@@ -472,6 +472,26 @@ def _browser_family(app_id: str | None) -> str:
     return name
 
 
+def _missing_atspi_bindings(exc: BaseException) -> ComputerUseError:
+    """Missing PyGObject or the Atspi typelib. Not a macOS Accessibility grant.
+
+    ``doctor`` prints the same hint. A model that follows the macOS pane text
+    asks for ``request_permission``, which cannot install ``gi``.
+    """
+    from a11y_computer_use.doctor import ATSPI_BINDINGS_FIX
+
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "AT-SPI2 Python bindings are missing",
+        detail={
+            "reason": "missing_dependency",
+            "module": "gi",
+            "hint": ATSPI_BINDINGS_FIX,
+            "error": str(exc),
+        },
+    )
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -504,8 +524,9 @@ class LinuxDriver:
     # -- permissions --------------------------------------------------------
     def ensure_trusted(self) -> None:
         """Linux has no per-app TCC grant; the requirement is that the AT-SPI2
-        registry is reachable (accessibility bus running). Raise a structured,
-        actionable error when it is not — the Grok-desktop default (a11y OFF)."""
+        registry is reachable (accessibility bus running). A missing ``gi``
+        import is ``unsupported`` / ``missing_dependency`` with the doctor
+        hint. An unreachable bus is the accessibility-off error."""
         try:
             from a11y_computer_use.drivers import _atspi
 
@@ -518,12 +539,7 @@ class LinuxDriver:
             Atspi = _atspi._atspi()
             desktop = self._run(lambda: _atspi._safe(lambda: Atspi.get_desktop(0)))
         except ImportError as exc:
-            raise ComputerUseError(
-                ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
-                "AT-SPI2 Python bindings are missing",
-                detail={"hint": "pip install 'a11y-computer-use[agent,linux]'; apt install "
-                        "gir1.2-atspi-2.0 at-spi2-core python3-gi", "error": str(exc)},
-            ) from exc
+            raise _missing_atspi_bindings(exc) from exc
         if desktop is None:
             raise ComputerUseError(
                 ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
@@ -2070,7 +2086,7 @@ class LinuxDriver:
     def _menu_root(self, app: str) -> object:
         """The AT-SPI application accessible for ``app``, or a structured error.
 
-        Missing bindings are the same permission error as `ensure_trusted`.
+        Missing bindings are the same missing-dependency error as `ensure_trusted`.
         An unknown name is `app_not_found` and does not wait on a bus.
         """
         from a11y_computer_use.drivers import _atspi
@@ -2078,12 +2094,7 @@ class LinuxDriver:
         try:
             root = self._run(lambda: _atspi.find_root(app, Scope.APP))
         except ImportError as exc:
-            raise ComputerUseError(
-                ErrorCode.PERMISSION_DENIED_ACCESSIBILITY,
-                "AT-SPI2 Python bindings are missing",
-                detail={"hint": "pip install a11y_computer_use[linux]; apt install "
-                        "gir1.2-atspi-2.0 at-spi2-core", "error": str(exc)},
-            ) from exc
+            raise _missing_atspi_bindings(exc) from exc
         if root is None:
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
