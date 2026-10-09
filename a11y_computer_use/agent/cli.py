@@ -2,6 +2,8 @@
 
 ``a11y-agent run`` prints one JSON object on stdout when ``--json`` is set.
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
+SIGINT and SIGTERM cancel after the current step (status ``cancelled``,
+exit 3). A second signal exits 3 immediately and does not print a traceback.
 ``--approve-policy deny`` is the default for risky actions. ``--approve``
 prompts on the terminal (stderr or the tty, never stdout).
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from collections.abc import Sequence
 
@@ -52,7 +55,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     try:
         agent = build_agent(args)
-        result = agent.run(args.goal)
+        result = _run_until_cancelled(agent, args.goal)
+    except KeyboardInterrupt:
+        body = _error_body("cancelled")
+        body["status"] = "cancelled"
+        return _emit(args, body, 3)
     except Exception as exc:  # noqa: BLE001 - the process must exit 3, not traceback
         return _emit(args, _error_body(f"error: {type(exc).__name__}: {exc}"), 3)
     return _emit(args, result.to_dict(), exit_code(result))
@@ -84,6 +91,43 @@ def build_agent(args: argparse.Namespace):
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,
     )
+
+
+def _run_until_cancelled(agent: object, goal: str):
+    """Run ``goal``. SIGINT and SIGTERM cancel after the current step.
+
+    The first signal calls ``agent.cancel`` and returns to the loop, so the
+    step in progress finishes, the trace write closes, and ``run`` returns a
+    cancelled result. A second signal raises ``SystemExit(3)`` with no
+    traceback. Handlers are restored when the run returns.
+    """
+    hits = 0
+    saved: list[tuple[int, object]] = []
+
+    def handler(signum, frame) -> None:
+        nonlocal hits
+        del signum, frame
+        hits += 1
+        cancel = getattr(agent, "cancel", None)
+        if callable(cancel):
+            cancel()
+        if hits >= 2:
+            raise SystemExit(3)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            saved.append((sig, signal.getsignal(sig)))
+            signal.signal(sig, handler)
+        except (OSError, ValueError):
+            continue
+    try:
+        return agent.run(goal)  # type: ignore[attr-defined]
+    finally:
+        for sig, previous in saved:
+            try:
+                signal.signal(sig, previous)  # type: ignore[arg-type]
+            except (OSError, ValueError):
+                pass
 
 
 def exit_code(result: RunResult) -> int:

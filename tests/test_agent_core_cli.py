@@ -472,3 +472,136 @@ def test_domain_flags_reach_the_agent():
     assert agent.domain_policy.allowed == ("file", "example.com")
     assert agent.domain_policy.blocked == ("blocked.example",)
     assert agent.fence_untrusted is True
+
+
+def _waits(path, seconds: list[float]) -> None:
+    turns = [
+        {"text": "", "calls": [{"name": "wait", "args": {"seconds": item}}]}
+        for item in seconds
+    ]
+    path.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+
+
+def _spawn_run(script, trace, home):
+    import os
+    import subprocess
+    import sys
+
+    grant = home / ".a11y-computer-use"
+    grant.mkdir(parents=True, exist_ok=True)
+    (grant / "permissions.json").write_text(
+        json.dumps({"apps": {"unknown": {"tier": "read"}}, "deny": [], "allow": []}),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from a11y_computer_use.agent.cli import main; raise SystemExit(main())",
+            "run",
+            "wait a lot",
+            "--model",
+            f"scripted:{script}",
+            "--json",
+            "--max-time",
+            "90",
+            "--max-steps",
+            "10",
+            "--trace-dir",
+            str(trace),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=env,
+    )
+
+
+def _wait_for_steps(trace, count: int, timeout: float) -> None:
+    import time
+
+    path = trace / "steps.jsonl"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if len(lines) >= count:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"trace did not record {count} steps")
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="os.kill cannot deliver SIGINT to a Python handler on Windows",
+)
+@pytest.mark.parametrize("sig_name", ["SIGINT", "SIGTERM"])
+def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
+    """A real process, signalled mid-wait, prints cancelled JSON and exits 3."""
+    import signal
+    import time
+
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    _waits(script, [0.3, 3.0, 30.0])
+    proc = _spawn_run(script, trace, tmp_path / "home")
+    try:
+        _wait_for_steps(trace, 1, 20)
+        signalled = time.monotonic()
+        proc.send_signal(getattr(signal, sig_name))
+        out, err = proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    elapsed = time.monotonic() - signalled
+    assert proc.returncode == 3
+    assert elapsed < 12, elapsed
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err
+    payload = json.loads(out)
+    assert payload["status"] == "cancelled"
+    assert payload["reason"] == "cancelled"
+    assert [step["action"] for step in payload["step_log"]] == ["wait", "wait"]
+    recorded = [
+        json.loads(line)
+        for line in (trace / "steps.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [step["action"] for step in recorded] == ["wait", "wait"]
+    assert payload["trace_dir"] == str(trace)
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="os.kill cannot deliver SIGINT to a Python handler on Windows",
+)
+def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
+    """A second Ctrl+C leaves the process immediately, still with code 3."""
+    import signal
+    import time
+
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    _waits(script, [0.3, 30.0])
+    proc = _spawn_run(script, trace, tmp_path / "home")
+    try:
+        _wait_for_steps(trace, 1, 20)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGINT)
+        time.sleep(0.2)
+        proc.send_signal(signal.SIGINT)
+        _out, err = proc.communicate(timeout=8)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert time.monotonic() - started < 8
+    assert proc.returncode == 3
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err

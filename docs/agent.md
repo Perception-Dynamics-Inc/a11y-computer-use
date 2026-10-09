@@ -167,6 +167,11 @@ did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
 
+SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
+step. The trace write for that step is closed, and `--json` prints one object
+with `status` `cancelled` and `reason` `cancelled`. The process exits 3. A
+second SIGINT or SIGTERM exits 3 immediately and does not print a traceback.
+
 `--model-timeout` is the limit for one model call, in seconds. The default is
 120. It is not the time left in `--max-time`. The loop checks the run budget
 before each step and again after the observation, before it calls the model.
