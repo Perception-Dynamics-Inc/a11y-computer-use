@@ -8,6 +8,7 @@ removed before either file is written.
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import threading
@@ -94,6 +95,7 @@ class Trace:
         self._lock = threading.Lock()
         self.trajectory_path = self.dir / "trajectory.jsonl"
         self.steps_path = self.dir / "steps.jsonl"
+        self.events_path = self.dir / "events.jsonl"
 
     def save_png(self, index: int, png: bytes) -> str:
         path = self.dir / f"step-{index:04d}.png"
@@ -106,6 +108,19 @@ class Trace:
         with self._lock:
             with self.trajectory_path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+
+    def append_event(self, entry: dict) -> None:
+        """Append one lifecycle event and make it visible before the step blocks.
+
+        ``steps.jsonl`` is written when a step finishes. A cancel test has to
+        see that a step has started, so this line is flushed and synced first.
+        """
+        line = json.dumps(entry, default=str, ensure_ascii=False)
+        with self._lock:
+            with self.events_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
     def record(self, entry: dict, step: dict) -> None:
         line_entry = json.dumps(entry, default=str, ensure_ascii=False)

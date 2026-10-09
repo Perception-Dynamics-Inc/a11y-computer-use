@@ -369,6 +369,9 @@ directory):
   result, error, `verified`, recovery notes, a screenshot path, `skipped`,
   and `turn_stop`.
 - `steps.jsonl` — the same records as `step_log`.
+- `events.jsonl` — one line when a step starts (`kind` `step_started`,
+  `index`, `action`), flushed before that step's tool call blocks.
+  `steps.jsonl` is still written only when the step finishes.
 - `exec-audit.jsonl` — one JSON line per exec attempt, appended and never
   rewritten. Each line has `timestamp`, `command`, `cwd`, `exit_code`,
   `output` (already truncated), `truncated`, `approval` (`approved`,

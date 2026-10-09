@@ -596,9 +596,60 @@ def _wait_for_steps(trace, count: int, timeout: float) -> None:
     raise AssertionError(f"trace did not record {count} steps")
 
 
+def _step_started(trace, *, strict: bool) -> list[dict]:
+    """``step_started`` lines flushed before each step's tool call.
+
+    A poll can observe a partial last line while the child is still writing.
+    ``strict`` is for the read after the process has exited.
+    """
+    path = trace / "events.jsonl"
+    if not path.is_file():
+        return []
+    started: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                raise
+            continue
+        if event.get("kind") == "step_started":
+            started.append(event)
+    return started
+
+
+def _wait_for_step_started(proc, trace, index: int, timeout: float) -> list[dict]:
+    """Block until ``events.jsonl`` reports that ``index`` has started."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before step_started {index}: {err}"
+            )
+        started = _step_started(trace, strict=False)
+        if any(event.get("index") == index for event in started):
+            return started
+        time.sleep(0.05)
+    raise AssertionError(
+        f"trace did not record step_started {index}: {_step_started(trace, strict=False)}"
+    )
+
+
 @pytest.mark.parametrize("sig_name", ["SIGINT", "SIGTERM"])
 def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
-    """A real process, signalled mid-wait, prints cancelled JSON and exits 3."""
+    """Signal only after step 2 has started, and stop before any later step.
+
+    Waiting for a finished step and then signalling races a slow runner: the
+    next wait can already be underway. The child flushes ``step_started``
+    before the tool call, and the step being signalled waits long enough that
+    the signal lands inside it.
+    """
     import sys
     import time
 
@@ -606,32 +657,44 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
         pytest.skip("Windows TerminateProcess does not run a Python SIGTERM handler")
     script = tmp_path / "turns.json"
     trace = tmp_path / "trace"
-    _waits(script, [0.3, 3.0, 30.0])
+    # Step 2 is the one the signal hits. It is long so delivery delay cannot
+    # run it out and start step 3. Step 3 must not start.
+    _waits(script, [0.2, 30.0, 30.0])
     proc = _spawn_run(script, trace, tmp_path / "home")
     try:
-        _wait_for_steps(trace, 1, 20)
+        started = _wait_for_step_started(proc, trace, 2, 30)
+        started_actions = [event["action"] for event in started]
+        started_indexes = [event["index"] for event in started]
+        assert started_indexes == [1, 2]
+        assert started_actions == ["wait", "wait"]
         signalled = time.monotonic()
         _deliver(proc, sig_name)
-        out, err = proc.communicate(timeout=15)
+        out, err = proc.communicate(timeout=45)
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
     elapsed = time.monotonic() - signalled
     assert proc.returncode == 3
-    assert elapsed < 12, elapsed
+    # Step 2 may finish its wait; step 3 is another 30s and must not run.
+    assert elapsed < 40, elapsed
     assert "Traceback" not in err
     assert "KeyboardInterrupt" not in err
     payload = json.loads(out)
     assert payload["status"] == "cancelled"
     assert payload["reason"] == "cancelled"
-    assert [step["action"] for step in payload["step_log"]] == ["wait", "wait"]
+    finished = [step["action"] for step in payload["step_log"]]
+    assert finished == started_actions
     recorded = [
         json.loads(line)
         for line in (trace / "steps.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    assert [step["action"] for step in recorded] == ["wait", "wait"]
+    assert [step["action"] for step in recorded] == started_actions
+    assert [step["index"] for step in recorded] == started_indexes
+    after = _step_started(trace, strict=True)
+    assert [event["index"] for event in after] == started_indexes
+    assert [event["action"] for event in after] == started_actions
     assert payload["trace_dir"] == str(trace)
 
 

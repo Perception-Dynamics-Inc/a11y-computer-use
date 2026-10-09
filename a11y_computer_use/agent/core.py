@@ -475,6 +475,12 @@ class Agent:
     ) -> Iterator[Event]:
         requested = Action.from_call(call)
         index = len(self._steps) + 1
+        # On disk before the event is yielded, so a parent polling the trace
+        # observes this step before the tool call blocks.
+        if self.trace is not None:
+            self.trace.append_event(
+                {"kind": "step_started", "index": index, "action": requested.name}
+            )
         yield Event("step_started", {"index": index, "action": requested.name})
         problem = validate_action(requested, allow_exec=self.allow_exec)
         if problem is not None:
