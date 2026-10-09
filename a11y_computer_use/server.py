@@ -411,6 +411,30 @@ def _serialized(method: Callable[Concatenate["Runtime", _P], _R]) -> Callable[Co
 #: (e.g. for an app whose AX press handlers misbehave).
 PREFER_AX_ACTIONS = os.environ.get("A11Y_COMPUTER_USE_AX_CLICKS", "1") != "0"
 
+
+def _linux_button_uses_pointer(driver, element: Element) -> bool:
+    """Whether a Linux button ref must be a pointer click, not ``DoAction``.
+
+    at-spi2-atk replies to ``DoAction`` and then runs the action before
+    ``dbus_connection_dispatch`` returns. ``Gtk.Dialog.run()`` from that
+    handler holds the connection's dispatch lock for the whole modal loop.
+    The click has already returned, and the next key (Ctrl+L in a file
+    chooser) re-enters dispatch on that same connection and waits there.
+    A pointer click is delivered by GDK, outside that lock. A button with
+    no on-screen box still uses ``DoAction``. Other roles keep it too.
+    """
+    if getattr(driver, "name", None) != "linux":
+        return False
+    if element.role != "AXButton":
+        return False
+    bounds = element.bounds
+    if bounds is None or bounds.width <= 1 or bounds.height <= 1:
+        return False
+    # GTK's G_MININT box is a widget that has no window yet.
+    if bounds.x <= -2_000_000_000 or bounds.y <= -2_000_000_000:
+        return False
+    return True
+
 #: Require explicit human confirmation before a plausibly irreversible action
 #: (see `safety.confirmation_prompt`). When on and the host offers no
 #: confirmation channel, such actions fail-safe (blocked) rather than firing
@@ -576,6 +600,8 @@ def _scroll_anchor(snap):
     the document group that contains it when that group is smaller than the
     window, and otherwise to the list. It does not go to Chrome's tab strip.
     A menu smaller than the window is used only when the page has no list.
+    With no list, a titled group wins over a larger empty panel: that panel
+    is Chrome's frame, and a wheel there does not move the document.
     None for an empty snapshot.
     """
     if not snap.elements:
@@ -604,7 +630,8 @@ def _scroll_anchor(snap):
             return largest(menus)
         groups = [el for el in snap.elements if el.role == "AXGroup" and below_window(el)]
         if groups:
-            return largest(groups)
+            titled = [el for el in groups if (el.title or "").strip()]
+            return largest(titled or groups)
         tabs = [el for el in snap.elements if el.role == "AXTabGroup" and below_window(el)]
         if tabs:
             return largest(tabs)
@@ -1356,6 +1383,32 @@ def _recheck_frontmost(app: str, front: str | None = None) -> None:
         )
 
 
+def _linux_point_matches_snapshot_pid(runtime, target: Target) -> bool:
+    """Whether the window under ``target`` is the snapshot's process.
+
+    A GTK program name and ``/proc/pid/comm`` differ (``cuamodal`` versus
+    ``python3``). The pointer recheck compares those strings and would refuse
+    a click on the app that was just snapshotted. The pid on the snapshot is
+    the process that owns the tree. The same pid under the point is that
+    process, including a dialog it opened. Any other pid falls through to the
+    name check.
+    """
+    if getattr(getattr(runtime, "driver", None), "name", None) != "linux":
+        return False
+    snap = getattr(runtime, "_current", None)
+    pid = getattr(snap, "pid", None)
+    if not pid:
+        return False
+    point = target if isinstance(target, Point) else getattr(getattr(target, "bounds", None), "center", None)
+    if point is None:
+        return False
+    try:
+        found = _system_ops().pid_at_point(point.x, point.y)
+    except Exception:
+        return False
+    return bool(found) and int(found) == int(pid)
+
+
 def _recheck_target_app(app: str, target: Target) -> None:
     """Abort a pointer action when the window under it changed owner.
 
@@ -1827,6 +1880,11 @@ class Runtime:
         # can, so the frontmost check is the meaningful guard there.
         if self._resolves_apps():
             return self._recheck_frontmost_app(app)
+        # Linux permission keys are often the AT-SPI program name (cuamodal)
+        # while the window owner comm is python3. Same pid is the same app.
+        # A different process covering the point still fails the name check.
+        if _linux_point_matches_snapshot_pid(self, target):
+            return
         _recheck_target_app(app, target)
 
     # -- gate + audit -------------------------------------------------------
@@ -3246,6 +3304,7 @@ class Runtime:
                 and parsed_button is MouseButton.LEFT
                 and count == 1
                 and not mods
+                and not _linux_button_uses_pointer(self.driver, target)
                 and self.driver.press_element(target)
             ):
                 return  # activated via AX — the user's cursor never moved
@@ -4041,7 +4100,11 @@ class Runtime:
         (``page_unchanged``) is not the end of the search while the other
         direction has not been tried: the search comes back one line at a
         time. If that direction does not move either, the still-page error
-        stands. The still grab does not install a new head."""
+        stands. The still grab does not install a new head. A scroll that
+        moved the pixels while the in-scroll row read was still the old head
+        (``rows_stale``) is not the end of the search either: the page did
+        move, and the next iteration snapshots the tree again instead of
+        aborting or turning around."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -4063,6 +4126,9 @@ class Runtime:
 
         def page_unchanged(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "page_unchanged"
+
+        def rows_stale(exc: ComputerUseError) -> bool:
+            return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "rows_stale"
 
         def execute() -> str:
             # Several lines per step can jump past the target. On the 0.4.17
@@ -4101,6 +4167,12 @@ class Runtime:
                         recheck=partial(self._recheck_target, target=anchor),
                     )
                 except ComputerUseError as exc:
+                    if rows_stale(exc):
+                        # The wheel moved the page. The row read inside that
+                        # call was still the previous head. Snapshot again
+                        # instead of aborting or reversing.
+                        issued += 1
+                        continue
                     if not page_unchanged(exc):
                         raise
                     issued += 1
@@ -5776,7 +5848,9 @@ def build_server(
         (page_unchanged) does not end the search while the other direction has
         not been tried and the target has not been shown; that return pass is
         one line at a time. If the other direction does not move either, the
-        still-page error stands. Pass ref to wheel over a specific
+        still-page error stands. A scroll that moved the page but reported
+        rows_stale does not end the search and does not reverse: the next
+        pass snapshots the tree again. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the anchor is the
         overflow list, or the document on a body-scroll page, not the
         window's tab strip. Gated at tier 'click' (it scrolls).

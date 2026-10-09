@@ -423,6 +423,84 @@ async def test_modified_and_multiclicks_never_use_ax(
     assert len(mocked_driver["click"]) == 3  # right/double/modified all synthesize mouse events
 
 
+def test_linux_onscreen_button_click_uses_the_pointer() -> None:
+    """A Linux AXButton with a real box is not activated with DoAction.
+
+    DoAction runs the handler before dbus_connection_dispatch returns. A
+    Gtk.Dialog.run() from that handler holds the dispatch lock, and the next
+    key waits forever. The pointer path opens the dialog from GDK.
+    """
+    from a11y_computer_use.schema import Bounds, Element
+
+    button = Element(
+        ref="e2", role="AXButton", title="Browse", value=None,
+        bounds=Bounds(0, 40, 40, 80, 26), snapshot_id="s", clickable=True,
+    )
+    hidden = dataclasses.replace(button, ref="e9", bounds=Bounds(0, -2147483648, -2147483648, 1, 1))
+    field = dataclasses.replace(button, ref="e3", role="AXTextField", editable=True)
+    snap = type("S", (), {"app": "cuafileapp"})()
+    calls = {"press": [], "click": []}
+
+    class _D:
+        name = "linux"
+        resolves_apps = False
+
+        def press_element(self, element):
+            calls["press"].append(element.ref)
+            return True
+
+        def click(self, target, **_kwargs):
+            calls["click"].append(getattr(target, "ref", None))
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._operation_lock = __import__("threading").Lock()
+    rt._closed = False
+    rt._screen_text = None
+    rt.driver = _D()
+    rt._current = snap
+    rt._resolve = lambda ref, kind: (snap, {"e2": button, "e9": hidden, "e3": field}[ref])
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._dismiss_open_menu = lambda app: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._effect_after = lambda pre: ""
+
+    assert "clicked" in rt.click("e2")
+    rt.click("e9")
+    rt.click("e3")
+    assert calls["click"] == ["e2"]
+    assert calls["press"] == ["e9", "e3"]
+
+
+def test_linux_recheck_treats_prgname_and_comm_as_one_process(monkeypatch) -> None:
+    """A pointer click gated on the AT-SPI name still lands on that process.
+
+    The window owner comm is python3 and the snapshot app is the program
+    name. The pid is what makes them the same app. A different pid is still
+    a focus change.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    button = Element(
+        ref="e2", role="AXButton", title="Browse", value=None,
+        bounds=Bounds(0, 40, 40, 80, 26), snapshot_id="s", clickable=True,
+    )
+    snap = Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="cuamodal", pid=42,
+        created_at=0.0, displays=(), elements=(button,),
+    )
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("_D", (), {"name": "linux", "resolves_apps": False})()
+    rt._current = snap
+    monkeypatch.setattr(server, "_app_at_point", lambda point: "python3")
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 42)
+    rt._recheck_target("cuamodal", button)
+    monkeypatch.setattr(_linux_system, "pid_at_point", lambda x, y: 99)
+    with pytest.raises(ComputerUseError) as caught:
+        rt._recheck_target("cuamodal", button)
+    assert caught.value.code is ErrorCode.FOCUS_CHANGED
+
+
 # --- same-window recheck (decision -> injection race) ---------------------------
 
 
@@ -1432,26 +1510,36 @@ def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> No
     assert scrolls == [5, -1]
 
 
-def test_scroll_to_find_does_not_turn_around_on_rows_stale(monkeypatch) -> None:
-    """A rows_stale scroll is not a still page. The search does not reverse."""
+def test_scroll_to_find_resnapshots_after_rows_stale(monkeypatch) -> None:
+    """A rows_stale scroll moved the page. The next snapshot is searched.
+
+    Synthetic snapshots, not a live Chrome list. The first wheel raises
+    rows_stale and is not reversed. The following snapshot still lacks the
+    target; the one after the second wheel contains ITEM-180.
+    """
     from a11y_computer_use import server
 
     scrolls: list[int] = []
+    shots = {"n": 0}
 
     class _D:
         def ensure_trusted(self):
             pass
 
         def snapshot(self, scope, app):
+            shots["n"] += 1
+            if shots["n"] >= 3:
+                return _item_window(180)
             return _item_window(1)
 
         def scroll(self, target, **kw):
             scrolls.append(int(kw.get("dy") or 0))
-            raise ComputerUseError(
-                ErrorCode.UNSUPPORTED,
-                "the list moved on screen but the snapshot would still show the old rows",
-                detail={"reason": "rows_stale", "unit": "lines", "dy": 5},
-            )
+            if len(scrolls) == 1:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "the list moved on screen but the snapshot would still show the old rows",
+                    detail={"reason": "rows_stale", "unit": "lines", "dy": 5},
+                )
 
     rt = server.Runtime.__new__(server.Runtime)
     rt.driver = _D()
@@ -1460,10 +1548,10 @@ def test_scroll_to_find_does_not_turn_around_on_rows_stale(monkeypatch) -> None:
     rt._recheck_target = lambda *args: None
     monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
 
-    with pytest.raises(ComputerUseError) as error:
-        rt.scroll_to_find("app", text="ITEM-180")
-    assert error.value.detail["reason"] == "rows_stale"
-    assert scrolls == [5]
+    out = rt.scroll_to_find("app", text="ITEM-180")
+    assert "found after 2 scroll" in out
+    assert "ITEM-180" in out
+    assert scrolls == [5, 5]
 
 
 def test_scroll_to_find_returns_a_target_already_on_screen(monkeypatch) -> None:
@@ -1668,6 +1756,26 @@ def test_scroll_anchor_wheels_the_document_not_the_tab_strip() -> None:
     assert server._scroll_anchor(snap(window, notebook, overflow)).ref == "e5"
     # No list at all: a notebook-sized tab group is still a place to wheel.
     assert server._scroll_anchor(snap(window, notebook)).ref == "e6"
+
+
+def test_scroll_anchor_prefers_the_titled_document_over_a_larger_panel() -> None:
+    """A body of divs is not a list. Chrome's empty panel is larger than the
+    document and still under 90% of the window. The wheel belongs on the
+    titled document. Synthetic bounds, not a live window."""
+    from a11y_computer_use import server
+    from a11y_computer_use.schema import Bounds, Display, Element, Scope, Snapshot
+
+    def el(ref, role, x, y, w, h, title=""):
+        return Element(ref=ref, role=role, title=title, value=None,
+                       bounds=Bounds(0, x, y, w, h), snapshot_id="s")
+
+    window = el("e1", "AXWindow", 49, 49, 1002, 702, "cualong - Google Chrome")
+    panel = el("e19", "AXGroup", 53, 135, 994, 612)
+    document = el("e25", "AXGroup", 52, 133, 979, 602, "cualong")
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="chrome", pid=1, created_at=0.0,
+                    displays=(Display(0, 1920, 1200, 1.0, True),),
+                    elements=(window, panel, document))
+    assert server._scroll_anchor(snap).ref == "e25"
 
 
 def test_scroll_to_find_ref_pins_the_element_to_wheel_over(monkeypatch) -> None:

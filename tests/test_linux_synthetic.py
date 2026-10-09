@@ -1225,6 +1225,110 @@ def test_driver_coordinate_pixel_scroll_hit_tests_without_a_ref(fake_atspi, xtes
     assert vertical.value == 103
 
 
+def test_cdp_scroll_uses_the_topmost_window_not_the_desktop(monkeypatch) -> None:
+    """A fullscreen desktop contains every point. The port is read from the top window."""
+    from a11y_computer_use.drivers.linux import _cdp_scroll_pixels
+
+    rows = [
+        {"pid": 1, "title": "Desktop", "bounds": {"x": 0, "y": 0, "width": 1920, "height": 1200}},
+        {"pid": 42, "title": "cualong - Google Chrome", "bounds": {"x": 49, "y": 49, "width": 1000, "height": 700}},
+    ]
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_system.windows", lambda: rows)
+    seen: dict[str, int] = {}
+
+    def port(pid: int):
+        seen["pid"] = pid
+        return None
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._debug_port_for_pid", port)
+    assert _cdp_scroll_pixels(100, 150, dx=0, dy=40) is False
+    assert seen["pid"] == 42
+
+
+def test_cdp_scroll_picks_the_tab_the_window_is_showing(monkeypatch) -> None:
+    """A shared profile lists other tabs first. The window title names the page."""
+    from a11y_computer_use.drivers.linux import _cdp_scroll_pixels
+
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.windows",
+        lambda: [{
+            "pid": 7,
+            "title": "cualong - Google Chrome",
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+        }],
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._debug_port_for_pid", lambda _pid: 9222)
+    pages = [
+        {"title": "Other", "webSocketDebuggerUrl": "ws://other"},
+        {"title": "cualong", "webSocketDebuggerUrl": "ws://long"},
+    ]
+    monkeypatch.setattr("a11y_computer_use.drivers._cdp.page_targets", lambda _endpoint: pages)
+    opened: list[str] = []
+
+    class _Transport:
+        def close(self) -> None:
+            return None
+
+    class _Session:
+        def __init__(self, _transport, default_timeout: float = 3.0) -> None:
+            del default_timeout
+
+        def call(self, _method, _params):
+            return {"result": {"value": {"before": 0, "after": 80}}}
+
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._cdp.connect",
+        lambda ws, timeout=3.0: opened.append(ws) or _Transport(),
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers._cdp.CDPSession", _Session)
+    assert _cdp_scroll_pixels(10, 20, dx=0, dy=80) is True
+    assert opened == ["ws://long"]
+
+
+def test_lines_scroll_uses_cdp_when_the_document_is_not_a_list(xtest_recorder, monkeypatch) -> None:
+    """A Chrome document ignores wheel notches. A DevTools scroll is the step."""
+    events, _display = xtest_recorder
+    seen: dict[str, tuple] = {}
+
+    def cdp(x, y, *, dx, dy):
+        seen["at"] = (x, y, dx, dy)
+        return True
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._cdp_scroll_pixels", cdp)
+    LinuxDriver().scroll(Point(0, 30, 40), dy=5, unit=ScrollUnit.LINES)
+    assert events == []
+    assert seen["at"] == (30, 40, 0, 200)
+
+
+def test_chromium_document_scroll_waits_until_shown_names_change(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """The wheel returns before Chrome's tree does. The next snapshot must see new rows."""
+    events, _display = xtest_recorder
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    seen = {"n": 0}
+
+    def names(_handle):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return ("cualong", "TICKET-0000")
+        return ("cualong", "TICKET-0016")
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    assert seen["n"] >= 2
+    assert any(event[0] == _X_BPRESS and event[1] == 5 for event in events)
+
+
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:
     events, _display = xtest_recorder
 
@@ -1232,6 +1336,9 @@ def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -
         raise AssertionError("a coordinate line scroll has no list to capture")
 
     monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", grab)
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
     LinuxDriver().scroll(Point(0, 30, 40), dx=-1, dy=2, unit=ScrollUnit.LINES)
     assert events[0] == (_X_MOTION, 0, 30, 40)
     assert events[1:5] == [(_X_BPRESS, 5, 0, 0), (_X_BRELEASE, 5, 0, 0)] * 2
@@ -1250,12 +1357,79 @@ def test_driver_pixel_scroll_does_not_send_wheel_notches(fake_atspi, xtest_recor
 def test_driver_pixel_scroll_without_a_bar_is_unsupported(fake_atspi, xtest_recorder, monkeypatch) -> None:
     events, _display = xtest_recorder
     monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Acc("text"))
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+
+    def no_grab(_box):
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED, "no grab", detail={"reason": "page_unseen"},
+        )
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", no_grab)
     with pytest.raises(ComputerUseError) as error:
         LinuxDriver().scroll(_body(), dy=3, unit=ScrollUnit.PIXELS)
     assert error.value.code is ErrorCode.UNSUPPORTED
     assert "wheel notches were not sent" in error.value.message
     assert error.value.detail["unit"] == "pixels"
     assert events == []
+
+
+def test_driver_pixel_scroll_without_a_bar_wheels_when_pixels_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """No AT-SPI bar. A wheel at the element box is kept when the grab changes."""
+    events, _display = xtest_recorder
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Acc("text"))
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._grab_region", lambda _box: object())
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._list_pixels_moved", lambda _before, _box: (12.0, 1),
+    )
+    LinuxDriver().scroll(_body(), dy=160, unit=ScrollUnit.PIXELS)
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    assert len(presses) == 2  # 160px -> two notches at 80px each
+
+
+def test_negative_child_count_does_not_revive_a_fake() -> None:
+    """-1 is a D-Bus failure. A test double has no GObject to reconnect."""
+
+    class _Acc:
+        def get_child_count(self):
+            return -1
+
+    assert _atspi._revive_application(_Acc()) is False
+    assert _atspi._child_count(_Acc()) == -1
+
+
+def test_table_body_cells_are_added_when_children_are_only_headers() -> None:
+    """A file chooser's table exposes column headers. Body cells come from the Table iface."""
+
+    class _Node:
+        def __init__(self, role, n_rows=0, cells=None):
+            self.role = role
+            self.n_rows = n_rows
+            self.cells = cells or {}
+
+        def get_role_name(self):
+            return self.role
+
+        def get_n_rows(self):
+            return self.n_rows
+
+        def get_accessible_at(self, row, col):
+            return self.cells.get((row, col))
+
+    header = _Node("column header")
+    cell = _Node("table cell")
+    table = _Node("table", n_rows=1, cells={(0, 0): cell})
+    assert _atspi._with_table_body(table, [header]) == [header, cell]
+    assert _atspi._with_table_body(table, [cell]) == [cell]
+    assert _atspi._with_table_body(table, []) == [cell]
+    empty = _Node("table", n_rows=0)
+    assert _atspi._with_table_body(empty, [header]) == [header]
 
 
 def test_pixel_scroll_on_wayland_uses_the_bar_and_lines_stay_unsupported(

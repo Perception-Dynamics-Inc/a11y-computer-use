@@ -444,7 +444,9 @@ def test_disabled_refs_refuse_input_verbs_before_any_call(tmp_path, monkeypatch)
     assert driver.calls == []
 
     assert rt.click("e3").startswith("clicked")
-    assert driver.calls == ["press:e3"]
+    # An on-screen Linux button is a pointer click. DoAction would run a
+    # Gtk.Dialog.run() handler inside dbus_connection_dispatch.
+    assert driver.calls == ["click"]
 
 
 def test_type_reports_the_count_the_driver_inserted(tmp_path, monkeypatch) -> None:
