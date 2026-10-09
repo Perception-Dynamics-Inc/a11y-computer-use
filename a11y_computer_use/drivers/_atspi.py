@@ -1959,10 +1959,26 @@ def _qt_text_count_matches(acc, text: str) -> bool:
     return _character_count(acc) == len(text)
 
 
+def _content_is_blank(acc) -> bool:
+    """True when the field a person reads has no text.
+
+    An empty Chrome contenteditable reads back as a newline (the ``<br>``),
+    a space, a NBSP, or NULL from ``get_text(0, -1)``. U+FFFC is expanded
+    first, so a parent whose children still hold words is not blank.
+    """
+    raw = _full_text(acc)
+    if isinstance(raw, str) and _OBJECT_REPLACEMENT in raw:
+        shown = _readable_text(acc)
+        if shown is not None:
+            return _text_is_blank(shown)
+    return _text_is_blank(raw)
+
+
 def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
-        if _texts_match(shown, text) and _qt_text_count_matches(acc, text):
+        blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
+        if (blank or _texts_match(shown, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -3037,6 +3053,67 @@ def row_is_selected(acc) -> bool:
     return _row_settled(target)
 
 
+# Chrome's contenteditable ignores EditableText and a short ctrl+a/BackSpace.
+# A click is not required: focus plus select-all, BackSpace, and Delete, then
+# a poll, is what empties it. Three tries cover a renderer that publishes
+# the empty value late. A field that still has words is a failure.
+_CONTENT_CLEAR_TRIES = 3
+_CONTENT_CLEAR_POLLS = 12
+
+
+def _chromium_contenteditable(acc) -> bool:
+    """True for a Chrome contenteditable, not an input, a textarea, or GTK.
+
+    The live node is an ``entry`` whose tag is ``div`` and whose xml-roles
+    is ``textbox``. A number input stays on the number-clear path. A GTK
+    entry is not a Chromium app.
+    """
+    if not _chromium_app(acc) or _number_input(acc):
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    if tag in {"input", "textarea", "select"}:
+        return False
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    role = _role_name(acc)
+    if "textbox" in xml and tag not in {"input", "textarea"}:
+        return True
+    return tag in {"div", "span", "p", "pre"} and role in {
+        "entry", "text", "section", "paragraph", "panel", "document text",
+    }
+
+
+def _clear_contenteditable(acc) -> bool:
+    """Empty a Chrome contenteditable. True only when the read is blank.
+
+    Focus, select all, BackSpace, then Delete. The read is polled. A newline,
+    a space, or NULL counts as empty. Words that are still there are a
+    failure: the previous text is put back when this call changed it, and
+    the caller reports ``text_mismatch``. An input, a textarea, and a GTK
+    field do not use this path.
+    """
+    if _content_is_blank(acc):
+        return True
+    if not _x11_keys_available():
+        return False
+    from a11y_computer_use.drivers import _linux_input
+
+    original = _full_text(acc)
+    for _attempt in range(_CONTENT_CLEAR_TRIES):
+        grab_focus(acc)
+        _linux_input.press_chord("ctrl+a")
+        _linux_input.press_chord("backspace")
+        _linux_input.press_chord("delete")
+        for poll in range(_CONTENT_CLEAR_POLLS):
+            if _content_is_blank(acc):
+                return True
+            if poll + 1 < _CONTENT_CLEAR_POLLS:
+                time.sleep(0.05)
+    if not _content_is_blank(acc):
+        _restore_text(acc, original)
+    return False
+
+
 def set_text(acc, text: str) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -3063,8 +3140,13 @@ def set_text(acc, text: str) -> bool:
     be verified, the text from before the call is put back, so a
     contenteditable is not left empty. A Chromium field that still reads a
     value (an empty number input reads 0) is not focused in order to restore
-    it.
+    it. An empty string on a Chrome contenteditable is focus, select-all,
+    BackSpace, and Delete, then a poll. A newline left by ``<br>`` is empty.
+    Words that remain are ``text_mismatch``, and the previous text stays.
+    An input, a textarea, and a GTK field do not use that clear.
     """
+    if text == "" and _chromium_contenteditable(acc):
+        return _clear_contenteditable(acc)
     eti = _editable_iface(acc)
     if eti is None:
         return _replace_with_keys(acc, text)

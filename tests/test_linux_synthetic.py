@@ -1737,6 +1737,67 @@ def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_a
     assert sent == []
 
 
+def _chrome_contenteditable(field):
+    """A Chrome contenteditable shape: div, role=textbox, no input tag."""
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div", "xml-roles": "textbox"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "entry"
+    return field
+
+
+def test_chrome_contenteditable_clear_accepts_a_newline(fake_atspi, monkeypatch) -> None:
+    """Fake Chrome contenteditable. BackSpace leaves a newline, which is empty.
+
+    Not a browser. ``set_value ""`` used to restore "Hello world" because the
+    read-back was ``\\n`` rather than ``""``.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Hello world"))
+    field.get_editable_text_iface = None
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "") is True
+    assert field.text == "\n"
+    assert "Hello world" not in field.text
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+
+def test_chrome_contenteditable_clear_that_does_not_stick_is_not_success(
+    fake_atspi, monkeypatch
+) -> None:
+    """Fake Chrome contenteditable. Keys that do nothing leave the text, and fail.
+
+    Not a browser. The result is not a successful clear.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Hello world"))
+    field.get_editable_text_iface = None
+    monkeypatch.setattr(_linux_input, "press_chord", lambda _chord: None)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "") is False
+    assert field.text == "Hello world"
+
+
+def test_gtk_set_text_empty_still_replaces(fake_atspi, monkeypatch) -> None:
+    """Fake GTK entry. ``set_text_contents`` clears it. No key chords."""
+    field = _ReplacingField("kept")
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", sent.append)
+    assert _atspi.set_text(field, "") is True
+    assert field.text == ""
+    assert sent == []
+
+
 def test_contenteditable_clear_that_leaves_a_newline_still_types(fake_atspi, monkeypatch) -> None:
     """Fake transport. Chrome's empty contenteditable reads back as a newline.
 

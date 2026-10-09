@@ -1306,6 +1306,42 @@ def _para_page_edits_contenteditable(driver, runtime, app: str) -> None:
         f"{el.title} {el.value or ''}" for el in shot.elements if el.title in {"Editor B", "Editor A"} or "ZZ" in f"{el.title} {el.value or ''}"
     )
     assert "ZZ" in blob, blob
+    shot = driver.snapshot(Scope.WINDOW, app)
+    editor = next(el for el in shot.elements if el.title == "Editor A" and el.editable)
+    runtime._current = shot
+    filled = runtime.set_value(editor.ref, "Ayşe café ₸")
+    assert filled.startswith("set "), filled
+    deadline = time.monotonic() + 4
+    shown = None
+    last = shot
+    while time.monotonic() < deadline:
+        last = driver.snapshot(Scope.WINDOW, app)
+        editor = next(el for el in last.elements if el.title == "Editor A")
+        shown = "" if editor.value is None else str(editor.value).replace("\u00a0", " ").strip()
+        if shown == "Ayşe café ₸":
+            break
+        time.sleep(0.25)
+    assert shown == "Ayşe café ₸", f"{app} editor read {shown!r}\n{observe.render_text(last)}"
+    runtime._current = last
+    editor = next(el for el in last.elements if el.title == "Editor A" and el.editable)
+    cleared = runtime.set_value(editor.ref, "")
+    assert cleared.startswith("set "), cleared
+    # An empty contenteditable can lose its box, and a zero-size field is not
+    # listed. The words have to be gone either way. When the field is still
+    # listed, its value is empty.
+    deadline = time.monotonic() + 4
+    last = shot
+    while time.monotonic() < deadline:
+        last = driver.snapshot(Scope.WINDOW, app)
+        rendered = observe.render_text(last)
+        editor = next((el for el in last.elements if el.title == "Editor A"), None)
+        shown = None if editor is None else (
+            "" if editor.value is None else str(editor.value).replace("\u00a0", " ").strip()
+        )
+        if "Ayşe café ₸" not in rendered and shown in (None, ""):
+            return
+        time.sleep(0.25)
+    raise AssertionError(observe.render_text(last))
 
 
 def _browser_ids(driver, *needles: str) -> tuple[str, ...]:
