@@ -845,6 +845,18 @@ def test_zero_section_or_div_with_click_and_show_context_menu_keeps_the_form(rol
     _assert_login_form(snap)
 
 
+def test_find_bar_snapshot_is_remembered_and_the_address_bar_is_not() -> None:
+    """The find field latches the Chrome pid. The address bar does not."""
+    find = _NS(title="Find", role="AXTextField", value="")
+    close = _NS(title="Close find bar", role="AXButton", value=None)
+    address = _NS(title="Address and search bar", role="AXTextField", value="https://example.com/")
+    button = _NS(title="Find", role="AXButton", value=None)
+    assert _atspi.snapshot_shows_browser_bar([find])
+    assert _atspi.snapshot_shows_browser_bar([close])
+    assert not _atspi.snapshot_shows_browser_bar([address, button])
+    _atspi._BROWSER_BAR_PIDS.clear()
+
+
 def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
     """Find-in-page parks the content root above the viewport.
 

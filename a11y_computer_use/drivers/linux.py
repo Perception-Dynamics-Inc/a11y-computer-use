@@ -626,19 +626,26 @@ class LinuxDriver:
             )
 
         def _do() -> Snapshot:
-            pid = _atspi.pid_of(root)
+            # A find bar or omnibox popup fills libatspi's child cache. Closing
+            # the bar and Reload leave that cache in place, so the next walk
+            # would keep the bar or an empty document. Drop it and use the
+            # frame that holds the selected tab.
+            walked = _atspi.chromium_snapshot_root(root)
+            pid = _atspi.pid_of(walked)
             accessor = _atspi.ATSPIAccessor()
             accessor.libreoffice = (
                 _atspi.libreoffice_app(resolved) or _atspi.libreoffice_app(app or "")
             )
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
-            accessor.refresh_visible(root)
+            accessor.refresh_visible(walked)
             accessor._table_seek = self._table_seek
-            return observe.build_snapshot(
-                root, accessor, scope=scope, app=resolved, pid=pid,
+            snap = observe.build_snapshot(
+                walked, accessor, scope=scope, app=resolved, pid=pid,
                 geometry=_atspi.primary_geometry(),
             )
+            _atspi.note_browser_bar(walked, snap.elements)
+            return snap
 
         return self._run(_do)
 

@@ -5389,12 +5389,12 @@ def test_linux_chrome_omnibox_and_find_bar_type_matches(tmp_path) -> None:
 
 
 def test_linux_chrome_page_stays_after_find_bar_closes(tmp_path) -> None:
-    """Live Chrome: the page is still in the snapshot after the find bar closes.
+    """Live Chrome: the page survives the find bar, including after Reload.
 
-    The content root is a viewport-sized scroller. Ctrl+F, a query for the
-    text below the fold, and Close find bar scroll that root above the
-    screen. The snapshot after close still lists the match. Skips when no
-    Chrome binary is on PATH.
+    Ctrl+F, a query below the fold, and Close find bar used to leave an
+    empty document, and Reload kept that cached tree. The snapshot after
+    close lists the match, and the snapshot after Reload still lists the
+    page. Skips when no Chrome binary is on PATH.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -5463,6 +5463,21 @@ def test_linux_chrome_page_stays_after_find_bar_closes(tmp_path) -> None:
             raise AssertionError(
                 "page content missing after the find bar closed\n"
                 + _chrome_text(last)[:1200]
+            )
+
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        reload = next((el for el in shot.elements if el.title == "Reload"), None)
+        assert reload is not None, _chrome_text(shot)[:800]
+        assert driver.press_element(reload) is True
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if page_has("TopMarkerAlmaty") or page_has("ElevationMarkerUnique"):
+                break
+            time.sleep(0.25)
+        else:
+            last = driver.snapshot(Scope.WINDOW, "chrome")
+            raise AssertionError(
+                "page content missing after Reload\n" + _chrome_text(last)[:1200]
             )
     finally:
         _stop_chrome(proc)
