@@ -5670,6 +5670,31 @@ def test_sheet_cell_is_not_a_numeric_control_and_hides_value_zero(fake_atspi) ->
         fake_atspi.Value.get_minimum_value = staticmethod(original)
 
 
+def test_writer_cell_replace_writes_a_paragraph_set_text_refuses(fake_atspi) -> None:
+    """A Firefox paragraph stays blocked. A Writer cell paragraph is replaced.
+
+    set_text refuses the role so selecting a page paragraph does not select
+    the page. The cell write forces that same call.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    assert _atspi.set_text(paragraph, "nope") is False
+    assert paragraph.text == "Cell B2"
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+
+
 def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
     """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
 
@@ -5685,7 +5710,8 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     assert _atspi.writer_text_cell(cell) is True
     assert _atspi.writer_cell_text(cell) == "Cell B2"
 
-    def replace(acc, text):
+    def replace(acc, text, force=False):
+        assert force is True
         acc.text = text
         return True
 
@@ -5697,7 +5723,8 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     paragraph.text = "Cell B2"
     calls = {"n": 0}
 
-    def miss(acc, text):
+    def miss(acc, text, force=False):
+        assert force is True
         calls["n"] += 1
         if calls["n"] == 1:
             acc.text = "NEWB2-1\nCell B2"
