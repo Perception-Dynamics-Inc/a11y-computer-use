@@ -326,14 +326,14 @@ def test_click_that_kills_the_process_is_partial(tmp_path) -> None:
     driver.name = "linux"
     driver.pid = proc.pid
 
-    def press(element: Element) -> bool:
-        driver.calls.append(("press", element.ref))
+    def click(target, **_kwargs) -> None:
+        # An on-screen Linux button is a pointer click, not DoAction.
+        driver.calls.append(("click", getattr(target, "ref", None)))
         driver.dead = True
         proc.kill()
         proc.wait(timeout=2)
-        return True
 
-    driver.press_element = press  # type: ignore[method-assign]
+    driver.click = click  # type: ignore[method-assign]
     try:
         runtime = _runtime(tmp_path, driver)
         runtime._PROCESS_SETTLE_S = 0.5

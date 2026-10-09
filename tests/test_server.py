@@ -438,7 +438,7 @@ def test_linux_onscreen_button_click_uses_the_pointer() -> None:
     )
     hidden = dataclasses.replace(button, ref="e9", bounds=Bounds(0, -2147483648, -2147483648, 1, 1))
     field = dataclasses.replace(button, ref="e3", role="AXTextField", editable=True)
-    snap = type("S", (), {"app": "cuafileapp"})()
+    snap = type("S", (), {"app": "cuafileapp", "pid": 0, "elements": ()})()
     calls = {"press": [], "click": []}
 
     class _D:
