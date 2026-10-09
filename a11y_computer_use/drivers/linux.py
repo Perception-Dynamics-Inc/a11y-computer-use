@@ -454,6 +454,12 @@ def _not_editable(element: Element) -> ComputerUseError:
     )
 
 
+def _named_browser(app_id: str | None) -> bool:
+    """True when ``app_id`` is Chrome or Firefox, which own an address bar."""
+    name = (app_id or "").lower()
+    return "chrome" in name or "chromium" in name or "firefox" in name
+
+
 class LinuxDriver:
     """The `Driver` protocol, backed by AT-SPI2 / XTEST / X11."""
 
@@ -1412,13 +1418,16 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         app_id, _pid = self.frontmost_app()
-        location = self._location_entry(app_id) if app_id else None
+        # Only a browser has an address bar. Asking LibreOffice for one walks
+        # Collection and drops the cell handles a later set_value still holds.
+        browser = _named_browser(app_id)
+        location = self._location_entry(app_id) if app_id and browser else None
         # ctrl+l can leave a11y focus on the omnibox popup. The keys still
         # land in the address bar. The popup's text is not that URL.
         bar_before = None
         if location is not None:
             before = self._run(lambda: _atspi._readable_text(location))
-        elif app_id and self._run(lambda: _atspi.focus_in_browser_chrome(app_id)):
+        elif browser and self._run(lambda: _atspi.focus_in_browser_chrome(app_id)):
             bar_before = self._run(lambda: _atspi.address_bar_text(app_id))
             before = bar_before
         else:
