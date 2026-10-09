@@ -2024,3 +2024,323 @@ def test_linux_type_and_key_with_app_land_in_that_app(tmp_path) -> None:
     finally:
         _stop(target_proc)
         _stop(other_proc)
+
+_QT_APP = "cuaqtapp"
+
+# The subprocess tries PySide6, then PyQt6, then PyQt5. Ubuntu 24.04's Qt 5
+# build has no AT-SPI adaptor, so the Linux CI job installs python3-pyqt6.
+# The state file is the widget's own text: AT-SPI GetText is a D-Bus string
+# and stops at NUL, which is how a bad insert used to look successful.
+_QT_FIXTURE = textwrap.dedent(
+    r"""
+    import os
+    import sys
+
+    state_path = sys.argv[1]
+    os.environ["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+
+    def load():
+        errors = []
+        bindings = ("PySide6", "PyQt6", "PyQt5")
+        for name in bindings:
+            try:
+                module = __import__(name + ".QtWidgets", fromlist=["QtWidgets"])
+                core = __import__(name + ".QtCore", fromlist=["QtCore"])
+                return name, core.Qt, core.QTimer, module
+            except Exception as exc:
+                errors.append("%s: %s" % (name, exc))
+        sys.stderr.write("no Qt binding\n" + "\n".join(errors) + "\n")
+        raise SystemExit(2)
+
+    binding, Qt, QTimer, widgets = load()
+    QApplication = widgets.QApplication
+    QWidget = widgets.QWidget
+    QVBoxLayout = widgets.QVBoxLayout
+    QLabel = widgets.QLabel
+    QLineEdit = widgets.QLineEdit
+    QComboBox = widgets.QComboBox
+    QSpinBox = widgets.QSpinBox
+    QSlider = widgets.QSlider
+    QProgressBar = widgets.QProgressBar
+    QCheckBox = widgets.QCheckBox
+    QRadioButton = widgets.QRadioButton
+    QListWidget = widgets.QListWidget
+
+    def horizontal():
+        orientation = getattr(Qt, "Horizontal", None)
+        if orientation is not None:
+            return orientation
+        return Qt.Orientation.Horizontal
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("cuaqtapp")
+    try:
+        app.setDesktopFileName("cuaqtapp")
+    except Exception:
+        pass
+
+    win = QWidget()
+    win.setWindowTitle("cuaqtapp")
+    win.setAccessibleName("cuaqtapp")
+    layout = QVBoxLayout(win)
+
+    name = QLabel("Name")
+    edit = QLineEdit()
+    edit.setAccessibleName("Qt name")
+    layout.addWidget(name)
+    layout.addWidget(edit)
+
+    color_label = QLabel("Qt color")
+    combo = QComboBox()
+    combo.addItems(["Red", "Green", "Blue"])
+    combo.setAccessibleName("Qt color")
+    color_label.setBuddy(combo)
+    layout.addWidget(color_label)
+    layout.addWidget(combo)
+
+    spin = QSpinBox()
+    spin.setRange(0, 10)
+    spin.setValue(3)
+    spin.setAccessibleName("Quantity")
+    layout.addWidget(spin)
+
+    slider = QSlider(horizontal())
+    slider.setRange(0, 100)
+    slider.setValue(40)
+    slider.setAccessibleName("Volume")
+    layout.addWidget(slider)
+
+    progress = QProgressBar()
+    progress.setRange(0, 100)
+    progress.setValue(25)
+    progress.setAccessibleName("Progress")
+    layout.addWidget(progress)
+
+    check = QCheckBox("Notify")
+    check.setAccessibleName("Notify")
+    layout.addWidget(check)
+
+    radio = QRadioButton("Choice")
+    radio.setAccessibleName("Choice")
+    layout.addWidget(radio)
+
+    rows = QListWidget()
+    rows.setAccessibleName("Rows")
+    rows.addItem("Row A")
+    layout.addWidget(rows)
+
+    def dump():
+        payload = "\n".join([repr(edit.text()), combo.currentText(), str(spin.value()), binding]) + "\n"
+        temporary = state_path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(temporary, state_path)
+
+    edit.textChanged.connect(lambda *_args: dump())
+    combo.currentTextChanged.connect(lambda *_args: dump())
+    spin.valueChanged.connect(lambda *_args: dump())
+    timer = QTimer()
+    timer.timeout.connect(dump)
+    timer.start(50)
+    dump()
+
+    win.resize(480, 720)
+    win.move(80, 40)
+    win.show()
+    win.raise_()
+    edit.setFocus()
+    run = getattr(app, "exec", None)
+    if run is None:
+        run = app.exec_
+    sys.exit(run())
+    """
+)
+
+
+def _qt_log(path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-2000:]
+    except OSError:
+        return ""
+
+
+def _read_qt_state(path):
+    import ast
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if len(lines) < 3:
+        return None
+    return ast.literal_eval(lines[0]), lines[1], lines[2]
+
+
+def _wait_qt_line(path, expected: str, timeout_s: float = 4.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        last = _read_qt_state(path)
+        if last is not None and last[0] == expected:
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"line edit is {last!r}, expected {expected!r}")
+
+
+def test_linux_qt_line_edit_combo_and_values(tmp_path) -> None:
+    """Live Qt via AT-SPI: non-ASCII insert, combo name and selection, value display.
+
+    The line edit's Python text is read from the fixture's state file. That
+    string includes a NUL when the insert length was a byte count; the AT-SPI
+    text does not. The snapshot value and that file have to be the same text.
+    """
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    state = tmp_path / "qt_state.txt"
+    script = tmp_path / "cuaqtapp.py"
+    script.write_text(_QT_FIXTURE)
+    log_path = tmp_path / "qt.log"
+    log = open(log_path, "w", encoding="utf-8")
+    env = os.environ.copy()
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    proc = subprocess.Popen(
+        [sys.executable, str(script), str(state)],
+        env=env, stdout=log, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError("Qt fixture exited\n" + _qt_log(log_path))
+            try:
+                snap = driver.snapshot(Scope.WINDOW, _QT_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                titles = {el.title for el in snap.elements}
+                if {"Qt name", "Quantity", "Volume", "Row A"} <= titles and (
+                    "Qt color" in titles or "Red" in titles
+                ):
+                    break
+            time.sleep(0.4)
+        else:
+            shown = [] if snap is None else [(el.role, el.title, el.value) for el in snap.elements]
+            raise AssertionError(f"Qt window did not expose its controls: {shown}\n{_qt_log(log_path)}")
+
+        def current():
+            shot = driver.snapshot(Scope.WINDOW, _QT_APP)
+            runtime._current = shot
+            return shot
+
+        def find(shot, title, role=None):
+            matches = [
+                el for el in shot.elements
+                if el.title == title and (role is None or el.role == role)
+            ]
+            assert matches, (
+                f"no {title!r} role={role}; "
+                f"{[(el.role, el.title, el.value) for el in shot.elements]}"
+            )
+            return matches[0]
+
+        runtime = _runtime_for(tmp_path, driver, _QT_APP)
+        shot = current()
+        for element in shot.elements:
+            if element.value is None:
+                continue
+            text = str(element.value).lower()
+            assert "e-" not in text and "e+" not in text, (element.role, element.title, element.value)
+
+        assert find(shot, "Name").value is None
+        assert find(shot, "Qt name").value is None
+        assert find(shot, "Notify").value is None
+        assert find(shot, "Choice").value is None
+        assert find(shot, "Row A").value is None
+        assert abs(float(find(shot, "Volume").value) - 40.0) < 0.01
+        assert abs(float(find(shot, "Progress").value) - 25.0) < 0.01
+        assert float(find(shot, "Quantity").value) == 3.0
+        combo = find(shot, "Qt color", "AXComboBox")
+        assert combo.value == "Red"
+        assert combo.expanded is not True
+
+        with pytest.raises(ValueError) as exc:
+            runtime.set_value(combo.ref, "Mars")
+        assert "Red" in str(exc.value) and "Blue" in str(exc.value)
+        shot = current()
+        assert find(shot, "Qt color", "AXComboBox").value == "Red"
+        assert _read_qt_state(state)[1] == "Red"
+
+        combo = find(shot, "Qt color", "AXComboBox")
+        assert "set " in runtime.set_value(combo.ref, "Blue")
+        deadline = time.monotonic() + 4
+        current_item = ""
+        while time.monotonic() < deadline:
+            got = _read_qt_state(state)
+            current_item = "" if got is None else got[1]
+            if current_item == "Blue":
+                break
+            time.sleep(0.05)
+        assert current_item == "Blue", _read_qt_state(state)
+        shot = current()
+        combo = find(shot, "Qt color", "AXComboBox")
+        assert combo.value == "Blue"
+        assert combo.expanded is not True
+
+        def append_from_start(sample: str) -> None:
+            shot = current()
+            edit = find(shot, "Qt name")
+            assert "set " in runtime.set_value(edit.ref, "Start")
+            _wait_qt_line(state, "Start")
+            shot = current()
+            edit = find(shot, "Qt name")
+            runtime.click(edit.ref)
+            runtime.key("end")
+            front = driver.frontmost_app()[0]
+            focused = driver._run(lambda: _atspi.focused_editable(front)) if front else None
+            assert focused is not None, "the line edit is not the focused editable after key end"
+            typed = runtime.type_text(sample)
+            assert f"typed {len(sample)} characters" in typed, typed
+            _wait_qt_line(state, "Start" + sample)
+            shot = current()
+            assert find(shot, "Qt name").value == "Start" + sample
+
+        for sample in ("abc", "x y", "ünï", "日本"):
+            append_from_start(sample)
+
+        append_from_start("ünï")
+        shot = current()
+        edit = find(shot, "Qt name")
+        runtime.click(edit.ref)
+        runtime.key("end")
+        front = driver.frontmost_app()[0]
+        focused = driver._run(lambda: _atspi.focused_editable(front)) if front else None
+        assert focused is not None, "the line edit is not the focused editable before the trailing character"
+        typed = runtime.type_text("!")
+        assert "typed 1 characters" in typed, typed
+        _wait_qt_line(state, "Startünï!")
+        shot = current()
+        assert find(shot, "Qt name").value == "Startünï!"
+
+        quantity = find(shot, "Quantity")
+        assert "set " in runtime.set_value(quantity.ref, "7")
+        deadline = time.monotonic() + 4
+        held = ""
+        while time.monotonic() < deadline:
+            got = _read_qt_state(state)
+            held = "" if got is None else got[2]
+            if held in {"7", "7.0"}:
+                break
+            time.sleep(0.05)
+        assert held in {"7", "7.0"}, _read_qt_state(state)
+        shot = current()
+        assert float(find(shot, "Quantity").value) == 7.0
+    finally:
+        _stop(proc)
+        log.close()
