@@ -7,7 +7,7 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
-## [Unreleased]
+## [0.4.53] - 2026-10-09
 
 ### Fixed
 
