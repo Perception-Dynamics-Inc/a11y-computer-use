@@ -25,7 +25,13 @@ from a11y_computer_use.agent.actions import (
     validate_action,
 )
 from a11y_computer_use.agent.events import Event
-from a11y_computer_use.agent.models.base import Message, ModelTurn, ToolCall, make_model
+from a11y_computer_use.agent.models.base import (
+    Message,
+    ModelTurn,
+    ToolCall,
+    assistant_message,
+    make_model,
+)
 from a11y_computer_use.agent.result import RunResult, StepRecord
 from a11y_computer_use.agent.trace import (
     Trace,
@@ -213,7 +219,7 @@ class Agent:
                 self._messages, tool_schemas(), timeout=max(0.0, remaining),
             )
             yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
-            self._messages.append(Message(role="assistant", content=turn.text or ""))
+            self._messages.append(assistant_message(turn))
             if not turn.calls:
                 self._nudges += 1
                 if self._nudges >= 2:

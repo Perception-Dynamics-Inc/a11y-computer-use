@@ -166,25 +166,15 @@ Card-number-shaped strings and secret argument names are stored as
 
 `Model.complete(messages, tools, timeout=...)` returns a `ModelTurn` of
 `ToolCall`s plus optional text. `tools` is `agent.actions.tool_schemas()`.
+After each turn the loop appends `assistant_message(turn)`, so the next
+request replays the tool calls the model just made.
 
-`make_model` accepts `openai:`, `anthropic:`, `gemini:`, `xai:`, `ollama:`,
-`command:`, and `scripted:` specs. In this tree only `scripted:` is
-implemented. The other specs raise `LookupError`. The models change supplies
-the HTTP adapters and `CommandModel`, and replaces
-`a11y_computer_use/agent/models/base.py` and `scripted.py`. Keys those
-adapters will read, and which this process does not read today:
-
-| Spec | Environment |
-|---|---|
-| `openai:` | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` |
-| `xai:` | `XAI_API_KEY` |
-| `ollama:` | `OPENAI_BASE_URL` (default `http://127.0.0.1:11434/v1`) |
-| `anthropic:` | `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL` |
-| `gemini:` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
-| `command:` | no key; a subprocess |
-
-No API keys are configured for CI or for the tests in this repository.
-Hermetic tests construct `ScriptedModel` directly.
+`make_model` lives in `a11y_computer_use.agent.models`. Specs, endpoints, and
+environment variables are in `docs/agent-models.md`. A bad spec or a missing
+key raises `ModelError`. HTTP clients are an optional extra
+(`pip install 'a11y-computer-use[agent]'`). This package's tests do not call
+them: they construct `ScriptedModel` directly. No API key is stored in the
+repo.
 
 ## Forward compatibility
 
@@ -219,9 +209,10 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 
 Not in this change:
 
-- No live GTK or Chrome run. That end-to-end test is a separate change.
-- No call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command provider.
-  `make_model("openai:...")` raises `LookupError` here.
+- No live GTK or Chrome agent run. That end-to-end test is a separate change.
+- No live call to OpenAI, Anthropic, Gemini, xAI, Ollama, or a command
+  provider. Those clients are in `a11y_computer_use.agent.models` and are
+  tested with recorded HTTP fixtures, not from this loop.
 - No OCR, no element-crop vision, no opaque-region markers.
 - No shell or Python execution.
 
