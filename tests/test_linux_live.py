@@ -4050,7 +4050,6 @@ def test_linux_snapshot_ignores_libreoffice_on_another_display(tmp_path) -> None
 
     driver = LinuxDriver()
     _require_bus(driver)
-<<<<<<< HEAD
     binary = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True).stdout.strip()
     assert binary, "libreoffice-calc is not installed"
     assert subprocess.run(["bash", "-lc", "command -v Xvfb"], capture_output=True, text=True).stdout.strip()
