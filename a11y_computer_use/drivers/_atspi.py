@@ -2459,6 +2459,109 @@ def do_press(acc) -> bool:
     return False
 
 
+# Chrome's doAction("click") on a canvas or image synthesizes a DOM click at
+# the element's top-left. offsetX/offsetY are then 0. A button, link, or
+# checkbox keeps that action. These roles need a pointer click at the center.
+_COORDINATE_CLICK_ROLES = frozenset({"image", "icon", "canvas", "drawing area"})
+_CANVAS_XML_ROLES = frozenset({"img", "image", "graphics-document", "graphics-symbol"})
+
+
+def coordinate_click_target(acc) -> bool:
+    """A Chromium canvas or image. Its action click has no pointer position."""
+    if acc is None or not _chromium_app(acc):
+        return False
+    if _role_name(acc) in _COORDINATE_CLICK_ROLES:
+        return True
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    if tag == "canvas":
+        return True
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    return bool(xml & _CANVAS_XML_ROLES)
+
+
+def atspi_screen_box(acc) -> tuple[float, float, float, float] | None:
+    """SCREEN ``(x, y, width, height)``, including a zero width or height.
+
+    None when the node has no component, or the box is GTK's negative
+    sentinel. A zero side is kept so the caller can replace the size from
+    the DOM and still use a real origin.
+    """
+    position, size = _extents(acc, keep_zero=True)
+    if position is None or size is None:
+        return None
+    x, y = float(position[0]), float(position[1])
+    width, height = float(size[0]), float(size[1])
+    if x < 0 and y < 0 and width < 0 and height < 0:
+        return None
+    return (x, y, width, height)
+
+
+def opaque_click_target(acc) -> bool:
+    """A canvas, or an image with no name.
+
+    The accessibility tree does not contain the pixels, so a focus or
+    state change is not evidence the click landed inside the drawing.
+    A named image that is not a canvas can still change the page, and
+    that change remains evidence.
+    """
+    if acc is None:
+        return False
+    role = _role_name(acc)
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if role in {"canvas", "drawing area"} or tag == "canvas" or xml & {"graphics-document", "graphics-symbol"}:
+        return True
+    if role in {"image", "icon"} or bool(xml & {"img", "image"}):
+        name = str(_call_first(acc, ("get_name",), default="") or "").strip()
+        return not name
+    return False
+
+
+def opaque_click_verdict(acc) -> tuple[str, str] | None:
+    """``(unverifiable, evidence)`` for a canvas or unnamed image. None otherwise.
+
+    The click may already have been sent. This does not claim it missed.
+    Accessibility cannot see the pixels, so the result is not confirmed
+    from the tree. The evidence tells the caller to check a crop or a
+    screenshot.
+    """
+    if not opaque_click_target(acc):
+        return None
+    return (
+        "unverifiable",
+        "accessibility cannot see inside this canvas or unnamed image, so the click is not confirmed; "
+        "verify with crop or a screenshot",
+    )
+
+
+def coordinate_click_info(acc) -> dict | None:
+    """Identity and AT-SPI box for a canvas or image click, or None.
+
+    The box may have a zero side. ``element_id``, ``label``, and ``tag`` are
+    plain strings so a DOM lookup does not touch AT-SPI again.
+    """
+    if not coordinate_click_target(acc):
+        return None
+    attrs = _get_attributes(acc)
+    return {
+        "box": atspi_screen_box(acc),
+        "pid": pid_of(acc),
+        "element_id": str(attrs.get("id") or attrs.get("html-id") or "").strip(),
+        "label": str(_call_first(acc, ("get_name",), default="") or "").strip(),
+        "tag": str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower(),
+    }
+
+
 def grab_focus(acc) -> bool:
     """Give ``acc`` keyboard focus via AT-SPI (True on success) — no cursor move."""
     comp = _component(acc)

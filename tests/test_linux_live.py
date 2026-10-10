@@ -6104,3 +6104,113 @@ def test_linux_mcp_server_survives_calc_snapshots_in_a_fresh_home(tmp_path) -> N
     stderr = err_path.read_text(encoding="utf-8", errors="replace")
     assert "last reference on a connection was dropped" not in stderr, stderr
 
+
+def test_linux_chrome_canvas_ref_click_lands_on_the_center(tmp_path) -> None:
+    """Live Chrome. A ref click on a canvas is the center, not offset 0,0.
+
+    The page handler records offsetX/offsetY. The canvas is 600 by 400, so
+    the center is about (300, 200). Chrome's action click reports (0, 0).
+    """
+    import socket
+
+    from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome/Chromium is required for the canvas click test"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "canvas.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuacanvas</title>"
+        "<style>html,body{margin:0}canvas{display:block;width:600px;height:400px}</style>"
+        "<canvas id=board width=600 height=400 role=img aria-label='Drawing board'></canvas>"
+        "<script>document.getElementById('board').addEventListener('click', function (event) {"
+        "window.__click = {x: event.offsetX, y: event.offsetY};});</script>"
+    )
+    profile = tmp_path / "chrome-canvas-profile"
+    profile.mkdir()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            f"--remote-debugging-port={port}", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = []
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the canvas")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = [(el.role, el.title, el.clickable, el.bounds.width, el.bounds.height) for el in shot.elements]
+                canvas = next(
+                    (
+                        el for el in shot.elements
+                        if el.title == "Drawing board" and el.clickable
+                    ),
+                    None,
+                )
+                if canvas is not None:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, last
+        canvas = next(el for el in snap.elements if el.title == "Drawing board" and el.clickable)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        runtime._current = snap
+        driver.activate_app("chrome")
+        result = runtime.click(canvas.ref)
+        assert result.startswith("clicked "), result
+        assert "click_without_coordinates" not in result
+        assert result.outcome == "unverifiable", (result.outcome, result.evidence)
+        assert "crop" in result.evidence and "screenshot" in result.evidence
+
+        point = None
+        deadline = time.monotonic() + 8
+        read_error = ""
+        while time.monotonic() < deadline:
+            try:
+                pages = page_targets(f"http://127.0.0.1:{port}")
+                ws = next(
+                    (item.get("webSocketDebuggerUrl") for item in pages if item.get("webSocketDebuggerUrl")),
+                    None,
+                )
+                if not ws:
+                    time.sleep(0.2)
+                    continue
+                transport = connect(str(ws), timeout=3.0)
+                session = CDPSession(transport, default_timeout=3.0)
+                try:
+                    reply = session.call(
+                        "Runtime.evaluate",
+                        {"expression": "window.__click || null", "returnByValue": True},
+                    )
+                finally:
+                    transport.close()
+                value = (reply.get("result") or {}).get("value")
+                if isinstance(value, dict) and "x" in value and "y" in value:
+                    point = (float(value["x"]), float(value["y"]))
+                    break
+            except Exception as exc:
+                read_error = str(exc)
+            time.sleep(0.25)
+        assert point is not None, (read_error, result, canvas.bounds)
+        assert abs(point[0] - 300) <= 40 and abs(point[1] - 200) <= 40, (
+            point, canvas.bounds, result,
+        )
+    finally:
+        _stop_group(proc)
