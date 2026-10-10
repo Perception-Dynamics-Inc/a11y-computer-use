@@ -2409,19 +2409,24 @@ def _vision_fallback_note(
 
 
 def _fallback_ocr(png: bytes, bounds: object) -> str | None:
-    """Fenced OCR lines, or None when the reader is missing or fails.
+    """Fenced OCR lines, or None when no engine is installed.
 
-    ``a11y_computer_use.ocr.ocr`` is the interface from the optional OCR
-    extra. This branch does not require that function. A missing attribute,
-    a missing engine, or any other failure leaves the screenshot in place.
+    Calls ``a11y_computer_use.ocr.ocr``. That function already fences
+    ``text``. A missing engine raises ``ComputerUseError`` with
+    ``detail["reason"] == "missing_dependency"`` and leaves the screenshot
+    in place. A bad image does the same. The loop does not install the
+    ``[ocr]`` extra.
     """
-    reader = _ocr_reader()
-    if reader is None:
-        return None
+    from a11y_computer_use.ocr import ocr
+    from a11y_computer_use.schema import ComputerUseError
+
     payload: object = png if bounds is None else (png, bounds)
     try:
-        spans = reader(payload)
-    except Exception:  # noqa: BLE001 - a missing engine must not end the run
+        spans = ocr(payload)
+    except (ComputerUseError, ValueError, OSError):
+        # A missing engine is ComputerUseError. A screenshot that is not a
+        # PNG is ValueError or PIL's UnidentifiedImageError (OSError).
+        # Neither one ends the run.
         return None
     if not isinstance(spans, (list, tuple)):
         return None
@@ -2438,17 +2443,6 @@ def _fallback_ocr(png: bytes, bounds: object) -> str | None:
     if not lines:
         return None
     return "\n".join(lines)
-
-
-def _ocr_reader():
-    try:
-        from a11y_computer_use import ocr as ocr_mod
-    except ImportError:
-        return None
-    reader = getattr(ocr_mod, "ocr", None)
-    if not callable(reader):
-        return None
-    return reader
 
 
 def _ground_point(hit: object) -> tuple[int, int] | None:

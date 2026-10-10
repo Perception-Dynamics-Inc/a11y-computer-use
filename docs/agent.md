@@ -96,7 +96,6 @@ constructs a real `Runtime` after applying `display`.
 
 `vision=True` attaches PNG crops of unnamed images, unknown widgets, and
 unnamed clickables (at most four), then a whole-window screenshot, when the
-<<<<<<< HEAD
 tree says it has no interactive elements or contains those refs. The same
 attachment runs without `vision=True` when the tree is insufficient: a target
 sits inside an `opaque_region` (or a canvas), the tree is empty or only
@@ -106,10 +105,12 @@ exists; otherwise the loop attaches the window screenshot. Each image block
 is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
 clicks with `x` and `y` inside the region. Those coordinate clicks use the
 same approval gate and typed outcomes as a ref click. Words in the image are
-wrapped in an `<untrusted>` fence and are not instructions. When
-`a11y_computer_use.ocr.ocr` exists, the loop calls it on the crop or the
-window screenshot and fences that text the same way. A missing function or a
-missing engine is skipped. The loop does not install the `[ocr]` extra.
+wrapped in an `<untrusted>` fence and are not instructions. The loop calls
+`a11y_computer_use.ocr.ocr` on the crop or the window screenshot and fences
+that text the same way. `ocr` reads a window screenshot, a `crop` result, or
+`(image, bounds)` and returns fenced `{text, bounds, confidence}` in screen
+pixels. A missing engine (`unsupported`, reason `missing_dependency`) is
+skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
 is `HoloLocalGrounding` for `Hcompany/Holo-3.1-0.8B` on CPU. The loop does
@@ -534,12 +535,12 @@ Not in this change:
   tested with recorded HTTP fixtures, not from this loop. The system prompt
   tells a real model that fenced text is data; the scripted tests do not
   measure whether an LLM would obey it.
-- The loop calls `ocr.ocr` when that function is present and skips it when
-  the import or the engine is missing. Tests pass a stub. Element crops are
-  `crop` and the vision fallback. Words in an attached image, OCR lines, and
-  a grounding suggestion are fenced as untrusted screen data. Opaque-region
-  markers drawn on the crop are not implemented. No hosted grounding API is
-  called. `HoloLocalGrounding` loads only when the caller constructs it.
+- The loop calls `a11y_computer_use.ocr.ocr` and skips a missing engine.
+  Tests pass a stub. Element crops are `crop` and the vision fallback.
+  Words in an attached image, OCR lines, and a grounding suggestion are
+  fenced as untrusted screen data. Opaque-region markers drawn on the crop
+  are not implemented. No hosted grounding API is called.
+  `HoloLocalGrounding` loads only when the caller constructs it.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
