@@ -723,6 +723,52 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
             proc.kill()
 
 
+def test_linux_type_unknown_argument_types_nothing(tmp_path) -> None:
+    """MCP type with an undeclared ref sends no text."""
+    import asyncio
+
+    from mcp.shared.memory import create_connected_server_and_client_session as client_session
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_type_app(tmp_path)
+    try:
+        snap = _wait_named(driver)
+        assert snap is not None, "the GTK type window never exposed single, multi, and Save"
+        single = next(el for el in snap.elements if el.title == "single")
+        assert driver.set_value(driver.resolve_ref(snap, single.ref), "keep")
+        assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep"
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        store.set_tier(_TYPE_APP, safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != _TYPE_APP:
+            store.set_tier(front, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        mcp = server.build_server(runtime=runtime)
+
+        async def _call():
+            async with client_session(mcp) as client:
+                return await client.call_tool("type", {"text": "TYPED", "ref": "e1"})
+
+        result = asyncio.run(_call())
+        assert result.isError
+        text = result.content[0].text
+        assert "invalid_arguments: type:" in text
+        assert "unknown field 'ref'" in text
+        assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 _VALUE_APP = "cuavalueapp"
 
 _GTK_VALUE_APP = textwrap.dedent(

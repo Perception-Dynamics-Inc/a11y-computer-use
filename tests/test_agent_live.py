@@ -1605,7 +1605,7 @@ def test_agent_approve_names_a_gtk_pay_button(tmp_path, isolated_home) -> None:
             assert button is not None, text
             return ModelTurn(calls=[ToolCall(
                 name="click",
-                args={"ref": button.ref, "note": "4111111111111111"},
+                args={"ref": button.ref, "button": "4111111111111111"},
             )])
 
         result = _run_agent(

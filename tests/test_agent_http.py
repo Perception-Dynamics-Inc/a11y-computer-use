@@ -247,7 +247,7 @@ def test_payment_stops_unless_opted_out_and_approval_names_the_target(tmp_path: 
         title="Checkout - Google Chrome",
     )
     turns = [
-        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "button": "4111111111111111"})]),
         _done_turn(),
     ]
     store, runtime = _store(tmp_path, ScriptedModel(turns), elements=elements)
@@ -269,7 +269,7 @@ def test_payment_stops_unless_opted_out_and_approval_names_the_target(tmp_path: 
         httpd.shutdown()
 
     opted_turns = [
-        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "note": "4111111111111111"})]),
+        ModelTurn(calls=[ToolCall("click", {"ref": "e2", "button": "4111111111111111"})]),
         ModelTurn(calls=[ToolCall(
             "done",
             {"answer": "held", "conditions": [{"element": {"role": "AXButton", "name": "Pay now"}}]},

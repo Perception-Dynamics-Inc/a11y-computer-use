@@ -110,6 +110,7 @@ from a11y_computer_use.schema import (
     clip_region_to_display,
     point_outside_display,
     unknown_display_message,
+    unknown_fields_message,
 )
 
 if TYPE_CHECKING:
@@ -6115,8 +6116,10 @@ class Runtime:
         (``(PNG bytes, clipped Bounds)``).
         ``confirm`` is the human-confirmation callback threaded into ``click``
         and ``act``; without one, plausibly irreversible actions fail safe.
-        Unknown names raise ``ValueError``; the tools themselves raise
-        `ComputerUseError` / `ActionRefused` exactly as under the MCP server.
+        Unknown names raise ``ValueError``. An argument the tool does not
+        declare raises ``ValueError`` naming that field before the tool runs,
+        so no input is sent. The tools themselves raise `ComputerUseError` /
+        `ActionRefused` exactly as under the MCP server.
         """
         methods: dict[str, Callable] = {
             "desktop_snapshot": self.desktop_snapshot,
@@ -6149,7 +6152,13 @@ class Runtime:
         }
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
-        return methods[tool](**params)  # type: ignore[arg-type]
+        method = methods[tool]
+        allowed = accepted_keywords(method)
+        if allowed is not None:
+            message = unknown_fields_message(params, allowed)
+            if message is not None:
+                raise ValueError(message)
+        return method(**params)  # type: ignore[arg-type]
 
     @_serialized
     def dispatch(self, tool: str, params: dict[str, object]) -> str:
@@ -6167,6 +6176,86 @@ class Runtime:
                 f"unknown tool {tool!r}; expected one of {sorted(self.RUN_ONCE_TOOLS)}"
             )
         return self.call_tool(tool, params)
+
+
+def accepted_keywords(fn: Callable) -> set[str] | None:
+    """Names ``fn(**params)`` accepts.
+
+    ``None`` means the callable takes ``**kwargs`` (or its signature cannot
+    be read), so there is no closed set to check. Keywords already bound on
+    a ``partial``, such as ``confirm``, are not accepted again. ``self`` is
+    not a tool argument.
+    """
+    import inspect
+
+    bound: set[str] = set()
+    seen: object = fn
+    while isinstance(seen, partial):
+        bound.update(seen.keywords or {})
+        seen = seen.func
+    try:
+        signature = inspect.signature(seen)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    names: set[str] = set()
+    for name, param in signature.parameters.items():
+        if name == "self" or name in bound:
+            continue
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return None
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        names.add(name)
+    return names
+
+
+def seal_mcp_tools(server: object) -> None:
+    """Reject unknown tool arguments and publish a closed input schema.
+
+    FastMCP's argument model ignores extra keys, so ``type`` with ``ref``
+    used to type into whatever had focus and report success. Each tool's
+    model forbids extras, its published schema sets ``additionalProperties``
+    to false, and validation raises ``invalid_arguments`` naming the unknown
+    keys before the tool function runs. ``Tool.run`` wraps that exception, so
+    the message includes the ``invalid_arguments`` prefix the client matches.
+    """
+    from pydantic import ConfigDict
+
+    manager = getattr(server, "_tool_manager", None)
+    if manager is None:
+        return
+    for tool in manager.list_tools():
+        model = tool.fn_metadata.arg_model
+        model.model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+        model.model_rebuild(force=True)
+        parameters = dict(tool.parameters)
+        parameters["additionalProperties"] = False
+        tool.parameters = parameters
+        allowed = {
+            field.alias or field_name
+            for field_name, field in model.model_fields.items()
+        }
+        original = tool.fn_metadata.call_fn_with_arg_validation
+        tool_name = tool.name
+
+        async def _reject_unknown(
+            fn,
+            fn_is_async,
+            arguments_to_validate,
+            arguments_to_pass_directly,
+            *,
+            _original=original,
+            _name=tool_name,
+            _allowed=frozenset(allowed),
+        ):
+            message = unknown_fields_message(arguments_to_validate, _allowed)
+            if message is not None:
+                raise ValueError(f"invalid_arguments: {_name}: {message}")
+            return await _original(
+                fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly,
+            )
+
+        object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", _reject_unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -6694,9 +6783,11 @@ def build_server(
     @server.tool(name="type")
     async def type_text(text: str, app: str | None = None) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). With app=<bundle id or name> on macOS the keystrokes
-        are addressed to that app's process: it need not be frontmost, nothing
-        is activated, and the user's screen stays where it is. On Linux, app=
+        for long text). An undeclared argument, including ref, is
+        invalid_arguments and no text is sent. With app=<bundle id or name> on
+        macOS the keystrokes are addressed to that app's process: it need not
+        be frontmost, nothing is activated, and the user's screen stays where
+        it is. On Linux, app=
         resolves that app's window from the EWMH list and the AT-SPI
         application, focuses it when it is not already active, checks that it
         became the active window, and then types. A window that cannot be
@@ -7224,6 +7315,7 @@ def build_server(
             return await run(runtime.webmcp, app, action, name, arguments,
                              confirm=_confirmer_for(server.get_context()))
 
+    seal_mcp_tools(server)
     return server
 
 

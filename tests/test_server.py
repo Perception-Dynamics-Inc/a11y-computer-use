@@ -2296,6 +2296,43 @@ async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) 
     assert json.loads(result.content[0].text)["needed"] is False
 
 
+@pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
+async def test_unknown_tool_argument_is_rejected_before_input(
+    mcp_server, mocked_driver, audit_dir, name: str,
+) -> None:
+    """An undeclared key is invalid_arguments and the tool function does not run."""
+    async with client_session(mcp_server) as client:
+        listed = (await client.list_tools()).tools
+        schema = next(tool.inputSchema for tool in listed if tool.name == name)
+        assert schema.get("additionalProperties") is False
+        result = await client.call_tool(name, {"not_a_real_argument": "x"})
+    assert result.isError
+    text = result.content[0].text
+    assert f"invalid_arguments: {name}:" in text
+    assert "unknown field 'not_a_real_argument'" in text
+    assert mocked_driver == {"click": [], "type": [], "key": [], "scroll": [], "drag": []}
+    assert audit_entries(audit_dir) == []
+
+
+async def test_runtime_rejects_unknown_type_argument_before_input(tmp_path, monkeypatch) -> None:
+    """call_tool and dispatch name ref and do not type."""
+    typed: list[str] = []
+    monkeypatch.setattr(act, "type_text", lambda text, **_kw: typed.append(text) or [])
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    with server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit")) as runtime:
+        runtime.driver.type_text = lambda text, **_kw: typed.append(text) or 0  # type: ignore[method-assign]
+        for entry in (runtime.call_tool, runtime.dispatch):
+            with pytest.raises(ValueError) as exc:
+                entry("type", {"text": "TYPED", "ref": "e1"})
+            message = str(exc.value)
+            assert "unknown field 'ref'" in message
+            assert "text" in message and "app" in message
+            assert "invalid_arguments" not in message
+        with pytest.raises(ValueError, match="unknown fields 'ref', 'zoom'"):
+            runtime.call_tool("type", {"text": "TYPED", "ref": "e1", "zoom": 2})
+    assert typed == []
+
+
 async def test_unknown_key_chord_is_invalid_arguments_not_an_internal_error(mcp_server, audit_dir) -> None:
     """key('ctrl+notakey') names the unknown key. It is not an internal crash."""
     result = await call_tool(mcp_server, "key", {"chord": "ctrl+notakey"})
