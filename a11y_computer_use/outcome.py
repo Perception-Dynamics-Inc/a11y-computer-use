@@ -139,6 +139,9 @@ def next_for_error(code: str, detail: dict | None) -> tuple[str, ...]:
         return ("ref", "coordinates", "keyboard")
     if code == "focus_changed" or reason in {"focus_changed", "not_frontmost"}:
         return ("foreground", "ref")
+    if code == "focus_lost" or reason == "focus_lost":
+        # Do not offer keyboard: that types into whatever is focused now.
+        return ("ref", "cdp")
     if code == "element_disabled" or reason == "disabled":
         return ("ref", "keyboard")
     if reason == "text_mismatch":

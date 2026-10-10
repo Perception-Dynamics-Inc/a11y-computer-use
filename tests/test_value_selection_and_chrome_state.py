@@ -406,6 +406,12 @@ def test_firefox_select_uses_keys_when_the_option_action_does_not_land(monkeypat
     for item in items:
         item.do_action = lambda index, node=item: miss(index, node)
 
+    def grab_focus() -> bool:
+        combo.states.add("FOCUSED")
+        return True
+
+    combo.grab_focus = grab_focus
+
     def press(chord: str) -> None:
         keys.append(chord)
         if chord != "Down":
@@ -639,10 +645,13 @@ def test_empty_chrome_number_is_typed_and_zero_is_not_a_false_success(monkeypatc
 
     def type_text(text, _node=number):
         typed.append(text)
-        _node.text = text
+        _node.text = (_node.text or "") + text
+
+    def click_center(node) -> None:
+        node.states.add("FOCUSED")
 
     monkeypatch.setattr(_atspi, "_type_string", type_text)
-    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    monkeypatch.setattr(_atspi, "_click_center", click_center)
     field = _element("e9", "AXTextField", "Guests", editable=True)
     assert driver.set_value(field, "0") is True
     assert number.text == "0"
@@ -686,6 +695,7 @@ def test_chrome_number_without_editable_text_is_cleared_by_a_click_and_keys(monk
 
     def click(x, y, **_kwargs):
         clicked.append((x, y))
+        number.states.add("FOCUSED")
 
     def press_chord(chord: str) -> None:
         chords.append(chord)
@@ -704,6 +714,133 @@ def test_chrome_number_without_editable_text_is_cleared_by_a_click_and_keys(monk
     assert number.text == ""
     assert clicked
     assert chords[:3] == ["ctrl+a", "backspace", "delete"]
+
+
+def _number_and_name(number_states=()):
+    """A Count spin button and a Name entry under one document."""
+    name = _Node(
+        "entry", "Name", text="Ayşe café ₸",
+        attrs={"tag": "input", "id": "name", "text-input-type": "text"},
+    )
+    number = _Node(
+        "spin button", "Count", text="", value=0.0, minimum=0.0, maximum=100.0,
+        states=set(number_states),
+        attrs={"tag": "input", "text-input-type": "number", "id": "count"},
+    )
+    _Node("document web", "form", children=[name, number])
+    return name, number
+
+
+def test_number_set_value_types_nothing_when_focus_is_elsewhere(monkeypatch) -> None:
+    """Focus stays on Name. The digits are not sent, and Name is unchanged."""
+    name, number = _number_and_name()
+    name.states.add("FOCUSED")
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        name.text += text
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda _node: None)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(number, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "keyboard" not in exc.value.detail["next"]
+    assert typed == []
+    assert name.text == "Ayşe café ₸"
+    assert number.text == ""
+
+
+def test_number_set_value_stops_when_focus_moves_mid_write(monkeypatch) -> None:
+    """The first digit lands in Count. Focus then moves. The next digit is not sent."""
+    name, number = _number_and_name({"FOCUSED"})
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        if "FOCUSED" not in number.states:
+            name.text += text
+            return
+        number.text += text
+        number.states.discard("FOCUSED")
+        name.states.add("FOCUSED")
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda node: node.states.add("FOCUSED"))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(number, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["outcome"] == "refused"
+    assert typed == ["1"]
+    assert number.text == "1"
+    assert name.text == "Ayşe café ₸"
+
+
+def test_failed_set_value_reports_focus_lost_when_another_field_changes(monkeypatch) -> None:
+    """Keys that land in Name are not reported as a plain text_mismatch."""
+    name, number = _number_and_name({"FOCUSED"})
+
+    def type_string(text: str) -> None:
+        name.text += text
+
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_click_center", lambda node: node.states.add("FOCUSED"))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    driver = _driver(monkeypatch, number)
+    field = _element("e9", "AXTextField", "Count", editable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.set_value(field, "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert exc.value.detail["outcome"] == "refused"
+    assert exc.value.detail["changed_fields"]
+    assert name.text == "Ayşe café ₸12"
+    assert number.text == ""
+
+
+def test_linux_runtime_does_not_type_when_focus_cannot_be_confirmed() -> None:
+    """A Linux set_value that returns False must not fall through to type_text."""
+    from a11y_computer_use import server
+
+    element = _element("e9", "AXTextField", "Count", editable=True)
+    snap = type("S", (), {"app": "chrome", "scope": None})()
+    runtime = server.Runtime.__new__(server.Runtime)
+    runtime._resolve = lambda ref, kind: (snap, element)
+    runtime._run_gated = lambda action, app, execute, **_kwargs: execute()
+    runtime._refuse_disabled = lambda target, verb="": None
+    calls: list[str] = []
+
+    class _Driver:
+        name = "linux"
+
+        def set_value(self, _element, _value):
+            return False
+
+        def press_element(self, _element):
+            calls.append("press")
+            return True
+
+        def type_text(self, text, pid=None):
+            calls.append(text)
+
+    runtime.driver = _Driver()
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.set_value("e9", "12")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["outcome"] == "refused"
+    assert calls == []
 
 
 def test_slider_set_value_uses_the_value_interface(monkeypatch) -> None:
@@ -1069,17 +1206,25 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     """
     monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
     monkeypatch.setattr(_atspi, "_click_center", lambda _acc: None)
     typed: list[str] = []
+    segments: list = []
+
+    def grab_focus(acc) -> bool:
+        acc.states.add("FOCUSED")
+        return True
 
     def type_string(text):
         typed.append(text)
-        if text == "03":
-            month.attrs["valuetext"] = "March"
-        elif text == "17":
-            day.attrs["valuetext"] = text
+        for seg in segments:
+            if "FOCUSED" in seg.states:
+                seg.buf = getattr(seg, "buf", "") + text
+                if seg.buf == "03":
+                    seg.attrs["valuetext"] = "March"
+                elif seg.buf == "17":
+                    seg.attrs["valuetext"] = "17"
 
+    monkeypatch.setattr(_atspi, "grab_focus", grab_focus)
     monkeypatch.setattr(_atspi, "_type_string", type_string)
 
     _editor, year = _date_segment("Year Date of birth", "1994")
@@ -1091,13 +1236,15 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     assert typed == []
 
     _blank_editor, day = _date_segment("Day Date of birth", "0", value=0.0)
+    segments.append(day)
     assert ATSPIAccessor().read(day).value is None
     assert _atspi.set_text(day, "17") is True
-    assert typed == ["17"]
+    assert "".join(typed) == "17"
     assert ATSPIAccessor().read(day).value == "17"
     assert day.value == 0.0
 
     _month_editor, month = _date_segment("Month Month", "0", kind="month", value=0.0)
+    segments.append(month)
     assert _atspi.set_text(month, "03") is True
     assert month.attrs["valuetext"] == "March"
     assert ATSPIAccessor().read(month).value == "March"

@@ -52,6 +52,7 @@ def test_error_codes_are_wire_stable() -> None:
         "permission_denied_screen",
         "secure_field",
         "focus_changed",
+        "focus_lost",
         "app_not_found",
         "timeout",
         "busy",

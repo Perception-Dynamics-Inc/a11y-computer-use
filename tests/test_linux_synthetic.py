@@ -703,7 +703,16 @@ def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
     field.get_attributes = lambda: dict(field.attrs)
     field.get_role_name = lambda: "section"
     field.get_editable_text_iface = None
-    field.get_state_set = lambda: _States({"EDITABLE", "ENABLED", "FOCUSABLE"})
+
+    def state_set():
+        # grab_focus records field.focused and does not touch a static set.
+        # Without FOCUSED the gate treats focus as reported and absent.
+        names = {"EDITABLE", "ENABLED", "FOCUSABLE"}
+        if getattr(field, "focused", False):
+            names.add("FOCUSED")
+        return _States(names)
+
+    field.get_state_set = state_set
     sent: list[str] = []
 
     def press_chord(chord: str) -> None:
@@ -715,8 +724,17 @@ def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
             field.echo = None
             field.selected_all = False
 
+    def type_string(text: str) -> None:
+        # One character is one batch once focus is reported. A blank read,
+        # including the newline BackSpace leaves, is replaced; later
+        # characters append.
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text += text
+
     monkeypatch.setattr(_linux_input, "press_chord", press_chord)
-    monkeypatch.setattr(_linux_input, "type_string", lambda text: setattr(field, "text", text))
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
     box = Bounds(0, 8, 8, 200, 40)
@@ -734,6 +752,91 @@ def test_set_value_writes_an_editable_group_and_refuses_a_plain_one(
     assert exc.value.detail["reason"] == "not_editable"
     assert sent == []
     assert field.text == "new note"
+
+
+def test_set_value_accepts_focus_on_a_child_text_node(fake_atspi, monkeypatch) -> None:
+    """Roleless contenteditable. FOCUSED is on a child text node, not the section.
+
+    Fake transport. The section's state set never includes FOCUSED, and
+    grab_focus does not add it. An indexed text child carries FOCUSED, then
+    a hypertext embed with no indexed children does. Both writes land. A
+    section with no focused descendant sends no chords.
+    """
+    field = _KeyClearedWebField("old note")
+    _mark_toolkit(field, "Chromium", "Google Chrome")
+    field.attrs = {"tag": "div"}
+    field.get_attributes = lambda: dict(field.attrs)
+    field.get_role_name = lambda: "section"
+    field.get_editable_text_iface = None
+    field.grab_focus = lambda: True
+    field.get_state_set = lambda: _States({"EDITABLE", "ENABLED", "FOCUSABLE"})
+    sent: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and getattr(field, "selected_all", False):
+            field.text = "\n"
+            field.echo = None
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text += text
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    box = Bounds(0, 8, 8, 200, 40)
+    editable = Element(
+        "e4", "AXGroup", "Notes box", "old note", box, "snap-1", editable=True, clickable=True,
+    )
+
+    class _Text:
+        def __init__(self):
+            self.states = {"ENABLED", "FOCUSED"}
+
+        def get_role_name(self):
+            return "text"
+
+        def get_state_set(self):
+            return _States(self.states)
+
+        def get_child_count(self):
+            return 0
+
+    text = _Text()
+    field.children = [text]
+    field.get_child_count = lambda: len(field.children)
+    field.get_child_at_index = lambda index: field.children[index]
+    field.links = ()
+    assert LinuxDriver().set_value(editable, "new note") is True
+    assert field.text == "new note"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "old note"
+    field.selected_all = False
+    sent.clear()
+    field.children = []
+    field.links = (text,)
+    assert LinuxDriver().set_value(editable, "from embed") is True
+    assert field.text == "from embed"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+
+    field.text = "old note"
+    field.selected_all = False
+    sent.clear()
+    field.links = ()
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(editable, "nope")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert sent == []
+    assert field.text == "old note"
 
 
 class _Tagged:
