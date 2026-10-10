@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -330,6 +331,235 @@ def _usable_window_rect(rect) -> bool:
     if width <= 0 or height <= 0:
         return False
     return x > -1_000_000 and y > -1_000_000
+
+
+def _coords_close(a: float, b: float, tol: float = 4.0) -> bool:
+    return abs(a - b) <= tol
+
+
+def _client_area_is_on_screen(frame, frame_screen, client) -> bool:
+    """True when SCREEN coordinates already include the window-manager frame.
+
+    The X client origin sits below the outer frame by the title bar. A
+    direct child whose SCREEN top is that client origin — LibreOffice's
+    root pane — is already on the pixels, so adding the origin again drops
+    every box by one title bar. A child whose SCREEN top is still the outer
+    frame's top is the build that omits the title bar. No such child means
+    the node's own SCREEN point is kept.
+    """
+    if frame is None or frame_screen is None or client is None:
+        return True
+    fx, fy = float(frame_screen[0]), float(frame_screen[1])
+    cx, cy = float(client[0]), float(client[1])
+    if _coords_close(cx, fx) and _coords_close(cy, fy):
+        return True
+    count = _child_count(frame)
+    if count < 0:
+        count = 0
+    saw_outer = False
+    for index in range(min(count, 6)):
+        child = _child_at(frame, index)
+        if child is None or _role_name(child) == "frame":
+            continue
+        rect = _raw_rect(child, "SCREEN")
+        if rect is None or rect[2] <= 0 or rect[3] <= 0:
+            continue
+        if _coords_close(float(rect[0]), cx, 8) and _coords_close(float(rect[1]), cy, 8):
+            return True
+        if _coords_close(float(rect[0]), fx, 4) and _coords_close(float(rect[1]), fy, 4):
+            saw_outer = True
+    return not saw_outer
+
+
+def _libreoffice_content_origin(
+    screen, window, frame_screen, client, *, screen_is_absolute: bool,
+):
+    """Screen top-left for one LibreOffice content node.
+
+    ``screen`` and ``window`` are that node's SCREEN and WINDOW points.
+    ``frame_screen`` is the frame's outer SCREEN rectangle. ``client`` is
+    the X client origin inside that frame. ``screen_is_absolute`` is the
+    frame-child check in ``_client_area_is_on_screen``.
+
+    A node whose SCREEN point is already the client origin plus its WINDOW
+    point is on the pixels. When SCREEN and WINDOW are the same point, the
+    client origin is added only if the frame's client area was reported at
+    the outer corner. Adding it on a build whose SCREEN point already
+    matches the screen drops the box by one title bar.
+    """
+    sx, sy = float(screen[0]), float(screen[1])
+    wx, wy = float(window[0]), float(window[1])
+    cx, cy = float(client[0]), float(client[1])
+    fx, fy = float(frame_screen[0]), float(frame_screen[1])
+    if _coords_close(sx, cx + wx) and _coords_close(sy, cy + wy):
+        return (sx, sy)
+    if _coords_close(sx, wx) and _coords_close(sy, wy):
+        if screen_is_absolute:
+            return (sx, sy)
+        return (cx + wx, cy + wy)
+    if _coords_close(sx, fx + wx) and _coords_close(sy, fy + wy):
+        return (sx, sy)
+    if not screen_is_absolute:
+        return (cx + wx, cy + wy)
+    return (sx, sy)
+
+
+def _libreoffice_pointer_delta(
+    screen_is_absolute: bool,
+    major: int | None,
+    client,
+    frame_screen,
+) -> tuple[float, float]:
+    """Pointer adjustment so a pixel point hits that pixel.
+
+    The published box stays on the pixels. LibreOffice 24.2 gtk3 still
+    hit-tests one title bar above those pixels, so a click on the published
+    centre selects the row above. The title bar is added to the event only.
+    Adding it to the box as well drops a crop onto the next line. LibreOffice
+    25 hit-tests the published point, and a build whose client area is still
+    reported at the outer corner already has the title bar in the box.
+    """
+    if not screen_is_absolute or client is None or frame_screen is None:
+        return (0.0, 0.0)
+    if major is None or major >= 25:
+        return (0.0, 0.0)
+    return (
+        float(client[0]) - float(frame_screen[0]),
+        float(client[1]) - float(frame_screen[1]),
+    )
+
+
+_lo_major: int | None = None
+_lo_major_known = False
+
+
+def libreoffice_major() -> int | None:
+    """Major version of the installed ``soffice``, or None when it cannot be read.
+
+    Cached for the process. ``LibreOffice 24.2.7.2`` is 24. A missing binary
+    is None, which does not move the pointer.
+    """
+    global _lo_major, _lo_major_known
+    if _lo_major_known:
+        return _lo_major
+    _lo_major_known = True
+    try:
+        out = subprocess.check_output(
+            ["soffice", "--version"], text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for token in out.split():
+        head, dot, _rest = token.partition(".")
+        if dot and head.isdigit():
+            _lo_major = int(head)
+            return _lo_major
+    return None
+
+
+def _libreoffice_frame_at(x: int, y: int):
+    """The LibreOffice frame whose SCREEN rectangle contains ``(x, y)``."""
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    count = _child_count(desktop)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 40)):
+        app = _child_at(desktop, index)
+        if app is None:
+            continue
+        name = str(_call_first(app, ("get_name",), default="") or "")
+        if not libreoffice_app(name):
+            continue
+        frames = _child_count(app)
+        if frames < 0:
+            frames = 0
+        for child_index in range(min(int(frames), 8)):
+            frame = _child_at(app, child_index)
+            if frame is None or _role_name(frame) != "frame":
+                continue
+            rect = _raw_rect(frame, "SCREEN")
+            if rect is None or rect[2] <= 0 or rect[3] <= 0:
+                continue
+            if (
+                rect[0] - 2 <= x <= rect[0] + rect[2] + 2
+                and rect[1] - 2 <= y <= rect[1] + rect[3] + 2
+            ):
+                return frame
+    return None
+
+
+# After the first pointer event, LibreOffice 24.2 republishes content
+# extents in the hit-test space (about one title bar lower). A later event
+# in that process must not add the inset again. A new soffice process, even
+# one whose frame lands on the same screen rectangle, still needs the first
+# inset. Keyed by process id plus the frame's SCREEN rectangle.
+_lo_pointer_aligned: set[tuple[int, int, int, int, int]] = set()
+
+
+def _libreoffice_frame_key(frame) -> tuple[int, int, int, int] | None:
+    screen = _raw_rect(frame, "SCREEN")
+    if screen is None or screen[2] <= 0 or screen[3] <= 0:
+        return None
+    return (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
+
+
+def _libreoffice_align_key(frame) -> tuple[int, int, int, int, int] | None:
+    rect = _libreoffice_frame_key(frame)
+    if rect is None:
+        return None
+    return (pid_of(frame) or 0, *rect)
+
+
+def libreoffice_pointer_shift(x: int, y: int) -> tuple[float, float]:
+    """``(dx, dy)`` added to a pointer event aimed at pixel ``(x, y)``.
+
+    Zero when the point is not in a LibreOffice frame, when that frame's
+    client area is still reported at the outer corner, on LibreOffice 25
+    and newer, or after a pointer event has already landed in that process's
+    frame. That first event moves the hit-test onto the published extents, so
+    a second click must use the new box as-is. Failures are zero so a click
+    outside LibreOffice is unchanged.
+    """
+    try:
+        frame = _libreoffice_frame_at(int(x), int(y))
+        if frame is None:
+            return (0.0, 0.0)
+        key = _libreoffice_frame_key(frame)
+        align = _libreoffice_align_key(frame)
+        if key is None or align is None or align in _lo_pointer_aligned:
+            return (0.0, 0.0)
+        screen = _raw_rect(frame, "SCREEN")
+        if screen is None:
+            return (0.0, 0.0)
+        from a11y_computer_use.drivers import _linux_system
+
+        title = str(_call_first(frame, ("get_name",), default="") or "")
+        origin = _linux_system.client_origin_for_outer_frame(
+            key[0], key[1], key[2], key[3], title=title,
+        )
+        absolute = True if origin is None else _client_area_is_on_screen(frame, screen, origin)
+        return _libreoffice_pointer_delta(absolute, libreoffice_major(), origin, screen)
+    except Exception:
+        return (0.0, 0.0)
+
+
+def note_libreoffice_pointer(x: int, y: int) -> None:
+    """Remember that a pointer event landed in the LibreOffice frame at ``(x, y)``."""
+    try:
+        frame = _libreoffice_frame_at(int(x), int(y))
+        if frame is None:
+            return
+        key = _libreoffice_align_key(frame)
+        if key is not None:
+            _lo_pointer_aligned.add(key)
+    except Exception:
+        return
 
 
 def _action_iface(acc):
@@ -1105,10 +1335,13 @@ class ATSPIAccessor:
         # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
         # snapshot, so listing the window does not scroll the tree.
         self._table_seek: str | None = None
-        # Set by the Linux snapshot when the tree is LibreOffice. Screen
-        # extents on that tree ignore the window-manager title bar.
+        # Set by the Linux snapshot when the tree is LibreOffice. Content
+        # bounds then pick SCREEN or the client origin plus WINDOW, per node.
         self.libreoffice = False
-        self._lo_clients: dict[tuple[int, int, int, int], tuple[int, int] | None] = {}
+        self._lo_placements: dict[
+            tuple[int, int, int, int],
+            tuple[tuple[int, int] | None, bool],
+        ] = {}
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -1240,35 +1473,37 @@ class ATSPIAccessor:
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
         return _with_table_body(node, kids)
 
-    def _lo_client_origin(self, frame) -> tuple[int, int] | None:
-        """X client origin for the outer frame ``frame``'s screen rectangle.
+    def _lo_placement(self, frame):
+        """``(client origin, screen coordinates already include the frame)``.
 
-        The lookup is cached for the rest of this snapshot. None when no
-        managed window sits on that rectangle.
+        The client origin is None when no managed window sits on the frame's
+        SCREEN rectangle. The flag is the root-pane check against that origin.
         """
         screen = _raw_rect(frame, "SCREEN")
         if screen is None or screen[2] <= 0 or screen[3] <= 0:
-            return None
+            return None, True
         key = (int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]))
-        if key in self._lo_clients:
-            return self._lo_clients[key]
+        cached = self._lo_placements.get(key)
+        if cached is not None:
+            return cached
         from a11y_computer_use.drivers import _linux_system
 
         title = str(_call_first(frame, ("get_name",), default="") or "")
         origin = _linux_system.client_origin_for_outer_frame(
             key[0], key[1], key[2], key[3], title=title,
         )
-        self._lo_clients[key] = origin
-        return origin
+        absolute = True if origin is None else _client_area_is_on_screen(frame, screen, origin)
+        placed = (origin, absolute)
+        self._lo_placements[key] = placed
+        return placed
 
     def _libreoffice_position(self, node, position, size):
-        """Screen top-left with the window-manager frame added, or None.
+        """Screen top-left for a LibreOffice content node, or None.
 
-        On a fresh document LibreOffice reports the same point for ``SCREEN``
-        and ``WINDOW``, and that point omits the title bar. The real screen
-        position is the X client origin plus the window-relative box. The
-        frame's own ``SCREEN`` rectangle is already the outer window, so it
-        is left alone.
+        The frame's own SCREEN rectangle is the outer window, so it is left
+        alone. A content node uses ``_libreoffice_content_origin``. The
+        client origin is added only when this frame's client area is still
+        reported at the outer corner.
         """
         if position is None or size is None:
             return None
@@ -1281,13 +1516,18 @@ class ATSPIAccessor:
         frame = _frame_ancestor(node)
         if frame is None:
             return None
-        client = self._lo_client_origin(frame)
+        client, screen_is_absolute = self._lo_placement(frame)
         if client is None:
             return None
         window = _raw_rect(node, "WINDOW")
         if not _usable_window_rect(window):
             return None
-        return (float(client[0] + window[0]), float(client[1] + window[1]))
+        frame_screen = _raw_rect(frame, "SCREEN")
+        if frame_screen is None:
+            return None
+        return _libreoffice_content_origin(
+            position, window, frame_screen, client, screen_is_absolute=screen_is_absolute,
+        )
 
     def _tree_is_gecko(self, node: object) -> bool:
         if self._gecko is None:

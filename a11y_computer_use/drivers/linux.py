@@ -1208,6 +1208,35 @@ class LinuxDriver:
         return True
 
     # -- act (AT-SPI XTEST event generation) --------------------------------
+    def _pointer(self, x: int, y: int) -> tuple[int, int]:
+        """Screen point for an XTEST event.
+
+        Published LibreOffice bounds stay on the pixels. On 24.2 the hit
+        test sits one title bar above those pixels, so the event moves by
+        that inset. A point outside LibreOffice is unchanged.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            dx, dy = self._run(lambda: _atspi.libreoffice_pointer_shift(int(x), int(y)))
+        except Exception:
+            return int(x), int(y)
+        return int(x) + int(dx), int(y) + int(dy)
+
+    def _note_pointer(self, x: int, y: int) -> None:
+        """The pointer event at the published point has been sent.
+
+        LibreOffice 24.2 then republishes extents in hit-test space. Noting
+        the original point, not the shifted one, keeps the next event from
+        adding the title bar a second time.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            self._run(lambda: _atspi.note_libreoffice_pointer(int(x), int(y)))
+        except Exception:
+            return
+
     def click(self, target: Target, *, button: MouseButton = MouseButton.LEFT, count: int = 1,
               modifiers: tuple[str, ...] = (), pre_check: Callable | None = None,
               dry_run: bool = False) -> object:
@@ -1225,9 +1254,10 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
         x, y = _point_of(target)
-        # A Writer paragraph click places the caret in that paragraph. The
-        # screen point is one title bar high, so a pointer click lands in
-        # the paragraph above and the following type confirms the miss.
+        # A plain left single-click on a Writer paragraph places the caret
+        # in that paragraph. A double-click uses the published point, shifted
+        # onto the hit-test on LibreOffice 24.2. A crop uses the published
+        # point as the pixel rectangle.
         if (
             handle is not None
             and button is MouseButton.LEFT
@@ -1237,8 +1267,18 @@ class LinuxDriver:
         ):
             self._focused_editable = handle
             return None
+        px, py = self._pointer(x, y)
         with _linux_input.held(modifiers):
-            _linux_input.click(x, y, button=_BUTTON_NAME.get(button, "left"), count=count)
+            _linux_input.click(px, py, button=_BUTTON_NAME.get(button, "left"), count=count)
+        self._note_pointer(x, y)
+        # A double-click does not place the caret through the text
+        # interface. When the pointer did land in this paragraph, the
+        # following type inserts there. A miss leaves the caret elsewhere
+        # and does not retarget the type.
+        if handle is not None and self._run(
+            lambda: _atspi.paragraph_click_verdict(handle)
+        ) == ("confirmed", "the caret is in the target paragraph"):
+            self._focused_editable = handle
         return None
 
     def hover(self, target: Target, *, dry_run: bool = False) -> object:
@@ -1251,7 +1291,9 @@ class LinuxDriver:
 
         self._focused_editable = None
         x, y = _point_of(target)
-        _linux_input.hover(x, y)
+        px, py = self._pointer(x, y)
+        _linux_input.hover(px, py)
+        self._note_pointer(x, y)
         return None
 
     def drag(self, start: Target, end: Target, *, button: MouseButton = MouseButton.LEFT,
@@ -1264,10 +1306,18 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_input
 
         self._focused_editable = None
+        # One delta for the whole gesture. Noting after the first point
+        # would drop the inset from the end and the path.
         x1, y1 = _point_of(start)
+        sx, sy = self._pointer(x1, y1)
+        dx, dy = sx - int(x1), sy - int(y1)
         x2, y2 = _point_of(end)
-        _linux_input.drag(x1, y1, x2, y2, button=_BUTTON_NAME.get(button, "left"),
-                          path=[_point_of(p) for p in path])
+        moved = [(_point_of(p)[0] + dx, _point_of(p)[1] + dy) for p in path]
+        _linux_input.drag(
+            sx, sy, int(x2) + dx, int(y2) + dy,
+            button=_BUTTON_NAME.get(button, "left"), path=moved,
+        )
+        self._note_pointer(x1, y1)
         return None
 
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
