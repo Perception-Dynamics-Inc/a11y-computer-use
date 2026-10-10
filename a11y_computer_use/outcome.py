@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -509,6 +510,27 @@ def _parse_display_number(value: str) -> float:
 
 def _numbers_close(got: float, wanted: float) -> bool:
     return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
+
+
+# A Writer paragraph break can come back as any of these. ``\r\n`` is one
+# break. A repeated break stays repeated, and a space is not a break.
+_PARAGRAPH_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029\ufffc]")
+
+
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    ``\\n``, ``\\r``, ``\\r\\n``, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    ``a b`` is not ``a\\nb``, and ``ab`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+
+    def normalize(text: str) -> str:
+        return _PARAGRAPH_BREAK.sub("\n", text.replace("\u00a0", " "))
+
+    return normalize(got) == normalize(wanted)
 
 
 def judge(

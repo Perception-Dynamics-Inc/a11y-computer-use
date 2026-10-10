@@ -1123,16 +1123,6 @@ def _texts_match(got: str | None, wanted: str | None) -> bool:
     return _norm_nbsp(got) == _norm_nbsp(wanted)
 
 
-# A Writer paragraph break can come back as any of these. ``\r\n`` is one
-# break. A repeated break stays repeated, and a space is not a break.
-_PARAGRAPH_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029\ufffc]")
-
-
-def _normalize_paragraph_breaks(text: str) -> str:
-    """Map paragraph and line separators onto ``\\n``, one break each."""
-    return _PARAGRAPH_BREAK.sub("\n", text)
-
-
 def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
     """True when the only difference is which paragraph separator was used.
 
@@ -1140,11 +1130,9 @@ def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
     break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
     and ``a b`` is not ``a\\nb``.
     """
-    if got is None or wanted is None:
-        return False
-    left = _normalize_paragraph_breaks(_norm_nbsp(got) or "")
-    right = _normalize_paragraph_breaks(_norm_nbsp(wanted) or "")
-    return left == right
+    from a11y_computer_use.outcome import paragraph_breaks_match as same_breaks
+
+    return same_breaks(got, wanted)
 
 
 def _text_is_blank(text: str | None) -> bool:
@@ -1612,6 +1600,15 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
             return None
     if role_name in _RANGE_ROLE_NAMES:
         return _range_value(acc)
+    if role_name == "document text":
+        # The document node's own text is empty. Paragraphs hold the lines.
+        # The Value interface on that node is an uninitialized double
+        # (about 4e-323), which is not the document.
+        document = writer_document_text(acc)
+        if document:
+            return document
+        if document == "":
+            return None
     # A Qt label, check, row, or empty line edit has a Value interface whose
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
@@ -4617,14 +4614,15 @@ def _document_paragraphs(acc) -> list:
 def writer_document_text(acc) -> str | None:
     """Paragraph text of a Writer document, one line per paragraph.
 
-    None when ``acc`` is not that document. The document node's own text
-    is empty even after the paragraphs hold the value.
+    None when ``acc`` is not that document. An empty document is ``""``,
+    not the node's Value interface. The snapshot uses this string, so a
+    done check can see the lines.
     """
     if not is_writer_document(acc):
         return None
     paragraphs = _document_paragraphs(acc)
     if not paragraphs:
-        return _full_text(acc)
+        return ""
     return "\n".join(_full_text(child) or "" for child in paragraphs)
 
 
@@ -4637,22 +4635,27 @@ def writer_document_matches(acc, text: str) -> bool:
 
 
 def _writer_document_landed(acc, text: str) -> bool:
-    """Poll the paragraphs. A Writer replace shows up a beat after the write."""
+    """Poll the paragraphs. A Writer replace shows up after the write.
+
+    The first reads can still be the empty document. Clearing before the
+    paragraphs appear deletes the text that just landed.
+    """
     if not is_writer_document(acc):
         return False
-    for attempt in range(8):
+    deadline = time.monotonic() + 1.5
+    while True:
         if writer_document_matches(acc, text):
             return True
-        if attempt + 1 < 8:
-            time.sleep(0.05)
-    return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def writer_document_outcome_text(requested: str, acc) -> str | None:
     """The requested string when a Writer document's paragraphs now hold it.
 
     None for any other node, and when a paragraph break is actually missing
-    or extra. The document node's snapshot value stays empty.
+    or extra. The snapshot value is the same paragraph text.
     """
     if not requested or acc is None:
         return None

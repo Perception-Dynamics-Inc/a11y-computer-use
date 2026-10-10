@@ -6353,6 +6353,7 @@ def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
     )
     assert _atspi.set_text(doc, value) is True
     assert doc.text == ""
+    assert _atspi._value_text(doc, "AXTextArea", "document text") == value
     assert _atspi.writer_document_outcome_text(value, doc) == value
     assert _atspi.writer_document_matches(doc, value.replace("\n", "\r\n")) is True
     assert _atspi.writer_document_matches(doc, value.replace("\n", "\u2029")) is True

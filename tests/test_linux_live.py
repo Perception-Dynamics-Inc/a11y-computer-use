@@ -4762,8 +4762,9 @@ def test_linux_writer_table_cell_set_value_replaces_the_paragraph(tmp_path) -> N
 def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> None:
     """Live Writer. A multi-line set_value on a new document is confirmed.
 
-    The document node reads back empty. The paragraphs hold the lines.
-    ``soffice`` has to be installed; this does not skip when it is missing.
+    The paragraphs hold the lines. The document value is those lines joined,
+    so a done check can see the text. ``soffice`` has to be installed; this
+    does not skip when it is missing.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -4835,7 +4836,8 @@ def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> Non
         assert "Revenue grew 12% compared with the previous quarter." in texts
         assert "We will hire two engineers in November." in texts
         document = next(el for el in current.elements if el.role == "AXTextArea")
-        assert not document.value
+        from a11y_computer_use.drivers import _atspi
+        assert _atspi.paragraph_breaks_match(document.value, value), document.value
     finally:
         _stop_group(proc)
         _kill_libreoffice()
