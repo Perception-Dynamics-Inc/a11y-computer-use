@@ -371,18 +371,27 @@ def active_window() -> dict | None:
         return None
 
 
+def _window_at_point(d, x: float, y: float):
+    """Topmost managed window containing a screen point, or None."""
+    for win in reversed(_managed_windows(d)):  # topmost first
+        geom = _geometry_on_root(win, d)
+        if geom is None:
+            continue
+        gx, gy, gw, gh = geom
+        if gx <= x < gx + gw and gy <= y < gy + gh:
+            return win
+    return None
+
+
 def _top_window_pid(x: float, y: float) -> int | None:
     """Pid of the topmost client window containing a screen point, or None."""
     try:
         with _open_display() as d:
-            for win in reversed(_managed_windows(d)):  # topmost first
-                geom = _geometry_on_root(win, d)
-                if geom is None:
-                    continue
-                gx, gy, gw, gh = geom
-                if gx <= x < gx + gw and gy <= y < gy + gh:
-                    pid = _pid_of(win, d)
-                    return int(pid) if pid else None
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            pid = _pid_of(win, d)
+            return int(pid) if pid else None
     except ComputerUseError:
         raise
     except Exception:
@@ -391,11 +400,23 @@ def _top_window_pid(x: float, y: float) -> int | None:
 
 
 def app_at_point_id(x: float, y: float) -> str | None:
-    """comm name of the topmost window containing a screen point (act-time hit-test)."""
-    pid = _top_window_pid(x, y)
-    if not pid:
+    """App id of the topmost window containing a screen point.
+
+    The process comm when the window has a pid. A Tk or Xt window has no
+    ``_NET_WM_PID``; the hit-test then uses its WM_CLASS instance, the same
+    key ``window focus`` gates on. None when the point hits no window, or
+    the window has neither a comm nor a class.
+    """
+    try:
+        with _open_display() as d:
+            win = _window_at_point(d, x, y)
+            if win is None:
+                return None
+            return _app_id(win, d) or None
+    except ComputerUseError:
+        raise
+    except Exception:
         return None
-    return _comm_for_pid(pid)
 
 
 def pid_at_point(x: float, y: float) -> int | None:

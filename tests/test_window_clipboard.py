@@ -133,40 +133,101 @@ def test_unfiltered_list_without_focus_or_grants_names_the_reason(tmp_path) -> N
     assert "needs_permission" not in text
 
 
-def test_unfiltered_list_includes_visible_windows_with_no_pid(tmp_path) -> None:
-    """A focused pid-less window used to hide every ungranted window.
+_PIDLESS_ROWS = [
+    {"window_id": 1, "app": "xterm", "pid": 42, "title": "shell", "on_screen": True,
+     "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 80, "height": 24}},
+    {"window_id": 2, "app": "xmessage", "pid": 0, "title": "hello", "on_screen": True,
+     "wm_class": "xmessage", "wm_class_class": "Xmessage",
+     "bounds": {"display_id": 0, "x": 10, "y": 10, "width": 200, "height": 80}},
+    {"window_id": 3, "app": "wish8.6", "pid": 0, "title": "TkProbe", "on_screen": True,
+     "wm_class": "wish8.6", "wm_class_class": "Wish8.6",
+     "bounds": {"display_id": 0, "x": 20, "y": 20, "width": 180, "height": 90}},
+    {"window_id": 4, "app": "secret", "pid": 99, "title": "notes", "on_screen": True,
+     "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 10, "height": 10}},
+    {"window_id": 5, "app": "wish8.6", "pid": 0, "title": "icon", "on_screen": False,
+     "wm_class": "wish8.6", "bounds": None},
+    {"window_id": 6, "app": "xmessage", "title": "no pid key", "on_screen": True,
+     "wm_class": "xmessage",
+     "bounds": {"display_id": 0, "x": 1, "y": 1, "width": 2, "height": 2}},
+]
 
-    wish and xmessage are mapped and have WM_CLASS, and they publish no
-    ``_NET_WM_PID``. The unfiltered list names them with that app id and
-    pid 0. A window that omits the pid key, a minimized pid-less window,
+
+def _assert_pidless_span(row: dict, app: str, wm_class: str) -> None:
+    assert row["pid"] is None
+    assert row["app"] == app
+    assert row["wm_class"] == wm_class
+    assert row["on_screen"] is True
+    assert row["bounds"]["width"] > 0 and row["bounds"]["height"] > 0
+
+
+def test_unfiltered_list_includes_visible_windows_with_no_pid(tmp_path) -> None:
+    """wish and xmessage are mapped and have WM_CLASS, and they publish no
+    ``_NET_WM_PID``. The unfiltered list names them with that class and
+    pid null. A window that omits the pid key, a minimized pid-less window,
     and an ungranted window that has a pid stay out.
     """
-    rows = [
-        {"window_id": 1, "app": "xterm", "pid": 42, "title": "shell", "on_screen": True,
-         "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 80, "height": 24}},
-        {"window_id": 2, "app": "xmessage", "pid": 0, "title": "hello", "on_screen": True,
-         "wm_class": "xmessage", "wm_class_class": "Xmessage",
-         "bounds": {"display_id": 0, "x": 10, "y": 10, "width": 200, "height": 80}},
-        {"window_id": 3, "app": "wish8.6", "pid": 0, "title": "TkProbe", "on_screen": True,
-         "wm_class": "wish8.6", "wm_class_class": "Wish8.6",
-         "bounds": {"display_id": 0, "x": 20, "y": 20, "width": 180, "height": 90}},
-        {"window_id": 4, "app": "secret", "pid": 99, "title": "notes", "on_screen": True,
-         "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 10, "height": 10}},
-        {"window_id": 5, "app": "wish8.6", "pid": 0, "title": "icon", "on_screen": False,
-         "bounds": None},
-        {"window_id": 6, "app": "xmessage", "title": "no pid key", "on_screen": True,
-         "bounds": {"display_id": 0, "x": 1, "y": 1, "width": 2, "height": 2}},
-    ]
-    driver = _Windows(rows)
+    driver = _Windows(_PIDLESS_ROWS)
     driver.frontmost_app = lambda: (None, None)
     rt = _runtime(tmp_path, driver, tier=safety.Tier.READ, app="xterm")
     listed = json.loads(rt.window("list"))
     assert [row["window_id"] for row in listed] == [1, 2, 3]
-    xmessage = next(row for row in listed if row["window_id"] == 2)
-    assert xmessage["app"] == "xmessage" and xmessage["pid"] == 0
-    assert xmessage["on_screen"] is True and xmessage["bounds"]["width"] > 0
-    wish = next(row for row in listed if row["window_id"] == 3)
-    assert wish["app"] == "wish8.6" and wish["pid"] == 0
+    _assert_pidless_span(next(row for row in listed if row["window_id"] == 2), "xmessage", "xmessage")
+    _assert_pidless_span(next(row for row in listed if row["window_id"] == 3), "wish8.6", "wish8.6")
+
+
+def test_pidless_windows_are_listed_while_another_app_is_focused(tmp_path) -> None:
+    """Focus on a different app does not drop mapped windows that have no pid.
+
+    secret is focused and has no grant, so its own window stays out. xmessage
+    and wish stay in, with pid null, WM_CLASS, and bounds.
+    """
+    driver = _Windows(_PIDLESS_ROWS)
+    driver.frontmost_app = lambda: ("secret", 99)
+    rt = _runtime(tmp_path, driver, app=None, tier=None)
+    listed = json.loads(rt.window("list"))
+    assert [row["window_id"] for row in listed] == [2, 3]
+    _assert_pidless_span(listed[0], "xmessage", "xmessage")
+    _assert_pidless_span(listed[1], "wish8.6", "wish8.6")
+    # A grant on a different app does not replace the focused app's refusal.
+    rt.store.set_tier("xterm", safety.Tier.READ)
+    again = json.loads(rt.window("list"))
+    assert [row["window_id"] for row in again] == [2, 3]
+
+
+def test_focused_ungranted_app_still_needs_permission_when_every_window_has_a_pid(tmp_path) -> None:
+    rows = [
+        {"window_id": 1, "app": "secret", "pid": 9, "title": "notes", "on_screen": True,
+         "bounds": {"display_id": 0, "x": 0, "y": 0, "width": 10, "height": 10}},
+    ]
+    driver = _Windows(rows)
+    driver.frontmost_app = lambda: ("secret", 9)
+    rt = _runtime(tmp_path, driver, app=None, tier=None)
+    with pytest.raises(server.ActionRefused) as exc:
+        rt.window("list")
+    assert exc.value.decision.app == "secret"
+
+
+def test_app_filter_does_not_include_other_apps_pidless_windows(tmp_path) -> None:
+    """``app=`` stays an exact app id. Another app's pid-less window stays out.
+
+    xmessage and wish have no pid and are keyed by WM_CLASS. ``app=xterm``
+    does not return them, and ``app=xmessage`` does not return wish.
+    """
+    driver = _Windows(_PIDLESS_ROWS)
+    rt = _runtime(tmp_path, driver, tier=safety.Tier.READ, app="xterm")
+    for name in ("xmessage", "wish8.6", "secret"):
+        rt.store.set_tier(name, safety.Tier.READ)
+    xterm = json.loads(rt.window("list", app="xterm"))
+    assert [row["window_id"] for row in xterm] == [1]
+    assert all(row.get("wm_class") != "xmessage" for row in xterm)
+    xmessage = json.loads(rt.window("list", app="xmessage"))
+    assert [row["window_id"] for row in xmessage] == [2, 6]
+    _assert_pidless_span(xmessage[0], "xmessage", "xmessage")
+    assert "pid" not in xmessage[1]
+    wish = json.loads(rt.window("list", app="wish8.6"))
+    assert [row["window_id"] for row in wish] == [3, 5]
+    assert all(row["wm_class"] == "wish8.6" for row in wish)
+    assert all(row["pid"] is None for row in wish)
 
 
 def test_unfiltered_list_of_only_pidless_windows_needs_no_grant(tmp_path) -> None:
@@ -179,7 +240,7 @@ def test_unfiltered_list_of_only_pidless_windows_needs_no_grant(tmp_path) -> Non
     driver.frontmost_app = lambda: (None, None)
     rt = _runtime(tmp_path, driver, app=None, tier=None)
     listed = json.loads(rt.window("list"))
-    assert listed == [{**rows[0], "on_screen": True}]
+    assert listed == [{**rows[0], "on_screen": True, "pid": None}]
 
 
 def test_unfiltered_list_with_no_windows_and_no_focus_is_empty(tmp_path) -> None:
@@ -195,6 +256,36 @@ def test_unfiltered_list_keeps_a_minimized_window_off_screen(tmp_path) -> None:
     rows = json.loads(rt.window("list"))
     hidden = next(row for row in rows if row["window_id"] == 4)
     assert hidden["on_screen"] is False and hidden["bounds"] is None
+
+
+def test_coordinate_click_on_a_pidless_window_gates_on_wm_class(tmp_path, monkeypatch) -> None:
+    """A focused window with no pid is not a grant of ``unknown``.
+
+    The point is gated on the WM_CLASS under it. With that grant the click
+    runs. Without it the refusal names xmessage.
+    """
+    driver = _Windows([])
+    driver.resolves_apps = False
+    driver.main_display_id = lambda: 0
+    clicked: list = []
+    driver.click = lambda target, **kwargs: clicked.append(target)
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "unknown")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: "xmessage")
+    rt = _runtime(tmp_path, driver, app="xmessage", tier=safety.Tier.CLICK)
+    text = rt.click(x=30, y=40, display_id=0)
+    assert clicked and clicked[0].x == 30 and clicked[0].y == 40
+    assert "unknown" not in text
+
+    bare = _Windows([])
+    bare.resolves_apps = False
+    bare.main_display_id = lambda: 0
+    bare.click = lambda target, **kwargs: None
+    other = tmp_path / "bare"
+    other.mkdir()
+    refused = _runtime(other, bare, app=None, tier=None)
+    with pytest.raises(server.ActionRefused) as exc:
+        refused.click(x=30, y=40, display_id=0)
+    assert exc.value.decision.app == "xmessage"
 
 
 def test_owner_unknown_does_not_ask_for_an_empty_grant(tmp_path) -> None:
