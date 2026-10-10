@@ -419,3 +419,82 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
             dpy.close()
         except Exception:
             pass
+
+
+@requires_desktop
+def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
+    """xmessage is mapped, has WM_CLASS, and publishes no _NET_WM_PID.
+
+    Focusing it makes the frontmost app undetectable. An unfiltered list
+    with no grants still names the window, with app from WM_CLASS and pid 0.
+    """
+    import json
+    import shutil
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = shutil.which("xmessage")
+    if not binary:
+        pytest.skip("xmessage is not installed")
+    if not shutil.which("xdotool"):
+        pytest.skip("xdotool is not installed")
+    proc = subprocess.Popen(
+        [binary, "-buttons", "ok", "-timeout", "90", "pidless-window-probe"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+
+    def match():
+        for item in driver.windows():
+            if item.get("pid") not in (0, None):
+                continue
+            names = " ".join(
+                str(item.get(key) or "")
+                for key in ("app", "wm_class", "wm_class_class", "title")
+            ).lower()
+            if "xmessage" in names and item.get("on_screen") is True:
+                bounds = item.get("bounds") or {}
+                if bounds.get("width", 0) > 0 and bounds.get("height", 0) > 0:
+                    return item
+        return None
+
+    try:
+        found = _until(match)
+        assert found is not None, driver.windows()
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", str(found["window_id"])],
+            check=False, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        def focused():
+            if _linux_system.frontmost_app_id() != "":
+                return None
+            active = _linux_system.active_window() or {}
+            try:
+                if int(active.get("window_id") or 0) == int(found["window_id"]):
+                    return active
+            except (TypeError, ValueError):
+                return None
+            return None
+
+        assert _until(focused), (_linux_system.frontmost_app_id(), _linux_system.active_window())
+        store = safety.PermissionStore(tmp_path / "p.json")
+        rt = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        listed = json.loads(rt.window("list"))
+        row = next(item for item in listed if item["window_id"] == found["window_id"])
+        assert row["pid"] == 0
+        assert "xmessage" in str(row.get("app") or "").lower() or (
+            "xmessage" in str(row.get("wm_class") or "").lower()
+        )
+        assert row["on_screen"] is True
+        assert row["bounds"]["width"] > 0 and row["bounds"]["height"] > 0
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
