@@ -170,13 +170,16 @@ Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`)
 SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
 step. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
 `SIGTERM` there ends the process without a Python handler, so it is not a
-cooperative cancel. The handler is installed before the first step. A signal
+cooperative cancel. The handlers are installed before the agent is built and
+stay installed until the process exits, including through shutdown. A signal
 that arrives inside a blocking call (`sleep`, `select`, or a subprocess) still
 ends the run as `cancelled` when that call raises `InterruptedError` or
 `KeyboardInterrupt`. The trace write for the step is closed, and `--json`
 prints one object with `status` `cancelled` and `reason` `cancelled`. The
-process exits 3. A second cancel signal exits 3 immediately and does not
-print a traceback.
+process exits 3. A second cancel signal calls `os._exit(3)` and does not
+print a traceback. On Windows a `SetConsoleCtrlHandler` callback does that
+for the second Ctrl+C or Ctrl+Break, so the default console handler does not
+terminate the process with `STATUS_CONTROL_C_EXIT` (`0xC000013A`).
 
 `--model-timeout` is the limit for one model call, in seconds. The default is
 120. It is not the time left in `--max-time`. The loop checks the run budget

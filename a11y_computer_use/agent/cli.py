@@ -4,8 +4,11 @@
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
 SIGINT and SIGTERM cancel after the current step (status ``cancelled``,
 exit 3). On Windows, Ctrl+C (SIGINT) and Ctrl+Break (SIGBREAK) do; SIGTERM
-there is TerminateProcess and is not a cooperative cancel. A second signal
-exits 3 immediately and does not print a traceback.
+there is TerminateProcess and is not a cooperative cancel. Handlers are
+installed before the agent is built and stay until the process exits. A
+second signal calls ``os._exit(3)`` and does not print a traceback. On
+Windows a console control handler does that for the second Ctrl+C or
+Ctrl+Break, so the default handler cannot exit ``STATUS_CONTROL_C_EXIT``.
 ``--approve-policy deny`` is the default for risky actions. ``--approve``
 prompts on the terminal (stderr or the tty, never stdout).
 
@@ -42,31 +45,45 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _serve(args)
     if args.command == "mcp":
         return _mcp(args)
-    policy = getattr(args, "approve_policy", "deny")
-    if args.approve and args.auto_deny:
-        return _emit(args, _error_body("error: pass only one of --approve and --auto-deny"), 3)
-    if args.approve and policy != "deny":
-        return _emit(
-            args,
-            _error_body("error: pass only one of --approve and --approve-policy"),
-            3,
-        )
-    if args.auto_deny and policy != "deny":
-        return _emit(
-            args,
-            _error_body("error: pass only one of --auto-deny and --approve-policy"),
-            3,
-        )
+    # Before the agent, the grant check, or the run. A signal during that
+    # work, or a second signal while the process is leaving, must not hit
+    # the default handler (exit -2, or 0xC000013A on Windows).
+    state = _arm_cancel_handlers()
+    code = 3
     try:
-        agent = build_agent(args)
-        result = _run_until_cancelled(agent, args.goal)
-    except KeyboardInterrupt:
-        body = _error_body("cancelled")
-        body["status"] = "cancelled"
-        return _emit(args, body, 3)
-    except Exception as exc:  # noqa: BLE001 - the process must exit 3, not traceback
-        return _emit(args, _error_body(f"error: {type(exc).__name__}: {exc}"), 3)
-    return _emit(args, result.to_dict(), exit_code(result))
+        policy = getattr(args, "approve_policy", "deny")
+        if args.approve and args.auto_deny:
+            code = _emit(args, _error_body("error: pass only one of --approve and --auto-deny"), 3)
+        elif args.approve and policy != "deny":
+            code = _emit(
+                args,
+                _error_body("error: pass only one of --approve and --approve-policy"),
+                3,
+            )
+        elif args.auto_deny and policy != "deny":
+            code = _emit(
+                args,
+                _error_body("error: pass only one of --auto-deny and --approve-policy"),
+                3,
+            )
+        else:
+            try:
+                agent = build_agent(args)
+                result = _run_until_cancelled(agent, args.goal)
+            except KeyboardInterrupt:
+                body = _error_body("cancelled")
+                body["status"] = "cancelled"
+                code = _emit(args, body, 3)
+            except Exception as exc:  # noqa: BLE001 - the process must exit 3, not traceback
+                code = _emit(args, _error_body(f"error: {type(exc).__name__}: {exc}"), 3)
+            else:
+                code = _emit(args, result.to_dict(), exit_code(result))
+    finally:
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            _disarm_cancel_handlers(state)
+        else:
+            _hard_exit(code)
+    return code
 
 
 def build_agent(args: argparse.Namespace):
@@ -114,19 +131,53 @@ def _cancel_signals() -> list[int]:
     return found
 
 
-def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object) -> None:
-    """First signal cancels after the current step. The second exits 3.
+# One process-wide arm. Replacing the handler from inside it, or putting the
+# default back before the process is gone, is the window where a second
+# signal dies with -2 or STATUS_CONTROL_C_EXIT (0xC000013A).
+_CANCEL_STATE: dict | None = None
 
-    The handler is re-armed before it does anything else. A second SIGINT
-    that arrives while the first is still tripped can leave the process on
-    the default handler; that path is an uncaught KeyboardInterrupt and the
-    process dies with status ``-SIGINT`` (-2) and a traceback. Re-arming
-    keeps this function installed. The second hit uses ``os._exit`` so
-    finalization cannot turn the exit into that signal death.
+
+def _cancel_state() -> dict:
+    global _CANCEL_STATE
+    if _CANCEL_STATE is None:
+        _CANCEL_STATE = {
+            "hits": [0],
+            "win_events": 0,
+            "agent": None,
+            "previous": [],
+            "win_handler": None,
+            "armed": False,
+        }
+    return _CANCEL_STATE
+
+
+def _record_cancel_hit(agent: object, hit: int) -> None:
+    """Flush the hit count where a parent can see it before the next signal.
+
+    The file is ``<trace_dir>/cancel_signal``. The write uses ``os`` calls so
+    it finishes and reaches disk before ``cancel`` returns.
     """
-    del frame
-    # Ask to stop before re-arming. signal.signal checks pending signals, and
-    # the cancel has to be visible even if that re-enters this handler.
+    directory = getattr(agent, "_trace_dir", None)
+    if not directory:
+        return
+    path = os.path.join(os.fspath(directory), "cancel_signal")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    except OSError:
+        return
+    try:
+        os.write(fd, f"{hit}\n".encode())
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _ask_agent_cancel(agent: object) -> None:
+    """Latch a cooperative cancel. A signal handler must not raise."""
+    if agent is None:
+        return
     flag = getattr(agent, "_signal_cancel", None)
     if flag is not None and hasattr(flag, "set"):
         try:
@@ -139,52 +190,149 @@ def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object
             cancel()
         except Exception:  # noqa: BLE001 - a signal handler must not raise
             pass
+
+
+def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object) -> None:
+    """First signal cancels after the current step. The second exits 3.
+
+    The same function stays installed. Swapping it for another handler, or
+    restoring the default while this one is still the process's handler,
+    lets the second signal kill the process with ``-SIGINT`` (-2) or, on
+    Windows, ``STATUS_CONTROL_C_EXIT``. The second hit uses ``os._exit`` so
+    finalization cannot turn the exit into that signal death. The hit is
+    recorded before the cooperative cancel so a parent can send the second
+    signal while this process is still inside the run.
+    """
+    del signum, frame
     hits[0] += 1
-    try:
-        signal.signal(signum, lambda sig, frm: _on_cancel_signal(agent, hits, sig, frm))
-    except (OSError, ValueError):
-        pass
+    _record_cancel_hit(agent, hits[0])
     if hits[0] >= 2:
         os._exit(3)
+    _ask_agent_cancel(agent)
 
 
-def _run_until_cancelled(agent: object, goal: str):
-    """Run ``goal``. The platform's cancel signals stop it after this step.
+def _windows_console_event(state: dict, ctrl_type: int) -> bool:
+    """Body of the Windows ``SetConsoleCtrlHandler`` callback.
 
-    Handlers are installed before ``run``, so a signal during startup is
-    recorded on ``agent._signal_cancel`` and still cancels after ``_loop``
-    clears the ordinary cancel event. The first signal returns into the
-    step. The trace write for that step closes, and ``run`` returns a
-    cancelled result. A second signal exits 3 with no traceback.
+    Ctrl+C is 0 and Ctrl+Break is 1. The handler registered last is called
+    first, and this one is registered after Python's. The first of those
+    events returns false so Python's handler still runs and the run can
+    cancel. The second calls ``os._exit(3)`` and does not return, so Windows
+    never applies the default handler (``STATUS_CONTROL_C_EXIT``,
+    ``0xC000013A``). Close, logoff, and shutdown are not claimed.
     """
-    hits = [0]
-    saved: list[tuple[int, object]] = []
-    flag = getattr(agent, "_signal_cancel", None)
-    if flag is None:
-        try:
-            agent._signal_cancel = threading.Event()  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
-            pass
+    if ctrl_type not in (0, 1):
+        return False
+    state["win_events"] = int(state.get("win_events", 0)) + 1
+    if int(state["win_events"]) >= 2:
+        os._exit(3)
+    return False
+
+
+def _arm_windows_console_handler(state: dict) -> None:
+    """Install the console handler once. It is not removed.
+
+    Removing it puts the default handler back. A Ctrl+Break in that window
+    exits ``0xC000013A`` instead of 3.
+    """
+    if state.get("win_handler") is not None or sys.platform != "win32":
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    routine = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+    def _callback(ctrl_type: int) -> int:
+        return 1 if _windows_console_event(state, int(ctrl_type)) else 0
+
+    callback = routine(_callback)
+    if not kernel.SetConsoleCtrlHandler(callback, True):
+        return
+    # The callback is a C function pointer. Dropping it lets it be collected
+    # and the next control event jumps to a dead address.
+    state["win_handler"] = callback
+    state["kernel32"] = kernel
+
+
+def _arm_cancel_handlers() -> dict:
+    """Install cancel handlers. The same ones stay up for the whole run."""
+    state = _cancel_state()
+    if state["armed"]:
+        return state
+    state["hits"][0] = 0
+    state["win_events"] = 0
+    state["agent"] = None
 
     def handler(signum: int, frame: object) -> None:
-        _on_cancel_signal(agent, hits, signum, frame)
+        _on_cancel_signal(state["agent"], state["hits"], signum, frame)
 
     for sig in _cancel_signals():
         try:
-            saved.append((sig, signal.getsignal(sig)))
-            signal.signal(sig, handler)
+            previous = signal.signal(sig, handler)
+            state["previous"].append((sig, previous))
             if hasattr(signal, "siginterrupt"):
                 signal.siginterrupt(sig, True)
         except (OSError, ValueError):
             continue
-    try:
-        return agent.run(goal)  # type: ignore[attr-defined]
-    finally:
-        for sig, previous in saved:
-            try:
-                signal.signal(sig, previous)  # type: ignore[arg-type]
-            except (OSError, ValueError):
-                pass
+    _arm_windows_console_handler(state)
+    state["armed"] = True
+    return state
+
+
+def _disarm_cancel_handlers(state: dict) -> None:
+    """Put back the handlers from before ``_arm_cancel_handlers``.
+
+    Used when ``main`` was called inside another process (the test suite).
+    A real ``a11y-agent run`` does not take this path: it ``os._exit``s with
+    these handlers still installed. The Windows console handler is never
+    removed.
+    """
+    for sig, previous in state["previous"]:
+        try:
+            signal.signal(sig, previous)  # type: ignore[arg-type]
+        except (OSError, ValueError):
+            pass
+    state["previous"].clear()
+    state["armed"] = False
+    state["agent"] = None
+
+
+def _hard_exit(code: int) -> None:
+    """Exit with ``code`` without running the default signal action.
+
+    ``os._exit`` skips stdio flush. The JSON result is written first.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - a closed stream must not block exit
+            pass
+    os._exit(code)
+
+
+def _run_until_cancelled(agent: object, goal: str):
+    """Run ``goal``. Cancel handlers are already installed.
+
+    A signal that arrived before the agent existed is applied now, and it
+    survives ``_loop`` clearing the ordinary cancel event. The first signal
+    returns into the step. The trace write for that step closes, and ``run``
+    returns a cancelled result. A second signal exits 3 with no traceback.
+    """
+    state = _cancel_state()
+    state["agent"] = agent
+    flag = getattr(agent, "_signal_cancel", None)
+    if flag is None:
+        try:
+            agent._signal_cancel = threading.Event()  # type: ignore[attr-defined]
+            flag = agent._signal_cancel  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
+            flag = None
+    if state["hits"][0]:
+        _ask_agent_cancel(agent)
+    elif flag is not None and hasattr(flag, "is_set") and flag.is_set():
+        _ask_agent_cancel(agent)
+    return agent.run(goal)  # type: ignore[attr-defined]
 
 
 def exit_code(result: RunResult) -> int:

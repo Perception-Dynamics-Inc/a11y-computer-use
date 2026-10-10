@@ -497,6 +497,10 @@ def _spawn_run(script, trace, home):
     env["HOME"] = str(home)
     env.pop("DISPLAY", None)
     env.pop("WAYLAND_DISPLAY", None)
+    # An in-process test returns from main and puts the previous handler
+    # back. This child is the process under test: it must os._exit with the
+    # cancel handlers still installed.
+    env.pop("PYTEST_CURRENT_TEST", None)
     kwargs = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -718,19 +722,49 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
     assert payload["trace_dir"] == str(trace)
 
 
+def _wait_for_cancel_hit(proc, trace, hit: int, timeout: float) -> None:
+    """Block until ``cancel_signal`` records that ``hit`` was received."""
+    import time
+
+    path = trace / "cancel_signal"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before cancel hit {hit}: {err}"
+            )
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            try:
+                seen = int(text)
+            except ValueError:
+                seen = 0
+            if seen >= hit:
+                return
+        time.sleep(0.01)
+    raise AssertionError(f"child did not record cancel hit {hit}")
+
+
 def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
-    """A second Ctrl+C leaves the process immediately, still with code 3."""
+    """The second signal is sent only after the child records the first.
+
+    A fixed sleep can deliver it before the handler is installed, or after
+    the default handler is back during shutdown. macOS then exits -2 and
+    Windows exits 0xC000013A. The return code is still 3.
+    """
     import time
 
     script = tmp_path / "turns.json"
     trace = tmp_path / "trace"
-    _waits(script, [0.3, 30.0])
+    _waits(script, [30.0])
     proc = _spawn_run(script, trace, tmp_path / "home")
     try:
-        _wait_for_steps(trace, 1, 20)
+        _wait_for_step_started(proc, trace, 1, 30)
         started = time.monotonic()
         _deliver(proc, "SIGINT")
-        time.sleep(0.2)
+        _wait_for_cancel_hit(proc, trace, 1, 20)
+        assert proc.poll() is None
         _deliver(proc, "SIGINT")
         _out, err = proc.communicate(timeout=8)
     finally:
@@ -741,3 +775,46 @@ def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
     assert proc.returncode == 3
     assert "Traceback" not in err
     assert "KeyboardInterrupt" not in err
+
+
+def test_run_arms_cancel_handlers_before_building_the_agent(monkeypatch) -> None:
+    """The handler is in place before ``build_agent``, and gone afterwards.
+
+    In-process callers get the previous handler back. A real process
+    ``os._exit``s instead, which this test does not do.
+    """
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    captured: dict = {}
+
+    def build(args):
+        del args
+        captured["handler"] = signal.getsignal(signal.SIGINT)
+        raise RuntimeError("stop before run")
+
+    monkeypatch.setattr(cli, "build_agent", build)
+    code = cli.main(["run", "goal", "--model", "scripted:missing.json"])
+    assert code == 3
+    assert captured["handler"] not in (signal.SIG_DFL, signal.SIG_IGN, None)
+    assert captured["handler"] != previous
+    assert signal.getsignal(signal.SIGINT) == previous
+
+
+def test_second_console_event_exits_3(monkeypatch) -> None:
+    """The second Ctrl+C or Ctrl+Break exits 3 and does not return."""
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    state = {"win_events": 0}
+    assert cli._windows_console_event(state, 0) is False  # CTRL_C_EVENT
+    assert cli._windows_console_event(state, 2) is False  # CTRL_CLOSE_EVENT is not claimed
+    assert codes == []
+    assert state["win_events"] == 1
+    with pytest.raises(SystemExit):
+        cli._windows_console_event(state, 1)  # CTRL_BREAK_EVENT
+    assert codes == [3]
