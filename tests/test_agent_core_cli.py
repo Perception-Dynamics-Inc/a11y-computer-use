@@ -474,15 +474,17 @@ def test_domain_flags_reach_the_agent():
     assert agent.fence_untrusted is True
 
 
-def _waits(path, seconds: list[float]) -> None:
+def _waits(path, seconds: list[float], **hold) -> None:
     turns = [
         {"text": "", "calls": [{"name": "wait", "args": {"seconds": item}}]}
         for item in seconds
     ]
-    path.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+    body: dict = {"turns": turns}
+    body.update(hold)
+    path.write_text(json.dumps(body), encoding="utf-8")
 
 
-def _spawn_run(script, trace, home):
+def _spawn_run(script, trace, home, extra_env=None):
     import os
     import subprocess
     import sys
@@ -497,6 +499,12 @@ def _spawn_run(script, trace, home):
     env["HOME"] = str(home)
     env.pop("DISPLAY", None)
     env.pop("WAYLAND_DISPLAY", None)
+    # An in-process test returns from main and puts the previous handler
+    # back. This child is the process under test: it must os._exit with the
+    # cancel handlers still installed.
+    env.pop("PYTEST_CURRENT_TEST", None)
+    if extra_env:
+        env.update(extra_env)
     kwargs = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
@@ -665,10 +673,11 @@ def _wait_for_step_started(proc, trace, index: int, timeout: float) -> list[dict
 def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
     """Signal only after step 2 has started, and stop before any later step.
 
-    Waiting for a finished step and then signalling races a slow runner: the
-    next wait can already be underway. The child flushes ``step_started``
-    before the tool call, and the step being signalled waits long enough that
-    the signal lands inside it.
+    The waits do not block. On Windows a settle wait can return at once, so a
+    clock cannot keep step 3 from starting before the signal is delivered.
+    The scripted model holds turn 3 until ``cancel_signal`` records the hit.
+    The parent sends the signal only after steps 1 and 2 are on disk, and the
+    turn that would start step 3 is then offered with cancel already latched.
     """
     import sys
     import time
@@ -677,9 +686,12 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
         pytest.skip("Windows TerminateProcess does not run a Python SIGTERM handler")
     script = tmp_path / "turns.json"
     trace = tmp_path / "trace"
-    # Step 2 is the one the signal hits. It is long so delivery delay cannot
-    # run it out and start step 3. Step 3 must not start.
-    _waits(script, [0.2, 30.0, 30.0])
+    _waits(
+        script,
+        [0.0, 0.0, 0.0],
+        hold_before_turn=3,
+        hold_file=str(trace / "cancel_signal"),
+    )
     proc = _spawn_run(script, trace, tmp_path / "home")
     try:
         started = _wait_for_step_started(proc, trace, 2, 30)
@@ -696,7 +708,7 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
             proc.communicate()
     elapsed = time.monotonic() - signalled
     assert proc.returncode == 3
-    # Step 2 may finish its wait; step 3 is another 30s and must not run.
+    # Turn 3 is released by the cancel record and must not run.
     assert elapsed < 40, elapsed
     assert "Traceback" not in err
     assert "KeyboardInterrupt" not in err
@@ -718,19 +730,65 @@ def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: st
     assert payload["trace_dir"] == str(trace)
 
 
+def _wait_for_cancel_hit(proc, trace, hit: int, timeout: float) -> None:
+    """Block until ``cancel_signal`` records that ``hit`` was received."""
+    import time
+
+    path = trace / "cancel_signal"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # Read the record before treating an exit as a miss. The child holds
+        # the cooperative ``os._exit`` until an ack file appears, so a
+        # recorded hit is still a live process. An exit with no record is
+        # the race this wait rejects.
+        seen = 0
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            try:
+                seen = int(text)
+            except ValueError:
+                seen = 0
+        if seen >= hit:
+            return
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before cancel hit {hit}: {err}"
+            )
+        time.sleep(0.01)
+    raise AssertionError(f"child did not record cancel hit {hit}")
+
+
 def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
-    """A second Ctrl+C leaves the process immediately, still with code 3."""
+    """The second signal is sent only after the child records the first.
+
+    A fixed sleep can deliver it before the handler is installed, or after
+    the default handler is back during shutdown. macOS then exits -2 and
+    Windows exits 0xC000013A. The return code is still 3.
+
+    The wait does not block, so the run can reach ``os._exit`` before this
+    process reads ``cancel_signal``. The child holds that exit until
+    ``exit-ack`` appears. This test never writes the ack: the second signal's
+    ``os._exit(3)`` is what ends the process, while it is still alive.
+    """
     import time
 
     script = tmp_path / "turns.json"
     trace = tmp_path / "trace"
-    _waits(script, [0.3, 30.0])
-    proc = _spawn_run(script, trace, tmp_path / "home")
+    ack = tmp_path / "exit-ack"
+    _waits(script, [0.0])
+    proc = _spawn_run(
+        script,
+        trace,
+        tmp_path / "home",
+        extra_env={"A11Y_AGENT_EXIT_ACK": str(ack)},
+    )
     try:
-        _wait_for_steps(trace, 1, 20)
+        _wait_for_step_started(proc, trace, 1, 30)
         started = time.monotonic()
         _deliver(proc, "SIGINT")
-        time.sleep(0.2)
+        _wait_for_cancel_hit(proc, trace, 1, 20)
+        assert proc.poll() is None, proc.returncode
         _deliver(proc, "SIGINT")
         _out, err = proc.communicate(timeout=8)
     finally:
@@ -739,5 +797,91 @@ def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
             proc.communicate()
     assert time.monotonic() - started < 8
     assert proc.returncode == 3
+    assert not ack.is_file()
     assert "Traceback" not in err
     assert "KeyboardInterrupt" not in err
+
+
+def test_hard_exit_waits_until_the_ack_file_exists(tmp_path, monkeypatch) -> None:
+    """The cooperative exit stays alive until the parent has seen the record."""
+    import threading
+    import time
+
+    ack = tmp_path / "ack"
+    monkeypatch.setenv("A11Y_AGENT_EXIT_ACK", str(ack))
+    monkeypatch.setenv("A11Y_AGENT_EXIT_ACK_TIMEOUT", "2")
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+
+    def _write() -> None:
+        time.sleep(0.1)
+        ack.write_text("seen", encoding="utf-8")
+
+    threading.Thread(target=_write).start()
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        cli._hard_exit(3)
+    assert codes == [3]
+    assert time.monotonic() - started >= 0.05
+
+
+def test_hard_exit_without_an_ack_path_does_not_wait(monkeypatch) -> None:
+    monkeypatch.delenv("A11Y_AGENT_EXIT_ACK", raising=False)
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    with pytest.raises(SystemExit):
+        cli._hard_exit(3)
+    assert codes == [3]
+
+
+def test_run_arms_cancel_handlers_before_building_the_agent(monkeypatch) -> None:
+    """The handler is in place before ``build_agent``, and gone afterwards.
+
+    In-process callers get the previous handler back. A real process
+    ``os._exit``s instead, which this test does not do.
+    """
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    captured: dict = {}
+
+    def build(args):
+        del args
+        captured["handler"] = signal.getsignal(signal.SIGINT)
+        raise RuntimeError("stop before run")
+
+    monkeypatch.setattr(cli, "build_agent", build)
+    code = cli.main(["run", "goal", "--model", "scripted:missing.json"])
+    assert code == 3
+    assert captured["handler"] not in (signal.SIG_DFL, signal.SIG_IGN, None)
+    assert captured["handler"] != previous
+    assert signal.getsignal(signal.SIGINT) == previous
+
+
+def test_second_console_event_exits_3(monkeypatch) -> None:
+    """The second Ctrl+C or Ctrl+Break exits 3 and does not return."""
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    state = {"win_events": 0}
+    assert cli._windows_console_event(state, 0) is False  # CTRL_C_EVENT
+    assert cli._windows_console_event(state, 2) is False  # CTRL_CLOSE_EVENT is not claimed
+    assert codes == []
+    assert state["win_events"] == 1
+    with pytest.raises(SystemExit):
+        cli._windows_console_event(state, 1)  # CTRL_BREAK_EVENT
+    assert codes == [3]
