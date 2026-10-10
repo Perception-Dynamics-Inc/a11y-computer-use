@@ -484,6 +484,21 @@ class BrowserDriver:
             except ComputerUseError:
                 pass
 
+    def focus_for_type(self, element: Element) -> bool:
+        """Focus ``element`` and confirm ``document.activeElement``. Does not type."""
+        if element.secure:
+            return False
+        backend = self._backend_id(element)
+        if backend is None:
+            return False
+        result = self._call_on(
+            backend,
+            "function(){this.focus(); return document.activeElement === this;}",
+            return_value=True,
+            session_id=self._session_id(element),
+        )
+        return result is True
+
     def press_element(self, element: Element) -> bool:
         if element.secure:
             return False
