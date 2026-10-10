@@ -3103,6 +3103,74 @@ def test_typed_visible_ignores_nbsp_and_one_trailing_newline() -> None:
     assert _atspi._typed_visible("hello world", "hello world", "4711") is False
 
 
+def test_typed_visible_replaces_a_selection_instead_of_appending() -> None:
+    """A selected word is replaced. The check is the final text, not an append.
+
+    Without the selection, ``WORD`` sitting in the middle of a shorter field
+    is not success: the old model required the typed text at the end or the
+    field to grow. With the selection, the result has to be that range
+    replaced and nothing else.
+    """
+    before = "Hello world startSecond line"
+    after = "Hello WORD startSecond line"
+    assert _atspi._typed_visible(before, after, "WORD") is False
+    assert _atspi._typed_visible(before, after, "WORD", selection=(6, 11)) is True
+    assert _atspi._typed_visible(
+        before, after, "WORD", selection=(6, 11), chrome=True,
+    ) is True
+    assert _atspi._typed_visible(before, after, "WORD", selection=(0, 5)) is False
+    assert _atspi._typed_visible(before, before + "WORD", "WORD") is True
+
+
+def test_selection_span_covers_an_embedded_word(fake_atspi) -> None:
+    """A contenteditable parent stores the bold word as one U+FFFC.
+
+    The selection of that object is the word in the expanded read-back.
+    """
+    word = _Acc("text")
+    word.text = "world"
+    parent = _Acc("section")
+    parent.text = "Hello \ufffc start"
+    parent.links = [word]
+    expanded, starts = _atspi._expansion_starts(parent, parent.text)
+    assert expanded == "Hello world start"
+    assert starts[6] == 6 and starts[7] == 11
+    parent.selection = (6, 7)
+    assert _atspi._selection_span(parent, expanded) == (6, 11)
+    assert _atspi._typed_visible(
+        expanded, "Hello WORD start", "WORD", selection=(6, 11), chrome=True,
+    ) is True
+
+
+def test_selection_span_uses_the_word_inside_the_paragraph(fake_atspi) -> None:
+    """Chrome selects the paragraph object and the word inside it.
+
+    The contenteditable's own text is one U+FFFC per paragraph, so its
+    selection is the whole first paragraph. The paragraph's selection is the
+    word. Typing replaces the word, so the span is the word.
+    """
+    word = _Acc("static", name="world")
+    word.text = "world"
+    word.selection = (0, 5)
+    para = _Acc("paragraph")
+    para.text = "Hello world start"
+    para.selection = (6, 11)
+    _adopt(para, word)
+    second = _Acc("paragraph")
+    second.text = "Second line"
+    parent = _Acc("entry", name="Story editor")
+    parent.text = "\ufffc\ufffc"
+    parent.links = [para, second]
+    parent.selection = (0, 1)
+    readable = "Hello world startSecond line"
+    assert _atspi._selection_span(parent, readable) == (6, 11)
+    para.selection = None
+    assert _atspi._selection_span(parent, readable) == (6, 11)
+    para.selection = (0, len(para.text))
+    word.selection = (0, 5)
+    assert _atspi._selection_span(parent, readable) == (0, len(para.text))
+
+
 def test_omnibox_poll_accepts_the_url_after_a_truncated_read() -> None:
     """The address bar can publish a prefix first. The later full URL matches."""
     url = "https://2captcha.com/demo/recaptcha-v2"
@@ -3142,6 +3210,34 @@ def test_chrome_contenteditable_type_waits_for_the_settled_text(fake_atspi, monk
     assert _atspi.chromium_contenteditable_type(field, " ZZ ") is True
     assert typed == [" ZZ "]
     assert reads["n"] >= 3
+
+
+def test_chrome_contenteditable_type_replaces_the_selected_word(
+    fake_atspi, monkeypatch
+) -> None:
+    """Fake Chrome contenteditable. Typing replaces the selected word.
+
+    Not a browser. The read-back is the field with that range replaced.
+    Appending ``WORD`` onto ``world`` is not success.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Hello world start"))
+    field.get_editable_text_iface = None
+    field.selection = (6, 11)
+    typed: list[str] = []
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        start, end = field.selection
+        field.text = field.text[:start] + text + field.text[end:]
+        field.selection = None
+
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.chromium_contenteditable_type(field, "WORD") is True
+    assert typed == ["WORD"]
+    assert field.text == "Hello WORD start"
+    assert _atspi.chromium_contenteditable_type.last_expected == "Hello WORD start"
 
 
 def test_chrome_contenteditable_type_that_settles_wrong_is_not_success(
