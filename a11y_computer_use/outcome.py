@@ -24,6 +24,7 @@ structured content. The agent loop reads the attributes.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import sys
 import time
@@ -462,6 +463,52 @@ def values_match(requested: str, actual: str) -> bool:
         return float(requested) == float(actual)
     except (TypeError, ValueError):
         return False
+
+
+def display_numbers_match(shown: str, wanted: str) -> bool:
+    """True when both sides are the same number after Calc's display rewrite.
+
+    ``14.60`` matches ``14.6``, ``1e3`` matches ``1000``, and ``1,200`` matches
+    ``1200``. A formula is not a number, so ``=E2+31`` does not match ``42``.
+    A formula cut at a colon does not match the rest of the formula.
+    """
+    if shown is None or wanted is None:
+        return False
+    try:
+        return _numbers_close(_parse_display_number(shown), _parse_display_number(wanted))
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_display_number(value: str) -> float:
+    """``1.50``, ``1e3``, ``1,200``, and ``1,5``. A formula is not a number."""
+    text = str(value).strip().replace("\u00a0", "").replace("\u202f", "")
+    if not text or text.startswith("="):
+        raise ValueError(text)
+    if any(char.isalpha() and char not in "eE" for char in text):
+        raise ValueError(text)
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        pieces = text.split(",")
+        head = pieces[0].lstrip("+-")
+        if head.isdigit() and all(len(piece) == 3 and piece.isdigit() for piece in pieces[1:]):
+            text = "".join(pieces)
+        elif len(pieces) == 2 and pieces[1].isdigit() and len(pieces[1]) != 3:
+            text = pieces[0] + "." + pieces[1]
+        else:
+            raise ValueError(text)
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(text)
+    return number
+
+
+def _numbers_close(got: float, wanted: float) -> bool:
+    return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
 
 
 def judge(

@@ -5999,6 +5999,85 @@ def test_writer_cell_replace_waits_for_a_stale_paragraph_read(fake_atspi, monkey
     assert reads["n"] > 4
 
 
+def test_sheet_formula_match_folds_case_whitespace_and_separators(fake_atspi) -> None:
+    """Synthetic formula text. A range colon stays a colon.
+
+    ``;`` and ``,`` are the same argument separator. A space inside a
+    quoted string is still a difference. The computed number is not the formula.
+    """
+    assert _atspi.formulas_match("=AVERAGE(B2:B5)", "=average( B2:B5 )") is True
+    assert _atspi.formulas_match("AVERAGE(B2\\", "=AVERAGE(B2:B5)") is False
+    assert _atspi.formulas_match("=AVERAGE(B", "=AVERAGE(B2:B5)") is False
+    assert _atspi.formulas_match("SUM(A1:A3)", "=sum( A1:A3 )") is True
+    assert _atspi.formulas_match("SUM(A1\\:A3)", "=SUM(A1:A3)") is True
+    assert _atspi.formulas_match("SUM(A1;A2)", "=SUM(A1,A2)") is True
+    assert _atspi.formulas_match('CONCAT("a b")', '=concat( "a b" )') is True
+    assert _atspi.formulas_match('CONCAT("a b")', '=CONCAT("ab")') is False
+    assert _atspi.formulas_match("SUM(A1:A3)", "=SUM(A1:B9)") is False
+    assert _atspi.formulas_match("SUM(A1\\", "=SUM(A1:A3)") is False
+    cell = _Acc("table cell", name="C1")
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1:A3)"}
+    assert _atspi.sheet_cell_matches(cell, "=sum( A1:A3 )") is True
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    assert _atspi.sheet_cell_matches(cell, "=SUM(A1:A3)") is False
+    assert _atspi.sheet_cell_matches(cell, "6") is True
+
+
+def test_sheet_number_match_accepts_calc_display_and_rejects_a_different_number(
+    fake_atspi,
+) -> None:
+    """Synthetic cell text. ``1.50``, ``1e3``, and ``1,200`` match the display."""
+    cell = _Acc("table cell", name="D1")
+    cell.text = "14.6"
+    cell.get_attributes = lambda: {}
+    assert _atspi.sheet_cell_matches(cell, "14.60") is True
+    cell.text = "1.5"
+    assert _atspi.sheet_cell_matches(cell, "1.50") is True
+    assert _atspi.sheet_cell_matches(cell, "14.60") is False
+    cell.text = "1000"
+    assert _atspi.sheet_cell_matches(cell, "1e3") is True
+    cell.text = "1200"
+    assert _atspi.sheet_cell_matches(cell, "1,200") is True
+    assert _atspi.sheet_outcome_text("soffice.bin", "1,200", cell) == "1,200"
+    cell.text = "1.5"
+    assert _atspi.sheet_cell_matches(cell, "1,5") is True
+    cell.text = "1.6"
+    assert _atspi.sheet_cell_matches(cell, "1.50") is False
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1:A3)"}
+    assert _atspi.sheet_cell_matches(cell, "=SUM(A1:A3)") is True
+    assert _atspi._numeric_texts_match("6", "=SUM(A1:A3)") is False
+
+
+def test_cut_range_formula_outcome_reads_the_editor(fake_atspi, monkeypatch) -> None:
+    """Synthetic cell. The cut Formula attribute is not the comparison.
+
+    The editor text is. A complete formula does not open the editor, and a
+    different range stays a mismatch.
+    """
+    cell = _Acc("table cell", name="C1")
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    opened = {"text": "=sum( A1:A3 )", "n": 0}
+
+    def read(_acc, _app="soffice.bin"):
+        opened["n"] += 1
+        return opened["text"]
+
+    monkeypatch.setattr(_atspi, "committed_sheet_formula", read)
+    assert _atspi.sheet_outcome_text("soffice.bin", "=SUM(A1:A3)", cell) == "=SUM(A1:A3)"
+    assert opened["n"] == 1
+    opened["text"] = "=SUM(A1:B9)"
+    assert _atspi.sheet_outcome_text("soffice.bin", "=SUM(A1:A3)", cell) is None
+    cell.get_attributes = lambda: {"formula": "E2+31"}
+    assert _atspi.sheet_outcome_text("soffice.bin", "=E2+31", cell) == "=E2+31"
+    assert opened["n"] == 2
+    assert _atspi.sheet_outcome_text("soffice.bin", "=Z9", cell) is None
+    assert opened["n"] == 2
+
+
 def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
     """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
 
@@ -6437,6 +6516,43 @@ def test_set_value_on_a_sheet_cell_types_and_commits(fake_atspi, monkeypatch) ->
     element = Element("e3", "AXCell", "D1", None, Bounds(0, 10, 10, 40, 16), "snap")
     assert LinuxDriver().set_value(element, "setv") is True
     assert sent == ["setv", "return"]
+
+
+def test_range_formula_set_value_confirms_from_the_editor(fake_atspi, monkeypatch) -> None:
+    """Synthetic cell. No keystroke reaches an X server.
+
+    The Formula attribute is the cut string. The editor read is the formula,
+    so set_value returns. A different editor formula is still a mismatch.
+    """
+    from a11y_computer_use.drivers import _linux_input
+    import a11y_computer_use.drivers.linux as linux_mod
+
+    cell = _Acc("table cell", name="C1", value=0.0, minimum=-1e308, maximum=1e308, width=40, height=16)
+    cell.text = "6"
+    cell.get_attributes = lambda: {"formula": "SUM(A1\\"}
+    cell.component.grab_focus = lambda: True
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(linux_mod.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda _chord: None)
+    reads = {"text": "=SUM(A1:A3)", "n": 0}
+
+    def read(_acc, _app="soffice.bin"):
+        reads["n"] += 1
+        return reads["text"]
+
+    monkeypatch.setattr(_atspi, "committed_sheet_formula", read)
+    element = Element("e9", "AXCell", "C1", None, Bounds(0, 10, 10, 40, 16), "snap")
+    assert LinuxDriver().set_value(element, "=SUM(A1:A3)") is True
+    assert reads["n"] == 1
+    reads["text"] = "=SUM(A1:B9)"
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().set_value(element, "=SUM(A1:A3)")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["formula"] == "=SUM(A1:B9)"
+    assert reads["n"] == 2
 
 
 def test_soffice_without_a_bridge_is_unsupported_and_other_apps_stay_missing(

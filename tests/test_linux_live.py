@@ -3790,6 +3790,107 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> None:
+    """Live Calc. A range formula and a normalised number are not mismatches.
+
+    The Formula attribute is cut at the colon (``AVERAGE(B2\\`` for
+    ``=AVERAGE(B2:B5)``). Confirmation uses the cell editor's formula, so
+    the read-back is the whole range, not ``=AVERAGE(B``. ``14.60`` reads
+    back as ``14.6``. ``1.50``, ``1e3``, and ``1,200`` do the same for
+    ``1.5``, ``1000``, and ``1200``. The average of 10, 20, 30, and 40 is
+    25, so the formula stayed in the cell.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-formula"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                if all(_cell(shot, name) is not None for name in ("B2", "B3", "B4", "B5", "C1", "D1", "G1")):
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose the formula cells\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        for address, seed in (("B2", "10"), ("B3", "20"), ("B4", "30"), ("B5", "40")):
+            cell = _cell(current, address)
+            assert cell is not None
+            seeded = runtime.set_value(cell.ref, seed)
+            assert seeded.outcome == "confirmed", (address, seeded, seeded.evidence)
+            runtime.desktop_snapshot("soffice")
+            current = runtime._current
+            assert current is not None
+        target = _cell(current, "C1")
+        assert target is not None
+        formula = runtime.set_value(target.ref, "=AVERAGE(B2:B5)")
+        assert formula.outcome == "confirmed", (formula, formula.evidence)
+        assert "=AVERAGE(B2:B5)" in formula.evidence
+        assert "AVERAGE(B\\" not in formula.evidence
+        assert "text_mismatch" not in formula.evidence
+        shot = driver.snapshot(Scope.WINDOW, "soffice")
+        held = _cell(shot, "C1")
+        assert held is not None
+        assert held.value in {"25", "25.0", "25.00", "=AVERAGE(B2:B5)", "AVERAGE(B2:B5)"}, held.value
+        current = shot
+        for address, request, shown in (
+            ("D1", "14.60", {"14.6", "14.60"}),
+            ("E1", "1.50", {"1.5", "1.50"}),
+            ("F1", "1e3", {"1000", "1,000", "1e3"}),
+            ("G1", "1,200", {"1200", "1,200"}),
+        ):
+            runtime.desktop_snapshot("soffice")
+            current = runtime._current
+            assert current is not None
+            cell = _cell(current, address)
+            assert cell is not None, address
+            result = runtime.set_value(cell.ref, request)
+            assert result.outcome == "confirmed", (address, result, result.evidence)
+            assert "text_mismatch" not in result.evidence
+            shot = driver.snapshot(Scope.WINDOW, "soffice")
+            landed = _cell(shot, address)
+            assert landed is not None and landed.value in shown, (address, None if landed is None else landed.value)
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_calc_type_42_into_three_cells_is_not_a_secure_field(tmp_path) -> None:
     """Live Calc. Typing 42 into a cell is not a password refusal.
 

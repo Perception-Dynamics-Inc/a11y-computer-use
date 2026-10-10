@@ -4387,20 +4387,130 @@ def _sheet_window_cells(acc) -> list:
     return fallback[:_SHEET_KEEP]
 
 
-def sheet_cell_matches(acc, value: str) -> bool:
-    """True when the cell text is ``value``, or the formula is that request.
+def _unescape_formula(text: str) -> str:
+    """Undo LibreOffice's ``\\:``, ``\\;``, and ``\\\\`` in a Formula attribute."""
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text) and text[index + 1] in {":", ";", "\\"}:
+            out.append(text[index + 1])
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
 
-    The formula attribute omits a leading ``=``. The computed text (``0``
-    when ``=B1*2`` and B1 is empty) does not have to equal the request when
-    the formula does.
+
+def _formula_key(text: str) -> str:
+    """Case-folded formula text with whitespace removed and ``;`` folded to ``,``.
+
+    A leading ``=`` is optional. Whitespace inside quotes stays, so a space
+    in a string is still a difference. A range colon stays a colon. The
+    semicolon is LibreOffice's argument separator.
     """
-    if _full_text(acc) == value:
+    raw = _unescape_formula(str(text).strip())
+    if raw.startswith("="):
+        raw = raw[1:]
+    out: list[str] = []
+    quote = ""
+    for char in raw:
+        if quote:
+            out.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            out.append(char)
+            continue
+        if char.isspace():
+            continue
+        if char == ";":
+            out.append(",")
+            continue
+        out.append(char.casefold())
+    return "".join(out)
+
+
+def formulas_match(got: str | None, wanted: str | None) -> bool:
+    """True when both strings are the same formula after Calc's rewriting."""
+    if not got or not wanted:
+        return False
+    return _formula_key(got) == _formula_key(wanted)
+
+
+def _formula_needs_editor(formula: str | None, wanted: str) -> bool:
+    """True when the Formula attribute cannot be the whole request.
+
+    LibreOffice escapes a range colon as ``\\:``. AT-SPI then splits the
+    attribute on that colon, so ``=SUM(A1:A3)`` arrives as ``SUM(A1\\``.
+    The open cell editor still has the formula.
+    """
+    if not str(wanted).lstrip().startswith("=") or not formula:
+        return False
+    if formula.endswith("\\"):
+        return True
+    return ":" in wanted and ":" not in formula
+
+
+def _numeric_texts_match(shown: str | None, wanted: str) -> bool:
+    """True when both sides are numbers and Calc's display equals the request."""
+    if shown is None or not str(wanted).strip() or str(wanted).lstrip().startswith("="):
+        return False
+    from a11y_computer_use.outcome import display_numbers_match
+
+    return display_numbers_match(str(shown), wanted)
+
+
+def committed_sheet_formula(acc, app: str = "soffice.bin") -> str | None:
+    """Formula text from the cell editor, then Escape so the cell stays committed.
+
+    Used when the Formula attribute was cut at a range colon. ``None`` when
+    the editor does not open. Escape cancels the edit of an unchanged formula.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    grab_focus(acc)
+    _linux_input.press_chord("f2")
+    names = [app]
+    if app != "soffice.bin":
+        names.append("soffice.bin")
+    if "soffice" not in names:
+        names.append("soffice")
+    text = None
+    try:
+        for _attempt in range(10):
+            time.sleep(0.05)
+            for name in names:
+                text = sheet_editor_text(name)
+                if text:
+                    return text
+        return None
+    finally:
+        try:
+            _linux_input.press_chord("escape")
+        except Exception:
+            pass
+
+
+def sheet_cell_matches(acc, value: str) -> bool:
+    """True when the cell shows ``value``, the same formula, or the same number.
+
+    The formula attribute omits a leading ``=``. Case, whitespace, and
+    LibreOffice's ``;`` argument separator do not make a different formula.
+    ``1.50`` and ``1.5`` are the same number. A formula request is not
+    compared to the number the cell computes. A range formula whose
+    attribute was cut at ``:`` is not a match here; the editor read is
+    separate.
+    """
+    shown = _full_text(acc)
+    if shown == value:
         return True
     formula = _sheet_formula(acc)
-    if not formula:
-        return False
-    wanted = value[1:] if value.startswith("=") else value
-    return formula == value or formula == wanted or ("=" + formula) == value
+    if formula and formulas_match(formula, value):
+        return True
+    return _numeric_texts_match(shown, value)
 
 
 def sheet_outcome_text(app: str, requested: str, cell=None) -> str | None:
@@ -4425,11 +4535,19 @@ def sheet_outcome_text(app: str, requested: str, cell=None) -> str | None:
     shown = _full_text(cell)
     if shown == requested:
         return None
-    if not sheet_cell_matches(cell, requested):
+    if sheet_cell_matches(cell, requested):
+        # A formula, or a number Calc rewrote (``1,200`` shows as ``1200``).
+        # The snapshot value stays the display. The outcome quotes the request.
+        if _sheet_formula(cell) or _numeric_texts_match(shown, requested):
+            return requested
         return None
-    if not _sheet_formula(cell):
+    formula = _sheet_formula(cell)
+    if not _formula_needs_editor(formula, requested):
         return None
-    return requested
+    opened = committed_sheet_formula(cell, app)
+    if opened and formulas_match(opened, requested):
+        return requested
+    return None
 
 
 def _find_cell_editor(node, budget: list[int]):
