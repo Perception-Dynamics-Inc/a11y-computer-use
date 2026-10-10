@@ -1655,9 +1655,13 @@ def _one_condition(condition: object, snap: Snapshot | None) -> tuple[bool, str]
             return False, "value condition did not match an element"
         actual = "" if element.value is None else str(element.value)
         wanted = str(spec["equals"])
-        if actual != wanted:
-            return False, f"{element.ref} value is {actual!r}, wanted {wanted!r}"
-        return True, f"{element.ref} value is {wanted!r}"
+        if actual == wanted:
+            return True, f"{element.ref} value is {wanted!r}"
+        # A Calc cell shows 14.6 after set_value of 14.60. That is the same
+        # number. A text field stays exact, and a formula is not its result.
+        if element.role == "AXCell" and outcome.display_numbers_match(actual, wanted):
+            return True, f"{element.ref} value is {actual!r}, same number as {wanted!r}"
+        return False, f"{element.ref} value is {actual!r}, wanted {wanted!r}"
     if key == "window_title_contains":
         needle = str(condition["window_title_contains"])
         title = _window_title(snap) or ""

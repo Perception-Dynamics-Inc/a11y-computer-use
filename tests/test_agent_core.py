@@ -1013,6 +1013,41 @@ def test_check_conditions_window_title():
     assert checked[0]["ok"] is True
 
 
+def test_done_accepts_a_calc_cell_display_and_rejects_a_different_value():
+    """The done gate treats Calc's display as the requested number.
+
+    ``14.60`` shows as ``14.6``. A different number, a formula, and a text
+    field that merely looks numeric stay mismatches.
+    """
+    cell = el("e2", "AXCell", "D1", value="14.6", parent="e1")
+    field = el("e3", "AXTextField", "Amount", value="14.6", parent="e1")
+    cut_cell = el("e4", "AXCell", "C1", value="=AVERAGE(B", parent="e1")
+    runtime = FakeRuntime(window(cell, field, cut_cell))
+    runtime.desktop_snapshot("demo")
+    snap = runtime._current
+    same = check_conditions([{"value": {"ref": "e2", "equals": "14.60"}}], snap)
+    assert same[0]["ok"] is True
+    thousands = check_conditions([{"value": {"ref": "e2", "equals": "1,200"}}], snap)
+    assert thousands[0]["ok"] is False
+    replace_ref(runtime, "e2", value="1200")
+    runtime.desktop_snapshot("demo")
+    thousands = check_conditions([{"value": {"ref": "e2", "equals": "1,200"}}], runtime._current)
+    assert thousands[0]["ok"] is True
+    scientific = check_conditions([{"value": {"ref": "e2", "equals": "1.2e3"}}], runtime._current)
+    assert scientific[0]["ok"] is True
+    other = check_conditions([{"value": {"ref": "e2", "equals": "14.7"}}], snap)
+    assert other[0]["ok"] is False
+    formula = check_conditions([{"value": {"ref": "e2", "equals": "=E2+31"}}], snap)
+    assert formula[0]["ok"] is False
+    cut = check_conditions(
+        [{"value": {"ref": "e4", "equals": "=AVERAGE(B2:B5)"}}],
+        snap,
+    )
+    assert cut[0]["ok"] is False
+    text = check_conditions([{"value": {"ref": "e3", "equals": "14.60"}}], snap)
+    assert text[0]["ok"] is False
+
+
 def test_stuck_alternate_ref_then_coordinate_then_keyboard():
     save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
     other = el("e9", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 200, 30, 80, 24))

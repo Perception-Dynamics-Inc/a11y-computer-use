@@ -4357,42 +4357,13 @@ def _formula_needs_editor(formula: str | None, wanted: str) -> bool:
     return ":" in wanted and ":" not in formula
 
 
-def _parse_display_number(value: str) -> float:
-    """A cell's displayed number, including ``1.50``, ``1e3``, and ``1,200``.
-
-    A comma that groups thousands is removed. A comma that is the decimal
-    mark (``1,5``) becomes a dot. A formula is not a number.
-    """
-    text = str(value).strip().replace("\u00a0", "").replace("\u202f", "")
-    if not text or text.startswith("="):
-        raise ValueError(text)
-    if any(char.isalpha() and char not in "eE" for char in text):
-        raise ValueError(text)
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
-        pieces = text.split(",")
-        head = pieces[0].lstrip("+-")
-        if head.isdigit() and all(len(piece) == 3 and piece.isdigit() for piece in pieces[1:]):
-            text = "".join(pieces)
-        elif len(pieces) == 2 and pieces[1].isdigit() and len(pieces[1]) != 3:
-            text = pieces[0] + "." + pieces[1]
-        else:
-            raise ValueError(text)
-    return _parse_number(text)
-
-
 def _numeric_texts_match(shown: str | None, wanted: str) -> bool:
     """True when both sides are numbers and Calc's display equals the request."""
     if shown is None or not str(wanted).strip() or str(wanted).lstrip().startswith("="):
         return False
-    try:
-        return _numbers_match(_parse_display_number(shown), _parse_display_number(wanted))
-    except ValueError:
-        return False
+    from a11y_computer_use.outcome import display_numbers_match
+
+    return display_numbers_match(str(shown), wanted)
 
 
 def committed_sheet_formula(acc, app: str = "soffice.bin") -> str | None:
