@@ -64,6 +64,10 @@ _ROLE = {
     "caption": "AXStaticText",
     "image": "AXImage",
     "icon": "AXImage",
+    # A canvas or GTK drawing area has bounds and no accessible children.
+    # The pruner publishes it as opaque_region. WebGL is a canvas.
+    "canvas": "AXCanvas",
+    "drawing area": "AXCanvas",
     "frame": "AXWindow",
     "window": "AXWindow",
     "dialog": "AXDialog",
@@ -1065,7 +1069,7 @@ def _action_names(acc) -> tuple[str, ...]:
 # groups/buttons/windows are the bulk of a tree. Their label lives in the Name
 # (title), not the value, so skipping the value read is a pure speedup.
 _NO_VALUE_ROLES = frozenset({
-    "AXButton", "AXImage", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
+    "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
 })
 
@@ -1687,6 +1691,28 @@ def _get_attributes(acc) -> dict:
     return {}
 
 
+def _opaque_surface_role(role: str, role_str: str, attrs: dict) -> str:
+    """``AXCanvas`` for a canvas, a drawing area, or a WebGL/graphics node.
+
+    Chromium sometimes reports ``<canvas>`` as a section. The tag and the
+    graphics ARIA roles are the same surface. An image stays ``AXImage``;
+    the pruner turns an unnamed one into ``opaque_region``.
+    """
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if (
+        role_str in {"canvas", "drawing area"}
+        or tag == "canvas"
+        or xml & {"graphics-document", "graphics-symbol"}
+    ):
+        return "AXCanvas"
+    return role
+
+
 def _refine_web_role(role: str, attrs: dict) -> str:
     """Upgrade a generic container role to the ARIA role its xml-roles declares,
     so ARIA-widget <div>s become real interactive elements in the snapshot."""
@@ -1860,6 +1886,7 @@ class ATSPIAccessor:
             role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
         role = _refine_web_role(role, attrs)
+        role = _opaque_surface_role(role, role_str, attrs)
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override

@@ -98,6 +98,154 @@ def _wait_for_snapshot(driver, timeout_s: float = 15.0):
     return last
 
 
+def test_linux_gtk_drawing_area_is_an_opaque_region(tmp_path) -> None:
+    """Live GTK drawing area. The snapshot names the box ``opaque_region``.
+
+    The paint handler draws the word PIXELWORD. The snapshot must not
+    contain that word: this library does not OCR.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuadrawapp.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuadrawapp")
+        win = Gtk.Window(title="cuadrawapp")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        area = Gtk.DrawingArea()
+        area.set_size_request(320, 180)
+        def _paint(widget, cr):
+            cr.set_source_rgb(0.1, 0.3, 0.7)
+            cr.rectangle(0, 0, 320, 180)
+            cr.fill()
+            cr.set_source_rgb(1, 1, 1)
+            cr.move_to(24, 80)
+            cr.show_text("PIXELWORD")
+            return False
+        area.connect("draw", _paint)
+        box.pack_start(area, True, True, 0)
+        box.pack_start(Gtk.Button(label="Marker"), False, False, 0)
+        win.add(box)
+        win.set_default_size(400, 280)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuadrawapp")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                if any(el.title == "Marker" for el in shot.elements) and any(
+                    el.role == "opaque_region" for el in shot.elements
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, last[:1200]
+        regions = [el for el in snap.elements if el.role == "opaque_region"]
+        assert regions, last[:1200]
+        assert all(el.ref.startswith("e") and el.clickable for el in regions)
+        assert all(el.bounds.width > 0 and el.bounds.height > 0 for el in regions)
+        text = observe.render_text(snap)
+        assert "PIXELWORD" not in text
+        for el in regions:
+            assert f"{el.ref} opaque_region" in text
+            assert f"[{el.bounds.width}x{el.bounds.height} @" in text
+        assert any(el.title == "Marker" and el.role == "AXButton" for el in snap.elements)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_linux_chrome_canvas_is_an_opaque_region(tmp_path) -> None:
+    """Live Chrome canvas. The canvas is ``opaque_region`` with bounds and a ref.
+
+    The page paints PIXELWORD onto the canvas. That word is not in the
+    snapshot. No OCR.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the canvas opaque-region test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "canvas.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuacanvas</title>"
+        "<canvas id=board width=640 height=360 style=\"width:640px;height:360px\"></canvas>"
+        "<button>Marker</button>"
+        "<script>const c=document.getElementById('board');"
+        "const g=c.getContext('2d');g.fillStyle='#2266cc';g.fillRect(0,0,640,360);"
+        "g.fillStyle='#fff';g.font='32px sans-serif';g.fillText('PIXELWORD',40,80);</script>"
+    )
+    profile = tmp_path / "chrome-canvas-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                if "Marker" in last and "opaque_region" in last:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, last[:1200]
+        regions = [el for el in snap.elements if el.role == "opaque_region"]
+        assert regions, last[:1200]
+        assert all(el.ref.startswith("e") and el.clickable for el in regions)
+        assert all(el.bounds.width > 0 and el.bounds.height > 0 for el in regions)
+        text = observe.render_text(snap)
+        assert "PIXELWORD" not in text
+        assert any(el.title == "Marker" and el.role == "AXButton" for el in snap.elements)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_linux_driver_reports_its_name() -> None:
     from a11y_computer_use.drivers import get_driver
 

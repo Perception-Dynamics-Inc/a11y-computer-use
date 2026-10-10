@@ -108,6 +108,29 @@ _DECORATIVE_ROLES = frozenset({"AXUnknown", "AXSplitter", "AXGrowArea"})
 _WRAPPER_ROLES = frozenset(
     {"AXGroup", "AXGenericElement", "AXLayoutArea", "AXScrollArea", "AXSplitGroup"}
 )
+#: Painted pixels the accessibility tree does not describe. A canvas, a
+#: drawing area, and an image with no usable name. The snapshot role is this
+#: string, not an ``AX*`` name, so the rendered line says ``opaque_region``.
+OPAQUE_ROLE = "opaque_region"
+_OPAQUE_SURFACE_ROLES = frozenset({"AXImage", "AXCanvas", OPAQUE_ROLE})
+#: Childless containers that currently survive as untitled groups. A group
+#: that still has children is layout, not a pixel surface.
+_DEAD_REGION_ROLES = frozenset({"AXGroup", "AXGenericElement", "AXLayoutArea"})
+_GENERIC_REGION_NAMES = frozenset({
+    "",
+    "image",
+    "img",
+    "graphic",
+    "icon",
+    "photo",
+    "picture",
+    "canvas",
+    "webgl",
+    "drawing area",
+    "unnamed",
+    "unknown",
+    "group",
+})
 _PRESS_ACTIONS = frozenset({"AXPress", "AXOpen", "AXConfirm", "AXPick"})
 _CLICKABLE_ROLES = frozenset(
     {
@@ -1241,8 +1264,12 @@ def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """(clickable, editable, secure) for a kept node.
 
     A plain zero-size wrapper is not clickable, even when Chrome gave it a
-    press action. Every other node uses `_flags`.
+    press action. An opaque region is clickable: the ref addresses the box,
+    and a later coordinate click uses those bounds. Every other node uses
+    `_flags`.
     """
+    if raw.role == OPAQUE_ROLE:
+        return True, False, False
     clickable, editable, secure = _flags(raw)
     if _plain_zero_wrapper(raw):
         clickable = False
@@ -1406,8 +1433,6 @@ def _prune_inner(
             kept, dropped = _cap_children(kept, cap)
             elided += dropped
 
-    clickable, editable, _ = _target_flags(raw)
-    interactive = clickable or editable
     if hollow:
         if not kept:
             return None  # zero-size and nothing visible below it
@@ -1423,12 +1448,15 @@ def _prune_inner(
             return kept[0]
     if candidate and len(kept) == 1 and elided == 0:
         return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
+    if bounds is not None:
+        raw = _as_opaque_region(raw, kept, elided)
+    clickable, editable, _ = _target_flags(raw)
     return _PNode(
         raw=raw,
         bounds=bounds,
         children=kept,
         elided=elided,
-        has_interactive=interactive or any(c.has_interactive for c in kept),
+        has_interactive=clickable or editable or any(c.has_interactive for c in kept),
         node=node,
     )
 
@@ -1566,11 +1594,72 @@ def _keep_priority(node: _PNode) -> int:
     return priority
 
 
+def _generic_region_name(text: str) -> bool:
+    return text.strip().casefold() in _GENERIC_REGION_NAMES
+
+
+def _no_accessible_content(raw: RawNode) -> bool:
+    """No name, description, value, or placeholder an agent can read.
+
+    A generic name such as ``image`` or ``canvas`` is not content. A described
+    image (``Sync status``) is.
+    """
+    if not _generic_region_name(raw.title) or not _generic_region_name(raw.description):
+        return False
+    if raw.value not in (None, ""):
+        return False
+    return not raw.placeholder
+
+
+def _positive_extent(raw: RawNode) -> bool:
+    size = raw.size
+    return size is not None and size[0] > 0 and size[1] > 0
+
+
+def _as_opaque_region(raw: RawNode, kept: list[_PNode], elided: int) -> RawNode:
+    """Rename a pixel surface or a childless dead group to ``opaque_region``.
+
+    A canvas stays opaque even when it has a real name: the name does not
+    describe the pixels. An image needs an empty or generic name.     A group is
+    opaque only when it has a real box, nothing to read, and no kept or
+    elided children. The box has to be at least 32 by 32. A smaller childless
+    panel is a layout spacer; marking it clickable would crowd the child cap
+    and hide a titled document that sits beside it. A zero-size wrapper keeps
+    its role so a hollow section around a form is not reported as a clickable
+    surface. An editable node stays an entry.
+    """
+    if raw.editable or not _positive_extent(raw):
+        return raw
+    size = raw.size or (0.0, 0.0)
+    surface = raw.role in _OPAQUE_SURFACE_ROLES
+    dead = (
+        raw.role in _DEAD_REGION_ROLES
+        and not kept
+        and elided == 0
+        and _no_accessible_content(raw)
+        and size[0] >= 32
+        and size[1] >= 32
+    )
+    if surface and raw.role == "AXImage" and not _no_accessible_content(raw):
+        return raw
+    if not surface and not dead:
+        return raw
+    title = "" if _generic_region_name(raw.title) else raw.title
+    description = "" if _generic_region_name(raw.description) else raw.description
+    return dataclasses.replace(raw, role=OPAQUE_ROLE, title=title, description=description)
+
+
 def _is_decorative(raw: RawNode) -> bool:
     if raw.role in _DECORATIVE_ROLES:
         return True
-    labelled = bool(raw.title or raw.description)
+    labelled = bool(raw.title or raw.description) and not (
+        _generic_region_name(raw.title) and _generic_region_name(raw.description)
+    )
     if raw.role == "AXImage" and not labelled:
+        # A painted image with a real box is an opaque region. A zero-size
+        # or missing box is still decoration and drops with its subtree.
+        if _positive_extent(raw):
+            return False
         return True
     return raw.role == "AXStaticText" and not labelled and raw.value in (None, "")
 
@@ -1756,7 +1845,9 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     ]
     if flags:
         parts.append(f"({','.join(flags)})")
-    if bounds is True or (bounds is None and el.parent is None):
+    # An opaque region is addressed by its box. Always print the bounds, in
+    # both views, so a coordinate click does not have to guess the size.
+    if bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None):
         b = el.bounds
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
     return " ".join(parts)
