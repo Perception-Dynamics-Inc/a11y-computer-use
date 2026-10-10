@@ -4053,6 +4053,7 @@ def _dark_rows(png: bytes) -> list[int]:
 def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_path) -> None:
     """Live Writer. The published box is that paragraph, and a double-click edits it.
 
+    Fresh process. The crop is taken before this test moves the pointer.
     The crop of the Beta ref contains the first glyph of Beta and not the
     next paragraph. A double-click on the Beta ref is confirmed from the
     caret in Beta, and the following type lands in Beta.
@@ -4184,8 +4185,10 @@ def test_linux_writer_paragraph_crop_and_double_click_hit_that_paragraph(tmp_pat
 def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
     """Live Calc. A coordinate click on B4's published centre selects B4.
 
-    The reported box used to sit one title bar below the row, so the centre
-    click selected B5. Typing after the click lands in B4, not in B3 or B5.
+    Fresh process, and this test does not move the pointer before that
+    click. The reported box used to sit one title bar off the row. The
+    click is confirmed only when the selected cell is B4. Typing after
+    the click lands in B4, not in B2, B3, B5, or B6.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -4241,7 +4244,15 @@ def test_linux_calc_b4_centre_click_selects_b4(tmp_path) -> None:
         assert b4 is not None and b4.bounds is not None, observe.render_text(current)[:400]
         x = int(b4.bounds.center.x)
         y = int(b4.bounds.center.y)
-        runtime.click(x=x, y=y)
+        clicked = runtime.click(x=x, y=y)
+        assert clicked.outcome == "confirmed", (clicked.outcome, clicked.evidence, x, y, b4.bounds)
+        assert clicked.evidence == "the selected cell is B4", clicked.evidence
+        from a11y_computer_use.drivers import _atspi
+
+        selected = driver._run(
+            lambda: _atspi.selected_sheet_address("soffice") or _atspi._focused_sheet_address("soffice")
+        )
+        assert selected == "B4", (selected, x, y, b4.bounds)
         runtime.type_text("7")
         runtime.key("Return")
         shot = _wait_cell_value(driver, "B4", "7")
