@@ -8,6 +8,8 @@ plus dedicated tests for the structured permission/app errors.
 
 from __future__ import annotations
 
+import dataclasses
+import os
 import sys
 
 import pytest
@@ -414,6 +416,78 @@ def test_resolve_ref_follows_moved_element_across_epochs() -> None:
     assert resolved.bounds == by_title(live, "Save").bounds
 
 
+def _with_identity(
+    snap: Snapshot, *, instance_id: str | None, document_id: str | None,
+) -> Snapshot:
+    elements = tuple(
+        dataclasses.replace(el, instance_id=instance_id, document_id=document_id)
+        for el in snap.elements
+    )
+    return dataclasses.replace(snap, elements=elements)
+
+
+def test_normalize_document_title_strips_one_modified_marker() -> None:
+    assert observe.normalize_document_title("*/tmp/a.txt - Mousepad") == "/tmp/a.txt - Mousepad"
+    assert observe.normalize_document_title("/tmp/a.txt - Mousepad") == "/tmp/a.txt - Mousepad"
+    assert observe.normalize_document_title("*Untitled 1 - Mousepad") == "Untitled 1 - Mousepad"
+
+
+def test_relaunched_process_ref_is_stale_and_names_no_replacement() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:11|start:200|bus::1.9",
+        document_id="title:/tmp/b.txt - Mousepad",
+    )
+    ref = by_title(old, "Save").ref
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(old, ref, live=live)
+    err = exc.value
+    assert err.code is ErrorCode.STALE_REF
+    assert err.detail["reason"] == "app_restarted"
+    assert err.detail["candidates"] == []
+    assert err.detail["next"] == ["ref"]
+    assert "Nothing was changed" in err.message
+
+
+def test_same_process_and_document_still_resolves() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window(save_at=(240.0, 120.0))),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    resolved = resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert resolved.title == "Save"
+    assert resolved.snapshot_id == live.snapshot_id
+
+
+def test_different_document_in_the_same_process_is_stale() -> None:
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/a.txt - Mousepad",
+    )
+    live = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:/tmp/b.txt - Mousepad",
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert exc.value.code is ErrorCode.STALE_REF
+    assert exc.value.detail["reason"] == "document_changed"
+    assert exc.value.detail["candidates"] == []
+
+
 def test_resolve_ref_raises_structured_stale_ref() -> None:
     old = snap_of(save_window())
     save_ref = by_title(old, "Save").ref
@@ -447,6 +521,21 @@ def test_resolve_ref_ambiguous_twins_are_stale() -> None:
         resolve_ref(old, by_title(old, "Save").ref, live=live)
     assert exc.value.code is ErrorCode.STALE_REF
     assert exc.value.detail["reason"] == "ambiguous"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc start time")
+def test_process_instance_id_is_pid_and_start_time() -> None:
+    from a11y_computer_use.drivers._atspi import process_instance_id
+
+    token = process_instance_id(os.getpid())
+    assert token is not None
+    assert token == process_instance_id(os.getpid())
+    pid_part, start_part = token.split("|", 1)
+    assert pid_part == f"pid:{os.getpid()}"
+    assert start_part.startswith("start:")
+    assert start_part.removeprefix("start:").isdigit()
+    assert process_instance_id(0) is None
+    assert process_instance_id(-1) is None
 
 
 def test_resolve_ref_unknown_ref_is_a_key_error() -> None:

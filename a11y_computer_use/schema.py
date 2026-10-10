@@ -11,12 +11,16 @@ Design invariants (do not weaken without updating every consumer):
   single global coordinate space — mixed Retina/1x setups (and, later,
   Windows negative virtual-desktop origins) make one a bug factory.
 * **Refs are snapshot-scoped.** An element ref like ``"e14"`` is only
-  meaningful within the `Snapshot` that produced it. macOS ``AXUIElementRef``
-  objects are live and unserializable, and trees mutate between ``observe()``
-  and ``act()``; ``act()`` re-resolves refs via the anchor attributes stored
-  on `Element` (role, title, path, bounds proximity) and raises
-  `ComputerUseError` with `ErrorCode.STALE_REF` when re-resolution fails,
-  prompting the caller to re-observe.
+  meaningful within the `Snapshot` that produced it, and on Linux it is also
+  bound to the process instance (pid and start time, plus the AT-SPI bus
+  name when the app exposes one) and the window or document it came from.
+  macOS ``AXUIElementRef`` objects are live and unserializable, and trees
+  mutate between ``observe()`` and ``act()``; ``act()`` re-resolves refs via
+  the anchor attributes stored on `Element` (role, title, path, bounds
+  proximity) and raises `ComputerUseError` with `ErrorCode.STALE_REF` when
+  re-resolution fails, including when that process instance has been
+  replaced. The caller re-observes. The action is not applied to the new
+  process.
 * **Errors are structured, never stringly-typed.** Every failure mode a model
   is expected to react to is an `ErrorCode`; drivers raise `ComputerUseError`
   and the server serializes it via `ComputerUseError.to_dict()`.
@@ -221,6 +225,14 @@ class Element:
             or None when the app exposes none. Far more durable than the
             title/path/bounds anchor across relayout, scroll, and dynamic lists,
             so `resolve_ref` matches on it first when present.
+        instance_id: Process identity the ref was issued against (Linux: pid,
+            start time, and the AT-SPI bus name). None when the backend did
+            not record one. A live tree from a different instance does not
+            match this ref.
+        document_id: Window or document identity (a document URL, or the
+            window title with one leading modified-marker removed). None when
+            the backend did not record one. A different document does not
+            match this ref.
     """
 
     ref: str
@@ -241,6 +253,8 @@ class Element:
     expanded: bool | None = None
     placeholder: str = ""
     stable_id: str | None = None
+    instance_id: str | None = None
+    document_id: str | None = None
 
     @property
     def actionable(self) -> bool:

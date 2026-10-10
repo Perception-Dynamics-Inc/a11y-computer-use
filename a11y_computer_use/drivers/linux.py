@@ -902,7 +902,13 @@ class LinuxDriver:
         try:
             return observe.rematch_ref(snap, ref, live)
         except ComputerUseError as exc:
-            if exc.code is ErrorCode.STALE_REF:
+            # A quit-and-relaunched app, or a different document, must stay
+            # stale_ref. Searching the new tree for a hidden namesake would
+            # retarget the error onto the replacement.
+            if exc.code is ErrorCode.STALE_REF and exc.detail.get("reason") not in {
+                "app_restarted",
+                "document_changed",
+            }:
                 self._raise_if_hidden_alive(snap, ref)
             raise
 

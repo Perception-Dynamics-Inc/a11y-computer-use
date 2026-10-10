@@ -5901,6 +5901,8 @@ _INSTRUCTIONS = (
     "Call desktop_snapshot first and act on "
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
     "snapshot — a stale_ref error means the UI changed, re-observe; if its reason is "
+    "app_restarted the process that issued the ref has quit and nothing was written to "
+    "whatever replaced it, so re-snapshot instead of reusing the ref; if its reason is "
     "title_changed the list reordered under the ref and the candidates name the element now at "
     "that position: find(text=...) or scroll_to_find the target again, never click the slot. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
@@ -6214,7 +6216,9 @@ def build_server(
         """Capture a pruned accessibility-tree snapshot of one app as indented
         text with element refs (e1, e2, ...). Refs are valid ONLY against this
         latest snapshot: act on them promptly and re-observe after the UI
-        changes (a stale_ref error means the tree moved). scope='window'
+        changes (a stale_ref error means the tree moved). A ref from a process
+        that has since quit is stale_ref with reason app_restarted and is not
+        applied to the new process. scope='window'
         covers the frontmost window, 'app' all windows.
 
         mode='full' (default) returns the complete pruned tree. mode='interactive'
