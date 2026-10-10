@@ -312,6 +312,27 @@ def test_path_executable_is_spawned_directly(monkeypatch) -> None:
     assert calls == [["/usr/bin/mousepad"]]
 
 
+def test_module_argv_spawns_the_program_and_its_flag(monkeypatch) -> None:
+    def which(name):
+        return "/usr/bin/soffice" if name in {"soffice", "/usr/bin/soffice"} else None
+
+    monkeypatch.setattr(_linux_system.shutil, "which", which)
+    calls = _record_spawns(monkeypatch)
+    handle = _linux_system.launch_app("soffice", argv=("soffice", "--calc"))
+    assert calls == [["/usr/bin/soffice", "--calc"]]
+    assert "soffice.bin" in handle["names"]
+    assert handle["is_launcher"] is False
+
+
+def test_module_argv_missing_program_is_not_spawned(monkeypatch) -> None:
+    monkeypatch.setattr(_linux_system.shutil, "which", lambda _name: None)
+    calls = _record_spawns(monkeypatch)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_system.launch_app("soffice", argv=("soffice", "--writer"))
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert calls == []
+
+
 def test_desktop_id_uses_gtk_launch(tmp_path, monkeypatch) -> None:
     _isolate_desktop_dirs(tmp_path, monkeypatch)
     apps = tmp_path / "xdg-home" / "applications"

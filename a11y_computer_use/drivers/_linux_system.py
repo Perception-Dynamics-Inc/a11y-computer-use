@@ -1207,7 +1207,12 @@ def _desktop_match_names(identifier: str, path: str) -> list[str]:
     return names
 
 
-def launch_app(identifier: str) -> dict:
+_OFFICE_WINDOW_NAMES = ("soffice", "soffice.bin", "libreoffice")
+_OFFICE_WRAPPERS = frozenset({"localc", "lowriter", "loimpress", "soffice", "libreoffice"})
+_OFFICE_FLAGS = frozenset({"--calc", "--writer", "--impress"})
+
+
+def launch_app(identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
     """Launch ``identifier`` or raise `ErrorCode.APP_NOT_FOUND` immediately.
 
     An executable on PATH is started directly. Otherwise a matching desktop
@@ -1215,12 +1220,35 @@ def launch_app(identifier: str) -> dict:
     ``gtk-launch`` is not installed. A name that is neither is not handed to
     ``xdg-open`` and does not wait for a window.
 
+    ``argv`` starts that program and its arguments instead of ``identifier``.
+    A Calc, Writer, or Impress launch passes ``localc`` or ``soffice --calc``
+    (and the writer and impress equivalents). The handle names include
+    ``soffice.bin``, which is the process that owns the document window.
+
     The return value is a handle: pid, the process (so a caller can see it
     exit), the names a window of this launch may use, and whether the process
     is a launcher that exits before the real window. ``gtk-launch`` exiting 0
     is not the app exiting.
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
+
+    if argv:
+        program = argv[0]
+        executable = shutil.which(program) if program else None
+        if not executable:
+            raise ComputerUseError(
+                ErrorCode.APP_NOT_FOUND,
+                f"could not launch {identifier!r}: not on PATH",
+                detail={"app": identifier},
+            )
+        base = os.path.basename(executable)
+        names = [identifier, base, executable]
+        if base in _OFFICE_WRAPPERS or any(part in _OFFICE_FLAGS for part in argv[1:]):
+            names.extend(_OFFICE_WINDOW_NAMES)
+        proc = _spawn([executable, *argv[1:]], identifier)
+        return _launch_handle(
+            proc, identifier, names, is_launcher=base in _LAUNCHER_BASENAMES,
+        )
 
     executable = shutil.which(identifier) if identifier else None
     if executable:

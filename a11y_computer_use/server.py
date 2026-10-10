@@ -1597,6 +1597,34 @@ def _box_on_image(png: bytes, region: Bounds, display) -> tuple[int, int, int, i
     return x, y, width, height
 
 
+def _tip_of_the_day(snap) -> object | None:
+    """The Tip of the Day dialog in ``snap``, or None."""
+    if snap is None:
+        return None
+    for el in getattr(snap, "elements", None) or []:
+        title = str(getattr(el, "title", "") or "")
+        if "tip of the day" not in title.lower():
+            continue
+        if getattr(el, "role", "") in {"AXDialog", "AXSheet", "AXWindow"}:
+            return el
+    return None
+
+
+def _tip_ok_button(snap) -> object | None:
+    """The OK or Close button of a snapshot that contains the tip dialog."""
+    buttons = []
+    for el in getattr(snap, "elements", None) or []:
+        if getattr(el, "role", "") != "AXButton":
+            continue
+        if str(getattr(el, "title", "") or "").strip().lower() not in {"ok", "close"}:
+            continue
+        buttons.append(el)
+    for el in buttons:
+        if getattr(el, "focused", False):
+            return el
+    return buttons[-1] if buttons else None
+
+
 def _same_app(owner: str, app: str) -> bool:
     if owner.casefold() == app.casefold():
         return True
@@ -4987,13 +5015,104 @@ class Runtime:
                 return False
             time.sleep(self.FOCUS_POLL_S)
 
-    def _prepare_launch(self, name: str) -> tuple[str, str]:
-        """``(launch_name, gate_key)`` for an OS ``app launch``.
+    def _office_module_launch(self, name: str, launch_name: str, argv: tuple[str, ...] | None) -> bool:
+        """True when this launch starts LibreOffice or one of its modules."""
+        from a11y_computer_use.drivers import _atspi
+
+        if _atspi.libreoffice_app(name) or _atspi.libreoffice_app(launch_name):
+            return True
+        bases = {
+            os.path.basename(name or ""),
+            os.path.basename(launch_name or ""),
+        }
+        if bases & {"localc", "lowriter", "loimpress"}:
+            return True
+        return bool(argv and any(part in {"--calc", "--writer", "--impress"} for part in argv))
+
+    def _office_snapshot(self, app: str):
+        """A window snapshot of this LibreOffice launch, or None."""
+        if not callable(getattr(self.driver, "snapshot", None)):
+            return None
+        seen: list[str] = []
+        for candidate in (app, "soffice", "soffice.bin", "LibreOffice"):
+            if not candidate or candidate in seen:
+                continue
+            seen.append(candidate)
+            try:
+                snap = self.driver.snapshot(Scope.WINDOW, candidate)
+            except ComputerUseError:
+                continue
+            if snap is not None and getattr(snap, "elements", None):
+                return snap
+        return None
+
+    def _dismiss_libreoffice_tip(
+        self, name: str, launch_name: str, argv: tuple[str, ...] | None, window_title: str,
+    ) -> str | None:
+        """Press OK on a Tip of the Day dialog so the document is usable.
+
+        A fresh profile shows that dialog on top of the sheet. The launch
+        reports the dialog title when the dialog was there and the OK press
+        closed it. A launch with no such dialog returns None.
+        """
+        if not self._office_module_launch(name, launch_name, argv):
+            return None
+        if not callable(getattr(self.driver, "press_element", None)):
+            return None
+        document = any(word in (window_title or "").lower() for word in ("calc", "writer", "impress"))
+        dismissed: str | None = None
+        looked = False
+        while True:
+            snap = self._office_snapshot(launch_name or name)
+            dialog = _tip_of_the_day(snap)
+            if dialog is not None:
+                button = _tip_ok_button(snap)
+                if button is None:
+                    return dismissed
+                try:
+                    pressed = self.driver.press_element(button)
+                except ComputerUseError:
+                    return dismissed
+                if not pressed and callable(getattr(self.driver, "key_chord", None)):
+                    try:
+                        self.driver.key_chord("return")
+                    except ComputerUseError:
+                        return dismissed
+                dismissed = str(getattr(dialog, "title", "") or "Tip of the Day")
+                time.sleep(0.4)
+                snap = self._office_snapshot(launch_name or name)
+                if _tip_of_the_day(snap) is None:
+                    return dismissed
+                return None
+            if dismissed is not None or not document or looked:
+                return dismissed
+            looked = True
+            time.sleep(0.4)
+
+    def _document_window_title(self, fallback: str) -> str:
+        """A Calc, Writer, or Impress window title, when one is open."""
+        try:
+            rows = list(self.driver.windows() or [])
+        except (ComputerUseError, AttributeError):
+            return fallback
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            if any(word in title for word in ("Calc", "Writer", "Impress")):
+                return title
+        return fallback
+
+    def _prepare_launch(self, name: str) -> tuple[str, str, tuple[str, ...] | None]:
+        """``(launch_name, gate_key, argv)`` for an OS ``app launch``.
 
         A grant for ``thunar`` covers ``Files``, and the process started is
-        ``thunar``. A name that is not installed, not running, and not granted
-        is ``app_not_found`` listing the granted names. It is not a permission
-        refusal for the raw string.
+        ``thunar``. A Calc, Writer, or Impress label starts that module
+        (``localc`` or ``soffice --calc``, and the same for writer and
+        impress) while the grant stays the soffice alias. A name that is not
+        installed, not running, and not granted is ``app_not_found`` listing
+        the granted names. It is not a permission refusal for the raw string.
+        ``argv`` is None when the launch is the program name alone.
         """
         from a11y_computer_use.app_identity import normalize, resolve_launch
 
@@ -5038,7 +5157,7 @@ class Runtime:
                 f"no application matches {name!r}; granted apps: {shown}",
                 detail={"app": name, "granted": list(granted)},
             )
-        return resolved.launch_name, resolved.gate_key
+        return resolved.launch_name, resolved.gate_key, resolved.argv
 
     @_serialized
     def app(self, action: str, name: str | None = None, activate: bool | None = None) -> str:
@@ -5061,8 +5180,9 @@ class Runtime:
             if self._resolves_apps():
                 gate_key = self._frontmost()  # browser: launch == navigate the bound tab
                 launch_name = name
+                launch_argv = None
             else:
-                launch_name, gate_key = self._prepare_launch(name)
+                launch_name, gate_key, launch_argv = self._prepare_launch(name)
 
             def launch() -> str | None:
                 before: list = []
@@ -5079,11 +5199,21 @@ class Runtime:
                         row.get("window_id"): str(row.get("title") or "")
                         for row in rows if isinstance(row, dict)
                     }
+                extra: dict = {}
+                if launch_argv:
+                    import inspect
+
+                    try:
+                        accepts_argv = "argv" in inspect.signature(self.driver.launch_app).parameters
+                    except (TypeError, ValueError):
+                        accepts_argv = False
+                    if accepts_argv:
+                        extra["argv"] = launch_argv
                 if getattr(self.driver, "background_input", False):
                     handle = self.driver.launch_app(launch_name, activate=activate if activate is not None
-                                           else FOCUS_MODE != "background")
+                                           else FOCUS_MODE != "background", **extra)
                 else:
-                    handle = self.driver.launch_app(launch_name)
+                    handle = self.driver.launch_app(launch_name, **extra)
                 # A Linux launch returns a process handle. macOS and Windows
                 # return None, and the wait keeps its previous success string
                 # when no window appears. The ids from before the spawn keep a
@@ -5106,10 +5236,15 @@ class Runtime:
                     f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s",
                     tool="app", verdict=("partial", "no window appeared"),
                 )
-            return self._conclude(
-                f"launched {name}; first window: {title!r}", tool="app",
-                verdict=("confirmed", f"first window {title!r} appeared"),
-            )
+            tip = self._dismiss_libreoffice_tip(name, launch_name, launch_argv, title or "")
+            if tip and "tip of the day" in (title or "").lower():
+                title = self._document_window_title(title)
+            text = f"launched {name}; first window: {title!r}"
+            detail = f"first window {title!r} appeared"
+            if tip:
+                text += f"; dismissed {tip!r}"
+                detail += f"; dismissed {tip!r}"
+            return self._conclude(text, tool="app", verdict=("confirmed", detail))
         if verb is AppVerb.QUIT:
             _running, bundle = self._resolve_app(name)
 

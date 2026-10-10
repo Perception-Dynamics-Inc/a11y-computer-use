@@ -3,9 +3,11 @@
 A grant stored under one name covers the same app asked for under another:
 case, a desktop-file id, an executable basename, a WM_CLASS, or a known
 alias. ``Files`` is nautilus or thunar, ``Terminal`` is gnome-terminal or
-xterm, and ``libreoffice calc`` is soffice. Alias matches are exact tokens.
-They are not substrings, so ``Files`` does not match an unrelated name that
-merely contains those letters.
+xterm, and ``libreoffice calc`` is soffice. Calc, Writer, and Impress labels
+start ``localc``, ``lowriter``, or ``loimpress`` when that program is on
+PATH, and otherwise ``soffice`` or ``libreoffice`` with the module flag.
+Alias matches are exact tokens. They are not substrings, so ``Files`` does
+not match an unrelated name that merely contains those letters.
 """
 
 from __future__ import annotations
@@ -39,23 +41,51 @@ _GROUPS: tuple[frozenset[str], ...] = (
     frozenset({
         "libreoffice calc",
         "libreoffice-calc",
+        "libreoffice writer",
+        "libreoffice-writer",
+        "libreoffice impress",
+        "libreoffice-impress",
         "libreoffice",
         "soffice",
         "soffice.bin",
         "localc",
+        "lowriter",
+        "loimpress",
         "calc",
+        "writer",
+        "impress",
     }),
 )
 
 #: Labels a person says that are not the executable. A launch of one of these
-#: is started as the granted or installed binary.
+#: is started as the granted or installed binary. Calc, Writer, and Impress
+#: also select that module's program or flag.
 _LABELS = frozenset({
     "files",
     "terminal",
     "libreoffice calc",
     "libreoffice-calc",
     "calc",
+    "libreoffice writer",
+    "libreoffice-writer",
+    "writer",
+    "libreoffice impress",
+    "libreoffice-impress",
+    "impress",
 })
+
+# Dedicated wrapper, then the flag passed to soffice or libreoffice.
+_OFFICE_MODULES: dict[str, tuple[str, str]] = {
+    "calc": ("localc", "--calc"),
+    "libreoffice-calc": ("localc", "--calc"),
+    "libreoffice calc": ("localc", "--calc"),
+    "writer": ("lowriter", "--writer"),
+    "libreoffice-writer": ("lowriter", "--writer"),
+    "libreoffice writer": ("lowriter", "--writer"),
+    "impress": ("loimpress", "--impress"),
+    "libreoffice-impress": ("loimpress", "--impress"),
+    "libreoffice impress": ("loimpress", "--impress"),
+}
 
 
 def normalize(name: str) -> str:
@@ -197,7 +227,12 @@ def _exec_basename(exec_line: str) -> str:
 
 
 class LaunchResolution:
-    """How to start ``name`` and which grant key to check."""
+    """How to start ``name`` and which grant key to check.
+
+    ``argv`` is set for a Calc, Writer, or Impress label: the dedicated
+    wrapper, or ``soffice``/``libreoffice`` plus the module flag. Other
+    launches leave it unset and start ``launch_name`` alone.
+    """
 
     def __init__(
         self,
@@ -205,10 +240,65 @@ class LaunchResolution:
         gate_key: str | None,
         *,
         resolved: bool,
+        argv: tuple[str, ...] | None = None,
     ) -> None:
         self.launch_name = launch_name
         self.gate_key = gate_key
         self.resolved = resolved
+        self.argv = argv
+
+
+def _lookup_program(lookup: Callable[[str], str | None], name: str) -> str | None:
+    try:
+        found = lookup(name)
+    except OSError:
+        return None
+    return found or None
+
+
+def _office_host(lookup: Callable[[str], str | None], hosts: Sequence[str]) -> str | None:
+    """``soffice`` or ``libreoffice`` for a module flag.
+
+    A program on PATH wins. A host already chosen for this launch is used
+    when the lookup finds nothing, so a grant or desktop exec of ``soffice``
+    still carries ``--calc`` in a test that stubs PATH.
+    """
+    named: list[str] = []
+    for host in hosts:
+        base = os.path.basename(normalize(host))
+        if base in {"soffice", "libreoffice"} and base not in named:
+            named.append(base)
+    for candidate in ("soffice", "libreoffice"):
+        found = _lookup_program(lookup, candidate)
+        if found:
+            return found
+        if candidate in named:
+            return candidate
+    return None
+
+
+def _office_module_argv(
+    name: str,
+    lookup: Callable[[str], str | None],
+    hosts: Sequence[str],
+) -> tuple[str, ...] | None:
+    """Argv for a Calc, Writer, or Impress label, or None for any other name.
+
+    ``localc`` (and the writer and impress wrappers) already pass the module
+    flag. Otherwise the command is ``soffice`` or ``libreoffice`` plus
+    ``--calc``, ``--writer``, or ``--impress``.
+    """
+    spec = _OFFICE_MODULES.get(normalize(name))
+    if spec is None:
+        return None
+    dedicated, flag = spec
+    found = _lookup_program(lookup, dedicated)
+    if found:
+        return (found,)
+    host = _office_host(lookup, hosts)
+    if host is None:
+        return None
+    return (host, flag)
 
 
 def resolve_launch(
@@ -293,4 +383,19 @@ def resolve_launch(
 
     resolved = bool(on_path or matched or installed_bundle or running or hit)
     gate_key = hit or (launch_name if resolved else None)
-    return LaunchResolution(launch_name, gate_key, resolved=resolved)
+    hosts = [launch_name]
+    if hit:
+        hosts.append(hit)
+    if running:
+        hosts.append(running)
+    for entry in matched:
+        exe = str(entry.get("exec") or "")
+        if exe:
+            hosts.append(exe)
+    argv = _office_module_argv(name, lookup, hosts)
+    if argv:
+        launch_name = os.path.basename(argv[0])
+        resolved = True
+        if not gate_key:
+            gate_key = launch_name
+    return LaunchResolution(launch_name, gate_key, resolved=resolved, argv=argv)
