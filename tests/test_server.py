@@ -1625,6 +1625,125 @@ def test_scroll_to_find_reaches_an_early_row_by_stepping_back_up(monkeypatch) ->
     assert -1 not in scrolls
 
 
+def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome table.
+
+    The page head is already row 312. One snapshot still names ROW-0300 at
+    y=403, which is the pre-scroll tree. The next snapshot does not contain
+    that row. The search scrolls back and returns ROW-0300 from a window
+    that actually shows it, not the stale y=403 line.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    def row_at(number: int, y: int) -> Snapshot:
+        els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                       bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+        els.append(Element(
+            ref=f"r{number}", role="AXCell", title=f"ROW-{number:04d}", value=None,
+            bounds=Bounds(0, 24, y, 76, 23), snapshot_id="s",
+        ))
+        return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                        displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+    class _D:
+        head = 280
+        stale = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if _D.stale:
+                _D.stale = False
+                return row_at(300, 403)
+            return _item_window_named(_D.head)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy > 0:
+                _D.head = 312
+                _D.stale = True
+                return
+            _D.head = 300
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ROW-0300", max_scrolls=6)
+    assert "ROW-0300" in out
+    assert "found after 2 scroll(s)" in out
+    assert "403" not in out
+    assert scrolls == [5, -5]
+
+
+def test_scroll_to_find_keeps_scrolling_toward_a_row_above_the_window(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome table.
+
+    The row is already in the tree, parked above the window. The search is
+    going up. It keeps scrolling up until the row's center is inside the
+    window. It does not turn around just because the name is already present.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        y = -80
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                           bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+            els.append(Element(
+                ref="r1", role="AXCell", title="ROW-0001", value=None,
+                bounds=Bounds(0, 24, _D.y, 76, 23), snapshot_id="s",
+            ))
+            return Snapshot(
+                snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els),
+            )
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            _D.y += -dy * 8
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ROW-0001", direction="up", max_scrolls=6)
+    assert "ROW-0001" in out
+    assert "not found" not in out
+    assert scrolls == [-5, -5]
+    assert 5 not in scrolls
+
+
+def _item_window_named(head: int) -> Snapshot:
+    """Eight ROW-NNNN cells starting at ``head``. Synthetic, not a Chrome table."""
+    els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                   bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s")]
+    for offset, number in enumerate(range(head, head + 8)):
+        els.append(Element(
+            ref=f"r{number}", role="AXCell", title=f"ROW-{number:04d}", value=None,
+            bounds=Bounds(0, 24, 80 + offset * 24, 76, 23), snapshot_id="s",
+        ))
+    return Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                    displays=(Display(0, 800, 600, 1.0, True),), elements=tuple(els))
+
+
 def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome list.
 
