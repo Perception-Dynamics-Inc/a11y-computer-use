@@ -1438,6 +1438,118 @@ def test_text_model_stops_when_the_tree_needs_vision(tmp_path):
     assert called["n"] == 1
 
 
+def test_fallback_fences_stubbed_ocr_and_survives_a_missing_engine(tmp_path, monkeypatch):
+    """The loop calls ``ocr.ocr`` when it exists and keeps going when it does not."""
+    import a11y_computer_use.ocr as ocr_mod
+
+    region = window(el("e2", "opaque_region", "", parent="e1", bounds=Bounds(0, 0, 0, 200, 150)))
+    runtime = FakeRuntime(region)
+
+    def crop(ref, padding=0, scale=1.0):
+        del ref, padding, scale
+        return ("crop", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+    seen: list = []
+
+    def fake_ocr(image, **kwargs):
+        del kwargs
+        assert isinstance(image, tuple)
+        assert image[0] == PNG
+        seen.append(image[0])
+        return [{"text": "DRAW TARGET", "confidence": 0.9}]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake_ocr, raising=False)
+
+    def script(messages):
+        return turn(done("read", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, _agent = run(
+        ScriptedModel(script), region, runtime=runtime, trace_dir=tmp_path / "ocr",
+    )
+    assert result.status == "success", result
+    assert seen
+    text = _agent._messages[2].content
+    assert isinstance(text, list)
+    body = text[0]["text"]
+    assert "DRAW TARGET" in body
+    assert "<untrusted nonce=" in body
+    assert "OCR text from the image" in body
+
+    def missing(image, **kwargs):
+        del image, kwargs
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no OCR engine is available",
+            detail={"reason": "missing_dependency"},
+        )
+
+    monkeypatch.setattr(ocr_mod, "ocr", missing, raising=False)
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script), region, runtime=runtime, trace_dir=tmp_path / "missing",
+    )
+    assert result.status == "success", result
+    body = agent._messages[2].content[0]["text"]
+    assert "DRAW TARGET" not in body
+    assert "OCR did not return text" in body
+
+    monkeypatch.delattr(ocr_mod, "ocr", raising=False)
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script), region, runtime=runtime, trace_dir=tmp_path / "absent",
+    )
+    assert result.status == "success", result
+    assert "DRAW TARGET" not in agent._messages[2].content[0]["text"]
+
+
+def test_fallback_uses_a_scripted_grounding_model_and_ignores_a_broken_one(tmp_path):
+    """A stub point is fenced. A model that cannot run does not end the task."""
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    region = window(el("e2", "opaque_region", "", parent="e1", bounds=Bounds(0, 0, 0, 200, 150)))
+    runtime = FakeRuntime(region)
+
+    def crop(ref, padding=0, scale=1.0):
+        del ref, padding, scale
+        return ("crop", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+    stub = ScriptedGrounding(GroundingHit(10, 20, box=(0, 10, 20, 20)))
+
+    def script(_messages):
+        return turn(done("pointed", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script),
+        region,
+        runtime=runtime,
+        trace_dir=tmp_path / "ground",
+        grounding=stub,
+    )
+    assert result.status == "success", result
+    assert stub.seen
+    assert stub.seen[0][1] == "finish the form"
+    assert isinstance(stub.seen[0][0], bytes)
+    body = agent._messages[2].content[0]["text"]
+    assert "image pixel (10, 20)" in body
+    assert "Screen point (10, 20)" in body
+    assert "<untrusted nonce=" in body
+
+    class _Broken:
+        def ground(self, png, instruction):
+            del png, instruction
+            raise RuntimeError("weights are not installed")
+
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script),
+        region,
+        runtime=runtime,
+        trace_dir=tmp_path / "broken",
+        grounding=_Broken(),
+    )
+    assert result.status == "success", result
+    assert "Local grounding is not available." in agent._messages[2].content[0]["text"]
+
+
 def test_vision_attaches_a_window_screenshot(tmp_path):
     elements = window(el("e2", "AXImage", "", parent="e1"))
     captured: list = []
