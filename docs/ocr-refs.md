@@ -75,9 +75,17 @@ one more capture plus recognition before the click when rematching is on.
 - Two identical labels near each other resolve to the nearest one to the old
   position, which is what you want when a list scrolls slightly and wrong when
   two identical buttons swap places.
-- macOS only today. Off macOS `screen_text` returns `unsupported` and the
-  automatic escalation stays silent. The `OcrEngine` protocol is two methods, so
-  a Windows OCR or Tesseract engine can be plugged in through `Runtime(ocr_engine=...)`.
+- `screen_text`'s default engine is still Vision, and off macOS that default
+  is None: `screen_text` returns `unsupported` and the automatic escalation
+  stays silent unless `Runtime(ocr_engine=...)` is given an engine. The
+  vision-fallback call is `ocr(image_or_region)` in this module. It prefers
+  RapidOCR (PP-OCRv5 mobile, ONNX, CPU) from the optional `[ocr]` extra, then
+  the system `tesseract` binary, then Vision. An explicit engine name does
+  not fall through. A missing engine raises `unsupported` with
+  `detail["reason"] == "missing_dependency"`. Returned text is
+  `fence_untrusted` output, and bounds are screen pixels. RapidOCR downloads
+  its models; this repository does not vendor them. Surya and EasyOCR are
+  not used. Linux `file_dialog` stays unsupported.
 - Vision reads image bytes, so the engine works without Screen Recording; the
   capture that feeds it does not.
 

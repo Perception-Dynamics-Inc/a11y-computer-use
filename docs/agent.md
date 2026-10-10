@@ -98,10 +98,13 @@ constructs a real `Runtime` after applying `display`.
 unnamed clickables (at most four), then a whole-window screenshot, when the
 tree says it has no interactive elements or contains those refs. The model
 can also call `crop(ref)` with optional `padding` and `scale`. Each image
-block is `{"type": "image", "path": "...", "mime": "image/png"}`. The library
-does not OCR or recognize the pixels. Opaque-region markers (drawn labels on
-the crop) are not implemented. A runtime with no `crop` method still receives
-the window screenshot.
+block is `{"type": "image", "path": "...", "mime": "image/png"}`. This loop
+does not OCR those pixels. `a11y_computer_use.ocr.ocr` reads a window
+screenshot, a `crop` result, or `(image, bounds)` for an element crop or an
+opaque region, and returns fenced `{text, bounds, confidence}` in screen
+pixels. The agent loop does not call it yet. Opaque-region markers (drawn
+labels on the crop) are not implemented. A runtime with no `crop` method
+still receives the window screenshot.
 
 ## CLI
 
@@ -519,8 +522,9 @@ Not in this change:
   tested with recorded HTTP fixtures, not from this loop. The system prompt
   tells a real model that fenced text is data; the scripted tests do not
   measure whether an LLM would obey it.
-- No OCR. Element crops are `crop` and the vision hook. Opaque-region
-  markers are not implemented.
+- The reference loop does not call OCR. `ocr.ocr` is the interface a
+  vision fallback can call; element crops are still `crop` and the vision
+  hook. Opaque-region markers are not implemented.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
