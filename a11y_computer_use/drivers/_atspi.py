@@ -2730,6 +2730,123 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
 # selected, so typing that query again leaves the same string.
 _CHROME_REWRITE_NAMES = frozenset({"Address and search bar", "Find"})
 
+# Pids whose find bar or omnibox popup has been in a snapshot. libatspi keeps
+# the child list from that snapshot. Closing the bar and Reload do not drop
+# it, so later reads still walk the bar or an empty document. The next
+# snapshot of that process clears the client cache and uses the page frame.
+_BROWSER_BAR_PIDS: set[int] = set()
+
+
+def snapshot_shows_browser_bar(elements) -> bool:
+    """True when a snapshot still contains the find bar or an omnibox popup.
+
+    The address bar itself is always present and is not this. A page button
+    titled Find is not this either: only the find field, the close button,
+    the find-in-page frame, and an omnibox URL count.
+    """
+    for el in elements:
+        title = getattr(el, "title", None) or ""
+        role = getattr(el, "role", None) or ""
+        value = str(getattr(el, "value", None) or "")
+        folded = title.lstrip().lower()
+        if title == "Close find bar" or folded.startswith("find in page"):
+            return True
+        if title == "Find" and role in {"AXTextField", "AXSearchField", "AXTextArea"}:
+            return True
+        if "omnibox" in folded or "omnibox" in value.lower():
+            return True
+    return False
+
+
+def note_browser_bar(root, elements) -> None:
+    """Remember that ``root``'s process showed a find bar or omnibox popup."""
+    if root is None or not snapshot_shows_browser_bar(elements):
+        return
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return
+    if pid:
+        _BROWSER_BAR_PIDS.add(int(pid))
+
+
+def _browser_bar_latched(root) -> bool:
+    if not _BROWSER_BAR_PIDS or root is None:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    return bool(pid and int(pid) in _BROWSER_BAR_PIDS)
+
+
+def _is_browser_bar_frame(node) -> bool:
+    """True for the find-in-page frame or an omnibox popup, not the page window."""
+    if node is None:
+        return False
+    name = (_node_name(node) or "").lstrip().lower()
+    if name.startswith("find in page"):
+        return True
+    url = _doc_url(node) or ""
+    return "omnibox" in url.lower()
+
+
+def _clear_browser_bar_cache(node, depth: int = 0) -> None:
+    """Drop libatspi's child cache on the window and its documents.
+
+    The walk stops at a document, so the page's own nodes are fetched again
+    by the snapshot instead of being cleared one by one.
+    """
+    if node is None or depth > 12:
+        return
+    role = _role_name(node)
+    if depth == 0 or role in {
+        "application", "frame", "window", "document web", "document frame", "internal frame",
+    }:
+        _call_first(node, ("clear_cache", "clearCache"))
+    if depth and role in {"document web", "document frame"}:
+        return
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 8)):
+        _clear_browser_bar_cache(_child_at(node, index), depth + 1)
+
+
+def chromium_snapshot_root(root):
+    """Page frame for a Chrome snapshot after the find bar or omnibox was open.
+
+    ``root`` is unchanged until that bar has appeared in a snapshot of this
+    process. After that, the client cache on the application is dropped, and
+    a leftover find-in-page or omnibox frame is not the root. The frame that
+    holds the selected tab is. Reload then reads the new document instead of
+    the cached bar.
+    """
+    if not _browser_bar_latched(root) or not _chromium_app(root):
+        return root
+    app = _call_first(root, ("get_application", "getApplication")) or root
+    _clear_browser_bar_cache(app)
+    if not _is_browser_bar_frame(root):
+        return root
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    pages = []
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is None or _is_browser_bar_frame(frame):
+            continue
+        if _role_name(frame) == "alert":
+            continue
+        pages.append(frame)
+    for frame in pages:
+        if _state_has(frame, "ACTIVE"):
+            return frame
+    for frame in pages:
+        if _selected_tab_name(frame):
+            return frame
+    return pages[0] if pages else root
+
 
 def _chrome_rewrite_field(acc) -> bool:
     """True for the Chrome address bar or find bar, not a web input."""

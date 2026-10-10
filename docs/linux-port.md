@@ -28,6 +28,10 @@ hCaptcha and reCAPTCHA image-challenge tiles carry no accessible names. They are
 
 A Chrome `<input type=date>`, `type=time`, or `type=month` is a `date editor` whose segments are spin buttons. The text interface is empty. `valuetext` is the segment ("03", "17", "1994", "AM", "March"). An unset segment's `valuetext` is "0", and that is not shown. The Value interface is not the segment: `set_current_value` can leave it at 0.0, and a filled date can publish one float across the segments (the year read back as 171994.0 in #146). `set_value` on a segment types that segment and succeeds when `valuetext` matches. "03" matches "3" and, on a month input, "March". A mismatch reports that displayed text, not the float. `week` and `datetime-local` use the same editor. The address bar (`Address and search bar`) is polled after `type` until the typed URL is visible or the field settles on a different string. A settled rewrite is not `text_mismatch`; the outcome judge reads the string the bar shows. The find bar (`Find`) that already contains exactly the typed query is a match, including when the bar reopens with that query selected.
 
+Closing that bar leaves the page scrolled to the match. Chrome then reports the content root (a viewport-sized section under the active tab's document) at a negative Y, so the box misses the screen, while the text now on screen keeps real coordinates under it. A snapshot walks that root and keeps those descendants. The group is no longer an empty `group "<title>" (focus)`. A control above the viewport, and the rest of the page below the fold, still drop.
+
+The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. Reload does not reuse the cached document.
+
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 
 | Driver primitive | Linux (implemented) | macOS / Windows analog |
