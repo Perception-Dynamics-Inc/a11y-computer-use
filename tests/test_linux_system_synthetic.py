@@ -87,6 +87,17 @@ def test_app_at_point_prefers_the_window_that_contains_the_point(fake_ewmh) -> N
     assert _linux_system.app_at_point_id(3000, 3000) is None
 
 
+def test_app_at_point_uses_wm_class_when_the_window_has_no_pid(monkeypatch) -> None:
+    """A Tk or Xt window has no comm. The hit-test names its WM_CLASS."""
+    win = _ClassWin(0x21, pid=0, instance="xmessage", klass="Xmessage", title="note")
+    _active_display(monkeypatch, [win], 0x21)
+    assert _linux_system.app_at_point_id(20, 20) == "xmessage"
+    assert _linux_system.pid_at_point(20, 20) is None
+    blank = _ClassWin(0x22, pid=0, instance="", klass="", title="blank")
+    _active_display(monkeypatch, [blank], 0x22)
+    assert _linux_system.app_at_point_id(20, 20) is None
+
+
 def test_topmost_window_wins_when_windows_overlap(monkeypatch) -> None:
     """Stacking order is bottom -> top; the hit-test must walk it top -> bottom."""
     below = _FakeXWin(0x30, 100, 100, 600, 400, pid=300)

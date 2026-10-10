@@ -1212,8 +1212,9 @@ def _visible_pidless_window(row: dict) -> bool:
 
     Rows that omit ``pid`` are not this case. Hermetic lists leave the key
     off, and those stay on the grant filter. A Tk or Xt window has no
-    ``_NET_WM_PID``; the driver reports pid 0 and an app id from WM_CLASS.
-    A minimized window stays off this path.
+    ``_NET_WM_PID``. The row is keyed by WM_CLASS and has a positive bounds
+    box. Focus is not part of this check. A minimized window stays off this
+    path.
     """
     if "pid" not in row:
         return False
@@ -1221,14 +1222,16 @@ def _visible_pidless_window(row: dict) -> bool:
         return False
     if row.get("on_screen") is False:
         return False
-    identity = str(
-        row.get("bundle")
-        or row.get("app")
-        or row.get("wm_class")
-        or row.get("wm_class_class")
-        or ""
-    ).strip()
-    return bool(identity)
+    wm_class = str(row.get("wm_class") or row.get("wm_class_class") or "").strip()
+    if not wm_class:
+        return False
+    bounds = row.get("bounds")
+    if not isinstance(bounds, dict):
+        return False
+    try:
+        return int(bounds.get("width") or 0) > 0 and int(bounds.get("height") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _linux_name_matches(identifier: str, *names: str) -> bool:
@@ -1368,10 +1371,14 @@ def _window_row(row: dict) -> dict:
     Rows that never set the flag are on the current Space's window list, so
     they are on screen. A minimized window that already says ``on_screen``
     false stays false, and its bounds stay whatever the driver reported.
+    A pid that was read as 0 is null: the window has no process id. A row
+    that omits the key stays without it.
     """
     out = dict(row)
     if "on_screen" not in out:
         out["on_screen"] = True
+    if "pid" in out:
+        out["pid"] = _row_pid(out)
     return out
 
 
@@ -2749,6 +2756,8 @@ class Runtime:
         gate against the issuing snapshot's app; raw points gate against the
         frontmost app and default to the driver's main display (so this path is
         platform-free: Linux/Windows/browser report 0, macOS `CGMainDisplayID`).
+        On Linux, a point whose frontmost app is unknown gates on the window
+        under the point (WM_CLASS when that window has no pid).
         ``kind`` names the calling tool in the audit row a failed resolution
         leaves behind.
         """
@@ -2762,7 +2771,18 @@ class Runtime:
             raise ValueError("target an element ref, or both x and y coordinates")
         if display_id is None:
             display_id = int(self.driver.main_display_id())  # through the seam, not Quartz
-        return Point(display_id=display_id, x=x, y=y), self._frontmost()
+        point = Point(display_id=display_id, x=x, y=y)
+        app = self._frontmost()
+        # A focused Tk or Xt window has no process id, so the frontmost name
+        # is "unknown". Gate the point on the window under it (its WM_CLASS)
+        # instead of asking for a grant of unknown.
+        if getattr(self.driver, "name", None) == "linux" and (
+            not str(app or "").strip() or app == "unknown"
+        ):
+            owner = _app_at_point(point)
+            if owner:
+                app = owner
+        return point, app
 
     # -- OCR refs (o1..oN) ----------------------------------------------------
 
@@ -5767,20 +5787,54 @@ class Runtime:
                     verdict=("confirmed", f"listed {len(rows)} windows"),
                 )
             front = self._frontmost()
-            if not str(front or "").strip() or front == "unknown":
-                listed = self._list_windows_without_focus()
-                try:
-                    count = len(json.loads(listed))
-                except json.JSONDecodeError:
-                    count = 0
-                return self._conclude(
-                    listed, tool="window", verdict=("confirmed", f"listed {count} windows"),
+            focused = bool(str(front or "").strip()) and front != "unknown"
+            if focused:
+                decision = safety.check_action(
+                    WindowOp(verb=verb), front, store=self.store,
                 )
-            rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
-            shown = [_window_row(r) for r in rows]
+                if decision.allowed:
+                    # The focused app's read grant still returns every window.
+                    # Pid-less rows are in that list; they are not conditional
+                    # on the focused window itself having no process id.
+                    rows = self._run_gated(WindowOp(verb=verb), front, self.driver.windows)
+                    shown = [_window_row(r) for r in rows]
+                    return self._conclude(
+                        json.dumps(shown), tool="window",
+                        verdict=("confirmed", f"listed {len(shown)} windows"),
+                    )
+                # The focused app is not granted, so this does not become a
+                # list of every other grant. Mapped windows with no pid are
+                # still included. With none of those, the focused app's
+                # permission refusal stands.
+                pidless = [
+                    row for row in (_window_row(item) for item in self.driver.windows())
+                    if _visible_pidless_window(row)
+                ]
+                if not pidless:
+                    self._require_permission(WindowOp(verb=verb), front)
+                listed = json.dumps(pidless)
+                return self._conclude(
+                    listed, tool="window",
+                    verdict=("confirmed", f"listed {len(pidless)} windows"),
+                )
+            listed = self._list_granted_and_pidless_windows()
+            if listed is None:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    "no focused window; an unfiltered window list includes windows "
+                    "whose app has a read grant, and visible windows with no process id. "
+                    "None of the open windows qualify",
+                    detail={
+                        "reason": "no_focused_window",
+                        "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
+                    },
+                )
+            try:
+                count = len(json.loads(listed))
+            except json.JSONDecodeError:
+                count = 0
             return self._conclude(
-                json.dumps(shown), tool="window",
-                verdict=("confirmed", f"listed {len(shown)} windows"),
+                listed, tool="window", verdict=("confirmed", f"listed {count} windows"),
             )
         platform = str(getattr(self.driver, "name", None) or "this platform")
         method_name = _WINDOW_METHODS.get(verb)
@@ -5901,15 +5955,14 @@ class Runtime:
             return "unverifiable", f"window {window_id} does not report maximized"
         return "confirmed", f"window {window_id} is still listed"
 
-    def _list_windows_without_focus(self) -> str:
-        """Unfiltered ``window list`` when nothing is focused.
+    def _list_granted_and_pidless_windows(self) -> str | None:
+        """Granted owners, plus mapped windows that have no process id.
 
-        Gating that call on the frontmost name asked for a grant of
-        ``unknown``. Return the windows whose owners already have a read
-        grant, and visible windows whose pid was read as absent (Tk, Xt).
-        A desktop with no windows is an empty list. Open windows that are
-        neither granted nor a visible pid-less window are `unsupported`
-        with reason ``no_focused_window``.
+        A Tk or Xt window is keyed by WM_CLASS and keeps its bounds. It is
+        included whether or not another window is focused. A minimized
+        pid-less window is included only when its app already has a read
+        grant. ``[]`` when the desktop has no windows. None when windows are
+        open and none of them qualify.
         """
         raw = [_window_row(row) for row in self.driver.windows()]
         kept: list[dict] = []
@@ -5935,16 +5988,7 @@ class Runtime:
                 kept.append(row)
         if kept or not raw:
             return json.dumps(kept)
-        raise ComputerUseError(
-            ErrorCode.UNSUPPORTED,
-            "no focused window; an unfiltered window list includes windows "
-            "whose app has a read grant, and visible windows with no process id. "
-            "None of the open windows qualify",
-            detail={
-                "reason": "no_focused_window",
-                "hint": "Pass app= to list one app, or grant read on an app that owns a window.",
-            },
-        )
+        return None
 
     @_serialized
     def clipboard(self, action: str, text: str | None = None) -> str:
@@ -6899,14 +6943,19 @@ def build_server(
         whose app id equals X, case-insensitive, and is gated against X (tier
         read) instead of the frontmost app. An empty app is invalid_arguments.
         A window with no app id never matches a filter. An app that is not
-        running returns an empty list. With no focused window, an unfiltered
-        list returns windows whose app already has a read grant, and visible
-        windows whose pid was read as 0 (a Tk or Xt window with no
-        _NET_WM_PID; app is the process comm or the WM_CLASS). A minimized
-        window with no pid is included only when its app has a grant. When
-        windows are open and none of them qualify, the error is unsupported
-        with reason no_focused_window. It does not ask for a grant of
-        'unknown'. A minimized window (iconic or hidden) has
+        running returns an empty list. An unfiltered list returns every
+        window when the focused app already has a read grant. It also
+        includes mapped top-level windows that have no process id, whether
+        or not any window is focused. Those rows are keyed by WM_CLASS,
+        carry bounds, and report pid null (the driver read _NET_WM_PID as
+        absent; a row that omits pid is unchanged). A minimized window with
+        no pid is included only when its app has a grant, unless the focused
+        app's grant returns the whole list. When nothing is focused and no
+        window qualifies, the error is unsupported with reason
+        no_focused_window. It does not ask for a grant of 'unknown'. When a
+        focused app is not granted, the list is those pid-less windows only.
+        If there are none, the error is that app's permission refusal, not a
+        list of other grants. A minimized window (iconic or hidden) has
         on_screen false. bounds are {display_id, x, y, width, height} in that
         display's physical pixels — the same space click/scroll/drag take —
         or null when the driver has no rect (a minimized Linux window). On

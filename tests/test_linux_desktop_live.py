@@ -421,12 +421,82 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
             pass
 
 
+_HOLDER_SRC = r"""
+import os
+import time
+from Xlib import X, Xatom, display
+d = display.Display()
+screen = d.screen()
+win = screen.root.create_window(
+    20, 20, 80, 40, 1, screen.root_depth, X.InputOutput, X.CopyFromParent,
+)
+win.change_property(d.intern_atom("WM_NAME"), Xatom.STRING, 8, b"pidholder")
+win.change_property(d.intern_atom("WM_CLASS"), Xatom.STRING, 8, b"pidholder\0Pidholder\0")
+win.change_property(d.intern_atom("_NET_WM_PID"), Xatom.CARDINAL, 32, [os.getpid()])
+win.map()
+d.flush()
+while True:
+    time.sleep(1)
+"""
+
+
+def _button_point(window_id: int) -> tuple[int, int]:
+    """Screen center of xmessage's ok button, the small child near the bottom."""
+    from Xlib import display as xdisplay
+
+    d = xdisplay.Display()
+    try:
+        top = d.create_resource_object("window", int(window_id))
+        root = d.screen().root
+        best: tuple[int, int, int, int] | None = None
+        stack = [top]
+        while stack:
+            win = stack.pop()
+            try:
+                children = list(win.query_tree().children or [])
+            except Exception:
+                children = []
+            stack.extend(children)
+            if int(win.id) == int(window_id):
+                continue
+            box = _linux_box(root, win)
+            if box is None:
+                continue
+            x, y, w, h = box
+            if not (16 <= w <= 100 and 10 <= h <= 40):
+                continue
+            # The label is wide and sits above the button. The lowest modest
+            # child is the button.
+            rank = (y, -(w * h))
+            if best is None or rank > (best[0], best[1]):
+                best = (y, -(w * h), x + w // 2, y + h // 2)
+        if best is None:
+            raise AssertionError(f"xmessage {window_id} drew no button")
+        return best[2], best[3]
+    finally:
+        try:
+            d.close()
+        except Exception:
+            pass
+
+
+def _linux_box(root, win) -> tuple[int, int, int, int] | None:
+    try:
+        coords = root.translate_coords(win, 0, 0)
+        geom = win.get_geometry()
+        return int(coords.x), int(coords.y), int(geom.width), int(geom.height)
+    except Exception:
+        return None
+
+
 @requires_desktop
 def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
     """xmessage is mapped, has WM_CLASS, and publishes no _NET_WM_PID.
 
-    Focusing it makes the frontmost app undetectable. An unfiltered list
-    with no grants still names the window, with app from WM_CLASS and pid 0.
+    Another window that has a pid is focused. The unfiltered list still
+    names xmessage, with pid null, WM_CLASS, and bounds. ``app=`` for the
+    focused window does not include it. focus and raise target it, and a
+    coordinate click on its button closes it.
     """
     import json
     import shutil
@@ -440,8 +510,14 @@ def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
         pytest.skip("xmessage is not installed")
     if not shutil.which("xdotool"):
         pytest.skip("xdotool is not installed")
+    holder_path = tmp_path / "pidholder.py"
+    holder_path.write_text(_HOLDER_SRC)
+    holder = subprocess.Popen(
+        [sys.executable, str(holder_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
     proc = subprocess.Popen(
-        [binary, "-buttons", "ok", "-timeout", "90", "pidless-window-probe"],
+        [binary, "-buttons", "ok", "-geometry", "+200+160", "-timeout", "90", "pidless-window-probe"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     driver = LinuxDriver()
@@ -460,41 +536,96 @@ def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
                     return item
         return None
 
-    try:
-        found = _until(match)
-        assert found is not None, driver.windows()
+    def holder_row():
+        for item in driver.windows():
+            if item.get("pid") == holder.pid and item.get("on_screen") is True:
+                return item
+        return None
+
+    def activate(window_id: int) -> None:
         subprocess.run(
-            ["xdotool", "windowactivate", "--sync", str(found["window_id"])],
+            ["xdotool", "windowactivate", "--sync", str(window_id)],
             check=False, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
-        def focused():
-            if _linux_system.frontmost_app_id() != "":
+    try:
+        found = _until(match)
+        assert found is not None, driver.windows()
+        holding = _until(holder_row)
+        assert holding is not None, driver.windows()
+
+        def other_focused():
+            activate(int(holding["window_id"]))
+            front = _linux_system.frontmost_app_id()
+            if not front:
                 return None
             active = _linux_system.active_window() or {}
             try:
-                if int(active.get("window_id") or 0) == int(found["window_id"]):
-                    return active
+                if int(active.get("window_id") or 0) == int(holding["window_id"]):
+                    return front
             except (TypeError, ValueError):
                 return None
             return None
 
-        assert _until(focused), (_linux_system.frontmost_app_id(), _linux_system.active_window())
+        front = _until(other_focused)
+        assert front, (_linux_system.frontmost_app_id(), _linux_system.active_window())
         store = safety.PermissionStore(tmp_path / "p.json")
         rt = server.Runtime(
             store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
         )
         listed = json.loads(rt.window("list"))
         row = next(item for item in listed if item["window_id"] == found["window_id"])
-        assert row["pid"] == 0
-        assert "xmessage" in str(row.get("app") or "").lower() or (
-            "xmessage" in str(row.get("wm_class") or "").lower()
-        )
+        assert row["pid"] is None
+        assert "xmessage" in str(row.get("wm_class") or "").lower()
+        assert "xmessage" in str(row.get("app") or row.get("wm_class") or "").lower()
         assert row["on_screen"] is True
         assert row["bounds"]["width"] > 0 and row["bounds"]["height"] > 0
+        assert holding["window_id"] not in {item["window_id"] for item in listed}
+
+        comm = front
+        rt.store.set_tier(comm, safety.Tier.READ)
+        filtered = json.loads(rt.window("list", app=comm))
+        assert holding["window_id"] in {item["window_id"] for item in filtered}
+        assert found["window_id"] not in {item["window_id"] for item in filtered}
+
+        rt.store.set_tier("xmessage", safety.Tier.CLICK)
+        named = json.loads(rt.window("list", app="xmessage"))
+        assert [item["window_id"] for item in named] == [found["window_id"]]
+        assert named[0]["pid"] is None and named[0]["bounds"]["width"] > 0
+
+        wid = int(found["window_id"])
+        raised = rt.window("raise", window_id=wid)
+        assert raised.startswith("raised window")
+        focused = rt.window("focus", window_id=wid)
+        assert focused.startswith("focused window")
+
+        def xmessage_active():
+            active = _linux_system.active_window() or {}
+            try:
+                if int(active.get("window_id") or 0) == wid:
+                    return active
+            except (TypeError, ValueError):
+                return None
+            return None
+
+        assert _until(xmessage_active), _linux_system.active_window()
+        click_x, click_y = _button_point(wid)
+        rt.click(x=click_x, y=click_y, display_id=0)
+
+        def closed():
+            if proc.poll() is None:
+                return None
+            for item in driver.windows():
+                if item.get("window_id") == wid:
+                    return None
+            return True
+
+        assert _until(closed, timeout=8), (proc.poll(), driver.windows())
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        for child in (proc, holder):
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
