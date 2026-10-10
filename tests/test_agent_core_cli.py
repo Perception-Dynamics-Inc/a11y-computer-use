@@ -57,7 +57,7 @@ def test_json_success(monkeypatch, capsys, tmp_path):
 
 def test_json_needs_human_exits_2(monkeypatch, capsys):
     elements = window(el("e2", "AXTextField", "Password", parent="e1", secure=True, editable=True))
-    model = ScriptedModel(lambda _messages: turn(ToolCall("set_value", {"ref": "e2", "value": "hunter2"})))
+    model = ScriptedModel(lambda _messages: turn(ToolCall("type", {"ref": "e2", "text": "hunter2"})))
 
     def build(args):
         return _agent(args, model, elements)

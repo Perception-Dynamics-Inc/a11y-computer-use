@@ -48,6 +48,10 @@ class MacOSDriver:
     def press_element(self, element: Element) -> bool:
         return observe.press_element(element)
 
+    def focus_for_type(self, element: Element) -> bool:
+        """Focus ``element`` and confirm AXFocused. Does not type."""
+        return observe.focus_for_type(element)
+
     def scroll_into_view(self, element: Element) -> bool:
         return observe.scroll_into_view(element)
 

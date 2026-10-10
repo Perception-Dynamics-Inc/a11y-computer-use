@@ -1799,9 +1799,10 @@ def test_validate_action_rejects_unknown_fields() -> None:
             Action(name, {"not_a_real_argument": "x"}), allow_exec=True,
         )
         assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
-    refused = validate_action(Action("type", {"text": "hi", "ref": "e1"}))
-    assert refused == "invalid_arguments: type: unknown field 'ref'; expected app, text"
+    refused = validate_action(Action("type", {"text": "hi", "zoom": 1}))
+    assert refused == "invalid_arguments: type: unknown field 'zoom'; expected app, ref, text"
     assert validate_action(Action("type", {"text": "hi"})) is None
+    assert validate_action(Action("type", {"text": "hi", "ref": "e1"})) is None
     assert validate_action(Action("click", {"x": 1, "y": 2, "_source_ref": "e2"})) == (
         "invalid_arguments: click: unknown field '_source_ref'; "
         "expected button, count, display_id, ref, x, y"

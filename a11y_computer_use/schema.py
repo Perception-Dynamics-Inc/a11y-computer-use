@@ -114,7 +114,7 @@ def unknown_fields_message(given: object, allowed: object) -> str | None:
 
     None when every key is declared, or when ``given`` is not a mapping.
     The wording matches an act step's unknown field: ``unknown field
-    'ref'; expected app, text``. Several keys use ``fields``. An empty
+    'zoom'; expected app, ref, text``. Several keys use ``fields``. An empty
     allowed set says ``expected no fields``.
     """
     if not isinstance(given, dict):
@@ -355,8 +355,8 @@ class ErrorCode(str, Enum):
     decision and injection (same-window recheck, PLAN.md §6); re-observe."""
 
     FOCUS_LOST = "focus_lost"
-    """Keyboard focus was not on the set_value target. No further keystrokes
-    were sent. The outcome is refused."""
+    """Keyboard focus was not on the set_value or type target. No further
+    keystrokes were sent. The outcome is refused."""
 
     APP_NOT_FOUND = "app_not_found"
     """No running (or launchable) application matches the given identifier."""

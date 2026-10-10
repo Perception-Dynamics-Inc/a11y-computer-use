@@ -2315,20 +2315,24 @@ async def test_unknown_tool_argument_is_rejected_before_input(
 
 
 async def test_runtime_rejects_unknown_type_argument_before_input(tmp_path, monkeypatch) -> None:
-    """call_tool and dispatch name ref and do not type."""
+    """call_tool and dispatch name an undeclared key and do not type.
+
+    ``ref`` is a declared type argument, so the unknown key is ``zoom``.
+    """
     typed: list[str] = []
     monkeypatch.setattr(act, "type_text", lambda text, **_kw: typed.append(text) or [])
     store = safety.PermissionStore(tmp_path / "permissions.json")
     with server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit")) as runtime:
         runtime.driver.type_text = lambda text, **_kw: typed.append(text) or 0  # type: ignore[method-assign]
+        assert "ref" in server.accepted_keywords(runtime.type_text)
         for entry in (runtime.call_tool, runtime.dispatch):
             with pytest.raises(ValueError) as exc:
-                entry("type", {"text": "TYPED", "ref": "e1"})
+                entry("type", {"text": "TYPED", "zoom": 1})
             message = str(exc.value)
-            assert "unknown field 'ref'" in message
-            assert "text" in message and "app" in message
+            assert "unknown field 'zoom'" in message
+            assert "text" in message and "app" in message and "ref" in message
             assert "invalid_arguments" not in message
-        with pytest.raises(ValueError, match="unknown fields 'ref', 'zoom'"):
+        with pytest.raises(ValueError, match="unknown field 'zoom'"):
             runtime.call_tool("type", {"text": "TYPED", "ref": "e1", "zoom": 2})
     assert typed == []
 
