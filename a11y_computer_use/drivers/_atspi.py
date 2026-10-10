@@ -3235,24 +3235,338 @@ def _type_needles(text: str, *, chrome: bool) -> tuple[str, ...]:
     return (needle, trimmed)
 
 
-def _typed_visible(before: str | None, after: str | None, text: str, *, chrome: bool = False) -> bool:
+def _expansion_starts(acc, raw: str) -> tuple[str, list[int]]:
+    """Expanded text and the expanded index of each raw character.
+
+    ``starts[i]`` is where raw character ``i`` begins. The last entry is the
+    length, so an exclusive end offset has a place to land. A U+FFFC begins
+    at the child text that replaces it. NBSP is a space, matching the
+    read-back. No embedded objects leaves the raw string unchanged.
+    """
+    if _OBJECT_REPLACEMENT not in raw:
+        text = raw.replace("\u00a0", " ")
+        return text, list(range(len(text) + 1))
+    targets = _embedded_targets(acc, raw)
+    parts = raw.split(_OBJECT_REPLACEMENT)
+    surrounding = "".join(parts)
+    out: list[str] = []
+    starts: list[int] = []
+    built = 0
+    obj_i = 0
+    for part_index, part in enumerate(parts):
+        for ch in part:
+            starts.append(built)
+            piece = " " if ch == "\u00a0" else ch
+            out.append(piece)
+            built += 1
+        if part_index >= len(parts) - 1:
+            break
+        starts.append(built)
+        obj = targets[obj_i] if obj_i < len(targets) else None
+        obj_i += 1
+        piece = _object_text(obj, 1, surrounding).replace("\u00a0", " ")
+        out.append(piece)
+        built += len(piece)
+    starts.append(built)
+    return "".join(out), starts
+
+
+def _span_in_contribution(
+    readable: str, span: tuple[int, int], contributed: str,
+) -> tuple[int, int] | None:
+    """``span`` moved from ``readable`` into ``contributed``, or None.
+
+    The embed's read-back and the slice spliced into the parent can differ by
+    a stripped edge. Offsets that fall outside the contribution are None.
+    """
+    start, end = span
+    read_n = readable.replace("\u00a0", " ")
+    contrib = contributed.replace("\u00a0", " ")
+    if start < 0 or end <= start or end > len(read_n):
+        return None
+    lead = 0
+    if read_n == contrib:
+        lead = 0
+    elif contrib and read_n.strip() == contrib:
+        lead = len(read_n) - len(read_n.lstrip())
+    elif contrib and contrib in read_n:
+        lead = read_n.find(contrib)
+    else:
+        return None
+    placed_start = start - lead
+    placed_end = end - lead
+    if placed_start < 0 or placed_end > len(contrib) or placed_end <= placed_start:
+        return None
+    return placed_start, placed_end
+
+
+def _descendant_text_span(acc, readable: str, depth: int) -> tuple[int, int] | None:
+    """Selection on a descendant, expressed in ``readable``.
+
+    A paragraph can leave its own Text selection empty while the static text
+    that holds the word reports one. The child's offsets are placed where
+    that child's text sits in ``readable``.
+    """
+    if depth > 6 or not readable:
+        return None
+    text = readable.replace("\u00a0", " ")
+    cursor = 0
+    spans: list[tuple[int, int]] = []
+    for index in range(min(_child_count(acc), 32)):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        try:
+            child_raw = _full_text(child)
+        except Exception:
+            child_raw = None
+        if isinstance(child_raw, str) and child_raw and _OBJECT_REPLACEMENT not in child_raw:
+            child_text = child_raw.replace("\u00a0", " ")
+        else:
+            try:
+                child_text = _readable_text(child) or ""
+            except Exception:
+                child_text = ""
+        if not child_text:
+            continue
+        at = text.find(child_text, cursor)
+        if at < 0:
+            continue
+        local = _selection_span(child, child_text, depth + 1)
+        if local is None:
+            local = _descendant_text_span(child, child_text, depth + 1)
+        if local is not None and local[1] <= len(child_text):
+            spans.append((at + local[0], at + local[1]))
+        cursor = at + len(child_text)
+    if not spans:
+        return None
+    return spans[0][0], spans[-1][1]
+
+
+def _embed_inner_span(obj, contributed: str, depth: int) -> tuple[int, int] | None:
+    """Selection inside one embedded paragraph, relative to ``contributed``.
+
+    None keeps the whole embed. Chrome's contenteditable parent selects the
+    paragraph object, and the paragraph (or the static text inside it)
+    selects the word. Typing replaces the word.
+    """
+    if obj is None or not contributed or depth > 6:
+        return None
+    try:
+        readable = _readable_text(obj)
+    except Exception:
+        return None
+    if not isinstance(readable, str) or not readable:
+        return None
+    span = _selection_span(obj, readable, depth + 1)
+    if span is None:
+        span = _descendant_text_span(obj, readable, depth + 1)
+    if span is None:
+        return None
+    return _span_in_contribution(readable, span, contributed)
+
+
+def _refine_embedded_selection(
+    acc, raw: str, start: int, end: int, expanded: str, starts: list[int], depth: int,
+) -> tuple[int, int] | None:
+    """The expanded span, shrunk to a word selected inside a U+FFFC.
+
+    A selection that also covers ordinary characters keeps the object
+    mapping. An embed with no inner selection stays the whole embed, which
+    is a selected paragraph. The word's range is what a selected word
+    inside that paragraph reports.
+    """
+    targets = _embedded_targets(acc, raw)
+    obj_i = 0
+    pieces: list[tuple[int, int]] = []
+    saw_object = False
+    for index, ch in enumerate(raw):
+        if ch != _OBJECT_REPLACEMENT:
+            if start <= index < end:
+                return None
+            continue
+        contrib_s = starts[index] if index < len(starts) else len(expanded)
+        contrib_e = starts[index + 1] if index + 1 < len(starts) else len(expanded)
+        if start <= index < end:
+            saw_object = True
+            contributed = expanded[contrib_s:contrib_e]
+            inner = _embed_inner_span(
+                targets[obj_i] if obj_i < len(targets) else None, contributed, depth,
+            )
+            if inner is None:
+                pieces.append((contrib_s, contrib_e))
+            else:
+                pieces.append((contrib_s + inner[0], contrib_s + inner[1]))
+        obj_i += 1
+    if not saw_object or not pieces:
+        return None
+    refined_start, refined_end = pieces[0][0], pieces[-1][1]
+    if refined_end <= refined_start:
+        return None
+    return refined_start, refined_end
+
+
+def _selection_span(acc, readable: str | None, _depth: int = 0) -> tuple[int, int] | None:
+    """Active ``[start, end)`` in ``readable``, or None.
+
+    The Text interface counts characters in its own string. A contenteditable
+    parent is often one U+FFFC per paragraph, while the read-back is the
+    children's words. The span is translated into that read-back. When that
+    object is selected only because the caret is inside it, the paragraph's
+    own selection is the word, and that word is the span. A collapsed
+    caret, a missing selection, and offsets that are not in ``readable`` are
+    None, and the caller keeps the append check.
+    """
+    if _depth > 6 or not isinstance(readable, str) or not readable:
+        return None
+    try:
+        raw = _full_text(acc)
+    except Exception:
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        Atspi = _atspi()
+        count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    except Exception:
+        count = None
+    nchars = count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else len(raw)
+    try:
+        _caret, start, end = _caret_and_selection(acc, nchars)
+    except Exception:
+        return None
+    if end <= start:
+        return None
+    readable_n = readable.replace("\u00a0", " ")
+    if _OBJECT_REPLACEMENT not in raw:
+        raw_n = raw.replace("\u00a0", " ")
+        if end <= len(readable_n) and (
+            nchars == len(readable_n)
+            or raw_n == readable_n
+            or raw_n.rstrip("\n") == readable_n
+            or readable_n.rstrip("\n") == raw_n
+        ):
+            return start, end
+        return None
+    expanded, starts = _expansion_starts(acc, raw)
+    if start >= len(starts):
+        return None
+    r_start = starts[start]
+    r_end = starts[end] if end < len(starts) else len(expanded)
+    try:
+        refined = _refine_embedded_selection(acc, raw, start, end, expanded, starts, _depth)
+    except Exception:
+        refined = None
+    if refined is not None:
+        r_start, r_end = refined
+    lead = 0
+    if expanded != readable_n:
+        stripped = expanded.strip()
+        if stripped != readable_n and stripped.rstrip("\n") != readable_n.rstrip("\n"):
+            if nchars == len(readable_n) and end <= len(readable_n):
+                return start, end
+            return None
+        found = expanded.find(stripped) if stripped else 0
+        lead = found if found > 0 else 0
+    r_start -= lead
+    r_end -= lead
+    if r_start < 0 or r_end < r_start or r_end > len(readable_n):
+        return None
+    return r_start, r_end
+
+
+def _selection_replaced(
+    before_n: str,
+    after_n: str,
+    needles: tuple[str, ...],
+    start: int,
+    end: int,
+    typed: str,
+) -> bool:
+    """True when ``after_n`` is ``before_n`` with ``[start, end)`` replaced."""
+    from a11y_computer_use.outcome import replaced_text
+
+    if end <= start or end > len(before_n):
+        return False
+    for needle in needles:
+        if not needle:
+            continue
+        expected = replaced_text(before_n, needle, start, end)
+        if expected is None:
+            continue
+        if _field_text_for_type(expected, typed) == after_n:
+            return True
+    return False
+
+
+def _matched_replacement(
+    before: str | None,
+    after: str | None,
+    text: str,
+    selection: tuple[int, int] | None,
+    *,
+    chrome: bool = False,
+) -> str | None:
+    """The final field text when ``after`` is the selection replacement.
+
+    None when there is no selection or ``after`` is some other edit. The
+    outcome check compares the snapshot with this string.
+    """
+    if not selection or len(selection) != 2:
+        return None
+    before_n = _field_text_for_type(before, text)
+    after_n = _field_text_for_type(after, text)
+    if before_n is None or after_n is None:
+        return None
+    start, end = selection
+    if not _selection_replaced(before_n, after_n, _type_needles(text, chrome=chrome), start, end, text):
+        return None
+    from a11y_computer_use.outcome import replaced_text
+
+    for needle in _type_needles(text, chrome=chrome):
+        expected = replaced_text(before_n, needle, start, end)
+        if expected is not None and _field_text_for_type(expected, text) == after_n:
+            return _field_text_for_type(expected, text)
+    return None
+
+
+def _typed_visible(
+    before: str | None,
+    after: str | None,
+    text: str,
+    *,
+    chrome: bool = False,
+    selection: tuple[int, int] | None = None,
+) -> bool:
     """Whether ``text`` showed up in the focused text.
 
     A readable field that still shows the pre-type text, or that shows the
-    case-inverted string, does not count. A suffix or an insertion does.
-    NBSP compares as a space, and one trailing contenteditable newline is
-    not part of the value. ``chrome`` also accepts the typed text with its
-    trailing spaces removed, which is the string Chrome keeps. A field that
-    settled without the characters is not a match. A field whose whole text
-    is already exactly the typed string is a match: Chrome's find bar
-    reopens with that query selected, and typing it again does not change
-    the string.
+    case-inverted string, does not count. With an active selection the
+    expected result is the previous text with that range replaced, and the
+    final text has to be that string. A suffix or an insertion is the check
+    when the caret is collapsed. NBSP compares as a space, and one trailing
+    contenteditable newline is not part of the value. ``chrome`` also
+    accepts the typed text with its trailing spaces removed, which is the
+    string Chrome keeps. A field that settled without the characters is not
+    a match. A field whose whole text is already exactly the typed string
+    is a match: Chrome's find bar reopens with that query selected, and
+    typing it again does not change the string.
     """
     before_n = _field_text_for_type(before, text)
     after_n = _field_text_for_type(after, text)
     needles = _type_needles(text, chrome=chrome)
     if after_n is None or not any(needle and needle in after_n for needle in needles):
         return False
+    if (
+        selection is not None
+        and len(selection) == 2
+        and before_n is not None
+        and int(selection[1]) > int(selection[0])
+        and int(selection[1]) <= len(before_n)
+    ):
+        return _selection_replaced(
+            before_n, after_n, needles, int(selection[0]), int(selection[1]), text,
+        )
     if before_n is None:
         return True
     if after_n == before_n:
@@ -3275,7 +3589,14 @@ _TYPE_SETTLE_PAUSE_S = 0.05
 _TYPE_SETTLE_STABLE = 2
 
 
-def _poll_typed_text(read, before: str | None, text: str, *, chrome: bool = False) -> str | None:
+def _poll_typed_text(
+    read,
+    before: str | None,
+    text: str,
+    *,
+    chrome: bool = False,
+    selection: tuple[int, int] | None = None,
+) -> str | None:
     """Poll ``read`` until ``text`` is visible or the field settles.
 
     ``read`` returns the current readable text. The first hit wins. A read
@@ -3291,7 +3612,7 @@ def _poll_typed_text(read, before: str | None, text: str, *, chrome: bool = Fals
     before_n = _field_text_for_type(before, text)
     for attempt in range(_TYPE_SETTLE_POLLS):
         seen = read()
-        if _typed_visible(before, seen, text, chrome=chrome):
+        if _typed_visible(before, seen, text, chrome=chrome, selection=selection):
             return seen
         norm = _field_text_for_type(seen, text)
         if norm is not None and norm == last and norm != before_n:
@@ -4083,18 +4404,32 @@ def chromium_contenteditable_type(acc, text: str) -> bool | None:
 
     ``None`` means this is not the path: ``acc`` is not a Chrome
     contenteditable, or XTEST cannot reach the session. ``True`` means a
-    settled read contains ``text``. ``False`` means the read settled without
-    those characters. That is a mismatch, not a success. NBSP is a space
-    and one trailing newline is the ``<br>``. An input, a textarea, and a
-    GTK field are not this path.
+    settled read is the previous text with an active selection replaced, or
+    the typed text inserted at a collapsed caret. ``False`` means the read
+    settled on something else. That is a mismatch, not a success. NBSP is a
+    space and one trailing newline is the ``<br>``. An input, a textarea,
+    and a GTK field are not this path. ``last_expected`` is the replacement
+    string when a selection was replaced, else None.
     """
+    chromium_contenteditable_type.last_expected = None
     if not _chromium_contenteditable(acc) or not _x11_keys_available():
         return None
-    grab_focus(acc)
     before = _readable_text(acc)
+    selection = _selection_span(acc, before)
+    grab_focus(acc)
     _type_string(text)
-    after = _poll_typed_text(lambda: _readable_text(acc), before, text, chrome=True)
-    return bool(_typed_visible(before, after, text, chrome=True))
+    after = _poll_typed_text(
+        lambda: _readable_text(acc), before, text, chrome=True, selection=selection,
+    )
+    landed = bool(_typed_visible(before, after, text, chrome=True, selection=selection))
+    if landed:
+        chromium_contenteditable_type.last_expected = _matched_replacement(
+            before, after, text, selection, chrome=True,
+        )
+    return landed
+
+
+chromium_contenteditable_type.last_expected = None
 
 
 def focus_and_type_into(acc, text: str) -> bool:
@@ -5405,6 +5740,30 @@ def selected_sheet_address(app: str) -> str | None:
     if _SHEET_ADDRESS.match(name):
         return name
     return None
+
+
+def focused_type_selection(app: str) -> tuple:
+    """``(readable text, selection span)`` for the focused node.
+
+    The span is in that readable text. A contenteditable word selection is
+    the word, not the paragraph object that contains it. A collapsed caret
+    is ``(text, None)``.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return (None, None)
+    if truncated or acc is None:
+        return (None, None)
+    try:
+        text = _readable_text(acc)
+    except Exception:
+        text = None
+    try:
+        span = _selection_span(acc, text)
+    except Exception:
+        span = None
+    return (text, span)
 
 
 def focused_key_evidence(app: str) -> tuple:

@@ -511,6 +511,57 @@ def _numbers_close(got: float, wanted: float) -> bool:
     return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
 
 
+def _type_field_text(value: str) -> str:
+    """Field text compared after a type.
+
+    NBSP is a space. One trailing newline is the empty contenteditable
+    ``<br>`` and is not part of the value.
+    """
+    text = value.replace("\u00a0", " ").replace("\r\n", "\n")
+    if text.endswith("\n"):
+        text = text[:-1]
+    return text
+
+
+def replaced_text(before: str, typed: str, start: int, end: int) -> str | None:
+    """``before`` with the selected ``[start, end)`` replaced by ``typed``.
+
+    None when the span is empty, reversed, or outside ``before``. A collapsed
+    caret is not a replacement: the caller keeps the append check.
+    """
+    if (
+        isinstance(start, bool) or isinstance(end, bool)
+        or not isinstance(start, int) or not isinstance(end, int)
+    ):
+        return None
+    if end <= start or start < 0 or end > len(before):
+        return None
+    return before[:start] + typed + before[end:]
+
+
+def _selection_confirmed(
+    before_value: str,
+    readback: str,
+    requested: str,
+    selection: tuple[int, int] | None,
+) -> bool:
+    """True when ``readback`` is ``before_value`` with the selection replaced."""
+    if selection is None or len(selection) != 2:
+        return False
+    start, end = selection
+    read_n = _type_field_text(readback)
+    for base in (before_value, _type_field_text(before_value)):
+        expected = replaced_text(base, requested, start, end)
+        if expected is not None and _type_field_text(expected) == read_n:
+            return True
+        trimmed = requested.rstrip(" ")
+        if trimmed and trimmed != requested:
+            expected = replaced_text(base, trimmed, start, end)
+            if expected is not None and _type_field_text(expected) == read_n:
+                return True
+    return False
+
+
 def judge(
     *,
     changed: bool | None,
@@ -519,13 +570,17 @@ def judge(
     before_value: str | None = None,
     process_died: bool = False,
     readable: bool = True,
+    selection: tuple[int, int] | None = None,
+    expected: str | None = None,
 ) -> tuple[str, str]:
     """``(outcome, evidence)`` from a real observation.
 
     ``process_died`` wins: a click that kills the target is not confirmed.
-    A read-back that equals the request is confirmed. A read-back that moved
-    but does not equal the request is partial. An unchanged readable tree is
-    ``suspected_noop``.
+    A read-back that equals the request is confirmed. A read-back that is
+    the previous text with the active selection replaced by the request is
+    confirmed. A read-back that only grew by appending the request is
+    confirmed. A read-back that moved some other way is partial. An
+    unchanged readable tree is ``suspected_noop``.
     """
     if process_died:
         return "partial", "the target process exited after the action"
@@ -533,6 +588,13 @@ def judge(
         if readback is None or not readable:
             return "unverifiable", "the value could not be read back"
         if values_match(requested, readback):
+            return "confirmed", f"read back {readback!r}"
+        if isinstance(expected, str) and _type_field_text(readback) == _type_field_text(expected):
+            return "confirmed", f"read back {readback!r}"
+        if (
+            isinstance(before_value, str)
+            and _selection_confirmed(before_value, readback, requested, selection)
+        ):
             return "confirmed", f"read back {readback!r}"
         moved = before_value is not None and readback != before_value
         appended = (

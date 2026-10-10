@@ -2461,6 +2461,7 @@ class Runtime:
         previous: str | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
     ) -> tuple[str, str]:
         died = self._process_died(before)
         scope = before.get("scope") if before else None
@@ -2513,6 +2514,42 @@ class Runtime:
                         readback = better
             if readback is None:
                 readable = False
+        # Chrome's contenteditable often publishes the new characters after
+        # type has already returned. One snapshot can still be the pre-type
+        # text, and the outcome is then a false suspected_noop.
+        stale_read = isinstance(before_value, str) and readback == before_value
+        if before_value is None and readback in (None, ""):
+            stale_read = True
+        if (
+            requested
+            and not died
+            and getattr(self.driver, "name", None) == "linux"
+            and stale_read
+        ):
+            for _attempt in range(8):
+                time.sleep(0.05)
+                later = self._reread(app, scope)
+                if later is None:
+                    break
+                if element is not None:
+                    fresh_anchor = self._element_like(element, later)
+                else:
+                    fresh_anchor = self._focused_editable(later)
+                if fresh_anchor is None:
+                    continue
+                fresh = "" if fresh_anchor.value is None else str(fresh_anchor.value)
+                after = later
+                readback = fresh
+                anchor = fresh_anchor
+                if fresh != before_value:
+                    break
+        type_expected = None
+        if getattr(self.driver, "name", None) == "linux":
+            found = getattr(self.driver, "_type_expected", None)
+            if isinstance(found, str):
+                type_expected = found
+            if hasattr(self.driver, "_type_expected"):
+                self.driver._type_expected = None
         self._remember_baseline(after)
         judged, evidence = outcome.judge(
             changed=changed,
@@ -2521,6 +2558,8 @@ class Runtime:
             before_value=before_value,
             process_died=died,
             readable=readable if requested is None else readback is not None or not died,
+            selection=selection,
+            expected=type_expected,
         )
         if focus_note and judged == "confirmed" and evidence == "the accessibility state changed":
             evidence = focus_note
@@ -2550,6 +2589,77 @@ class Runtime:
             return None
         return found if isinstance(found, tuple) else None
 
+    def _active_type_selection(
+        self, app: str | None, previous: str | None,
+    ) -> tuple[int, int] | None:
+        """Selection offsets in ``previous``, read before the keys replace it.
+
+        None when the caret is collapsed, or the focused text is not the
+        snapshot value the offsets were counted in. The driver still records
+        the replacement it verified, and the outcome check uses that string.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not app or not isinstance(previous, str):
+            return None
+        mapped = self._mapped_type_selection(app, previous)
+        if mapped is not None:
+            return mapped
+        found = self._key_focus_probe(app)
+        if not isinstance(found, tuple) or len(found) < 4:
+            return None
+        text, _caret, start, end = found[0], found[1], found[2], found[3]
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
+    def _mapped_type_selection(
+        self, app: str, previous: str,
+    ) -> tuple[int, int] | None:
+        """Selection in the read-back's coordinates, or None.
+
+        Raw AT-SPI offsets on a Chrome contenteditable count one object
+        character per paragraph. The word selected inside that paragraph is
+        the range typing replaces. None leaves the raw caret offsets.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.focused_type_selection(app)
+
+        try:
+            if callable(runner):
+                found = runner(read)
+            else:
+                found = read()
+        except Exception:
+            return None
+        if not isinstance(found, tuple) or len(found) != 2:
+            return None
+        text, span = found
+        if not isinstance(span, tuple) or len(span) != 2:
+            return None
+        start, end = span
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
     def _conclude(
         self,
         text: str,
@@ -2565,12 +2675,13 @@ class Runtime:
         verdict: tuple[str, str] | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
-                key_focus=key_focus, focus_before=focus_before,
+                key_focus=key_focus, focus_before=focus_before, selection=selection,
             )
         else:
             judged, evidence = verdict
@@ -4311,6 +4422,7 @@ class Runtime:
         base = before["snap"] if before else None
         focused_field = self._focused_editable(base)
         previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
+        selection = self._active_type_selection(bundle, previous)
         count = self._run_gated(action, bundle, execute)
         where = f" into {bundle}"
         if focused:
@@ -4318,6 +4430,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{where}{''.join(note)}",
             tool="type", app=bundle, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _linux_key(self, chord: str, identifier: str) -> str:
@@ -4356,6 +4469,12 @@ class Runtime:
         base = before["snap"] if before else self._current
         focused = self._focused_editable(base)
         previous = None if focused is None or focused.value is None else str(focused.value)
+        # Do not probe the frontmost app here. That probe is the focus
+        # recheck inside the gate, and an extra call consumes it.
+        current_app = getattr(getattr(self, "_current", None), "app", None)
+        selection = self._active_type_selection(
+            target[0] if target is not None else current_app, previous,
+        )
         if target is not None:
             bundle, pid = target
 
@@ -4372,6 +4491,7 @@ class Runtime:
                 f"typed {count} characters into {bundle} "
                 "(addressed to its process; nothing was activated)",
                 tool="type", app=bundle, before=before, requested=text, previous=previous,
+                selection=selection,
             )
         front = self._frontmost()
 
@@ -4387,6 +4507,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{''.join(note)}",
             tool="type", app=front, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _validate_chord(self, chord: str) -> None:
