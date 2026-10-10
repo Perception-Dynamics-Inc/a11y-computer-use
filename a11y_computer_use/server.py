@@ -484,6 +484,104 @@ def _linux_button_uses_pointer(driver, element: Element) -> bool:
         return False
     return True
 
+
+_TEXT_CLICK_ROLES = frozenset({"AXStaticText", "AXHeading"})
+# A window or browser chrome node is not the control a label stands for.
+_TEXT_CLICK_SKIP_ROLES = frozenset({
+    "AXWindow", "AXDialog", "AXSheet", "AXDrawer", "AXScrollArea", "AXWebArea",
+    "AXToolbar", "AXMenuBar", "AXTabGroup", "AXScrollBar",
+})
+
+
+def _bounds_meet(a: "Bounds | None", b: "Bounds | None") -> bool:
+    """True when both boxes overlap, or either box is missing or empty.
+
+    A missing box is not evidence the nodes are apart. Chrome's line box and
+    the button inside it do overlap.
+    """
+    if a is None or b is None:
+        return True
+    if a.width <= 0 or a.height <= 0 or b.width <= 0 or b.height <= 0:
+        return True
+    return (
+        a.x < b.x + b.width
+        and b.x < a.x + a.width
+        and a.y < b.y + b.height
+        and b.y < a.y + a.height
+    )
+
+
+def _positive_box(element: Element) -> bool:
+    bounds = element.bounds
+    if bounds is None or bounds.width <= 1 or bounds.height <= 1:
+        return False
+    if bounds.x <= -2_000_000_000 or bounds.y <= -2_000_000_000:
+        return False
+    return True
+
+
+def text_click_control(elements, target: Element) -> Element | None:
+    """The control a non-clickable text ref stands for, or None.
+
+    Chrome lists ``<button>Billing section</button>`` as a line-wide static
+    text with the button as its child. The text's center is not on the
+    button, so a pointer click there reports success and does not activate
+    it. ``<button><span>Label</span></button>`` and a link put the static
+    text inside the control. Either shape has to activate that control.
+
+    A paragraph with no control returns None. More than one control under
+    the text is ambiguous: the click is not sent.
+    """
+    if target.clickable or target.editable or target.role not in _TEXT_CLICK_ROLES:
+        return None
+    by_ref = {el.ref: el for el in elements}
+    children: dict[str, list[Element]] = {}
+    for el in elements:
+        if el.parent:
+            children.setdefault(el.parent, []).append(el)
+    found: list[Element] = []
+    stack = list(children.get(target.ref, []))
+    while stack:
+        node = stack.pop()
+        if node.role in _TEXT_CLICK_SKIP_ROLES:
+            continue
+        if node.clickable and node.enabled and _bounds_meet(target.bounds, node.bounds):
+            found.append(node)
+            continue
+        stack.extend(children.get(node.ref, []))
+    if len(found) > 1:
+        shown = ", ".join(f"{el.ref} ({el.role} {el.title!r})" for el in found[:6])
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{target.ref} ({target.role}) covers more than one control ({shown}); "
+            "click one of those refs",
+            detail={
+                "ref": target.ref,
+                "role": target.role,
+                "reason": "ambiguous_control",
+                "controls": [el.ref for el in found[:8]],
+            },
+        )
+    if len(found) == 1:
+        return found[0]
+    parent_ref = target.parent
+    seen: set[str] = set()
+    while parent_ref and parent_ref not in seen:
+        seen.add(parent_ref)
+        parent = by_ref.get(parent_ref)
+        if parent is None:
+            break
+        if (
+            parent.role not in _TEXT_CLICK_SKIP_ROLES
+            and parent.clickable
+            and parent.enabled
+            and _bounds_meet(target.bounds, parent.bounds)
+        ):
+            return parent
+        parent_ref = parent.parent
+    return None
+
+
 #: Require explicit human confirmation before a plausibly irreversible action
 #: (see `safety.confirmation_prompt`). When on and the host offers no
 #: confirmation channel, such actions fail-safe (blocked) rather than firing
@@ -3716,51 +3814,97 @@ class Runtime:
         before = self._capture()
 
         menu_note: list[str] = []
+        # A non-clickable text ref that stands for a button or link. The
+        # click lands on that control. Empty when the ref is the control.
+        activated: list[Element] = []
 
         def execute() -> None:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
+            act: Target = target
+            if isinstance(target, Element) and self._current is not None:
+                proxy = text_click_control(self._current.elements, target)
+                if proxy is not None:
+                    self._refuse_disabled(proxy, verb="click")
+                    self._refuse_secure(proxy)
+                    act = proxy
+                    activated.append(proxy)
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
-                self._recheck_target(app, target)
+                self._recheck_target(app, act)
             menu_note.append(self._dismiss_open_menu(app))
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
             # count, or modifier semantics goes through synthesized mouse events.
-            if (
+            plain = (
                 PREFER_AX_ACTIONS
-                and isinstance(target, Element)
+                and isinstance(act, Element)
                 and parsed_button is MouseButton.LEFT
                 and count == 1
                 and not mods
-                and not _linux_button_uses_pointer(self.driver, target)
-                and self.driver.press_element(target)
-            ):
+                and not _linux_button_uses_pointer(self.driver, act)
+            )
+            if plain and self.driver.press_element(act):
                 return  # activated via AX — the user's cursor never moved
+            if activated and isinstance(act, Element) and not _positive_box(act):
+                control = activated[0]
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has no click action, and "
+                    f"{control.ref} ({control.role} {control.title!r}) was not activated",
+                    detail={
+                        "ref": getattr(target, "ref", None),
+                        "role": getattr(target, "role", None),
+                        "reason": "not_activated",
+                        "control": control.ref,
+                    },
+                )
             # Synthesized mouse events land on whatever window is under the
             # point, so the hit-test runs right before them; an AXPress above
             # addressed the element itself and needs no such guard (#11).
-            self._recheck_target(app, target)
+            # A text ref uses the control's box, not the line-wide text box.
+            self._recheck_target(app, act)
             self._guard_user(app)
-            self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
+            self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
         self._run_gated(action, app, execute, confirm=confirm)
-        msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
+        control_note = ""
+        if activated:
+            control = activated[0]
+            control_note = f" (activated {control.ref} {control.role} {control.title!r})"
+        msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
+        judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
         verdict = None
-        if isinstance(target, Element):
+        if isinstance(target, Element) and not activated:
             verdict = self._paragraph_click_verdict(target)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
-        if verdict is None and address:
+        if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
-        return self._conclude(
+        result = self._conclude(
             text, tool="click", app=app, before=before,
-            element=target if isinstance(target, Element) else None,
+            element=judged_element,
             had_ref=ref is not None,
             verdict=verdict,
         )
+        # The text ref has no action of its own. "clicked" is only true when
+        # the control it stands for actually changed.
+        if activated and result.outcome == "suspected_noop":
+            control = activated[0]
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{getattr(target, 'ref', ref)} ({getattr(target, 'role', 'text')}) "
+                f"click did not activate {control.ref} ({control.role} {control.title!r})",
+                detail={
+                    "ref": getattr(target, "ref", ref),
+                    "role": getattr(target, "role", None),
+                    "reason": "not_activated",
+                    "control": control.ref,
+                },
+            )
+        return result
 
     def _sheet_address_for_click(self, target: Target, x: int | None, y: int | None) -> str | None:
         """The Calc address this click is aimed at, or None.

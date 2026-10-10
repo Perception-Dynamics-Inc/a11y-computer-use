@@ -998,6 +998,127 @@ def test_agent_escalates_a_noop_and_counts_it_as_stuck(tmp_path) -> None:
     assert any(event.type == "stuck" and event.data["terminal"] is True for event in events)
 
 
+def _billing_tree(*, expanded: bool = False) -> list[Element]:
+    """Chrome's line box: the static text contains the button, and is wider than it."""
+    line = Bounds(0, 59, 151, 965, 22)
+    button = Bounds(0, 59, 153, 95, 20)
+    return [
+        _element("w", "AXWindow", "cuabilling", path=("AXWindow",), bounds=Bounds(0, 0, 0, 1000, 800)),
+        _element(
+            "page", "AXGroup", "cuabilling", parent="w",
+            path=("AXWindow", "AXGroup"), bounds=Bounds(0, 52, 133, 900, 700), focused=True,
+        ),
+        _element(
+            "line", "AXStaticText", "Billing section", parent="page",
+            path=("AXWindow", "AXGroup", "AXStaticText"), value="Billing section", bounds=line,
+        ),
+        _element(
+            "btn", "AXButton", "Billing section", parent="line",
+            path=("AXWindow", "AXGroup", "AXStaticText", "AXButton"),
+            clickable=True, expanded=expanded, bounds=button,
+        ),
+        _element(
+            "link", "AXLink", "Link text", parent="page",
+            path=("AXWindow", "AXGroup", "AXLink"), clickable=True,
+            bounds=Bounds(0, 139, 190, 58, 18),
+        ),
+        _element(
+            "linktext", "AXStaticText", "Link text", parent="link",
+            path=("AXWindow", "AXGroup", "AXLink", "AXStaticText"), value="Link text",
+            bounds=Bounds(0, 139, 190, 58, 18),
+        ),
+    ]
+
+
+def test_statictext_click_activates_the_button_inside_the_line(tmp_path) -> None:
+    """A line-wide static text is not the button. The click activates the button.
+
+    The text center sits past the button. Reporting ``clicked`` for that point
+    left the control collapsed. The button's expanded state has to change, and
+    a press that does not change it is not ``clicked``.
+    """
+    driver = TreeDriver()
+    driver.elements = _billing_tree()
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        if element.ref == "btn":
+            driver._replace("btn", expanded=True)
+            return True
+        if element.ref == "link":
+            driver._replace("link", title="Link text opened")
+            return True
+        return False
+
+    driver.press_element = press  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("line")
+    assert result.startswith("clicked line")
+    assert "activated btn" in result
+    assert result.outcome == "confirmed"
+    assert [call[1] for call in driver.calls if call[0] == "press"] == ["btn"]
+    assert all(call[0] != "click" for call in driver.calls)
+
+    link = runtime.click("linktext")
+    assert link.startswith("clicked linktext")
+    assert "activated link" in link
+    assert link.outcome == "confirmed"
+
+    driver.elements = _billing_tree()
+    runtime.desktop_snapshot(APP)
+
+    def press_without_effect(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        return element.ref == "btn"
+
+    driver.press_element = press_without_effect  # type: ignore[method-assign]
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.click("line")
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_activated"
+    assert exc.value.detail["control"] == "btn"
+    assert not str(exc.value).startswith("clicked")
+
+
+def test_linux_text_click_points_at_the_button_not_the_line(tmp_path) -> None:
+    """On Linux a button ref is a pointer click. The text ref uses that box."""
+    driver = TreeDriver()
+    driver.name = "linux"
+    driver.elements = _billing_tree()
+
+    def click(target, **kwargs) -> None:
+        del kwargs
+        driver.calls.append(("click", getattr(target, "ref", None)))
+        if getattr(target, "ref", None) == "btn":
+            driver._replace("btn", expanded=True)
+
+    driver.click = click  # type: ignore[method-assign]
+    driver.press_element = lambda element: False  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    result = runtime.click("line")
+    assert result.outcome == "confirmed"
+    assert ("click", "btn") in driver.calls
+    assert ("click", "line") not in driver.calls
+
+
+def test_statictext_over_two_controls_is_not_clicked(tmp_path) -> None:
+    driver = TreeDriver()
+    driver.elements = _billing_tree() + [
+        _element(
+            "other", "AXButton", "Other", parent="line",
+            path=("AXWindow", "AXGroup", "AXStaticText", "AXButton"),
+            clickable=True, bounds=Bounds(0, 200, 153, 40, 20),
+        ),
+    ]
+    runtime = _runtime(tmp_path, driver)
+    with pytest.raises(ComputerUseError) as exc:
+        runtime.click("line")
+    assert exc.value.detail["reason"] == "ambiguous_control"
+    assert "btn" in exc.value.detail["controls"] and "other" in exc.value.detail["controls"]
+    assert driver.calls == []
+    assert not str(exc.value).startswith("clicked")
+
+
 def test_confirmed_outcome_verifies_without_a_digest_change(tmp_path) -> None:
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = FakeRuntime(elements)

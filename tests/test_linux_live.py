@@ -6925,6 +6925,110 @@ def test_linux_chrome_canvas_ref_click_lands_on_the_center(tmp_path) -> None:
         _stop_group(proc)
 
 
+def test_linux_chrome_statictext_click_activates_the_button(tmp_path) -> None:
+    """Live Chrome. A statictext ref for a button label activates that button.
+
+    ``<button>Billing section</button>`` is a line-wide static text with the
+    button as its child. A click on the text used to report ``clicked`` and
+    leave the button collapsed, because the text's center is not on the
+    button. The button expands, and the result is not a success when the
+    control does not change. A static text nested in a link activates the link.
+    """
+    from a11y_computer_use import observe, safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome/Chromium is required for the statictext click test"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "billing.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuabilling</title>"
+        "<h3><button id=b1 aria-expanded=false onclick=\"t()\">Billing section</button></h3>"
+        "<div id=p1 hidden><label>Card holder <input></label></div>"
+        "<p id=log>log:</p>"
+        "<a href='#' onclick=\"event.preventDefault(); log.textContent += ' link'\">Link text</a>"
+        "<script>function t(){const b=b1,e=b.getAttribute('aria-expanded')==='true';"
+        "b.setAttribute('aria-expanded', String(!e)); p1.hidden=e;"
+        "log.textContent += ' ' + (e ? 'collapse' : 'expand')}</script>"
+    )
+    profile = tmp_path / "chrome-billing-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the button")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            rendered = observe.render_text(shot)
+            last = rendered[:500]
+            if "Billing section" in rendered and "Link text" in rendered:
+                snap = shot
+                break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose the button\n{last}"
+        text = next(
+            el for el in snap.elements
+            if el.role == "AXStaticText" and el.title == "Billing section" and not el.clickable
+        )
+        button = next(
+            el for el in snap.elements
+            if el.role == "AXButton" and el.title == "Billing section"
+        )
+        assert button.expanded is False, (button.expanded, observe.render_text(snap))
+        store = safety.PermissionStore(tmp_path / "perm.json")
+        store.set_tier("chrome", safety.Tier.CLICK)
+        front = driver.frontmost_app()[0]
+        if front and front != "chrome":
+            store.set_tier(front, safety.Tier.CLICK)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        runtime._current = snap
+        result = runtime.click(text.ref)
+        assert str(result).startswith("clicked ")
+        assert "activated" in str(result)
+        assert result.outcome == "confirmed", (result, result.outcome, result.evidence)
+        after = driver.snapshot(Scope.WINDOW, "chrome")
+        button = next(
+            el for el in after.elements
+            if el.role == "AXButton" and el.title == "Billing section"
+        )
+        logs = [el.value or "" for el in after.elements if el.value and "log" in (el.value or "")]
+        assert button.expanded is True or any("expand" in value for value in logs), (
+            button.expanded, logs, result,
+        )
+        link_text = next(
+            el for el in after.elements
+            if el.role == "AXStaticText" and el.title == "Link text" and not el.clickable
+        )
+        runtime._current = after
+        linked = runtime.click(link_text.ref)
+        assert linked.outcome == "confirmed", (linked, linked.outcome, linked.evidence)
+        final = driver.snapshot(Scope.WINDOW, "chrome")
+        logs = [el.value or "" for el in final.elements if el.value and "log" in (el.value or "")]
+        assert any("link" in value for value in logs), (logs, linked)
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_ref_from_a_quit_editor_does_not_write_the_relaunched_file(tmp_path) -> None:
     """A GTK editor ref dies with the process that issued it.
 
