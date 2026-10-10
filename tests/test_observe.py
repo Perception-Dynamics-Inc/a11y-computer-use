@@ -488,6 +488,23 @@ def test_different_document_in_the_same_process_is_stale() -> None:
     assert exc.value.detail["candidates"] == []
 
 
+def test_browser_window_title_change_still_resolves() -> None:
+    """A tab title is not a file path. Switching tabs must not be app_restarted."""
+    old = _with_identity(
+        snap_of(save_window()),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:Form Probe - Google Chrome",
+    )
+    live = _with_identity(
+        snap_of(save_window(save_at=(240.0, 120.0))),
+        instance_id="pid:10|start:100|bus::1.2",
+        document_id="title:Other Probe - Google Chrome",
+    )
+    resolved = resolve_ref(old, by_title(old, "Save").ref, live=live)
+    assert resolved.title == "Save"
+    assert resolved.snapshot_id == live.snapshot_id
+
+
 def test_resolve_ref_raises_structured_stale_ref() -> None:
     old = snap_of(save_window())
     save_ref = by_title(old, "Save").ref

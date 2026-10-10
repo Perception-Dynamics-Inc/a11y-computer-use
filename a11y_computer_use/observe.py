@@ -392,16 +392,34 @@ def normalize_document_title(title: str) -> str:
     return text
 
 
-def _bound_to_same_target(anchor: Element, el: Element) -> bool:
-    """Whether ``el`` is the same process instance and document as ``anchor``.
+def _file_document(document_id: str | None) -> str | None:
+    """The file path carried in a document id, or None.
 
-    A side that did not record an id does not fail the check. Both sides
-    recording different ids does. That is how a relaunched editor, or a
-    different file in a new window, stops matching a ref from the old one.
+    GTK editors put the path in the window title (``/tmp/a.txt - Mousepad``).
+    A browser title (``Form Probe - Google Chrome``) has no path. Comparing
+    those titles treats a tab switch, or a title that flickers, as a different
+    document and hides the not-showing result the background tab should get.
     """
-    if anchor.instance_id and el.instance_id and anchor.instance_id != el.instance_id:
+    if not document_id or not document_id.startswith("title:"):
+        return None
+    text = document_id[len("title:"):]
+    if "/" not in text and "\\" not in text:
+        return None
+    return text
+
+
+def _bound_to_same_target(anchor: Element, el: Element) -> bool:
+    """Whether ``el`` is the same process instance and file as ``anchor``.
+
+    A side that did not record an id does not fail the check. A different
+    process instance does. A different file path does. Two browser window
+    titles do not: the title follows the active tab.
+    """
+    if not _same_instance(anchor, el):
         return False
-    if anchor.document_id and el.document_id and anchor.document_id != el.document_id:
+    anchor_file = _file_document(anchor.document_id)
+    live_file = _file_document(el.document_id)
+    if anchor_file and live_file and anchor_file != live_file:
         return False
     return True
 
@@ -416,13 +434,14 @@ def _identity_mismatch(anchor: Element, live: Snapshot) -> str | None:
         seen = {el.instance_id for el in live.elements if el.instance_id}
         if seen and anchor.instance_id not in seen:
             return "app_restarted"
-    if anchor.document_id:
-        docs = {
-            el.document_id
+    anchor_file = _file_document(anchor.document_id)
+    if anchor_file:
+        files = {
+            _file_document(el.document_id)
             for el in live.elements
-            if el.document_id and _same_instance(anchor, el)
+            if _same_instance(anchor, el) and _file_document(el.document_id)
         }
-        if docs and anchor.document_id not in docs:
+        if files and anchor_file not in files:
             return "document_changed"
     return None
 

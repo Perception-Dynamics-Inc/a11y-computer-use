@@ -231,8 +231,9 @@ class Element:
             match this ref.
         document_id: Window or document identity (a document URL, or the
             window title with one leading modified-marker removed). None when
-            the backend did not record one. A different document does not
-            match this ref.
+            the backend did not record one. A different file path in that
+            title does not match this ref. A browser window title follows
+            the active tab and does not, by itself, make the ref stale.
     """
 
     ref: str
