@@ -966,6 +966,130 @@ def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkey
     assert result.step_log[1].verified is True
 
 
+def _saved(goal: str, path, contains: str | None, trace):
+    condition: dict = {"file_exists": str(path)}
+    if contains is not None:
+        condition["contains"] = contains
+    agent = Agent(
+        ScriptedModel([
+            turn(done("saved", [condition])),
+            turn(),
+            turn(),
+        ]),
+        runtime=FakeRuntime(window()),
+        trace_dir=trace,
+    )
+    return agent.run(goal)
+
+
+def _note_odt(path, paragraph: str) -> None:
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+        "<office:body><office:text>"
+        f"<text:p>{paragraph}</text:p>"
+        "</office:text></office:body></office:document-content>"
+    )
+    _deflated_zip(path, {
+        "content.xml": xml,
+        "mimetype": "application/vnd.oasis.opendocument.text",
+    })
+
+
+def test_replace_goal_accepts_the_new_word_and_rejects_the_old_one(tmp_path, monkeypatch):
+    """Hermetic. A finished find-and-replace is the new word present and the old word gone.
+
+    The goal is the Mousepad wording from the report. ``colour`` is not
+    demanded in ``contains``. A real ``.txt`` and a real deflated ``.odt``
+    are written in the test. The sentence lives in ``content.xml`` and is
+    not the raw zip bytes. Not a named task.
+    """
+    from a11y_computer_use.agent.core import file_evidence_error, known_file_text, replaced_file_text
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    goal = 'Open ~/notes/draft.txt in Mousepad, replace every "colour" with "color", and save it.'
+    assert known_file_text(goal) == ["color"]
+    assert replaced_file_text(goal) == ["colour"]
+    assert known_file_text('Find "colour" and replace it with "color", then save notes.txt') == ["color"]
+    assert file_evidence_error(goal, [{"window_title_contains": "draft.txt"}])
+    bare = file_evidence_error(goal, [{"file_exists": "draft.txt"}])
+    assert bare == "file_exists must contain 'color'"
+    assert "colour" not in (bare or "")
+    assert file_evidence_error(goal, [{"file_exists": "draft.txt", "contains": "colour"}]) == bare
+    assert file_evidence_error(goal, [{"file_exists": "draft.txt", "contains": "color"}]) is None
+
+    kept = "harbour-note stays"
+    done_txt = tmp_path / "draft.txt"
+    done_txt.write_text(f"The color of the harbour. {kept}\n", encoding="utf-8")
+    saved = _saved(goal, done_txt, "color", tmp_path / "txt-ok")
+    assert saved.status == "success", saved
+    assert saved.conditions[0]["ok"] is True
+    assert "color" in saved.conditions[0]["detail"]
+
+    leftover = tmp_path / "leftover.txt"
+    leftover.write_text(f"The colour of the harbour is now color. {kept}\n", encoding="utf-8")
+    rejected = _saved(goal, leftover, "color", tmp_path / "txt-old")
+    assert rejected.status == "failed"
+    assert rejected.reason == "no_action"
+    assert rejected.step_log[0].error == "evidence_failed"
+    assert rejected.step_log[0].verified is False
+    assert "still contains 'colour'" in (rejected.step_log[0].result or "")
+    assert "must contain 'colour'" not in (rejected.step_log[0].result or "")
+
+    done_odt = tmp_path / "draft.odt"
+    odt_sentence = f"The color of the harbour. {kept}"
+    _note_odt(done_odt, odt_sentence)
+    assert odt_sentence.encode() not in done_odt.read_bytes()
+    odt_saved = _saved(goal, done_odt, "color", tmp_path / "odt-ok")
+    assert odt_saved.status == "success", odt_saved
+    assert "color" in odt_saved.conditions[0]["detail"]
+
+    old_odt = tmp_path / "old.odt"
+    old_sentence = f"The colour of the harbour is now color. {kept}"
+    _note_odt(old_odt, old_sentence)
+    assert old_sentence.encode() not in old_odt.read_bytes()
+    odt_rejected = _saved(goal, old_odt, "color", tmp_path / "odt-old")
+    assert odt_rejected.step_log[0].error == "evidence_failed"
+    assert "still contains 'colour'" in (odt_rejected.step_log[0].result or "")
+
+
+def test_remove_is_absence_and_a_search_does_not_demand_the_word(tmp_path, monkeypatch):
+    """Hermetic. Remove means the word is gone. Search does not require it either way."""
+    from a11y_computer_use.agent.core import file_evidence_error, known_file_text, replaced_file_text
+
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    remove = 'Delete every "colour" from ~/notes/draft.txt and save it.'
+    assert known_file_text(remove) == []
+    assert replaced_file_text(remove) == ["colour"]
+    assert file_evidence_error(remove, [{"file_exists": "draft.txt"}]) is None
+    gone = tmp_path / "gone.txt"
+    gone.write_text("The sky is blue. harbour-note stays\n", encoding="utf-8")
+    assert _saved(remove, gone, None, tmp_path / "rm-ok").status == "success"
+    still = tmp_path / "still.txt"
+    still.write_text("The colour of the harbour.\n", encoding="utf-8")
+    removed = _saved(remove, still, None, tmp_path / "rm-old")
+    assert removed.step_log[0].error == "evidence_failed"
+    assert "still contains 'colour'" in (removed.step_log[0].result or "")
+
+    search = 'Search ~/notes/draft.txt for "colour", then save the file.'
+    assert known_file_text(search) == []
+    assert replaced_file_text(search) == []
+    assert _saved(search, still, None, tmp_path / "search").status == "success"
+
+    catalog = 'Save notes.txt after you replace "cat" with "catalog".'
+    assert known_file_text(catalog) == ["catalog"]
+    assert replaced_file_text(catalog) == ["cat"]
+    word = tmp_path / "catalog.txt"
+    word.write_text("catalog\n", encoding="utf-8")
+    assert _saved(catalog, word, "catalog", tmp_path / "cat-ok").status == "success"
+    both = tmp_path / "both.txt"
+    both.write_text("the cat sat in the catalog\n", encoding="utf-8")
+    mixed = _saved(catalog, both, "catalog", tmp_path / "cat-old")
+    assert mixed.step_log[0].error == "evidence_failed"
+    assert "still contains 'cat'" in (mixed.step_log[0].result or "")
+
+
 def test_file_exists_outside_home_is_refused(tmp_path, monkeypatch):
     monkeypatch.delenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", raising=False)
     # The runner's tmp dir is under the real home on Windows
