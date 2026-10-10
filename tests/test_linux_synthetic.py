@@ -5769,15 +5769,16 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
 
     paragraph.text = "Cell B2"
     calls = {"n": 0}
+    monkeypatch.setattr(_atspi, "_WRITER_CELL_SETTLE_S", 0.15)
 
     def miss(acc, text, force=False):
         assert force is True
         calls["n"] += 1
-        if calls["n"] == 1:
-            acc.text = "NEWB2-1\nCell B2"
-            return False
-        acc.text = text
-        return True
+        if text == "Cell B2":
+            acc.text = text
+            return True
+        acc.text = "NEWB2-1\nCell B2"
+        return False
 
     monkeypatch.setattr(_atspi, "set_text", miss)
     with pytest.raises(ComputerUseError) as exc:
@@ -5797,6 +5798,42 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     _adopt(grid, calc)
     _adopt(calc, calc_text)
     assert _atspi.writer_text_cell(calc) is False
+
+
+def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:
+    """The new paragraph in front of the old line is the committed edit.
+
+    Writer can rebuild the cell child the write was aimed at. The first
+    walk then shows ``NEWB2-1`` and ``Cell B2``. That is not a miss: the
+    new paragraph stays and the old line is cleared.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    fresh = {"node": None}
+
+    def write(acc, text, force=False):
+        assert force is True
+        if text == "":
+            acc.text = ""
+            return True
+        if fresh["node"] is None:
+            created = _Acc("paragraph", name="")
+            created.text = text
+            fresh["node"] = created
+            _adopt(cell, created, paragraph)
+            return False
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", write)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert fresh["node"] is not None and fresh["node"].text == "NEWB2-1"
+    assert paragraph.text == ""
+    assert _atspi.writer_cell_text(cell) == "NEWB2-1"
 
 
 def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
