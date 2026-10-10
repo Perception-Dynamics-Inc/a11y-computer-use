@@ -7020,6 +7020,11 @@ def _in_view_named_rows(container) -> list[tuple]:
     """
     if _role_name(container) not in _LIST_ROLES or not _chromium_app(container):
         return []
+    # libatspi answers the child walk from the cache filled before the
+    # scroll. An upward step then still lists the lower rows, the head
+    # looks unchanged, and the line step is undone in favour of a track
+    # click that jumps over the row being sought.
+    _invalidate_tree_cache(container)
     pos, size = _extents(container)
     edges = _viewport_edges(container)
     if pos is None or size is None or edges is None:
@@ -7120,10 +7125,14 @@ def _named_rows_in_order(container) -> list:
     A list longer than ``_ROW_SEQUENCE_CAP`` is not read from child 0.
     The sequence starts a few rows above the viewport, so a line step
     can still see the previous head, and it still stops at that cap.
+    The child cache is cleared first. A line step that compares the old
+    head with the new one otherwise still sees the rows from before the
+    scroll, and an upward step looks like it never left that head.
     """
     _pos, size = _extents(container)
     if size is None:
         return []
+    _invalidate_tree_cache(container)
     full_h = float(size[1])
     found: list = []
 

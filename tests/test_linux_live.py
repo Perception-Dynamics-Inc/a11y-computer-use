@@ -4718,6 +4718,96 @@ def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> Non
         _stop(proc)
 
 
+def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> None:
+    """Scroll a long overflow list to the bottom, then find a row above it.
+
+    Live Chrome, not a synthetic list. Same family as issue #33: a
+    fixed-height overflow list of ITEM-NNN rows. The downward search uses
+    direction down and has to reach ITEM-120. The search back to ITEM-020
+    uses the default direction, so a still page at the bottom has to turn
+    and scroll up. Three passes in one Chrome process. The gap from the
+    bottom window to ITEM-020 is longer than this budget at one line per
+    step, and short enough for the five-line return. Skips when no Chrome
+    binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the scroll-up find test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        f'<div class=row role=listitem>ITEM-{i:03d} scroll-row</div>' for i in range(1, 121)
+    )
+    page = tmp_path / "bench-up.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>A11YBENCH</title>"
+        "<style>body{margin:8px;font:16px sans-serif}"
+        ".row{height:28px;line-height:28px}"
+        "#box{height:320px;overflow-y:scroll;border:1px solid #888}</style>"
+        "<h1>A11YBENCH-HEADING</h1>"
+        f'<div id=box role=list aria-label="Bench list">{rows}</div>'
+    )
+    profile = tmp_path / "chrome-scroll-up-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the list")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = _titles(shot)
+                if "A11YBENCH-HEADING" in titles and any(
+                    title.startswith("ITEM-001") for title in titles
+                ) and not any(title.startswith("ITEM-020") for title in titles):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not show the top of the overflow list without ITEM-020"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        for _pass in range(3):
+            down = runtime.scroll_to_find(
+                "chrome", text="ITEM-120", direction="down", max_scrolls=30,
+            )
+            assert "ITEM-120" in down, down
+            assert "not found" not in down, down
+            assert "found after 0" not in down, down
+            bottom = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
+            assert any(title.startswith("ITEM-120") for title in bottom), sorted(
+                title for title in bottom if title.startswith("ITEM-")
+            )
+            assert not any(title.startswith("ITEM-020") for title in bottom), sorted(
+                title for title in bottom if title.startswith("ITEM-")
+            )
+            up = runtime.scroll_to_find("chrome", text="ITEM-020", max_scrolls=30)
+            assert "ITEM-020" in up, up
+            assert "not found" not in up, up
+            assert "found after 0" not in up, up
+            shown = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
+            assert any(title.startswith("ITEM-020") for title in shown), sorted(
+                title for title in shown if title.startswith("ITEM-")
+            )
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
 

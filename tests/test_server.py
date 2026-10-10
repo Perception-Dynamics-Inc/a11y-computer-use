@@ -1536,9 +1536,9 @@ def test_scroll_to_find_comes_back_after_a_still_page_past_the_target(monkeypatc
 
     A downward step jumps forty rows and lands on ITEM-193 through ITEM-200
     without showing ITEM-180. The next wheel does not move and raises
-    page_unchanged. The search then steps back one line at a time until the
-    window contains ITEM-180. The default budget of 6 is extended for that
-    return pass.
+    page_unchanged. That still page is repeated once, then the search steps
+    back by the same five lines until the window contains ITEM-180. The
+    default budget of 6 is extended for that return pass.
     """
     from a11y_computer_use import server
 
@@ -1574,18 +1574,64 @@ def test_scroll_to_find_comes_back_after_a_still_page_past_the_target(monkeypatc
 
     out = rt.scroll_to_find("app", text="ITEM-180")
     assert "ITEM-180" in out
-    assert "found after 10 scroll(s)" in out
+    assert "found after 11 scroll(s)" in out
     assert "found after 0" not in out
-    assert scrolls == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
-    assert -5 not in scrolls
+    assert scrolls == [5, 5, 5, 5, 5, 5, 5, -5, -5, -5, -5]
+    assert -1 not in scrolls
+
+
+def test_scroll_to_find_reaches_an_early_row_by_stepping_back_up(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome list.
+
+    The window is already at the bottom, ITEM-172 through ITEM-179.
+    ITEM-020 is above it. Both downward wheels report page_unchanged, so
+    the still page is retried once and then the search turns. Each return
+    step moves five rows. Thirty-one of those steps put ITEM-020 in the
+    window. A one-line return would still be below that row when a budget
+    of 40 ran out.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        screen = 172
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(_D.screen)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy > 0:
+                raise _still_page(dy)
+            _D.screen = max(1, _D.screen + dy)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", max_scrolls=40)
+    assert "ITEM-020" in out
+    assert "found after 33 scroll(s)" in out
+    assert "found after 0" not in out
+    assert scrolls == [5, 5, *([-5] * 31)]
+    assert -1 not in scrolls
 
 
 def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome list.
 
-    The target is not on screen. The first wheel and the one-line return
-    both report page_unchanged. That second still page is the error the
-    caller sees. The search does not keep scrolling.
+    The target is not on screen. Each direction reports page_unchanged
+    twice: the first still page is retried, and the second ends that
+    direction. The error is the second still page of the return. The
+    search does not keep scrolling.
     """
     from a11y_computer_use import server
 
@@ -1614,8 +1660,8 @@ def test_scroll_to_find_stops_when_both_directions_stay_still(monkeypatch) -> No
         rt.scroll_to_find("app", text="ITEM-180")
     assert error.value.code is ErrorCode.UNSUPPORTED
     assert error.value.detail["reason"] == "page_unchanged"
-    assert error.value.detail["dy"] == -1
-    assert scrolls == [5, -1]
+    assert error.value.detail["dy"] == -5
+    assert scrolls == [5, 5, -5, -5]
 
 
 def test_scroll_to_find_resnapshots_after_rows_stale(monkeypatch) -> None:
