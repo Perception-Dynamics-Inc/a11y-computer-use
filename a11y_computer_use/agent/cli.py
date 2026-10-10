@@ -3,8 +3,10 @@
 ``a11y-agent run`` prints one JSON object on stdout when ``--json`` is set.
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
 SIGINT and SIGTERM cancel after the current step (status ``cancelled``,
-exit 3). On Windows, Ctrl+C (SIGINT) and Ctrl+Break (SIGBREAK) do; SIGTERM
-there is TerminateProcess and is not a cooperative cancel. Handlers are
+exit 3). The cancel flag is checked again before the next step is recorded,
+so that step does not start. On Windows, Ctrl+C (SIGINT) and Ctrl+Break
+(SIGBREAK) do; SIGTERM there is TerminateProcess and is not a cooperative
+cancel. Handlers are
 installed before the agent is built and stay until the process exits. A
 second signal calls ``os._exit(3)`` and does not print a traceback. On
 Windows a console control handler does that for the second Ctrl+C or
@@ -24,6 +26,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections.abc import Sequence
 
 from a11y_computer_use.agent.actions import Action, risk_category
@@ -298,16 +301,44 @@ def _disarm_cancel_handlers(state: dict) -> None:
     state["agent"] = None
 
 
+def _wait_for_exit_ack() -> None:
+    """Stay in the process until a test has read the cancel record.
+
+    ``A11Y_AGENT_EXIT_ACK`` is a file path. A real run leaves it unset and
+    returns immediately. The second cancel signal calls ``os._exit`` from
+    the handler and does not reach this wait, so the process is still alive
+    when that signal is delivered. ``A11Y_AGENT_EXIT_ACK_TIMEOUT`` seconds
+    (default 60) bounds the wait so a missed ack cannot hang the process.
+    """
+    path = os.environ.get("A11Y_AGENT_EXIT_ACK")
+    if not path:
+        return
+    try:
+        timeout = float(os.environ.get("A11Y_AGENT_EXIT_ACK_TIMEOUT", "60"))
+    except ValueError:
+        timeout = 60.0
+    if timeout <= 0:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.isfile(path):
+            return
+        time.sleep(0.01)
+
+
 def _hard_exit(code: int) -> None:
     """Exit with ``code`` without running the default signal action.
 
-    ``os._exit`` skips stdio flush. The JSON result is written first.
+    ``os._exit`` skips stdio flush. The JSON result is written first. A test
+    can hold this exit until it has observed ``cancel_signal`` and sent the
+    second signal; that signal's ``os._exit`` does not wait.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
         except Exception:  # noqa: BLE001 - a closed stream must not block exit
             pass
+    _wait_for_exit_ack()
     os._exit(code)
 
 

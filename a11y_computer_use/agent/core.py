@@ -435,6 +435,11 @@ class Agent:
                     self._finish("failed", "", "max_time", started)
                     return
                 raise
+            # The model may have blocked until a cancel was recorded (a test
+            # handshake) or the signal may have landed during the call. Do
+            # not start a step from a turn that arrived after the stop.
+            if self._stop_requested():
+                raise _Cancelled()
             yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
             self._messages.append(assistant_message(turn))
             if not turn.calls:
@@ -475,6 +480,11 @@ class Agent:
     ) -> Iterator[Event]:
         requested = Action.from_call(call)
         index = len(self._steps) + 1
+        # Last look before this step exists. ``_drive`` already checked, but
+        # a Windows console handler runs on another thread and can latch
+        # cancel in the gap. A step that has not been recorded does not start.
+        if self._stop_requested():
+            raise _Cancelled()
         # On disk before the event is yielded, so a parent polling the trace
         # observes this step before the tool call blocks.
         if self.trace is not None:

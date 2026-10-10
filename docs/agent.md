@@ -168,7 +168,9 @@ Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`)
 `2` needs_human, `3` error or cancel.
 
 SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
-step. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
+step. The cancel flag is checked again immediately before the next step is
+recorded, so a signal that arrives after that step was chosen does not start
+it. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
 `SIGTERM` there ends the process without a Python handler, so it is not a
 cooperative cancel. The handlers are installed before the agent is built and
 stay installed until the process exits, including through shutdown. A signal

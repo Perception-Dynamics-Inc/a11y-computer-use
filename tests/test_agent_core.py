@@ -535,6 +535,147 @@ def test_cancel_before_the_click():
     assert "error" in types(events)
 
 
+def test_cancel_latched_while_resolving_the_action_does_not_start_the_step(monkeypatch):
+    """Cancel is read again immediately before ``step_started`` is written.
+
+    The loop check can already have passed. A console handler on Windows runs
+    on another thread and can latch cancel in that gap.
+    """
+    import threading
+
+    from a11y_computer_use.agent import core as core_mod
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    agent = Agent(
+        ScriptedModel([turn(ToolCall("click", {"ref": "e2"}))]),
+        runtime=runtime,
+    )
+    agent._signal_cancel = threading.Event()
+    real = core_mod.Action.from_call.__func__
+
+    def wrapped(cls, call):
+        agent._signal_cancel.set()
+        agent.cancel()
+        return real(cls, call)
+
+    monkeypatch.setattr(core_mod.Action, "from_call", classmethod(wrapped))
+    events = []
+    agent.on_event = events.append
+    result = agent.run("click save")
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+    assert runtime.calls == []
+    assert "step_started" not in types(events)
+
+
+def test_scripted_hold_blocks_until_the_cancel_file_is_written(tmp_path):
+    record = tmp_path / "cancel_signal"
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({
+        "hold_before_turn": 2,
+        "hold_file": str(record),
+        "hold_timeout_s": 2,
+        "turns": [
+            {"text": "one", "calls": []},
+            {"text": "two", "calls": []},
+        ],
+    }), encoding="utf-8")
+    model = ScriptedModel(path=str(script))
+    first = model.complete([], [])
+    assert first.text == "one"
+    box: dict = {}
+
+    def _second() -> None:
+        box["turn"] = model.complete([], [])
+
+    import threading
+    worker = threading.Thread(target=_second)
+    worker.start()
+    time.sleep(0.05)
+    assert worker.is_alive()
+    record.write_text("1\n", encoding="utf-8")
+    worker.join(2)
+    assert not worker.is_alive()
+    assert box["turn"].text == "two"
+
+
+def test_scripted_hold_times_out_when_cancel_is_not_recorded(tmp_path):
+    from a11y_computer_use.agent.models.base import ModelError
+
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({
+        "hold_before_turn": 1,
+        "hold_file": str(tmp_path / "missing"),
+        "hold_timeout_s": 0.05,
+        "turns": [{"text": "", "calls": []}],
+    }), encoding="utf-8")
+    model = ScriptedModel(path=str(script))
+    try:
+        model.complete([], [])
+    except ModelError as exc:
+        assert "recorded a cancel" in str(exc)
+    else:
+        raise AssertionError("hold returned a turn with no cancel record")
+
+
+def test_held_turn_after_cancel_does_not_start(tmp_path):
+    """The model may return the next turn only after cancel is recorded."""
+    import threading
+
+    record = tmp_path / "cancel_signal"
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({
+        "hold_before_turn": 2,
+        "hold_file": str(record),
+        "hold_timeout_s": 5,
+        "turns": [
+            {"text": "", "calls": [{"name": "click", "args": {"ref": "e2"}}]},
+            {"text": "", "calls": [{"name": "click", "args": {"ref": "e2"}}]},
+        ],
+    }), encoding="utf-8")
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    def on_call(name, params, runtime):
+        if name == "click":
+            replace_ref(runtime, "e2", focused=True)
+
+    runtime = FakeRuntime(elements)
+    runtime.on_call = on_call
+    events: list = []
+    agent = Agent(f"scripted:{script}", runtime=runtime, on_event=events.append)
+    agent._signal_cancel = threading.Event()
+    box: dict = {}
+
+    def _run() -> None:
+        box["result"] = agent.run("click save")
+
+    worker = threading.Thread(target=_run)
+    worker.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        finished = [event for event in list(events) if event.type == "step_finished"]
+        if finished and worker.is_alive():
+            break
+        time.sleep(0.01)
+    else:
+        worker.join(0.2)
+        raise AssertionError(f"first step did not finish: {types(events)}")
+    time.sleep(0.05)
+    assert [event.type for event in list(events)].count("step_started") == 1
+    assert worker.is_alive()
+    agent._signal_cancel.set()
+    agent.cancel()
+    record.write_text("1\n", encoding="utf-8")
+    worker.join(5)
+    assert not worker.is_alive()
+    result = box["result"]
+    assert result.status == "cancelled"
+    assert result.reason == "cancelled"
+    assert [event.type for event in events].count("step_started") == 1
+    assert len(runtime.calls) == 1
+
+
 def test_approve_deny_then_done(tmp_path):
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     seen: list[str] = []
