@@ -549,6 +549,162 @@ def libreoffice_pointer_shift(x: int, y: int) -> tuple[float, float]:
         return (0.0, 0.0)
 
 
+# LibreOffice 25.2 keeps content SCREEN about one title bar above WINDOW
+# until the first pointer event. The gap is that bar (about 21–29px), so
+# anything smaller is the ordinary LO 24 reading, where the two already
+# agree and a motion would drop the published box into the hit-test.
+_LO_PRE_MOTION_GAP = 12
+_lo_settle_attempts: dict[int, int] = {}
+
+
+def libreoffice_pre_motion(screen_y: float, window_y: float) -> bool:
+    """True when a content SCREEN top is about a title bar above WINDOW.
+
+    That is the pre-motion reading on LibreOffice 25.2. LibreOffice 24
+    reports the two equal before the first pointer event, and moves SCREEN
+    down afterwards. Neither of those is this gap.
+    """
+    return float(window_y) - float(screen_y) >= _LO_PRE_MOTION_GAP
+
+
+def libreoffice_status_point(x: int, y: int, width: int, height: int) -> tuple[int, int] | None:
+    """A point in the status bar of a client rectangle, or None when it is tiny.
+
+    The bottom centre is status text. It is not a cell, a menu, or a toolbar
+    button, so the motion does not select or press anything.
+    """
+    if width < 40 or height < 40:
+        return None
+    return (int(x) + int(width) // 2, int(y) + int(height) - 8)
+
+
+def _client_box_for_frame(frame) -> tuple[int, int, int, int] | None:
+    """``(x, y, width, height)`` of the X client area under ``frame``.
+
+    The origin is the managed window that sits on the frame's outer SCREEN
+    rectangle. None when that window is not listed.
+    """
+    screen = _raw_rect(frame, "SCREEN")
+    if screen is None or screen[2] <= 0 or screen[3] <= 0:
+        return None
+    from a11y_computer_use.drivers import _linux_system
+
+    title = str(_call_first(frame, ("get_name",), default="") or "")
+    origin = _linux_system.client_origin_for_outer_frame(
+        int(screen[0]), int(screen[1]), int(screen[2]), int(screen[3]), title=title,
+    )
+    if origin is None:
+        return None
+    try:
+        listed = _linux_system.windows()
+    except Exception:
+        return None
+    for row in listed:
+        bounds = row.get("bounds") if isinstance(row, dict) else None
+        if not isinstance(bounds, dict):
+            continue
+        if abs(int(bounds.get("x", 0)) - origin[0]) > 4:
+            continue
+        if abs(int(bounds.get("y", 0)) - origin[1]) > 4:
+            continue
+        width = int(bounds.get("width") or 0)
+        height = int(bounds.get("height") or 0)
+        if width > 0 and height > 0:
+            return (origin[0], origin[1], width, height)
+    return None
+
+
+def _pre_motion_nodes(root) -> list:
+    """Content nodes whose SCREEN/WINDOW pair can show the pre-motion gap.
+
+    The frame itself is the outer window and is not content. A spreadsheet
+    contributes one cell; its other cells are not walked.
+    """
+    found: list = []
+    stack: list[tuple] = [(root, 0)]
+    while stack and len(found) < 24:
+        node, depth = stack.pop()
+        if node is None or depth > 5:
+            continue
+        role = _role_name(node)
+        if role not in {"frame", "application"}:
+            found.append(node)
+        if role in {"menu", "menu bar", "popup menu", "tool bar"} or role == "table":
+            if _spreadsheet_table(node):
+                cell = _table_cell_at(node, 0, 0)
+                if cell is not None:
+                    found.append(cell)
+            continue
+        if depth >= 5:
+            continue
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 6) - 1, -1, -1):
+            stack.append((_child_at(node, index), depth + 1))
+    return found
+
+
+def _frame_is_pre_motion(frame) -> bool:
+    for node in _pre_motion_nodes(frame):
+        screen = _raw_rect(node, "SCREEN")
+        window = _raw_rect(node, "WINDOW")
+        if screen is None or window is None:
+            continue
+        if screen[2] <= 0 or screen[3] <= 0 or window[2] <= 0 or window[3] <= 0:
+            continue
+        if libreoffice_pre_motion(screen[1], window[1]):
+            return True
+    return False
+
+
+def settle_libreoffice_geometry(root) -> None:
+    """Move the pointer once when this window's content is still pre-motion.
+
+    LibreOffice 25.2 then republishes SCREEN on the pixels. The snapshot
+    that follows reads those extents. The placement cache and the
+    LibreOffice 24 pointer inset are unchanged: a window whose SCREEN
+    already matches WINDOW is not moved, so the first click there still
+    uses the title-bar shift. The motion is two points in the status bar.
+    A process is tried at most twice. Failures leave the bounds as read.
+    """
+    try:
+        frame = root if _role_name(root) == "frame" else _frame_ancestor(root)
+        if frame is None:
+            count = _child_count(root)
+            if count < 0:
+                count = 0
+            for index in range(min(int(count), 4)):
+                child = _child_at(root, index)
+                if child is not None and _role_name(child) == "frame":
+                    frame = child
+                    break
+        if frame is None or not _frame_is_pre_motion(frame):
+            return
+        pid = pid_of(frame) or pid_of(root) or 0
+        if _lo_settle_attempts.get(pid, 0) >= 2:
+            return
+        box = _client_box_for_frame(frame)
+        if box is None:
+            return
+        point = libreoffice_status_point(*box)
+        if point is None:
+            return
+        from a11y_computer_use.drivers import _linux_input
+
+        x, y = point
+        _linux_input.hover(x, y)
+        _linux_input.hover(min(x + 3, box[0] + box[2] - 4), y)
+        _lo_settle_attempts[pid] = _lo_settle_attempts.get(pid, 0) + 1
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            if not _frame_is_pre_motion(frame):
+                return
+            time.sleep(0.05)
+    except Exception:
+        return
+
+
 def note_libreoffice_pointer(x: int, y: int) -> None:
     """Remember that a pointer event landed in the LibreOffice frame at ``(x, y)``."""
     try:
@@ -4757,6 +4913,91 @@ def poll_sheet_type(
         if cell:
             latest = cell
     return latest if latest is not None else found
+
+
+def sheet_address(title: str | None) -> str | None:
+    """A Calc address such as ``B4``, or None when ``title`` is not one."""
+    text = (title or "").strip()
+    if _SHEET_ADDRESS.match(text):
+        return text
+    return None
+
+
+def _focused_sheet_address(app: str) -> str | None:
+    """Address of the focused or selected visible Calc cell, or None.
+
+    LibreOffice 24 leaves ``Selection`` empty while the active cell is the
+    focused table cell. That address is the one the Name Box shows.
+    """
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    table = _find_spreadsheet(root, [80])
+    if table is None:
+        return None
+    focused = None
+    selected = None
+    for cell in _sheet_window_cells(table):
+        name = sheet_address(_node_name(cell))
+        if name is None:
+            continue
+        _enabled, is_focused, _checked, is_selected, *_rest = _state_flags(cell)
+        if is_focused and focused is None:
+            focused = name
+        if is_selected and selected is None:
+            selected = name
+    return focused or selected
+
+
+def sheet_click_verdict(app: str, address: str) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for a click aimed at a Calc cell, or None.
+
+    Confirmed only when the active cell's address is ``address``. The
+    address is the selection, or the focused visible cell when the
+    selection interface is empty. That is the Name Box. A click that
+    leaves a different cell active is partial, not confirmed. A window
+    that is not a Calc sheet is None, so other clicks keep their own check.
+    """
+    wanted = sheet_address(address)
+    if wanted is None or not libreoffice_app(app):
+        return None
+    try:
+        sheet = spreadsheet_open(app)
+    except Exception:
+        return None
+    if not sheet:
+        return None
+    latest: str | None = None
+    for attempt in range(6):
+        try:
+            selected = selected_sheet_address(app)
+        except Exception:
+            selected = None
+        if selected == wanted:
+            return "confirmed", f"the selected cell is {wanted}"
+        if sheet_address(selected):
+            # A published address that is not the target is the answer.
+            # A focused cell must not confirm over it.
+            latest = selected
+        elif attempt in (1, 4):
+            try:
+                focused = _focused_sheet_address(app)
+            except Exception:
+                focused = None
+            if focused == wanted:
+                return "confirmed", f"the selected cell is {wanted}"
+            if sheet_address(focused):
+                latest = focused
+        if attempt + 1 < 6:
+            time.sleep(0.05)
+    if latest and latest != wanted:
+        return "partial", f"the selected cell is {latest}, not {wanted}"
+    return "partial", f"the selected cell is not {wanted}"
 
 
 def selected_sheet_address(app: str) -> str | None:

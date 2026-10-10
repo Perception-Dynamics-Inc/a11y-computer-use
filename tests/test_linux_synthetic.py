@@ -333,6 +333,161 @@ def test_libreoffice_paragraph_bounds_follow_the_frame_insets(monkeypatch) -> No
     assert untouched.position == (194.0, 286.0)
 
 
+def test_libreoffice_pre_motion_is_screen_a_title_bar_above_window() -> None:
+    """The 25.2 gap is SCREEN above WINDOW. Equal, and SCREEN below, are not."""
+    assert _atspi.libreoffice_pre_motion(260, 287) is True
+    assert _atspi.libreoffice_pre_motion(208, 208) is False
+    assert _atspi.libreoffice_pre_motion(235, 208) is False
+    assert _atspi.libreoffice_status_point(0, 21, 1280, 779) == (640, 792)
+    assert _atspi.libreoffice_status_point(0, 0, 20, 779) is None
+
+
+def test_settle_libreoffice_geometry_moves_only_when_screen_is_high(monkeypatch) -> None:
+    """A pre-motion window gets two status-bar motions. A matched window does not.
+
+    Synthetic nodes, not a live LibreOffice. The placement cache is not
+    involved: this only reads raw extents and moves the pointer.
+    """
+    _atspi._lo_settle_attempts.clear()
+    moved: list[tuple[int, int]] = []
+    gap = {"on": True}
+
+    class _Node:
+        def __init__(self, role, name, children=()):
+            self.role = role
+            self.name = name
+            self.children = list(children)
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_process_id(self):
+            return 4242
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[int(index)]
+
+        def get_component_iface(self):
+            return self
+
+        def get_extents(self, coord):
+            if self.role == "frame":
+                raw = (0, 0, 1280, 800)
+            elif gap["on"]:
+                raw = (0, 0, 1280, 752) if coord == 0 else (0, 27, 1280, 752)
+            else:
+                raw = (0, 27, 1280, 752)
+            return _NS(x=raw[0], y=raw[1], width=raw[2], height=raw[3])
+
+    pane = _Node("root pane", "client")
+    frame = _Node("frame", "Untitled 1 — LibreOffice Calc", [pane])
+
+    def hover(x, y):
+        moved.append((int(x), int(y)))
+        gap["on"] = False
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
+    monkeypatch.setattr(_atspi, "_client_box_for_frame", lambda node: (0, 21, 1280, 779))
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.hover", hover)
+    try:
+        _atspi.settle_libreoffice_geometry(frame)
+        assert moved == [(640, 792), (643, 792)]
+        _atspi.settle_libreoffice_geometry(frame)
+        assert moved == [(640, 792), (643, 792)]
+    finally:
+        _atspi._lo_settle_attempts.clear()
+
+
+def test_sheet_click_verdict_requires_the_selected_address(monkeypatch) -> None:
+    """A Calc click is confirmed only when the selected cell is the target."""
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    chosen = {"address": "B2"}
+    focused = {"address": "B4"}
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: app == "soffice")
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: chosen["address"])
+    monkeypatch.setattr(_atspi, "_focused_sheet_address", lambda app: focused["address"])
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "partial", "the selected cell is B2, not B4",
+    )
+    chosen["address"] = "B4"
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "confirmed", "the selected cell is B4",
+    )
+    # LibreOffice 24 leaves Selection empty. The focused visible cell is
+    # the Name Box, and it can confirm. It cannot override a different
+    # published address: that case already returned partial above.
+    chosen["address"] = None
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "confirmed", "the selected cell is B4",
+    )
+    focused["address"] = "B2"
+    assert _atspi.sheet_click_verdict("soffice", "B4") == (
+        "partial", "the selected cell is B2, not B4",
+    )
+    assert _atspi.sheet_click_verdict("gedit", "B4") is None
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: False)
+    assert _atspi.sheet_click_verdict("soffice", "B4") is None
+
+
+def test_coordinate_click_on_a_calc_cell_uses_the_selected_cell(monkeypatch) -> None:
+    """A point click reports partial when the selected cell is not the target.
+
+    Synthetic snapshot, not a live Calc. The driver click is the pointer.
+    The outcome comes from the selected address, not from a tree change.
+    """
+    from a11y_computer_use import server
+
+    cell = Element(
+        "e1", "AXCell", "B4", None, Bounds(0, 100, 200, 82, 17), "s",
+    )
+    snap = Snapshot("s", Scope.WINDOW, "soffice", 0, 0.0, (), (cell,))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._current = snap
+    rt._view = "compact"
+    clicked_at: list[tuple] = []
+
+    class _Driver:
+        name = "linux"
+
+        def main_display_id(self):
+            return 0
+
+        def click(self, target, **kwargs):
+            clicked_at.append((target, kwargs.get("count")))
+
+        def _run(self, fn):
+            return fn()
+
+    rt.driver = _Driver()
+    rt._reject_coordinate = lambda *args, **kwargs: None
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._capture = lambda app=None: {
+        "snap": snap, "pid": 0, "pid_alive": False, "scope": Scope.WINDOW,
+        "app": "soffice", "bounds": "x",
+    }
+    rt._frontmost = lambda: "soffice"
+    rt._refuse_disabled = lambda *args, **kwargs: None
+    rt._refuse_secure = lambda *args, **kwargs: None
+    rt._dismiss_open_menu = lambda *args, **kwargs: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._resolves_apps = lambda: False
+    monkeypatch.setattr(
+        _atspi, "sheet_click_verdict",
+        lambda app, address: ("partial", f"the selected cell is B2, not {address}"),
+    )
+    result = rt.click(x=141, y=208)
+    assert clicked_at, "the pointer click was not sent"
+    assert result.outcome == "partial"
+    assert result.evidence == "the selected cell is B2, not B4"
+
+
 def test_libreoffice_pointer_shift_is_the_title_bar_only_on_24() -> None:
     """The published box stays on the pixels. The pointer moves on 24.2 only.
 

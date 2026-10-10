@@ -3736,6 +3736,7 @@ class Runtime:
             self._guard_user(app)
             self.driver.click(target, button=parsed_button, count=count, modifiers=mods)
 
+        address = self._sheet_address_for_click(target, x, y)
         self._run_gated(action, app, execute, confirm=confirm)
         msg = f"clicked {self._label(ref, target)}{''.join(menu_note)}"
         effect = self._effect_after(pre)
@@ -3745,12 +3746,62 @@ class Runtime:
             verdict = self._paragraph_click_verdict(target)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
+        if verdict is None and address:
+            verdict = self._sheet_click_verdict(app, address)
         return self._conclude(
             text, tool="click", app=app, before=before,
             element=target if isinstance(target, Element) else None,
             had_ref=ref is not None,
             verdict=verdict,
         )
+
+    def _sheet_address_for_click(self, target: Target, x: int | None, y: int | None) -> str | None:
+        """The Calc address this click is aimed at, or None.
+
+        A cell ref uses its title. A coordinate click uses the cell whose
+        published box contains the point. The address is taken before the
+        pointer moves.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if isinstance(target, Element):
+            if target.role != "AXCell":
+                return None
+            return _atspi.sheet_address(target.title)
+        snap = getattr(self, "_current", None)
+        if snap is None or x is None or y is None:
+            return None
+        found: list[Element] = []
+        for el in snap.elements:
+            if el.role != "AXCell" or el.bounds is None:
+                continue
+            if _atspi.sheet_address(el.title) is None:
+                continue
+            box = el.bounds
+            if box.x <= x < box.x + box.width and box.y <= y < box.y + box.height:
+                found.append(el)
+        if not found:
+            return None
+        found.sort(key=lambda el: el.bounds.width * el.bounds.height)
+        return _atspi.sheet_address(found[0].title)
+
+    def _sheet_click_verdict(self, app: str, address: str) -> tuple[str, str] | None:
+        """Selected-cell check for a Calc click. None off Linux and off a sheet."""
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.sheet_click_verdict(app, address)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
 
     def _paragraph_click_verdict(self, element: Element) -> tuple[str, str] | None:
         """Caret check for a LibreOffice paragraph click. None for every other target.
@@ -6381,7 +6432,9 @@ def build_server(
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
         reported as success. A click on a LibreOffice text paragraph is
-        confirmed only when the caret is in that paragraph. A click on a
+        confirmed only when the caret is in that paragraph. A click aimed at
+        a Calc cell is confirmed only when the selected cell address, the
+        Name Box, is that cell. A different cell is partial. A click on a
         canvas or an unnamed image is unverifiable: accessibility cannot
         see those pixels, so a tree change is not confirmation. The evidence
         says to verify with crop or a screenshot."""

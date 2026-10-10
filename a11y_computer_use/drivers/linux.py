@@ -777,6 +777,13 @@ class LinuxDriver:
             accessor.libreoffice = (
                 _atspi.libreoffice_app(resolved) or _atspi.libreoffice_app(app or "")
             )
+            # LibreOffice 25.2 reports content a title bar high until the
+            # first pointer event. A status-bar motion, then this walk,
+            # republishes those boxes. LibreOffice 24 already matches and
+            # is not moved, so its pointer inset and the placement cache
+            # stay as they were.
+            if accessor.libreoffice:
+                _atspi.settle_libreoffice_geometry(root)
             # Chromium lists: the rows are read from the list node this walk
             # holds. A saved head on another wrapper is not the snapshot.
             accessor.refresh_visible(root)
