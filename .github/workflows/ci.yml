@@ -279,11 +279,17 @@ jobs:
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
             ( openbox >/dev/null 2>&1 & )
             sleep 2
-            # 1200s: the Calc bus test launches LibreOffice ten times through MCP.
-            # The [ocr] extra is installed here, after the hermetic suite, so
-            # the base install under test stays free of RapidOCR.
+            # 1800s. CI runs 38047628453 (this branch) and 38060125035
+            # (main, after the OCR live cases) killed this step with exit
+            # 124 at the old 1200s ceiling while pytest was still printing
+            # progress. The log was fully buffered, so it did not name a
+            # test. This step installs the [ocr] extra after the hermetic
+            # suite and runs the OCR live cases plus the opaque-region
+            # launches. Line-buffered so a killed run names the test in
+            # progress.
             .venv/bin/pip install -e ".[ocr]" &&
-            A11Y_OCR_LIVE=1 timeout -k 5 1200 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
+            export PYTHONUNBUFFERED=1
+            A11Y_OCR_LIVE=1 timeout -k 5 1800 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
 
   package:
