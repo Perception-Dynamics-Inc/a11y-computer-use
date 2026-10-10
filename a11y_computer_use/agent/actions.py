@@ -403,7 +403,7 @@ _OBJ = {"type": "object"}
 _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     (
         "click",
-        "Click an element by accessibility ref, or at x,y when a ref click cannot land.",
+        "Click an element by accessibility ref, or at x,y inside an opaque region or when a ref click cannot land.",
         {"ref": _STR, "button": _STR, "count": _INT, "x": _INT, "y": _INT, "display_id": _INT},
         [],
     ),

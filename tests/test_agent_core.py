@@ -1248,6 +1248,196 @@ def test_stale_ref_backtracks_then_succeeds(tmp_path):
     assert result.reason == "done"
 
 
+def _image_blocks(content) -> list[dict]:
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict) and block.get("type") == "image"]
+
+
+def test_vision_fallback_attaches_only_when_the_tree_is_insufficient(tmp_path):
+    """An image is attached for an opaque region, an empty tree, or two misses.
+
+    A named control gets text only. The coordinate click keeps the approval
+    callback and a typed confirmed outcome. Words from the image are fenced.
+    """
+    from a11y_computer_use.outcome import ActionResult
+
+    save = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    seen: list = []
+
+    def sufficient(messages):
+        seen.append(messages[-1].content)
+        return turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(sufficient), save, trace_dir=tmp_path / "enough",
+    )
+    assert result.status == "success"
+    assert seen == [seen[0]]
+    assert isinstance(seen[0], str)
+    assert _image_blocks(seen[0]) == []
+
+    region = window(el(
+        "e2", "opaque_region", "", parent="e1",
+        bounds=Bounds(0, 0, 0, 200, 150),
+    ))
+    runtime = FakeRuntime(region)
+
+    def crop(ref, padding=0, scale=1.0):
+        del padding, scale
+        return (f"crop {ref}", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+
+    def call_tool(name, params, confirm=None):
+        assert confirm is not None
+        runtime.calls.append((name, dict(params)))
+        if name == "click" and params.get("x") is not None:
+            return ActionResult(
+                "clicked the canvas target", outcome="confirmed", evidence="landed",
+            )
+        return f"{name} ok"
+
+    runtime.call_tool = call_tool
+    captured: list = []
+
+    def opaque(messages):
+        captured.append(messages[-1].content)
+        if not runtime.calls:
+            return turn(ToolCall("click", {"x": 40, "y": 50, "display_id": 0}))
+        return turn(done("landed", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(opaque),
+        region,
+        runtime=runtime,
+        trace_dir=tmp_path / "opaque",
+    )
+    assert result.status == "success", result
+    images = _image_blocks(captured[0])
+    assert images
+    assert "crop-e2" in images[0]["path"]
+    assert os.path.isfile(images[0]["path"])
+    text = captured[0][0]["text"]
+    assert "insufficient (opaque_region)" in text
+    assert "<untrusted nonce=" in text
+    assert "untrusted screen data" in text
+    assert runtime.calls[0] == ("click", {"x": 40, "y": 50, "display_id": 0})
+    assert result.step_log[0].verified is True
+    assert "clicked the canvas target" in (result.step_log[0].result or "")
+
+    empty_seen: list = []
+
+    def empty(messages):
+        empty_seen.append(messages[-1].content)
+        return turn(done("empty", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, _agent = run(
+        ScriptedModel(empty), window(), trace_dir=tmp_path / "empty",
+    )
+    assert result.status == "success", result
+    empty_images = _image_blocks(empty_seen[0])
+    assert len(empty_images) == 1
+    assert "observe-" in empty_images[0]["path"]
+    assert "insufficient (empty_tree)" in empty_seen[0][0]["text"]
+
+    misses = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(misses)
+    runtime.fail["e999"] = ComputerUseError(ErrorCode.STALE_REF, "ref e999 is gone")
+    runtime.fail["e998"] = ComputerUseError(ErrorCode.STALE_REF, "ref e998 is gone")
+    miss_seen: list = []
+
+    def _turn_images(messages) -> list[dict]:
+        found: list[dict] = []
+        for message in messages:
+            found.extend(_image_blocks(message.content))
+        return found
+
+    def missing(messages):
+        miss_seen.append(list(messages))
+        if len(miss_seen) == 1:
+            return turn(ToolCall("click", {"ref": "e999"}))
+        if len(miss_seen) == 2:
+            return turn(ToolCall("click", {"ref": "e998"}))
+        if not any(params.get("x") is not None for _name, params in runtime.calls):
+            return turn(ToolCall("click", {"x": 12, "y": 18, "display_id": 0}))
+        return turn(done("found", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(missing),
+        misses,
+        runtime=runtime,
+        trace_dir=tmp_path / "miss",
+        max_retries=0,
+        max_replans=4,
+    )
+    assert result.status == "success", result
+    assert _turn_images(miss_seen[0]) == []
+    assert _turn_images(miss_seen[1]) == []
+    later = _turn_images(miss_seen[2])
+    assert later
+    assert "observe-" in later[-1]["path"]
+    texts = []
+    for message in miss_seen[2]:
+        content = message.content
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list) and content and isinstance(content[0], dict):
+            texts.append(str(content[0].get("text") or ""))
+    assert any("insufficient (not_found)" in text for text in texts)
+    assert ("click", {"x": 12, "y": 18, "display_id": 0}) in runtime.calls
+
+
+def test_coordinate_click_on_pay_still_stops_for_a_human(tmp_path):
+    """A point inside Pay now uses the payment gate, not a raw click."""
+    pay = el(
+        "e2", "AXButton", "Pay now", parent="e1", clickable=True,
+        bounds=Bounds(0, 100, 200, 80, 40),
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel([turn(ToolCall("click", {"x": 140, "y": 220, "display_id": 0}))]),
+        window(pay),
+        trace_dir=tmp_path,
+    )
+    assert result.status == "needs_human", result
+    assert result.needs_human["kind"] == "payment"
+    assert runtime.calls == []
+
+
+def test_text_model_stops_when_the_tree_needs_vision(tmp_path):
+    """No image support is a needs_human stop, not a silent text-only loop."""
+    region = window(el("e2", "opaque_region", "", parent="e1"))
+
+    class _Blind:
+        name = "blind"
+        supports_images = False
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            raise AssertionError("the text model should not be asked to guess")
+
+    result, events, runtime, _agent = run(_Blind(), region, trace_dir=tmp_path)
+    assert result.status == "needs_human", result
+    assert result.needs_human["kind"] == "unsupported"
+    assert result.needs_human["reason"] == "opaque_region"
+    assert "does not accept images" in result.needs_human["message"]
+    assert "needs_human" in types(events)
+    assert runtime.calls == []
+
+    save = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    called = {"n": 0}
+
+    class _BlindSave(_Blind):
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            called["n"] += 1
+            return turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))
+
+    result, _events, _runtime, _agent = run(_BlindSave(), save, trace_dir=tmp_path / "save")
+    assert result.status == "success", result
+    assert called["n"] == 1
+
+
 def test_vision_attaches_a_window_screenshot(tmp_path):
     elements = window(el("e2", "AXImage", "", parent="e1"))
     captured: list = []
