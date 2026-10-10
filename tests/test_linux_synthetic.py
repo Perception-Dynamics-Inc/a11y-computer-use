@@ -6309,6 +6309,83 @@ def test_unlisted_app_does_not_wait_for_atspi(fake_atspi, monkeypatch) -> None:
     assert slept["n"] == 0
 
 
+def _write_proc(root, pid: str, comm: str, state: str, environ: dict[str, str] | None) -> None:
+    folder = root / pid
+    folder.mkdir()
+    (folder / "comm").write_text(comm + "\n", encoding="utf-8")
+    (folder / "stat").write_text(f"{pid} ({comm}) {state} 1\n", encoding="utf-8")
+    if environ is None:
+        return
+    raw = b"\0".join(f"{key}={value}".encode() for key, value in environ.items()) + b"\0"
+    (folder / "environ").write_bytes(raw)
+
+
+def test_libreoffice_process_running_is_this_session_only(tmp_path, monkeypatch) -> None:
+    """Synthetic /proc. Another display's soffice is not this session.
+
+    The same display number matches with or without the screen suffix.
+    A zombie on this display does not count. An unreadable environ does
+    not count. With no DISPLAY here, a process that has one is not local.
+    A matching AT-SPI bus counts when the displays do not disagree.
+    """
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    monkeypatch.setattr(_atspi, "_proc_root", lambda: str(proc))
+    monkeypatch.setenv("DISPLAY", ":1.0")
+    monkeypatch.delenv("AT_SPI_BUS_ADDRESS", raising=False)
+    monkeypatch.delenv("AT_SPI_BUS", raising=False)
+
+    _write_proc(proc, "10", "soffice.bin", "S", {"DISPLAY": ":2"})
+    assert _atspi.libreoffice_process_running() is False
+
+    _write_proc(proc, "11", "soffice.bin", "S", {"DISPLAY": ":1"})
+    assert _atspi.libreoffice_process_running() is True
+
+    for child in proc.iterdir():
+        for path in child.iterdir():
+            path.unlink()
+        child.rmdir()
+    _write_proc(proc, "12", "soffice.bin", "Z", {"DISPLAY": ":1"})
+    _write_proc(proc, "13", "gedit", "S", {"DISPLAY": ":1"})
+    _write_proc(proc, "14", "soffice", "S", None)
+    assert _atspi.libreoffice_process_running() is False
+
+    monkeypatch.delenv("DISPLAY", raising=False)
+    _write_proc(proc, "15", "oosplash", "S", {"DISPLAY": ":2"})
+    assert _atspi.libreoffice_process_running() is False
+
+    monkeypatch.setenv("AT_SPI_BUS_ADDRESS", "unix:path=/tmp/bus-a")
+    _write_proc(proc, "16", "soffice.bin", "S", {"AT_SPI_BUS_ADDRESS": "unix:path=/tmp/bus-a"})
+    assert _atspi.libreoffice_process_running() is True
+
+
+def test_snapshot_does_not_wait_for_soffice_on_another_display(fake_atspi, monkeypatch) -> None:
+    """Synthetic. A foreign soffice process is app_not_found with no sleep."""
+    from a11y_computer_use.drivers import _linux_system
+
+    slept = {"n": 0}
+
+    def sleep(seconds):
+        slept["n"] += 1
+
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.delenv("AT_SPI_BUS_ADDRESS", raising=False)
+    monkeypatch.delenv("AT_SPI_BUS", raising=False)
+    monkeypatch.setattr(
+        _atspi, "_libreoffice_processes",
+        lambda: [("soffice.bin", "S", {"DISPLAY": ":2"})],
+    )
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _name: False)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda identifier: identifier)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().snapshot(Scope.WINDOW, "LibreOffice")
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "accessibility bridge" not in exc.value.message
+    assert slept["n"] == 0
+
+
 def test_tools_for_an_app_that_is_not_running_return_app_not_found(
     fake_atspi, monkeypatch
 ) -> None:

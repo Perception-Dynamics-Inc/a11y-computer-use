@@ -3486,43 +3486,117 @@ def libreoffice_app(app: str) -> bool:
     return "soffice" in name or "libreoffice" in name
 
 
-def libreoffice_process_running() -> bool:
-    """True when a LibreOffice process comm is ``soffice``, ``soffice.bin``, or ``oosplash``.
+def _display_key(value: str) -> str:
+    """``:1`` and ``localhost:1.0`` are the same display. An empty value stays empty."""
+    text = str(value or "").strip()
+    if ":" not in text:
+        return text
+    host, rest = text.rsplit(":", 1)
+    number = rest.split(".", 1)[0]
+    if not number.isdigit():
+        return text
+    if host in {"unix", "localhost"}:
+        host = ""
+    return f"{host}:{number}"
 
-    Reads ``/proc/<pid>/comm``. A command line that merely mentions the name
-    is not a match.
+
+def _atspi_bus(env: dict[str, str]) -> str:
+    return str(env.get("AT_SPI_BUS_ADDRESS") or env.get("AT_SPI_BUS") or "").strip()
+
+
+def process_in_caller_session(environ: dict[str, str]) -> bool:
+    """True when ``environ`` is this process's X display or AT-SPI bus.
+
+    A soffice process on another display is another session, even on the
+    same machine. When this process has no ``DISPLAY``, a process that has
+    one is not treated as local. A shared AT-SPI bus matches only when the
+    displays do not already disagree.
     """
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
+    ours = _display_key(os.environ.get("DISPLAY", ""))
+    theirs = _display_key(environ.get("DISPLAY", ""))
+    if ours and theirs:
+        return ours == theirs
+    if theirs and not ours:
         return False
+    ours_bus = _atspi_bus(dict(os.environ))
+    theirs_bus = _atspi_bus(environ)
+    if ours_bus and theirs_bus:
+        return ours_bus == theirs_bus
+    return False
+
+
+def _proc_root() -> str:
+    return "/proc"
+
+
+def _read_proc_environ(pid: str, root: str) -> dict[str, str] | None:
+    try:
+        with open(os.path.join(root, pid, "environ"), "rb") as fh:
+            raw = fh.read(262144)
+    except OSError:
+        return None
+    found: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        found[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return found
+
+
+def _libreoffice_processes() -> list[tuple[str, str, dict[str, str] | None]]:
+    """``(comm, state, environ)`` for each soffice, soffice.bin, or oosplash.
+
+    ``environ`` is None when ``/proc/<pid>/environ`` cannot be read. A
+    command line that merely mentions the name is not a row.
+    """
+    root = _proc_root()
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return []
+    rows: list[tuple[str, str, dict[str, str] | None]] = []
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(root, entry, "comm"), encoding="utf-8", errors="replace") as fh:
                 comm = fh.read().strip()
-            with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+            with open(os.path.join(root, entry, "stat"), encoding="utf-8", errors="replace") as fh:
                 stat = fh.read()
         except OSError:
             continue
         if comm not in _LO_COMMS:
             continue
-        # A zombie still has the comm until its parent reaps it. It is not
-        # a running LibreOffice.
         end = stat.rfind(")")
         state = stat[end + 2:].split(None, 1)[0] if end >= 0 and end + 2 < len(stat) else ""
+        rows.append((comm, state, _read_proc_environ(entry, root)))
+    return rows
+
+
+def libreoffice_process_running() -> bool:
+    """True when a LibreOffice process in this session is running.
+
+    The comm is ``soffice``, ``soffice.bin``, or ``oosplash``. A process on
+    another ``DISPLAY`` or AT-SPI bus does not count, and a zombie does not
+    count. A command line that merely mentions the name is not a match.
+    """
+    for _comm, state, environ in _libreoffice_processes():
         if state == "Z":
             continue
-        return True
+        if environ is None:
+            continue
+        if process_in_caller_session(environ):
+            return True
     return False
 
 
 def libreoffice_without_bridge(app: str) -> bool:
-    """True when ``app`` is LibreOffice and a soffice process is running.
+    """True when ``app`` is LibreOffice and a soffice process in this session is running.
 
     The caller has already failed to find an AT-SPI root. The gen VCL plugin
-    stays off the bus; gtk3 with libreoffice-gtk3 does not.
+    stays off the bus; gtk3 with libreoffice-gtk3 does not. A soffice process
+    on another display is not this session's bridge.
     """
     return libreoffice_app(app) and libreoffice_process_running()
 
@@ -3589,8 +3663,9 @@ def should_wait_for_atspi(identifier: str) -> bool:
     """True when snapshot should wait for this app to appear on the AT-SPI bus.
 
     The app is already in the app list or the window list, or a LibreOffice
-    process is running and has not registered yet. A name that is in neither
-    place, and is not that process, is ``app_not_found`` on the first look.
+    process in this session is running and has not registered yet. A name
+    that is in neither place, and is not that process, is ``app_not_found``
+    on the first look. A soffice process on another display does not wait.
     """
     if app_listed(identifier):
         return True
