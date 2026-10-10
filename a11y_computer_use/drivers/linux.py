@@ -877,7 +877,7 @@ class LinuxDriver:
 
         def _do() -> Snapshot:
             hinted = _hint_pid(app)
-            with _atspi.app_reply_watch(app, hinted) as watch:
+            with _atspi.app_reply_watch(app, hinted, root) as watch:
                 pid = _atspi.pid_of(root) or hinted
                 if isinstance(pid, int) and pid > 0:
                     watch.pid = pid

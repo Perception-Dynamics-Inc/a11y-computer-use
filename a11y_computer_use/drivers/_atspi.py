@@ -180,12 +180,18 @@ def _atspi():
 
 
 # libatspi's per-call D-Bus wait is 300ms (`Atspi.set_timeout` above). A call
-# that lasts this long did not answer. Two of those, or this much time spent
-# inside them, fails that one application. The rest of a desktop walk is not
-# charged to it, and a single slow read does not fail a live tree.
+# that raises after this long did not answer. A call that returns, however
+# long it took, is a live app: Firefox, Chrome, and LibreOffice cross 300ms
+# on startup and on large documents while still replying.
 ATSPI_SLOW_CALL_S = 0.25
-ATSPI_UNANSWERED_CALLS = 2
-ATSPI_APP_REPLY_S = 2.0
+# A process that is still scheduled is frozen only after this much consecutive
+# unanswered time, and only when a cheap ping also gets no reply.
+ATSPI_PING_WINDOW_S = 4.0
+ATSPI_PING_TRIES = 3
+ATSPI_PING_CALL_MS = 2000
+# Matches the registration wait. A young live process is retried by the
+# caller instead of declared frozen; SIGSTOP is not given this grace.
+ATSPI_STARTUP_GRACE_S = 15.0
 
 _APP_NOT_RESPONDING_HINT = "The app is not responding. Wait, then snapshot again."
 
@@ -193,28 +199,31 @@ _reply_local = threading.local()
 
 
 class _ReplyWatch:
-    """Slow-call budget for the application currently being read."""
+    """Unanswered-call streak for the application currently being read."""
 
-    def __init__(self, app: str, pid: int | None) -> None:
+    def __init__(self, app: str, pid: int | None, target: object | None) -> None:
         self.app = app or "application"
         self.pid = pid
-        self.slow_calls = 0
-        self.slow_s = 0.0
+        self.target = target
+        self.unanswered = 0
+        self.unanswered_s = 0.0
 
 
 @contextmanager
-def app_reply_watch(app: str, pid: int | None):
+def app_reply_watch(app: str, pid: int | None, target: object | None = None):
     """Charge unanswered AT-SPI reads to ``app`` until the block exits.
 
-    A read at or above `ATSPI_SLOW_CALL_S` is an unanswered D-Bus call. After
-    `ATSPI_UNANSWERED_CALLS` of them, or `ATSPI_APP_REPLY_S` spent inside
-    them, the read raises `ErrorCode.APP_NOT_RESPONDING` and names ``app``
-    and the pid. Reads outside a watch keep today's default-on-failure
-    behavior, so one frozen sibling cannot fail a different application's
-    snapshot.
+    A call that returns is never a hang. A call that raises after
+    `ATSPI_SLOW_CALL_S` is unanswered. That fails the read only with evidence
+    the app is actually wedged: ``/proc/<pid>/stat`` state ``T`` or ``t``, or
+    no reply to a cheap ping across `ATSPI_PING_WINDOW_S` after
+    `ATSPI_PING_TRIES` misses. A process younger than `ATSPI_STARTUP_GRACE_S`
+    is not failed for those misses; the caller retries. Reads outside a watch
+    keep today's default-on-failure behavior, so one frozen sibling cannot
+    fail a different application's snapshot.
     """
     previous = getattr(_reply_local, "watch", None)
-    watch = _ReplyWatch(app, pid)
+    watch = _ReplyWatch(app, pid, target)
     _reply_local.watch = watch
     try:
         yield watch
@@ -226,13 +235,73 @@ def _current_watch() -> _ReplyWatch | None:
     return getattr(_reply_local, "watch", None)
 
 
-def _charge_reply(watch: _ReplyWatch, elapsed: float) -> None:
-    if elapsed < ATSPI_SLOW_CALL_S:
-        return
-    watch.slow_calls += 1
-    watch.slow_s += elapsed
-    if watch.slow_calls < ATSPI_UNANSWERED_CALLS and watch.slow_s < ATSPI_APP_REPLY_S:
-        return
+def _proc_stat_after_comm(pid: int) -> list[bytes] | None:
+    """Fields of ``/proc/<pid>/stat`` after the comm, or None when unreadable.
+
+    The comm is wrapped in parentheses and may itself contain spaces and
+    parentheses, so the state is the token after the last ``)``.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    end = data.rfind(b")")
+    if end == -1 or end + 2 >= len(data):
+        return None
+    return data[end + 2 :].split()
+
+
+def process_is_stopped(pid: int | None) -> bool:
+    """True when the process is stopped (``T`` or ``t``), the SIGSTOP hang."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    fields = _proc_stat_after_comm(pid)
+    if not fields:
+        return False
+    return fields[0] in {b"T", b"t"}
+
+
+def process_age_s(pid: int | None) -> float | None:
+    """Seconds since the process started, or None when ``/proc`` cannot say."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    fields = _proc_stat_after_comm(pid)
+    # starttime is field 22; field 3 (state) is the first token after comm.
+    if not fields or len(fields) <= 19:
+        return None
+    try:
+        start_ticks = int(fields[19])
+    except ValueError:
+        return None
+    try:
+        ticks = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError):
+        ticks = 100
+    if not ticks:
+        return None
+    try:
+        with open("/proc/uptime", "rb") as handle:
+            uptime = float(handle.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+    age = uptime - (start_ticks / float(ticks))
+    return age if age >= 0 else 0.0
+
+
+def process_in_startup(pid: int | None) -> bool:
+    """True while the process is younger than the registration grace.
+
+    Snapshot waits already retry ``app_not_found`` through this window. A
+    busy launch that misses a few reads is the same kind of delay, not a hang.
+    """
+    age = process_age_s(pid)
+    return age is not None and age < ATSPI_STARTUP_GRACE_S
+
+
+def _raise_not_responding(watch: _ReplyWatch) -> None:
     pid = watch.pid
     pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
     raise ComputerUseError(
@@ -246,17 +315,95 @@ def _charge_reply(watch: _ReplyWatch, elapsed: float) -> None:
     )
 
 
+def _ping_answers(acc: object) -> bool:
+    """True when ``acc`` answers a cheap read inside a longer budget.
+
+    The walk stays on the 300ms per-call wait. This probe is the hang check
+    for a process that is still scheduled: a few tries, each allowed
+    `ATSPI_PING_CALL_MS`. A return, including an empty name, is a reply. An
+    exception is a miss.
+    """
+    if acc is None:
+        return False
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return False
+    try:
+        Atspi.set_timeout(ATSPI_PING_CALL_MS, 0)
+    except Exception:
+        return False
+    try:
+        for _ in range(ATSPI_PING_TRIES):
+            for method_name in ("get_name", "get_process_id"):
+                method = getattr(acc, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    method()
+                except Exception:
+                    continue
+                return True
+        return False
+    finally:
+        try:
+            Atspi.set_timeout(300, 0)
+        except Exception:
+            pass
+
+
+def _note_answered(watch: _ReplyWatch) -> None:
+    watch.unanswered = 0
+    watch.unanswered_s = 0.0
+
+
+def _note_unanswered(watch: _ReplyWatch, elapsed: float) -> None:
+    watch.unanswered += 1
+    watch.unanswered_s += elapsed
+    if process_is_stopped(watch.pid):
+        _raise_not_responding(watch)
+    # A just-started app misses reads while it builds its tree. The snapshot
+    # wait retries those; declaring it frozen here fails a live Firefox.
+    if process_in_startup(watch.pid):
+        return
+    if watch.unanswered < ATSPI_PING_TRIES or watch.unanswered_s < ATSPI_PING_WINDOW_S:
+        return
+    if watch.target is None or _ping_answers(watch.target):
+        _note_answered(watch)
+        return
+    _raise_not_responding(watch)
+
+
+def call_went_unanswered() -> bool:
+    """True when the last `_safe` call raised and used the D-Bus timeout.
+
+    A slow call that returned is not unanswered. Desktop listing and the
+    Gtk.Dialog.run revive use this so a busy app is not dropped or skipped.
+    """
+    return bool(getattr(_reply_local, "last_failed", False)) and (
+        float(getattr(_reply_local, "last_elapsed", 0.0)) >= ATSPI_SLOW_CALL_S
+    )
+
+
 def _safe(fn, default=None):
     watch = _current_watch()
     start = time.monotonic()
+    failed = False
     try:
         result = fn()
     except ComputerUseError:
         raise
     except Exception:
+        failed = True
         result = default
+    elapsed = time.monotonic() - start
+    _reply_local.last_failed = failed
+    _reply_local.last_elapsed = elapsed
     if watch is not None:
-        _charge_reply(watch, time.monotonic() - start)
+        if failed and elapsed >= ATSPI_SLOW_CALL_S:
+            _note_unanswered(watch, elapsed)
+        elif not failed:
+            _note_answered(watch)
     return result
 
 
@@ -2661,21 +2808,20 @@ def find_root(app: str, scope) -> object | None:
         candidate = _call_first(desktop, ("get_child_at_index",), i)
         if candidate is None:
             continue
-        started = time.monotonic()
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
-        name_unanswered = time.monotonic() - started >= ATSPI_SLOW_CALL_S
+        name_unanswered = call_went_unanswered()
         # A dialog opened with Gtk.Dialog.run() wedges this process's
         # connection to the app: get_name comes back empty and child count
         # is -1 until the bus is replaced. Revive before treating the
         # registrant as unnamed, then read the name on the fresh connection.
-        # A read that already used the D-Bus timeout is a frozen app, not
-        # that dialog: reviving it would spend another timeout per child.
+        # A read that timed out is not that dialog: reviving it would spend
+        # another timeout per child. A slow reply that returned still can be.
         if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
         if needle not in name and not (pids and pid_of(candidate) in pids):
             continue
-        with app_reply_watch(app, hinted) as watch:
+        with app_reply_watch(app, hinted, candidate) as watch:
             pid = pid_of(candidate)
             if pid:
                 watch.pid = pid
@@ -2691,7 +2837,7 @@ def find_root(app: str, scope) -> object | None:
     # WINDOW scope: prefer the ACTIVE top-level frame, else the first child.
     # The same per-app budget covers this second frame read. A stopped
     # target raises here instead of walking every child at 300ms each.
-    with app_reply_watch(app, hinted) as watch:
+    with app_reply_watch(app, hinted, app_acc) as watch:
         pid = pid_of(app_acc)
         if pid:
             watch.pid = pid
@@ -2705,9 +2851,11 @@ def find_root(app: str, scope) -> object | None:
 def desktop_application_roots() -> DesktopApplications:
     """Every application under the AT-SPI desktop.
 
-    A child whose name read hits the D-Bus timeout is counted as silent and
-    is not walked. Applications that answer are returned with the name the
-    registry reported. An empty desktop is ``ready`` empty and ``silent`` 0.
+    A child whose name read times out and whose process is stopped is counted
+    as silent and is not walked. A slow reply is a live app and stays in the
+    list, as does a live process that missed this one read. Applications that
+    answer are returned with the name the registry reported. An empty desktop
+    is ``ready`` empty and ``silent`` 0.
     """
     Atspi = _atspi()
     desktop = _safe(lambda: Atspi.get_desktop(0))
@@ -2720,9 +2868,8 @@ def desktop_application_roots() -> DesktopApplications:
         child = _call_first(desktop, ("get_child_at_index",), index)
         if child is None:
             continue
-        started = time.monotonic()
         name = str(_call_first(child, ("get_name",), default="") or "").strip()
-        if time.monotonic() - started >= ATSPI_SLOW_CALL_S:
+        if call_went_unanswered() and process_is_stopped(pid_of(child)):
             silent += 1
             continue
         ready.append((name or "application", child))

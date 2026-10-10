@@ -54,34 +54,124 @@ def _slow():
     raise RuntimeError("unanswered")
 
 
-def test_two_unanswered_calls_name_the_app_and_pid() -> None:
-    started = time.monotonic()
-    with pytest.raises(ComputerUseError) as caught:
-        with _atspi.app_reply_watch("mousepad", 4242):
-            _atspi._safe(_slow, default=None)
-            _atspi._safe(_slow, default=None)
-            _atspi._safe(_slow, default=None)
-    elapsed = time.monotonic() - started
-    assert elapsed < 2.0, elapsed
-    err = caught.value
+def _assert_not_responding(err: ComputerUseError, app: str, pid: int) -> None:
     assert err.code is ErrorCode.APP_NOT_RESPONDING
-    assert err.message == "mousepad did not answer accessibility queries (pid 4242)"
-    assert err.detail["app"] == "mousepad"
-    assert err.detail["pid"] == 4242
+    assert err.message == f"{app} did not answer accessibility queries (pid {pid})"
+    assert err.detail["app"] == app
+    assert err.detail["pid"] == pid
     rendered = error_text(err)
     assert "screen_text" not in rendered
     assert "custom-drawn" not in rendered
     assert rendered.startswith("app_not_responding:")
 
 
+def test_stopped_process_unanswered_call_names_the_app_and_pid(monkeypatch) -> None:
+    """SIGSTOP evidence fails on the first missed read, inside one timeout."""
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: pid == 4242)
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as caught:
+        with _atspi.app_reply_watch("mousepad", 4242):
+            _atspi._safe(_slow, default=None)
+            raise AssertionError("the frozen read continued")
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0, elapsed
+    _assert_not_responding(caught.value, "mousepad", 4242)
+
+
+def test_slow_but_answering_app_is_not_frozen(monkeypatch) -> None:
+    """A busy app that still returns is not app_not_responding.
+
+    Two reads at or above 250ms used to be a hang. Firefox, Chrome, and
+    LibreOffice cross that on startup and on large documents while the
+    process is alive and the calls succeed.
+    """
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: False)
+    monkeypatch.setattr(_atspi, "process_in_startup", lambda pid: False)
+
+    def slow_ok():
+        time.sleep(0.26)
+        return "paragraph"
+
+    def unexpected_ping(_acc):
+        raise AssertionError("a slow reply must not be treated as a missed ping")
+
+    monkeypatch.setattr(_atspi, "_ping_answers", unexpected_ping)
+    with _atspi.app_reply_watch("firefox", 7139, target=object()) as watch:
+        for _ in range(4):
+            assert _atspi._safe(slow_ok) == "paragraph"
+        assert _atspi._safe(_slow, default=None) is None
+        assert _atspi._safe(slow_ok) == "paragraph"
+        assert watch.unanswered == 0
+
+
+def test_startup_misses_are_retried_instead_of_a_hang(monkeypatch) -> None:
+    """A young live process that misses reads is not declared frozen."""
+    monkeypatch.setattr(_atspi, "ATSPI_SLOW_CALL_S", 0.0)
+    monkeypatch.setattr(_atspi, "ATSPI_PING_WINDOW_S", 0.0)
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: False)
+    monkeypatch.setattr(_atspi, "process_in_startup", lambda pid: True)
+    pings = {"n": 0}
+
+    def ping(_acc):
+        pings["n"] += 1
+        return False
+
+    monkeypatch.setattr(_atspi, "_ping_answers", ping)
+
+    def miss():
+        raise RuntimeError("no reply")
+
+    with _atspi.app_reply_watch("firefox", 7139, target=object()):
+        for _ in range(6):
+            assert _atspi._safe(miss, default=None) is None
+    assert pings["n"] == 0
+
+
+def test_failed_pings_name_a_live_process_that_is_not_starting(monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "ATSPI_SLOW_CALL_S", 0.0)
+    monkeypatch.setattr(_atspi, "ATSPI_PING_WINDOW_S", 0.0)
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: False)
+    monkeypatch.setattr(_atspi, "process_in_startup", lambda pid: False)
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda _acc: False)
+
+    def miss():
+        raise RuntimeError("no reply")
+
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as caught:
+        with _atspi.app_reply_watch("mousepad", 4242, target=object()):
+            for _ in range(_atspi.ATSPI_PING_TRIES):
+                _atspi._safe(miss, default=None)
+            raise AssertionError("ping failures did not fail the read")
+    assert time.monotonic() - started < 2.0
+    _assert_not_responding(caught.value, "mousepad", 4242)
+
+
+def test_a_ping_reply_clears_a_live_miss_streak(monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "ATSPI_SLOW_CALL_S", 0.0)
+    monkeypatch.setattr(_atspi, "ATSPI_PING_WINDOW_S", 0.0)
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: False)
+    monkeypatch.setattr(_atspi, "process_in_startup", lambda pid: False)
+    monkeypatch.setattr(_atspi, "_ping_answers", lambda _acc: True)
+
+    def miss():
+        raise RuntimeError("no reply")
+
+    with _atspi.app_reply_watch("firefox", 7139, target=object()) as watch:
+        for _ in range(_atspi.ATSPI_PING_TRIES * 2):
+            assert _atspi._safe(miss, default=None) is None
+        assert watch.unanswered == 0
+
+
 def test_one_slow_call_does_not_fail_and_an_unwatched_call_stays_a_default() -> None:
     with _atspi.app_reply_watch("gedit", 7) as watch:
         assert _atspi._safe(_slow, default="fallback") == "fallback"
-        assert watch.slow_calls == 1
+        assert watch.unanswered == 1
     assert _atspi._safe(_slow, default="fallback") == "fallback"
 
 
-def test_desktop_collection_keeps_apps_that_answer() -> None:
+def test_desktop_collection_keeps_apps_that_answer(monkeypatch) -> None:
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: pid == 22)
     calls = {"mousepad": 0}
 
     def mousepad():
@@ -100,7 +190,7 @@ def test_desktop_collection_keeps_apps_that_answer() -> None:
     ])
     assert time.monotonic() - started < 2.0
     assert kept == ["gedit-tree", "firefox-tree"]
-    assert calls["mousepad"] == 2
+    assert calls["mousepad"] == 1
 
 
 def test_desktop_snapshot_returns_the_other_app_and_a_frozen_target_errors(monkeypatch) -> None:
@@ -125,6 +215,7 @@ def test_desktop_snapshot_returns_the_other_app_and_a_frozen_target_errors(monke
         return firefox
 
     monkeypatch.setattr(_atspi, "desktop_application_roots", roots)
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: pid == 22)
     monkeypatch.setattr(_atspi, "pid_of", lambda root: 22 if root is mouse_root else 11)
     monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
     monkeypatch.setattr(observe, "build_snapshot", build)
