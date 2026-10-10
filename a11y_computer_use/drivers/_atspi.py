@@ -28,7 +28,7 @@ import sys
 import time
 from collections.abc import Sequence
 
-from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode
+from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode, normalize_document_title
 from a11y_computer_use.schema import Display
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
@@ -1342,6 +1342,15 @@ class ATSPIAccessor:
             tuple[int, int, int, int],
             tuple[tuple[int, int] | None, bool],
         ] = {}
+        # One process identity for the whole walk. The root is read first.
+        self._instance_id: str | None = None
+        self._instance_ready = False
+
+    def _bound_instance_id(self, node: object) -> str | None:
+        if not self._instance_ready:
+            self._instance_id = app_instance_id(node)
+            self._instance_ready = True
+        return self._instance_id
 
     def refresh_visible(self, root: object) -> None:
         """Point Chromium lists at the rows inside their boxes.
@@ -1422,6 +1431,8 @@ class ATSPIAccessor:
             editable=editable_entry(
                 node, role_str=role_str, attrs=attrs, state_editable=state_editable,
             ),
+            instance_id=self._bound_instance_id(node),
+            document_id=window_document_id(node, role_str, str(name)),
         )
 
     def children(self, node: object) -> Sequence[object]:
@@ -1586,6 +1597,92 @@ def pid_of(acc) -> int | None:
         return None
     pid = _call_first(acc, ("get_process_id",))
     return int(pid) if pid else None
+
+
+def process_instance_id(pid: int | None) -> str | None:
+    """``pid:<pid>|start:<ticks>`` for a live Linux process, else None.
+
+    Start time is field 22 of ``/proc/<pid>/stat`` (clock ticks since boot).
+    A pid reused by a later process has a different start time, so a ref
+    bound to this token does not resolve against the replacement.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    # comm is field 2 and may contain spaces and parentheses. Fields after
+    # the last ``)`` start at field 3. starttime is field 22, index 19.
+    end = raw.rfind(")")
+    if end < 0:
+        return None
+    fields = raw[end + 2:].split()
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return f"pid:{pid}|start:{fields[19]}"
+
+
+def _bus_name_of(acc) -> str | None:
+    """Unique AT-SPI bus name of ``acc``'s application, or None.
+
+    libatspi stores it on ``AtspiApplication.bus_name`` (``:1.N``). A
+    relaunched process connects again and gets a new name.
+    """
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    inner = getattr(app, "app", None)
+    if inner is None:
+        inner = getattr(acc, "app", None)
+    name = getattr(inner, "bus_name", None) if inner is not None else None
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", "replace")
+    text = str(name or "")
+    if text.startswith(":"):
+        return text
+    return None
+
+
+def app_instance_id(acc) -> str | None:
+    """Process identity for ``acc``: pid and start time, plus the bus name.
+
+    None when neither the pid nor a unique bus name can be read. Callers
+    that cannot record an identity leave the ref unbound rather than
+    inventing one.
+    """
+    if acc is None:
+        return None
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    pid = pid_of(app) or pid_of(acc)
+    token = process_instance_id(pid)
+    bus = _bus_name_of(acc)
+    if token and bus:
+        return f"{token}|bus:{bus}"
+    if token:
+        return token
+    if bus:
+        return f"bus:{bus}"
+    return None
+
+
+_DOCUMENT_WINDOW_ROLES = frozenset({"frame", "window", "dialog"})
+
+
+def window_document_id(_acc, role: str, title: str) -> str | None:
+    """Identity of a top-level window or dialog, else None.
+
+    The accessible name, with one leading ``*`` removed so a dirty GTK
+    buffer (``*/tmp/a.txt - Mousepad``) stays the same document as the
+    clean title. Descendants inherit the id while the snapshot is flattened.
+    The accessible is accepted so a later reader can prefer a document URL
+    without changing the call.
+    """
+    if role not in _DOCUMENT_WINDOW_ROLES:
+        return None
+    text = normalize_document_title(title)
+    if not text:
+        return None
+    return f"title:{text}"
 
 
 _DOC_URL_KEYS = ("docurl", "uri", "url")

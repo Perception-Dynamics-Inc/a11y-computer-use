@@ -210,6 +210,15 @@ class RawNode:
     #: false, so macOS, Windows, and the browser stay editable only when the
     #: role is a text field.
     editable: bool = False
+    #: Process identity of the app that owns this node. Linux sets
+    #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the
+    #: application exposes an AT-SPI bus name. None on backends that do not
+    #: record one, so those refs still re-resolve by role and title.
+    instance_id: str | None = None
+    #: Window or document this node belongs to. Set on a frame, window, or
+    #: dialog; descendants inherit it while the tree is flattened. None when
+    #: the backend has no document identity for the node.
+    document_id: str | None = None
 
 
 class TreeAccessor(Protocol):
@@ -370,6 +379,124 @@ def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> El
     return rematch_ref(snap, ref, live)
 
 
+def normalize_document_title(title: str) -> str:
+    """Window title with one leading modified marker removed.
+
+    GTK editors prefix ``*`` when the buffer is dirty
+    (``*/tmp/a.txt - Mousepad``). The path is the document. The marker is not,
+    so a later action on the same file still resolves after the first edit.
+    """
+    text = " ".join(str(title or "").split())
+    if text.startswith("*"):
+        text = text[1:].lstrip()
+    return text
+
+
+def _file_document(document_id: str | None) -> str | None:
+    """The file path carried in a document id, or None.
+
+    GTK editors put the path in the window title (``/tmp/a.txt - Mousepad``).
+    A browser title (``Form Probe - Google Chrome``) has no path. Comparing
+    those titles treats a tab switch, or a title that flickers, as a different
+    document and hides the not-showing result the background tab should get.
+    """
+    if not document_id or not document_id.startswith("title:"):
+        return None
+    text = document_id[len("title:"):]
+    if "/" not in text and "\\" not in text:
+        return None
+    return text
+
+
+def _bound_to_same_target(anchor: Element, el: Element) -> bool:
+    """Whether ``el`` is the same process instance and file as ``anchor``.
+
+    A side that did not record an id does not fail the check. A different
+    process instance does. A different file path does. Two browser window
+    titles do not: the title follows the active tab.
+    """
+    if not _same_instance(anchor, el):
+        return False
+    anchor_file = _file_document(anchor.document_id)
+    live_file = _file_document(el.document_id)
+    if anchor_file and live_file and anchor_file != live_file:
+        return False
+    return True
+
+
+def _identity_mismatch(anchor: Element, live: Snapshot) -> str | None:
+    """``app_restarted`` or ``document_changed`` when no live node shares the binding.
+
+    None when the anchor recorded no identity, or the live tree did not, so
+    older snapshots and non-Linux backends keep the role/title matcher.
+    """
+    if anchor.instance_id:
+        seen = {el.instance_id for el in live.elements if el.instance_id}
+        if seen and anchor.instance_id not in seen:
+            return "app_restarted"
+    anchor_file = _file_document(anchor.document_id)
+    if anchor_file:
+        files = {
+            _file_document(el.document_id)
+            for el in live.elements
+            if _same_instance(anchor, el) and _file_document(el.document_id)
+        }
+        if files and anchor_file not in files:
+            return "document_changed"
+    return None
+
+
+def _same_instance(anchor: Element, el: Element) -> bool:
+    """Whether ``el`` is the same process instance as ``anchor``.
+
+    A side that did not record an instance id does not fail the check.
+    """
+    if anchor.instance_id and el.instance_id and anchor.instance_id != el.instance_id:
+        return False
+    return True
+
+
+def _raise_identity_stale(
+    snap: Snapshot, ref: str, anchor: Element, live: Snapshot, reason: str,
+) -> None:
+    """``stale_ref`` for a process or document that is not the one the ref names.
+
+    No candidates. The elements in ``live`` belong to the replacement, and
+    offering them would point the next action at the wrong document.
+    """
+    if reason == "app_restarted":
+        message = (
+            f"{ref} ({anchor.role} {anchor.title!r}) was issued by an application "
+            "instance that is no longer running. The process was quit or relaunched; "
+            "re-snapshot before acting. Nothing was changed."
+        )
+    else:
+        message = (
+            f"{ref} ({anchor.role} {anchor.title!r}) belongs to a different window "
+            "or document than the one now showing. Re-snapshot before acting. "
+            "Nothing was changed."
+        )
+    raise ComputerUseError(
+        ErrorCode.STALE_REF,
+        message,
+        detail={
+            "ref": ref,
+            "snapshot_id": snap.snapshot_id,
+            "live_snapshot_id": live.snapshot_id,
+            "reason": reason,
+            "anchor": {
+                "role": anchor.role,
+                "title": anchor.title,
+                "path": list(anchor.path),
+            },
+            "candidates": [],
+            "next": ["ref"],
+            "instance_id": anchor.instance_id,
+            "document_id": anchor.document_id,
+        },
+    )
+
+
 def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
     """Re-resolve ``ref`` (issued by ``snap``) against an already-captured
     ``live`` snapshot via the shared anchor matcher — the backend-agnostic core
@@ -381,11 +508,16 @@ def rematch_ref(snap: Snapshot, ref: str, live: Snapshot) -> Element:
 
     Raises:
         KeyError: if ``ref`` was never part of ``snap`` (see `Snapshot.element`).
-        ComputerUseError: `ErrorCode.STALE_REF` when the element no longer exists
-            or the anchors no longer match unambiguously — with near-miss
-            candidates so the agent can retry a likely ref without re-observing.
+        ComputerUseError: `ErrorCode.STALE_REF` when the element no longer exists,
+            the anchors no longer match unambiguously, or the live tree is a
+            different process instance or document. An instance or document
+            mismatch carries no candidates: those elements are the replacement,
+            and the action must not use them.
     """
     anchor = snap.element(ref)
+    mismatch = _identity_mismatch(anchor, live)
+    if mismatch is not None:
+        _raise_identity_stale(snap, ref, anchor, live, mismatch)
     match, reason = _match_anchor(anchor, live)
     if match is None:
         message = f"{ref} ({anchor.role} {anchor.title!r}) no longer resolves; re-observe"
@@ -1443,8 +1575,12 @@ def _flatten(
     elisions: dict[str, int],
     handles: dict[str, object],
     full_values: dict[str, str],
+    instance_id: str | None = None,
+    document_id: str | None = None,
 ) -> None:
     """Assign pre-order refs and emit `Element`s (parents before children)."""
+    instance_id = node.raw.instance_id or instance_id
+    document_id = node.raw.document_id or document_id
     ref = f"e{len(out) + 1}"
     path = parent_path + (node.raw.role,)
     clickable, editable, secure = _target_flags(node.raw)
@@ -1476,12 +1612,17 @@ def _flatten(
             expanded=node.raw.expanded,
             placeholder=node.raw.placeholder,
             stable_id=node.raw.stable_id or None,
+            instance_id=instance_id,
+            document_id=document_id,
         )
     )
     if node.elided:
         elisions[ref] = node.elided
     for child in node.children:
-        _flatten(child, ref, path, snapshot_id, out, elisions, handles, full_values)
+        _flatten(
+            child, ref, path, snapshot_id, out, elisions, handles, full_values,
+            instance_id, document_id,
+        )
 
 
 def _to_bounds(
@@ -1740,6 +1881,7 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
         exact = [
             el for el in live.elements
             if el.stable_id == anchor.stable_id and el.role == anchor.role
+            and _bound_to_same_target(anchor, el)
         ]
         if label is not None:
             labelled = [el for el in exact if label_ok(el)]
@@ -1759,7 +1901,10 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
             d1 = _center_distance(anchor.bounds, ranked[1].bounds)
             return (None, "ambiguous") if d1 - d0 <= _AMBIGUITY_PX else (ranked[0], "")
 
-    same_role = [el for el in live.elements if el.role == anchor.role]
+    same_role = [
+        el for el in live.elements
+        if el.role == anchor.role and _bound_to_same_target(anchor, el)
+    ]
     candidates: list[tuple[int, float, Element]] = []
     for el in same_role:
         if label is not None:
@@ -1809,7 +1954,7 @@ def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> lis
     label = _anchor_label(anchor)
     scored: list[tuple[float, float, Element]] = []
     for el in live.elements:
-        if el.role != anchor.role:
+        if el.role != anchor.role or not _bound_to_same_target(anchor, el):
             continue
         score: float = 0.0
         if label is not None:
@@ -1833,7 +1978,10 @@ def stale_ref_candidates(anchor: Element, live: Snapshot, limit: int = 3) -> lis
         for score, _dist, el in scored[:limit]
     ]
     if label is not None:
-        same_role = [el for el in live.elements if el.role == anchor.role]
+        same_role = [
+            el for el in live.elements
+            if el.role == anchor.role and _bound_to_same_target(anchor, el)
+        ]
         if same_role:
             occupant = min(same_role, key=lambda el: _center_distance(anchor.bounds, el.bounds))
             if math.isfinite(_center_distance(anchor.bounds, occupant.bounds)):

@@ -6748,3 +6748,115 @@ def test_linux_chrome_canvas_ref_click_lands_on_the_center(tmp_path) -> None:
         )
     finally:
         _stop_group(proc)
+
+
+def test_linux_ref_from_a_quit_editor_does_not_write_the_relaunched_file(tmp_path) -> None:
+    """A GTK editor ref dies with the process that issued it.
+
+    Snapshot Mousepad on ``a.txt``, quit it, and open ``b.txt`` in a new
+    process. ``set_value`` on the old textarea ref is ``stale_ref`` with
+    reason ``app_restarted``. The new buffer still says ``other document``.
+    A ref taken from the new process still resolves after the title gains
+    the dirty-file marker.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v mousepad"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "mousepad is not installed"
+    original = tmp_path / "a.txt"
+    other = tmp_path / "b.txt"
+    original.write_text("original text\n")
+    other.write_text("other document\n")
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "mousepad-config")
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+
+    def launch(path) -> subprocess.Popen:
+        return subprocess.Popen(
+            [binary, "--disable-server", str(path)],
+            env=env,
+            start_new_session=True,
+        )
+
+    def wait_area(needle: str):
+        deadline = time.monotonic() + 20
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "mousepad")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                title = next((el.title for el in shot.elements if el.role == "AXWindow"), "")
+                if (
+                    area is not None
+                    and needle in title
+                    and area.instance_id
+                    and area.document_id
+                    and needle in (area.document_id or "")
+                ):
+                    return shot, area
+                last = (
+                    f"title={title!r} value={None if area is None else area.value!r} "
+                    f"instance={None if area is None else area.instance_id!r} "
+                    f"document={None if area is None else area.document_id!r}"
+                )
+            time.sleep(0.3)
+        raise AssertionError(f"mousepad did not expose {needle}: {last}")
+
+    proc = launch(original)
+    try:
+        shot, area = wait_area("a.txt")
+        assert "original text" in (area.value or ""), area.value
+        runtime = _runtime_for(tmp_path, driver, "mousepad")
+        runtime._current = shot
+        old_ref = area.ref
+        old_instance = area.instance_id
+    finally:
+        _stop_group(proc)
+    deadline = time.monotonic() + 5
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert proc.poll() is not None, "the first mousepad did not exit"
+
+    proc2 = launch(other)
+    try:
+        _shot2, area2 = wait_area("b.txt")
+        assert area2.instance_id != old_instance, (old_instance, area2.instance_id)
+        assert "other document" in (area2.value or ""), area2.value
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.set_value(old_ref, "STALE WRITE")
+        err = exc.value
+        assert err.code is ErrorCode.STALE_REF, err
+        assert err.detail.get("reason") == "app_restarted", err.detail
+        assert err.detail.get("candidates") == []
+        again = driver.snapshot(Scope.WINDOW, "mousepad")
+        live_area = next(el for el in again.elements if el.role == "AXTextArea")
+        shown = "" if live_area.value is None else str(live_area.value)
+        assert "STALE WRITE" not in shown, shown
+        assert "other document" in shown, shown
+        assert "STALE WRITE" not in other.read_text()
+        runtime.desktop_snapshot("mousepad")
+        current = runtime._current
+        assert current is not None
+        fresh = next(el for el in current.elements if el.role == "AXTextArea")
+        wrote = runtime.set_value(fresh.ref, "other document plus")
+        assert str(wrote).startswith("set "), wrote
+        # The window title now starts with ``*``. Put the pre-edit snapshot
+        # back so this ref is the one issued before the marker, and require
+        # it to still land in this process.
+        runtime._current = current
+        again_wrote = runtime.set_value(fresh.ref, "other document plus")
+        assert str(again_wrote).startswith("set "), again_wrote
+        checked = driver.snapshot(Scope.WINDOW, "mousepad")
+        body = next(el.value or "" for el in checked.elements if el.role == "AXTextArea")
+        assert "STALE WRITE" not in str(body), body
+        assert "other document plus" in str(body), body
+    finally:
+        _stop_group(proc2)
