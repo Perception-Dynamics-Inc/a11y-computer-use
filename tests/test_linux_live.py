@@ -1275,6 +1275,119 @@ def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
             proc.kill()
 
 
+def test_linux_chrome_first_set_value_after_launch_writes_the_input(tmp_path) -> None:
+    """The first set_value after Chrome starts fills an empty text input.
+
+    Live Chrome, not a fake. Six fresh processes, each with its own profile
+    and a page that is one empty text field. Nothing is written before that
+    set_value. The call has to succeed, and a later snapshot has to show the
+    same text. One pass is not this check: the miss was reported once in six
+    launches. Skips when Chrome or the accessibility bus is missing.
+    """
+    from a11y_computer_use import observe, safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the first set_value test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+
+    def stop(proc: subprocess.Popen) -> None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    passes = 0
+    for launch in range(6):
+        token = f"firstwrite-{launch}"
+        wanted = f"landed-{launch}"
+        page = tmp_path / f"{token}.html"
+        page.write_text(
+            "<!doctype html><meta charset=utf-8>"
+            f"<title>{token}</title>"
+            "<style>body{margin:24px;font:18px sans-serif}</style>"
+            f"<h1>{token}</h1>"
+            "<label>Note <input id=note type=text aria-label=Note></label>"
+        )
+        profile = tmp_path / f"chrome-first-{launch}"
+        profile.mkdir()
+        proc = subprocess.Popen(
+            [
+                binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+                "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+                f"--user-data-dir={profile}", "--window-size=800,600",
+                page.resolve().as_uri(),
+            ],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            deadline = time.monotonic() + 45
+            snap = None
+            last_note = ""
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"Chrome exited with status {proc.returncode} before {token}"
+                    )
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.APP_NOT_FOUND:
+                        raise
+                    last_note = exc.message
+                    shot = None
+                else:
+                    rendered = observe.render_text(shot)
+                    last_note = rendered[:400]
+                    note = next((el for el in shot.elements if el.title == "Note"), None)
+                    if token in rendered and note is not None and note.value in (None, ""):
+                        snap = shot
+                        break
+                time.sleep(0.4)
+            assert snap is not None, f"Chrome did not expose {token}\n{last_note}"
+            store = safety.PermissionStore(tmp_path / f"first-permissions-{launch}.json")
+            store.set_tier("chrome", safety.Tier.FULL)
+            front = driver.frontmost_app()[0]
+            if front and front != "chrome":
+                store.set_tier(front, safety.Tier.FULL)
+            runtime = server.Runtime(
+                store=store,
+                audit=safety.AuditLog(tmp_path / f"first-audit-{launch}"),
+                driver=driver,
+            )
+            runtime._current = snap
+            note = next(el for el in snap.elements if el.title == "Note")
+            try:
+                result = runtime.set_value(note.ref, wanted)
+            except ComputerUseError as exc:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+                shown = next((el for el in shot.elements if el.title == "Note"), None)
+                value = None if shown is None else shown.value
+                raise AssertionError(
+                    f"launch {launch}: set_value raised {exc.code} {exc.detail} "
+                    f"while Note reads {value!r}"
+                ) from exc
+            assert str(result).startswith("set "), result
+            assert wanted in str(result), result
+            deadline = time.monotonic() + 4
+            shown_value = None
+            while time.monotonic() < deadline:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+                live = next((el for el in shot.elements if el.title == "Note"), None)
+                shown_value = None if live is None else live.value
+                if shown_value is not None and wanted in str(shown_value):
+                    break
+                time.sleep(0.2)
+            assert shown_value is not None and wanted in str(shown_value), shown_value
+            passes += 1
+        finally:
+            stop(proc)
+    assert passes == 6
+
+
 _MENU_APP = "cuamenuapp"
 
 _GTK_MENU_APP = textwrap.dedent(
