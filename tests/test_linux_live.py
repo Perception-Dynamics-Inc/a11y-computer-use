@@ -123,6 +123,69 @@ def test_linux_atspi_snapshot_of_gtk_app(tmp_path) -> None:
         proc.terminate()
 
 
+def test_linux_frozen_gtk_app_is_app_not_responding(tmp_path) -> None:
+    """SIGSTOP the GTK fixture. Snapshot must fail fast with the app and pid.
+
+    SIGCONT then returns the same tree, and the ref from before the freeze
+    still rematches. The error does not mention screen_text.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.server import error_text
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_app(tmp_path)
+    stopped = False
+    try:
+        before = _wait_for_snapshot(driver)
+        assert before and any(el.clickable and "Save" in el.title for el in before.elements)
+        button = next(el for el in before.elements if el.clickable and "Save" in el.title)
+        os.kill(proc.pid, signal.SIGSTOP)
+        stopped = True
+        started = time.monotonic()
+        with pytest.raises(ComputerUseError) as caught:
+            driver.snapshot(Scope.WINDOW, _APP)
+        elapsed = time.monotonic() - started
+        assert elapsed < 8.0, elapsed
+        err = caught.value
+        assert err.code is ErrorCode.APP_NOT_RESPONDING
+        assert _APP in err.message
+        assert err.detail.get("pid") in {proc.pid, before.pid}
+        assert isinstance(err.detail.get("pid"), int)
+        rendered = error_text(err)
+        assert "screen_text" not in rendered
+        assert "custom-drawn" not in rendered
+        os.kill(proc.pid, signal.SIGCONT)
+        stopped = False
+        recovered = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                recovered = driver.snapshot(Scope.WINDOW, _APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_RESPONDING:
+                    raise
+                time.sleep(0.2)
+                continue
+            if any(el.clickable and "Save" in el.title for el in recovered.elements):
+                break
+            time.sleep(0.2)
+        assert recovered and any(el.clickable and "Save" in el.title for el in recovered.elements)
+        resolved = driver.resolve_ref(before, button.ref)
+        assert "Save" in resolved.title
+    finally:
+        if stopped:
+            try:
+                os.kill(proc.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_linux_a11y_press_button(tmp_path) -> None:
     """The a11y-first activation path: press the Save button through the AT-SPI
     action API (no pointer movement); its handler sets the entry to 'SAVED',

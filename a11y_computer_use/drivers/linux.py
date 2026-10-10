@@ -39,6 +39,25 @@ from a11y_computer_use.schema import (
 )
 
 
+def _hint_pid(app: str) -> int | None:
+    """The only X11 pid for ``app``, or None when the name is not unique.
+
+    Used when AT-SPI's own pid read does not answer. A missing display is
+    None, the same as no match.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    try:
+        pids = _linux_system.pids_matching(app)
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
+        return None
+    if len(pids) == 1:
+        return next(iter(pids))
+    return None
+
+
 def _resolved_app(identifier: str) -> str:
     """The app id app list would show for ``identifier``.
 
@@ -711,15 +730,90 @@ class LinuxDriver:
         If the accessibility bus drops while LibreOffice is registering, the
         walk is retried once on a new connection. A second failure is a
         retryable ``timeout`` with reason ``bus_disconnected``.
+
+        ``Scope.DISPLAY`` walks every application on the AT-SPI desktop. An
+        application that does not answer is omitted and the others are
+        returned. A stopped target of ``Scope.WINDOW`` or ``Scope.APP``
+        raises ``app_not_responding`` instead of an empty tree.
         """
         from a11y_computer_use.drivers import _dbus_guard
 
+        if scope is Scope.DISPLAY:
+            return _dbus_guard.call_with_reconnect(self._snapshot_desktop)
         return _dbus_guard.call_with_reconnect(lambda: self._snapshot(scope, app))
 
-    def _snapshot(self, scope: Scope, app: str) -> Snapshot:
+    def _not_responding(self, app: str, exc: ComputerUseError) -> ComputerUseError:
+        """The caller's app name, with the pid the bus actually timed out on."""
+        pid = exc.detail.get("pid")
+        pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
+        detail = dict(exc.detail)
+        detail["app"] = app
+        detail["pid"] = pid if isinstance(pid, int) and pid > 0 else None
+        return ComputerUseError(
+            ErrorCode.APP_NOT_RESPONDING,
+            f"{app} did not answer accessibility queries{pid_text}",
+            detail=detail,
+        )
+
+    def _snapshot_desktop(self) -> Snapshot:
+        """One snapshot of every application that answers AT-SPI.
+
+        A frozen application is left out. When at least one other application
+        answers, its tree is in the result. When none answer, the error names
+        the failure instead of an empty success.
+        """
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
+        found = self._run(_atspi.desktop_application_roots)
+        if not found.ready:
+            if found.silent:
+                raise ComputerUseError(
+                    ErrorCode.APP_NOT_RESPONDING,
+                    "an application did not answer accessibility queries",
+                    detail={
+                        "app": None,
+                        "pid": None,
+                        "silent": found.silent,
+                        "hint": _atspi._APP_NOT_RESPONDING_HINT,
+                    },
+                )
+            return self._empty_display()
+        items = [
+            (name, None, lambda name=name, root=root: self._snapshot_root(name, root, Scope.APP))
+            for name, root in found.ready
+        ]
+        snaps = _atspi.collect_app_snapshots(items)
+        return observe.merge_snapshots(snaps)
+
+    def _empty_display(self) -> Snapshot:
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        return observe.build_snapshot(
+            None,
+            _atspi.ATSPIAccessor(),
+            scope=Scope.DISPLAY,
+            app=None,
+            pid=None,
+            geometry=_atspi.primary_geometry(),
+        )
+
+    def _snapshot(self, scope: Scope, app: str) -> Snapshot:
+        try:
+            return self._snapshot_resolved(scope, app)
+        except ComputerUseError as exc:
+            if exc.code is ErrorCode.APP_NOT_RESPONDING and exc.detail.get("app") != app:
+                raise self._not_responding(app, exc) from exc
+            raise
+
+    def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
+        from a11y_computer_use.drivers import _atspi
+
+        # A stopped process is already visible in /proc. Raising here skips
+        # the desktop scan, which otherwise spends a D-Bus timeout on every
+        # sibling before this app's own read fails.
+        _atspi.raise_if_app_stopped(app)
         # A name find_root already answers is the AT-SPI application. Two
         # Python windows share the comm python3; resolving that name to the
         # comm first would snapshot the other window. LibreOffice is the
@@ -771,27 +865,47 @@ class LinuxDriver:
                 detail={"app": resolved},
             )
 
+        return self._snapshot_root(resolved, root, scope, caller=app)
+
+    def _snapshot_root(
+        self, app: str, root: object, scope: Scope, caller: str | None = None,
+    ) -> Snapshot:
+        """Pruned snapshot of one already-resolved AT-SPI root.
+
+        Unanswered reads of this application raise ``app_not_responding``
+        with its name and pid. The budget starts here, after the desktop
+        scan, so a frozen sibling is not charged to ``app``.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
         def _do() -> Snapshot:
-            pid = _atspi.pid_of(root)
-            accessor = _atspi.ATSPIAccessor()
-            accessor.libreoffice = (
-                _atspi.libreoffice_app(resolved) or _atspi.libreoffice_app(app or "")
-            )
-            # LibreOffice 25.2 reports content a title bar high until the
-            # first pointer event. A status-bar motion, then this walk,
-            # republishes those boxes. LibreOffice 24 already matches and
-            # is not moved, so its pointer inset and the placement cache
-            # stay as they were.
-            if accessor.libreoffice:
-                _atspi.settle_libreoffice_geometry(root)
-            # Chromium lists: the rows are read from the list node this walk
-            # holds. A saved head on another wrapper is not the snapshot.
-            accessor.refresh_visible(root)
-            accessor._table_seek = self._table_seek
-            return observe.build_snapshot(
-                root, accessor, scope=scope, app=resolved, pid=pid,
-                geometry=_atspi.primary_geometry(),
-            )
+            hinted = _hint_pid(app)
+            with _atspi.app_reply_watch(app, hinted, root) as watch:
+                pid = _atspi.pid_of(root) or hinted
+                if isinstance(pid, int) and pid > 0:
+                    watch.pid = pid
+                accessor = _atspi.ATSPIAccessor()
+                # ``app`` is the resolved comm when the caller said LibreOffice
+                # and the bus said soffice.bin. Either name marks the suite.
+                accessor.libreoffice = _atspi.libreoffice_app(app or "") or _atspi.libreoffice_app(
+                    caller or ""
+                )
+                # LibreOffice 25.2 reports content a title bar high until the
+                # first pointer event. A status-bar motion, then this walk,
+                # republishes those boxes. LibreOffice 24 already matches and
+                # is not moved, so its pointer inset and the placement cache
+                # stay as they were.
+                if accessor.libreoffice:
+                    _atspi.settle_libreoffice_geometry(root)
+                # Chromium lists: the rows are read from the list node this walk
+                # holds. A saved head on another wrapper is not the snapshot.
+                accessor.refresh_visible(root)
+                accessor._table_seek = self._table_seek
+                return observe.build_snapshot(
+                    root, accessor, scope=scope, app=app, pid=watch.pid,
+                    geometry=_atspi.primary_geometry(),
+                )
 
         return self._run(_do)
 

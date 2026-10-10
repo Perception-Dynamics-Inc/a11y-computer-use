@@ -55,6 +55,7 @@ def test_error_codes_are_wire_stable() -> None:
         "focus_lost",
         "app_not_found",
         "timeout",
+        "app_not_responding",
         "busy",
         "closed",
         "confirmation_declined",

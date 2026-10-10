@@ -341,6 +341,9 @@ class ErrorCode(str, Enum):
     TIMEOUT = "timeout"
     """The operation (e.g. ``wait_for``, a hung-app AX call) timed out."""
 
+    APP_NOT_RESPONDING = "app_not_responding"
+    """The application is running but did not answer accessibility queries in time."""
+
     BUSY = "busy"
     """The Runtime is occupied or its bounded request queue is full; retry later."""
 

@@ -350,6 +350,53 @@ def build_snapshot(
     )
 
 
+def merge_snapshots(snaps: Sequence[Snapshot]) -> Snapshot:
+    """One display snapshot containing every element of ``snaps``.
+
+    Refs are renumbered ``e1..eN`` in the order given, and the live handles
+    move with them so a ref from the merged tree still activates. Each input
+    keeps its own epoch. ``app`` and ``pid`` are None, which is the display
+    scope contract.
+    """
+    if not snaps:
+        raise ValueError("merge_snapshots needs at least one snapshot")
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    handles: dict[str, object] = {}
+    elisions: dict[str, int] = {}
+    full_values: dict[str, str] = {}
+    for snap in snaps:
+        mapping: dict[str, str] = {}
+        old_handles = _HANDLES.get(snap.snapshot_id, {})
+        old_values = _FULL_VALUES.get(snap.snapshot_id, {})
+        old_elisions = _EPOCHS.get(snap.snapshot_id, {})
+        for el in snap.elements:
+            new_ref = f"e{len(elements) + 1}"
+            mapping[el.ref] = new_ref
+            parent = mapping[el.parent] if el.parent and el.parent in mapping else None
+            elements.append(
+                dataclasses.replace(el, ref=new_ref, snapshot_id=snapshot_id, parent=parent)
+            )
+            if el.ref in old_handles:
+                handles[new_ref] = old_handles[el.ref]
+            if el.ref in old_values:
+                full_values[new_ref] = old_values[el.ref]
+        for parent_ref, count in old_elisions.items():
+            mapped = mapping.get(parent_ref)
+            if mapped is not None:
+                elisions[mapped] = count
+    _register_epoch(snapshot_id, elisions, handles, full_values)
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=Scope.DISPLAY,
+        app=None,
+        pid=None,
+        created_at=time.time(),
+        displays=snaps[0].displays,
+        elements=tuple(elements),
+    )
+
+
 def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
     """Re-resolve a snapshot-scoped ref against the *live* tree.
 
