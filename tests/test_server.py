@@ -736,6 +736,45 @@ async def test_app_list_on_a_fresh_desktop_keys_on_a_trusted_running_app(mcp_ser
     assert server.Runtime(store=store, audit=safety.AuditLog(tmp_path_for(store)))._list_gate_key() == APP
 
 
+async def test_app_list_on_an_unimplemented_backend_is_a_refusal(tmp_path, monkeypatch) -> None:
+    """A grant must not turn a missing app-list backend into an internal error.
+
+    Windows ``running_apps`` raises ``NotImplementedError``. With no grant the
+    gate refuses before that call. With a grant the list used to crash. The
+    wire result is still refusal text.
+    """
+
+    class _Driver:
+        name = "stub"
+        calls = 0
+
+        def running_apps(self):
+            self.calls += 1
+            raise NotImplementedError("Windows backend not implemented yet")
+
+    driver = _Driver()
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    audit = tmp_path / "audit"
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "notepad.exe")
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(audit), driver=driver)
+    mcp = server.build_server(runtime=runtime)
+    result = await call_tool(mcp, "app", {"action": "list"})
+    assert result.isError
+    text = result.content[0].text
+    assert text.startswith("needs_permission"), text
+    assert "internal_error" not in text
+    assert driver.calls == 0  # ungranted: the gate never asks the backend
+
+    store.set_tier("notepad.exe", safety.Tier.READ)
+    result = await call_tool(mcp, "app", {"action": "list"})
+    assert result.isError
+    text = result.content[0].text
+    assert text.startswith("needs_permission"), text
+    assert "internal_error" not in text
+    assert "not implemented" in text
+    assert driver.calls == 1
+
+
 async def test_window_list_bounds_are_display_qualified_physical_pixels(
     mcp_server, store, monkeypatch
 ) -> None:

@@ -35,6 +35,49 @@ def test_settle_longer_than_the_timeout_is_a_timeout(monkeypatch) -> None:
     assert info.value.detail["polls"] == 5 and "condition" in info.value.detail
 
 
+def test_settle_retries_when_sleep_is_interrupted(monkeypatch) -> None:
+    """macOS can raise InterruptedError from time.sleep on SIGTERM."""
+    clock = [100.0]
+    calls = {"n": 0}
+
+    def sleep(seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise InterruptedError("interrupted system call")
+        clock[0] += seconds
+
+    monkeypatch.setattr(conditions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(conditions.time, "sleep", sleep)
+    result = conditions.Checker().wait({"settle": 1}, timeout_s=10, poll_s=1)
+    assert result["matched"] == "settled for 1s"
+    assert calls["n"] >= 2
+
+
+def test_interrupted_sleep_stops_the_wait_when_cancel_is_set(monkeypatch) -> None:
+    """A signal during the slice must not keep the settle running."""
+    clock = [0.0]
+
+    def sleep(_seconds: float) -> None:
+        raise InterruptedError("interrupted system call")
+
+    monkeypatch.setattr(conditions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(conditions.time, "sleep", sleep)
+    flag = {"stop": False}
+
+    def on_interrupt() -> None:
+        flag["stop"] = True
+
+    result = conditions.Checker().wait(
+        {"settle": 30},
+        timeout_s=60,
+        poll_s=1,
+        stop=lambda: flag["stop"],
+        on_interrupt=on_interrupt,
+    )
+    assert result["matched"] == "cancelled"
+    assert flag["stop"] is True
+
+
 def test_settle_rejects_negative_or_absurd_seconds() -> None:
     with pytest.raises(ValueError):
         conditions.Checker().probe({"settle": -1}, {})

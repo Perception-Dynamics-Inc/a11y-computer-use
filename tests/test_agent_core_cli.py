@@ -472,3 +472,272 @@ def test_domain_flags_reach_the_agent():
     assert agent.domain_policy.allowed == ("file", "example.com")
     assert agent.domain_policy.blocked == ("blocked.example",)
     assert agent.fence_untrusted is True
+
+
+def _waits(path, seconds: list[float]) -> None:
+    turns = [
+        {"text": "", "calls": [{"name": "wait", "args": {"seconds": item}}]}
+        for item in seconds
+    ]
+    path.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+
+
+def _spawn_run(script, trace, home):
+    import os
+    import subprocess
+    import sys
+
+    grant = home / ".a11y-computer-use"
+    grant.mkdir(parents=True, exist_ok=True)
+    (grant / "permissions.json").write_text(
+        json.dumps({"apps": {"unknown": {"tier": "read"}}, "deny": [], "allow": []}),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "env": env,
+    }
+    # Ctrl+Break reaches a Windows child only when it is its own process
+    # group. POSIX uses a new session so the signal hits this process.
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    # A settle wait is gated on the frontmost app. macOS CI's frontmost app is
+    # not "unknown", so a grant for only that name refuses the wait at once
+    # and the next step has started before a poll can see this one. Grant the
+    # app NSWorkspace reports, which is the same app the wait checks.
+    # The file is the HOME this process was given. PermissionStore() with no
+    # path uses Path.home(), and on Windows that is USERPROFILE, not HOME, so
+    # a bare store would write the grant into the runner profile and later
+    # tests would be allowed through to the unimplemented Windows backend.
+    child = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "from a11y_computer_use.safety import PermissionStore, Tier, frontmost_app\n"
+        "store = PermissionStore(Path(os.environ['HOME']) / '.a11y-computer-use' / 'permissions.json')\n"
+        "store.set_tier('unknown', Tier.READ)\n"
+        "bundle, _pid = frontmost_app()\n"
+        "if bundle:\n"
+        "    store.set_tier(bundle, Tier.READ)\n"
+        "from a11y_computer_use.agent.cli import main\n"
+        "raise SystemExit(main())\n"
+    )
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            child,
+            "run",
+            "wait a lot",
+            "--model",
+            f"scripted:{script}",
+            "--json",
+            "--max-time",
+            "90",
+            "--max-steps",
+            "10",
+            "--trace-dir",
+            str(trace),
+        ],
+        **kwargs,
+    )
+
+
+def _deliver(proc, sig_name: str) -> None:
+    """Deliver one cooperative cancel signal to a running agent process.
+
+    Windows cannot deliver SIGTERM to a Python handler. Ctrl+Break reaches
+    the SIGBREAK handler in a child started with ``CREATE_NEW_PROCESS_GROUP``.
+    """
+    import signal
+    import sys
+
+    if sys.platform == "win32":
+        if sig_name == "SIGTERM":
+            raise AssertionError("SIGTERM is not a cooperative cancel on Windows")
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+        return
+    proc.send_signal(getattr(signal, sig_name))
+
+
+def test_second_cancel_signal_exits_3(monkeypatch) -> None:
+    """The second signal must not fall through to the default SIGINT death."""
+    import signal
+
+    previous = signal.getsignal(signal.SIGINT)
+    codes: list[int] = []
+
+    def _exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(cli.os, "_exit", _exit)
+    flag = __import__("threading").Event()
+    cancelled = {"n": 0}
+
+    class _Agent:
+        _signal_cancel = flag
+
+        def cancel(self) -> None:
+            cancelled["n"] += 1
+
+    hits = [0]
+    try:
+        cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert flag.is_set()
+        assert cancelled["n"] == 1
+        assert codes == []
+        with pytest.raises(SystemExit):
+            cli._on_cancel_signal(_Agent(), hits, signal.SIGINT, None)
+        assert codes == [3]
+        assert hits[0] == 2
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def _wait_for_steps(trace, count: int, timeout: float) -> None:
+    import time
+
+    path = trace / "steps.jsonl"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.is_file():
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if len(lines) >= count:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"trace did not record {count} steps")
+
+
+def _step_started(trace, *, strict: bool) -> list[dict]:
+    """``step_started`` lines flushed before each step's tool call.
+
+    A poll can observe a partial last line while the child is still writing.
+    ``strict`` is for the read after the process has exited.
+    """
+    path = trace / "events.jsonl"
+    if not path.is_file():
+        return []
+    started: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                raise
+            continue
+        if event.get("kind") == "step_started":
+            started.append(event)
+    return started
+
+
+def _wait_for_step_started(proc, trace, index: int, timeout: float) -> list[dict]:
+    """Block until ``events.jsonl`` reports that ``index`` has started."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _out, err = proc.communicate()
+            raise AssertionError(
+                f"child exited {proc.returncode} before step_started {index}: {err}"
+            )
+        started = _step_started(trace, strict=False)
+        if any(event.get("index") == index for event in started):
+            return started
+        time.sleep(0.05)
+    raise AssertionError(
+        f"trace did not record step_started {index}: {_step_started(trace, strict=False)}"
+    )
+
+
+@pytest.mark.parametrize("sig_name", ["SIGINT", "SIGTERM"])
+def test_subprocess_signal_cancels_after_the_current_step(tmp_path, sig_name: str) -> None:
+    """Signal only after step 2 has started, and stop before any later step.
+
+    Waiting for a finished step and then signalling races a slow runner: the
+    next wait can already be underway. The child flushes ``step_started``
+    before the tool call, and the step being signalled waits long enough that
+    the signal lands inside it.
+    """
+    import sys
+    import time
+
+    if sys.platform == "win32" and sig_name == "SIGTERM":
+        pytest.skip("Windows TerminateProcess does not run a Python SIGTERM handler")
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    # Step 2 is the one the signal hits. It is long so delivery delay cannot
+    # run it out and start step 3. Step 3 must not start.
+    _waits(script, [0.2, 30.0, 30.0])
+    proc = _spawn_run(script, trace, tmp_path / "home")
+    try:
+        started = _wait_for_step_started(proc, trace, 2, 30)
+        started_actions = [event["action"] for event in started]
+        started_indexes = [event["index"] for event in started]
+        assert started_indexes == [1, 2]
+        assert started_actions == ["wait", "wait"]
+        signalled = time.monotonic()
+        _deliver(proc, sig_name)
+        out, err = proc.communicate(timeout=45)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    elapsed = time.monotonic() - signalled
+    assert proc.returncode == 3
+    # Step 2 may finish its wait; step 3 is another 30s and must not run.
+    assert elapsed < 40, elapsed
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err
+    payload = json.loads(out)
+    assert payload["status"] == "cancelled"
+    assert payload["reason"] == "cancelled"
+    finished = [step["action"] for step in payload["step_log"]]
+    assert finished == started_actions
+    recorded = [
+        json.loads(line)
+        for line in (trace / "steps.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [step["action"] for step in recorded] == started_actions
+    assert [step["index"] for step in recorded] == started_indexes
+    after = _step_started(trace, strict=True)
+    assert [event["index"] for event in after] == started_indexes
+    assert [event["action"] for event in after] == started_actions
+    assert payload["trace_dir"] == str(trace)
+
+
+def test_second_sigint_exits_3_without_a_traceback(tmp_path) -> None:
+    """A second Ctrl+C leaves the process immediately, still with code 3."""
+    import time
+
+    script = tmp_path / "turns.json"
+    trace = tmp_path / "trace"
+    _waits(script, [0.3, 30.0])
+    proc = _spawn_run(script, trace, tmp_path / "home")
+    try:
+        _wait_for_steps(trace, 1, 20)
+        started = time.monotonic()
+        _deliver(proc, "SIGINT")
+        time.sleep(0.2)
+        _deliver(proc, "SIGINT")
+        _out, err = proc.communicate(timeout=8)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert time.monotonic() - started < 8
+    assert proc.returncode == 3
+    assert "Traceback" not in err
+    assert "KeyboardInterrupt" not in err

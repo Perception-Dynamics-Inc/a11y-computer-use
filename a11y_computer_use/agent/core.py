@@ -247,6 +247,9 @@ class Agent:
         self._domains_explicit = allowed_domains is not None or blocked_domains is not None
         self.domain_policy = DomainPolicy.resolve(allowed_domains, blocked_domains)
         self._cancel = threading.Event()
+        #: Set by the CLI signal handler. Unlike ``_cancel``, ``_loop`` does
+        #: not clear it, so a signal during startup still stops the run.
+        self._signal_cancel: threading.Event | None = None
         self._result: RunResult | None = None
         self.model = None
         self.runtime = None
@@ -254,6 +257,24 @@ class Agent:
 
     def cancel(self) -> None:
         """Ask the in-flight ``run`` or ``stream`` to stop. Thread-safe."""
+        self._cancel.set()
+
+    def _restore_signal_cancel(self) -> None:
+        """Re-apply a CLI signal that ``_loop``'s ``clear`` would drop."""
+        flag = getattr(self, "_signal_cancel", None)
+        if flag is not None and flag.is_set():
+            self._cancel.set()
+
+    def _stop_requested(self) -> bool:
+        """True when ``cancel`` or a CLI signal has asked the run to stop."""
+        self._restore_signal_cancel()
+        return self._cancel.is_set()
+
+    def _mark_signal_cancel(self) -> None:
+        """Record a cancel from a signal, including one seen as ``InterruptedError``."""
+        flag = self._signal_cancel
+        if flag is not None:
+            flag.set()
         self._cancel.set()
 
     def run(self, goal: str) -> RunResult:
@@ -273,7 +294,6 @@ class Agent:
     # -- loop -----------------------------------------------------------------
 
     def _loop(self, goal: str) -> Iterator[Event]:
-        self._cancel.clear()
         self._result = None
         started = time.perf_counter()
         self._steps: list[StepRecord] = []
@@ -291,16 +311,36 @@ class Agent:
         self._injection = False
         self._crop_block: dict | None = None
         self._goal = goal
+        # ``clear`` drops a cancel that arrived before the loop, which the
+        # HTTP service re-applies on the next event. A CLI signal sets
+        # ``_signal_cancel`` as well, and that one must survive ``clear``:
+        # the handler is installed before ``run``, so the signal can land
+        # in this window or during ``_prepare``.
+        self._cancel.clear()
+        self._restore_signal_cancel()
         try:
             self._prepare()
             yield from self._drive(goal, started)
         except _Cancelled:
             self._result = self._build("cancelled", "", "cancelled", started)
             yield Event("error", {"reason": "cancelled"})
+        except KeyboardInterrupt:
+            # Ctrl+C that escaped a blocking call (the default SIGINT handler,
+            # or a platform that raises instead of returning EINTR). The steps
+            # recorded so far stay on the result.
+            self._result = self._build("cancelled", "", "cancelled", started)
+            yield Event("error", {"reason": "cancelled"})
         except Exception as exc:  # a broken runtime must still produce a result
-            reason = f"error: {type(exc).__name__}: {exc}"
-            self._result = self._build("failed", "", reason, started)
-            yield Event("error", {"reason": reason})
+            if self._stop_requested():
+                # macOS can raise InterruptedError from sleep, select, or a
+                # subprocess after the signal handler has already asked to
+                # stop. That is a cancel, not a failed run.
+                self._result = self._build("cancelled", "", "cancelled", started)
+                yield Event("error", {"reason": "cancelled"})
+            else:
+                reason = f"error: {type(exc).__name__}: {exc}"
+                self._result = self._build("failed", "", reason, started)
+                yield Event("error", {"reason": reason})
 
     def _prepare(self) -> None:
         if self.display:
@@ -323,6 +363,14 @@ class Agent:
             elif isinstance(existing, DomainPolicy):
                 self.domain_policy = existing
         self._require_linux_bindings()
+        # The wait loop polls these so a signal during time.sleep stops this
+        # step instead of running the next turn. Missing attributes on a test
+        # double are ignored.
+        try:
+            self.runtime._agent_stop = self._stop_requested  # type: ignore[attr-defined]
+            self.runtime._agent_interrupt = self._mark_signal_cancel  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
+            pass
         self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         self.trace = Trace(self._trace_dir)
         prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
@@ -335,7 +383,7 @@ class Agent:
     def _drive(self, goal: str, started: float) -> Iterator[Event]:
         self._messages.append(Message(role="user", content=f"Goal: {goal}"))
         while True:
-            if self._cancel.is_set():
+            if self._stop_requested():
                 raise _Cancelled()
             if self._timed_out(started):
                 self._finish("failed", "", "max_time", started)
@@ -401,7 +449,7 @@ class Agent:
                 continue
             self._nudges = 0
             for position, call in enumerate(turn.calls):
-                if self._cancel.is_set():
+                if self._stop_requested():
                     raise _Cancelled()
                 if self._timed_out(started):
                     self._finish("failed", "", "max_time", started)
@@ -427,6 +475,12 @@ class Agent:
     ) -> Iterator[Event]:
         requested = Action.from_call(call)
         index = len(self._steps) + 1
+        # On disk before the event is yielded, so a parent polling the trace
+        # observes this step before the tool call blocks.
+        if self.trace is not None:
+            self.trace.append_event(
+                {"kind": "step_started", "index": index, "action": requested.name}
+            )
         yield Event("step_started", {"index": index, "action": requested.name})
         problem = validate_action(requested, allow_exec=self.allow_exec)
         if problem is not None:
@@ -561,7 +615,7 @@ class Agent:
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
-        if error and self.max_retries > 0 and requested.name != "crop":
+        if error and self.max_retries > 0 and requested.name != "crop" and not self._stop_requested():
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
             recovery.extend(retry_notes)
@@ -866,6 +920,19 @@ class Agent:
         except (TypeError, ValueError, KeyError) as exc:
             text = self._fence_tool_text(f"invalid_arguments: {exc}")
             marker = outcome.ActionResult(text, outcome="refused", next=(), evidence=text)
+            return "", text, marker
+        except InterruptedError as exc:
+            # A signal during sleep, select, or a subprocess. On macOS this
+            # can surface before the Python handler runs. Record the cancel
+            # now so the loop does not start another step.
+            if self._signal_cancel is not None:
+                self._mark_signal_cancel()
+            text = self._fence_tool_text(f"error: {type(exc).__name__}: {exc}")
+            marker = outcome.ActionResult(
+                text, outcome="refused",
+                next=("ref", "coordinates", "keyboard", "foreground"),
+                evidence=text,
+            )
             return "", text, marker
         except Exception as exc:  # noqa: BLE001 - one tool must not kill the run
             text = self._fence_tool_text(f"error: {type(exc).__name__}: {exc}")

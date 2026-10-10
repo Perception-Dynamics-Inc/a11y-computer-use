@@ -2,6 +2,10 @@
 
 ``a11y-agent run`` prints one JSON object on stdout when ``--json`` is set.
 Exit codes: 0 success, 1 failed, 2 needs_human, 3 error or cancel.
+SIGINT and SIGTERM cancel after the current step (status ``cancelled``,
+exit 3). On Windows, Ctrl+C (SIGINT) and Ctrl+Break (SIGBREAK) do; SIGTERM
+there is TerminateProcess and is not a cooperative cancel. A second signal
+exits 3 immediately and does not print a traceback.
 ``--approve-policy deny`` is the default for risky actions. ``--approve``
 prompts on the terminal (stderr or the tty, never stdout).
 
@@ -13,7 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import sys
+import threading
 from collections.abc import Sequence
 
 from a11y_computer_use.agent.actions import Action, risk_category
@@ -52,7 +59,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     try:
         agent = build_agent(args)
-        result = agent.run(args.goal)
+        result = _run_until_cancelled(agent, args.goal)
+    except KeyboardInterrupt:
+        body = _error_body("cancelled")
+        body["status"] = "cancelled"
+        return _emit(args, body, 3)
     except Exception as exc:  # noqa: BLE001 - the process must exit 3, not traceback
         return _emit(args, _error_body(f"error: {type(exc).__name__}: {exc}"), 3)
     return _emit(args, result.to_dict(), exit_code(result))
@@ -84,6 +95,96 @@ def build_agent(args: argparse.Namespace):
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,
     )
+
+
+def _cancel_signals() -> list[int]:
+    """Signals that cancel ``a11y-agent run`` on this operating system.
+
+    POSIX delivers SIGINT (Ctrl+C) and SIGTERM to a Python handler. Windows
+    delivers SIGINT (Ctrl+C) and SIGBREAK (Ctrl+Break). ``os.kill(SIGTERM)``
+    on Windows calls TerminateProcess and never enters the handler, so it is
+    not installed there.
+    """
+    names = ("SIGINT", "SIGBREAK") if sys.platform == "win32" else ("SIGINT", "SIGTERM")
+    found: list[int] = []
+    for name in names:
+        value = getattr(signal, name, None)
+        if isinstance(value, int):
+            found.append(value)
+    return found
+
+
+def _on_cancel_signal(agent: object, hits: list[int], signum: int, frame: object) -> None:
+    """First signal cancels after the current step. The second exits 3.
+
+    The handler is re-armed before it does anything else. A second SIGINT
+    that arrives while the first is still tripped can leave the process on
+    the default handler; that path is an uncaught KeyboardInterrupt and the
+    process dies with status ``-SIGINT`` (-2) and a traceback. Re-arming
+    keeps this function installed. The second hit uses ``os._exit`` so
+    finalization cannot turn the exit into that signal death.
+    """
+    del frame
+    # Ask to stop before re-arming. signal.signal checks pending signals, and
+    # the cancel has to be visible even if that re-enters this handler.
+    flag = getattr(agent, "_signal_cancel", None)
+    if flag is not None and hasattr(flag, "set"):
+        try:
+            flag.set()
+        except Exception:  # noqa: BLE001 - a signal handler must not raise
+            pass
+    cancel = getattr(agent, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:  # noqa: BLE001 - a signal handler must not raise
+            pass
+    hits[0] += 1
+    try:
+        signal.signal(signum, lambda sig, frm: _on_cancel_signal(agent, hits, sig, frm))
+    except (OSError, ValueError):
+        pass
+    if hits[0] >= 2:
+        os._exit(3)
+
+
+def _run_until_cancelled(agent: object, goal: str):
+    """Run ``goal``. The platform's cancel signals stop it after this step.
+
+    Handlers are installed before ``run``, so a signal during startup is
+    recorded on ``agent._signal_cancel`` and still cancels after ``_loop``
+    clears the ordinary cancel event. The first signal returns into the
+    step. The trace write for that step closes, and ``run`` returns a
+    cancelled result. A second signal exits 3 with no traceback.
+    """
+    hits = [0]
+    saved: list[tuple[int, object]] = []
+    flag = getattr(agent, "_signal_cancel", None)
+    if flag is None:
+        try:
+            agent._signal_cancel = threading.Event()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse new attributes
+            pass
+
+    def handler(signum: int, frame: object) -> None:
+        _on_cancel_signal(agent, hits, signum, frame)
+
+    for sig in _cancel_signals():
+        try:
+            saved.append((sig, signal.getsignal(sig)))
+            signal.signal(sig, handler)
+            if hasattr(signal, "siginterrupt"):
+                signal.siginterrupt(sig, True)
+        except (OSError, ValueError):
+            continue
+    try:
+        return agent.run(goal)  # type: ignore[attr-defined]
+    finally:
+        for sig, previous in saved:
+            try:
+                signal.signal(sig, previous)  # type: ignore[arg-type]
+            except (OSError, ValueError):
+                pass
 
 
 def exit_code(result: RunResult) -> int:

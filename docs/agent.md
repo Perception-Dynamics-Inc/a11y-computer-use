@@ -167,6 +167,17 @@ did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
 
+SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
+step. On Windows, Ctrl+C (`SIGINT`) and Ctrl+Break (`SIGBREAK`) do the same;
+`SIGTERM` there ends the process without a Python handler, so it is not a
+cooperative cancel. The handler is installed before the first step. A signal
+that arrives inside a blocking call (`sleep`, `select`, or a subprocess) still
+ends the run as `cancelled` when that call raises `InterruptedError` or
+`KeyboardInterrupt`. The trace write for the step is closed, and `--json`
+prints one object with `status` `cancelled` and `reason` `cancelled`. The
+process exits 3. A second cancel signal exits 3 immediately and does not
+print a traceback.
+
 `--model-timeout` is the limit for one model call, in seconds. The default is
 120. It is not the time left in `--max-time`. The loop checks the run budget
 before each step and again after the observation, before it calls the model.
@@ -358,6 +369,9 @@ directory):
   result, error, `verified`, recovery notes, a screenshot path, `skipped`,
   and `turn_stop`.
 - `steps.jsonl` — the same records as `step_log`.
+- `events.jsonl` — one line when a step starts (`kind` `step_started`,
+  `index`, `action`), flushed before that step's tool call blocks.
+  `steps.jsonl` is still written only when the step finishes.
 - `exec-audit.jsonl` — one JSON line per exec attempt, appended and never
   rewritten. Each line has `timestamp`, `command`, `cwd`, `exit_code`,
   `output` (already truncated), `truncated`, `approval` (`approved`,
