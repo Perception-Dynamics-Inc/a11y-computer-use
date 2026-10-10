@@ -99,6 +99,33 @@ def _atspi_actions(*names: str) -> tuple[str, ...]:
     return _atspi._action_names(_Acc())
 
 
+def test_canvas_drawing_area_and_canvas_tag_read_as_a_canvas(monkeypatch) -> None:
+    """AT-SPI canvas, GTK drawing area, and a ``<canvas>`` section are AXCanvas.
+
+    WebGL is the graphics-document role on that same element. An image stays
+    an image; the pruner, not this reader, decides ``opaque_region``.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 9.0), (120.0, 80.0)))
+    monkeypatch.setattr(
+        _atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_call_first", lambda acc, names, *args, default=None: "")
+
+    def read(role: str, attrs: dict | None = None):
+        node = type("Node", (), {"role": role, "attrs": attrs or {}})()
+        monkeypatch.setattr(_atspi, "_role_name", lambda acc: acc.role)
+        monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: dict(acc.attrs))
+        return _atspi.ATSPIAccessor().read(node)
+
+    assert read("canvas").role == "AXCanvas"
+    assert read("drawing area").role == "AXCanvas"
+    assert read("section", {"tag": "canvas"}).role == "AXCanvas"
+    assert read("panel", {"xml-roles": "graphics-document"}).role == "AXCanvas"
+    assert read("image").role == "AXImage"
+    assert read("push button", {"tag": "button"}).role == "AXButton"
+
+
 def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     """A Linux-shaped tree (window > button + entry) prunes/indexes through the
     identical engine macOS uses: AXWindow root, a clickable button, an editable

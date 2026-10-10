@@ -89,10 +89,71 @@ def test_decorative_nodes_dropped_but_described_image_kept() -> None:
     snap = snap_of(typical_app_window())
     images = [el for el in snap.elements if el.role == "AXImage"]
     assert [el.title for el in images] == ["Sync status"], (
-        "unlabelled images and empty static text are decorative; described "
-        "images survive with the description as title"
+        "a described image keeps that description as its title"
     )
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 1, "an unnamed image is an opaque region, not a dropped decoration"
+    assert opaque[0].clickable and opaque[0].ref
+    assert opaque[0].bounds.width == 48 and opaque[0].bounds.height == 48
     assert not any(el.role == "AXStaticText" and not el.value for el in snap.elements)
+
+
+def test_canvas_unnamed_image_and_dead_group_are_opaque_regions() -> None:
+    """A pixel surface or a childless empty group is ``opaque_region``.
+
+    The line carries the ref and the bounds. A described image stays an
+    image. A group that holds a button collapses onto that button. A named
+    empty group stays a group. Nothing here reads pixels.
+    """
+    tree = ax(
+        "AXWindow",
+        title="Pixels",
+        at=(0.0, 0.0),
+        size=(800.0, 600.0),
+        children=[
+            ax("AXCanvas", at=(40.0, 40.0), size=(320.0, 180.0)),
+            ax("AXCanvas", title="Game board", at=(40.0, 240.0), size=(200.0, 100.0)),
+            ax("AXImage", title="image", at=(400.0, 40.0), size=(64.0, 64.0)),
+            ax("AXImage", description="Sync status", at=(480.0, 40.0), size=(24.0, 24.0)),
+            ax("AXGroup", at=(40.0, 360.0), size=(180.0, 80.0)),
+            ax("AXGroup", at=(40.0, 460.0), size=(10.0, 10.0)),
+            ax("AXGroup", title="Sidebar", at=(240.0, 360.0), size=(180.0, 80.0)),
+            ax(
+                "AXGroup",
+                at=(440.0, 360.0),
+                size=(120.0, 40.0),
+                children=[button("Inside", (448.0, 364.0))],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 4
+    assert all(el.clickable and el.ref.startswith("e") for el in opaque)
+    assert all(el.bounds.width > 0 and el.bounds.height > 0 for el in opaque)
+    titled = next(el for el in opaque if el.title == "Game board")
+    assert titled.bounds.width == 400 and titled.bounds.height == 200
+    assert any(el.role == "AXImage" and el.title == "Sync status" for el in snap.elements)
+    assert any(el.role == "AXGroup" and el.title == "Sidebar" for el in snap.elements)
+    spacer = next(
+        el for el in snap.elements
+        if el.role == "AXGroup" and not el.title and el.bounds.width == 20
+    )
+    assert not spacer.clickable
+    assert any(el.title == "Inside" and el.role == "AXButton" for el in snap.elements)
+    assert not any(
+        el.role == "AXGroup" and not el.title and el.value is None and el.bounds.width > 20
+        for el in snap.elements
+    )
+    text = render_text(snap)
+    assert "PIXELWORD" not in text
+    for el in opaque:
+        assert f"{el.ref} opaque_region" in text
+        assert f"[{el.bounds.width}x{el.bounds.height} @" in text
+    interactive = render_text(snap, mode="interactive")
+    assert "opaque_region" in interactive
+    assert f"[{titled.bounds.width}x{titled.bounds.height} @" in interactive
+    assert observe.find_elements(snap, role="opaque_region") == tuple(opaque)
 
 
 def test_controls_inside_an_empty_text_container_are_kept() -> None:

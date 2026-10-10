@@ -66,7 +66,7 @@ class DictAccessor:
 def typical_app_window() -> dict:
     """A realistic mid-size app window plus the noise the pruner must eat.
 
-    Contains: a toolbar of 8 buttons; a decorative (dropped) and a described
+    Contains: a toolbar of 8 buttons; an unnamed image (opaque_region) and a described
     (kept) image; a zero-size node; a fully-offscreen and a half-offscreen
     button; a group>scrollarea wrapper chain around the text editor
     (collapsed); a 40-row sidebar list with 2 interactive rows (fan-out cap);
@@ -84,7 +84,7 @@ def typical_app_window() -> dict:
         size=(1200.0, 44.0),
         children=[
             *toolbar_buttons,
-            ax("AXImage", at=(1000.0, 57.0), size=(24.0, 24.0)),  # decorative: dropped
+            ax("AXImage", at=(1000.0, 57.0), size=(24.0, 24.0)),  # unnamed: opaque_region
             ax("AXImage", at=(1030.0, 57.0), size=(24.0, 24.0), description="Sync status"),
             ax("AXGroup", at=(110.0, 57.0), size=(0.0, 0.0)),  # zero-size: dropped
             button("Ghost", (3000.0, 57.0)),  # fully offscreen: dropped
