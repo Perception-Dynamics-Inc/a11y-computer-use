@@ -3446,6 +3446,72 @@ def coordinate_click_info(acc) -> dict | None:
     }
 
 
+# A canvas ancestor sits between the control and its document. Stopping at
+# the document keeps a normal button from walking the whole window. The
+# canvas itself is not fallback content: a click on it stays a center click.
+_CANVAS_FALLBACK_STOP_ROLES = frozenset({
+    "document web", "document frame", "application", "frame", "window", "desktop frame",
+})
+
+
+def _canvas_surface(acc) -> bool:
+    """A Chromium ``<canvas>``. A GTK drawing area and an image are not one.
+
+    Chrome exposes ``<canvas>`` as role ``embedded`` with ``tag=canvas``, and
+    sometimes as role ``canvas``. The tag is the boundary. Fallback content
+    nested in that element is in the tree and is not painted.
+    """
+    if acc is None:
+        return False
+    if _role_name(acc) == "canvas":
+        return True
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    return tag == "canvas"
+
+
+def canvas_fallback_content(acc) -> bool:
+    """True when ``acc`` is Chromium content nested inside a canvas.
+
+    That content is not painted, so a pointer click lands on the canvas and
+    the control's handler does not run. False for the canvas element itself,
+    for GTK, and for anything that is not inside a canvas.
+    """
+    if acc is None or not _chromium_app(acc) or _canvas_surface(acc):
+        return False
+    current = acc
+    seen: set[int] = set()
+    for _ in range(40):
+        parent = _parent_of(current)
+        if parent is None or id(parent) in seen:
+            return False
+        seen.add(id(parent))
+        if _canvas_surface(parent):
+            return True
+        if _role_name(parent) in _CANVAS_FALLBACK_STOP_ROLES:
+            return False
+        current = parent
+    return False
+
+
+def canvas_fallback_dom_spec(acc) -> dict:
+    """DOM id, name, and tag for a click on canvas fallback content.
+
+    The caller has already decided ``acc`` is fallback content. The strings
+    are plain so the DOM lookup does not touch AT-SPI again.
+    """
+    attrs = _get_attributes(acc) if acc is not None else {}
+    label = ""
+    if acc is not None:
+        label = str(_call_first(acc, ("get_name",), default="") or "").strip()
+    return {
+        "pid": pid_of(acc),
+        "element_id": str(attrs.get("id") or attrs.get("html-id") or "").strip(),
+        "label": label,
+        "tag": str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower(),
+    }
+
+
 def grab_focus(acc) -> bool:
     """Give ``acc`` keyboard focus via AT-SPI (True on success) — no cursor move."""
     comp = _component(acc)
