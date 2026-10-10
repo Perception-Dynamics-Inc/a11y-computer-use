@@ -25,11 +25,13 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager
 
 from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode, normalize_document_title
-from a11y_computer_use.schema import Display
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
 # Keyed by the human role-name string rather than the numeric Atspi.Role enum
@@ -177,11 +179,116 @@ def _atspi():
     return Atspi
 
 
-def _safe(fn, default=None):
+# libatspi's per-call D-Bus wait is 300ms (`Atspi.set_timeout` above). A call
+# that lasts this long did not answer. Two of those, or this much time spent
+# inside them, fails that one application. The rest of a desktop walk is not
+# charged to it, and a single slow read does not fail a live tree.
+ATSPI_SLOW_CALL_S = 0.25
+ATSPI_UNANSWERED_CALLS = 2
+ATSPI_APP_REPLY_S = 2.0
+
+_APP_NOT_RESPONDING_HINT = "The app is not responding. Wait, then snapshot again."
+
+_reply_local = threading.local()
+
+
+class _ReplyWatch:
+    """Slow-call budget for the application currently being read."""
+
+    def __init__(self, app: str, pid: int | None) -> None:
+        self.app = app or "application"
+        self.pid = pid
+        self.slow_calls = 0
+        self.slow_s = 0.0
+
+
+@contextmanager
+def app_reply_watch(app: str, pid: int | None):
+    """Charge unanswered AT-SPI reads to ``app`` until the block exits.
+
+    A read at or above `ATSPI_SLOW_CALL_S` is an unanswered D-Bus call. After
+    `ATSPI_UNANSWERED_CALLS` of them, or `ATSPI_APP_REPLY_S` spent inside
+    them, the read raises `ErrorCode.APP_NOT_RESPONDING` and names ``app``
+    and the pid. Reads outside a watch keep today's default-on-failure
+    behavior, so one frozen sibling cannot fail a different application's
+    snapshot.
+    """
+    previous = getattr(_reply_local, "watch", None)
+    watch = _ReplyWatch(app, pid)
+    _reply_local.watch = watch
     try:
-        return fn()
+        yield watch
+    finally:
+        _reply_local.watch = previous
+
+
+def _current_watch() -> _ReplyWatch | None:
+    return getattr(_reply_local, "watch", None)
+
+
+def _charge_reply(watch: _ReplyWatch, elapsed: float) -> None:
+    if elapsed < ATSPI_SLOW_CALL_S:
+        return
+    watch.slow_calls += 1
+    watch.slow_s += elapsed
+    if watch.slow_calls < ATSPI_UNANSWERED_CALLS and watch.slow_s < ATSPI_APP_REPLY_S:
+        return
+    pid = watch.pid
+    pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
+    raise ComputerUseError(
+        ErrorCode.APP_NOT_RESPONDING,
+        f"{watch.app} did not answer accessibility queries{pid_text}",
+        detail={
+            "app": watch.app,
+            "pid": pid if isinstance(pid, int) and pid > 0 else None,
+            "hint": _APP_NOT_RESPONDING_HINT,
+        },
+    )
+
+
+def _safe(fn, default=None):
+    watch = _current_watch()
+    start = time.monotonic()
+    try:
+        result = fn()
+    except ComputerUseError:
+        raise
     except Exception:
-        return default
+        result = default
+    if watch is not None:
+        _charge_reply(watch, time.monotonic() - start)
+    return result
+
+
+class DesktopApplications:
+    """Applications on the AT-SPI desktop, split by whether they answered."""
+
+    def __init__(self, ready: list[tuple[str, object]], silent: int) -> None:
+        self.ready = ready
+        self.silent = silent
+
+
+def collect_app_snapshots(items: Sequence[tuple[str, int | None, Callable[[], object]]]) -> list:
+    """Run each ``(app, pid, fn)`` under that app's reply budget.
+
+    An application that does not answer is omitted. The others are returned
+    in order. When every application fails, the first `app_not_responding`
+    error is raised so the desktop does not look like an empty success.
+    """
+    kept: list = []
+    first_fail: ComputerUseError | None = None
+    for app, pid, fn in items:
+        try:
+            with app_reply_watch(app, pid):
+                kept.append(fn())
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_RESPONDING:
+                raise
+            if first_fail is None:
+                first_fail = exc
+    if not kept and first_fail is not None:
+        raise first_fail
+    return kept
 
 
 _a11y_status_forced = False
@@ -2549,22 +2656,31 @@ def find_root(app: str, scope) -> object | None:
         pids = set()
     best = None
     best_rank = -1
+    hinted = next(iter(pids)) if len(pids) == 1 else None
     for i in range(int(count)):
         candidate = _call_first(desktop, ("get_child_at_index",), i)
         if candidate is None:
             continue
+        started = time.monotonic()
         name = (_call_first(candidate, ("get_name",), default="") or "").lower()
+        name_unanswered = time.monotonic() - started >= ATSPI_SLOW_CALL_S
         # A dialog opened with Gtk.Dialog.run() wedges this process's
         # connection to the app: get_name comes back empty and child count
         # is -1 until the bus is replaced. Revive before treating the
         # registrant as unnamed, then read the name on the fresh connection.
-        if not name:
+        # A read that already used the D-Bus timeout is a frozen app, not
+        # that dialog: reviving it would spend another timeout per child.
+        if not name and not name_unanswered:
             _child_count(candidate)
             name = (_call_first(candidate, ("get_name",), default="") or "").lower()
         if needle not in name and not (pids and pid_of(candidate) in pids):
             continue
-        frames = _frames(candidate)
-        rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
+        with app_reply_watch(app, hinted) as watch:
+            pid = pid_of(candidate)
+            if pid:
+                watch.pid = pid
+            frames = _frames(candidate)
+            rank = 2 if any(_is_active(f) for f in frames) else (1 if frames else 0)
         if rank > best_rank:
             best, best_rank = candidate, rank
             if rank == 2:
@@ -2573,11 +2689,44 @@ def find_root(app: str, scope) -> object | None:
     if app_acc is None or scope is Scope.APP:
         return app_acc
     # WINDOW scope: prefer the ACTIVE top-level frame, else the first child.
-    frames = _frames(app_acc)
-    for frame in frames:
-        if _is_active(frame):
-            return frame
-    return frames[0] if frames else app_acc
+    # The same per-app budget covers this second frame read. A stopped
+    # target raises here instead of walking every child at 300ms each.
+    with app_reply_watch(app, hinted) as watch:
+        pid = pid_of(app_acc)
+        if pid:
+            watch.pid = pid
+        frames = _frames(app_acc)
+        for frame in frames:
+            if _is_active(frame):
+                return frame
+        return frames[0] if frames else app_acc
+
+
+def desktop_application_roots() -> DesktopApplications:
+    """Every application under the AT-SPI desktop.
+
+    A child whose name read hits the D-Bus timeout is counted as silent and
+    is not walked. Applications that answer are returned with the name the
+    registry reported. An empty desktop is ``ready`` empty and ``silent`` 0.
+    """
+    Atspi = _atspi()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return DesktopApplications([], 0)
+    count = _call_first(desktop, ("get_child_count",), default=0) or 0
+    ready: list[tuple[str, object]] = []
+    silent = 0
+    for index in range(int(count)):
+        child = _call_first(desktop, ("get_child_at_index",), index)
+        if child is None:
+            continue
+        started = time.monotonic()
+        name = str(_call_first(child, ("get_name",), default="") or "").strip()
+        if time.monotonic() - started >= ATSPI_SLOW_CALL_S:
+            silent += 1
+            continue
+        ready.append((name or "application", child))
+    return DesktopApplications(ready, silent)
 
 
 def is_secure(acc) -> bool:

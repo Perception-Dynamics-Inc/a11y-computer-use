@@ -3304,7 +3304,14 @@ class Runtime:
             if header:
                 first, _nl, rest = text.partition("\n")
                 text = f"{first}{header}\n{rest}" if rest else f"{first}{header}"
-            if observe.interactive_count(snap) == 0:  # a11y→vision handoff signal
+            # The custom-drawn note points at screen_text, whose default engine
+            # is macOS Vision. On Linux that note is a dead end: a frozen app
+            # is app_not_responding, and a genuinely empty tree stays silent.
+            # The Linux vision fallback is the ocr tool, not this hint.
+            if (
+                observe.interactive_count(snap) == 0
+                and getattr(self.driver, "name", None) != "linux"
+            ):
                 text = f"{text}\n\n{_VISION_HANDOFF_HINT}{self._auto_ocr_note(bundle, snap)}"
             if hasattr(self.driver, "webmcp_tools"):  # browser: the page's own tools as w refs
                 text = f"{text}{self._webmcp_block(bundle)}"
