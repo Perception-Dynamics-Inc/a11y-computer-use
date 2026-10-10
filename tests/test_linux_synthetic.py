@@ -5695,6 +5695,53 @@ def test_writer_cell_replace_writes_a_paragraph_set_text_refuses(fake_atspi) -> 
     assert paragraph.text == "NEWB2-1"
 
 
+def test_writer_cell_replace_waits_for_a_stale_paragraph_read(fake_atspi, monkeypatch) -> None:
+    """The paragraph write sticks when the first reads still show the old line.
+
+    ``set_text_contents`` has already replaced the line. A snapshot read can
+    still return ``Cell B2``. That lag is not a miss, and it must not select
+    the paragraph: ctrl+a in Writer selects the document.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    reads = {"n": 0}
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    def delete_text(*_args):
+        raise AssertionError("delete")
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    paragraph.delete_text = delete_text
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    real_text = _atspi._full_text
+
+    def lagging(acc):
+        shown = real_text(acc)
+        if acc is not paragraph:
+            return shown
+        reads["n"] += 1
+        if reads["n"] <= 4:
+            return "Cell B2"
+        return shown
+
+    monkeypatch.setattr(_atspi, "_full_text", lagging)
+
+    def selected(*_args, **_kwargs):
+        raise AssertionError("ctrl+a")
+
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", selected)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+    assert reads["n"] > 4
+
+
 def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
     """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
 
@@ -5722,21 +5769,23 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
 
     paragraph.text = "Cell B2"
     calls = {"n": 0}
+    monkeypatch.setattr(_atspi, "_WRITER_CELL_SETTLE_S", 0.15)
 
     def miss(acc, text, force=False):
         assert force is True
         calls["n"] += 1
-        if calls["n"] == 1:
-            acc.text = "NEWB2-1\nCell B2"
-            return False
-        acc.text = text
-        return True
+        if text == "Cell B2":
+            acc.text = text
+            return True
+        acc.text = "NEWB2-1\nCell B2"
+        return False
 
     monkeypatch.setattr(_atspi, "set_text", miss)
     with pytest.raises(ComputerUseError) as exc:
         _atspi.replace_writer_cell_text(cell, "NEWB2-1")
     assert exc.value.detail["reason"] == "text_mismatch"
-    assert exc.value.detail["actual"] == "Cell B2"
+    assert exc.value.detail["actual"] == "NEWB2-1\nCell B2"
+    assert "NEWB2-1\\nCell B2" in exc.value.message
     assert paragraph.text == "Cell B2"
     assert calls["n"] == 2
 
@@ -5749,6 +5798,42 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     _adopt(grid, calc)
     _adopt(calc, calc_text)
     assert _atspi.writer_text_cell(calc) is False
+
+
+def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:
+    """The new paragraph in front of the old line is the committed edit.
+
+    Writer can rebuild the cell child the write was aimed at. The first
+    walk then shows ``NEWB2-1`` and ``Cell B2``. That is not a miss: the
+    new paragraph stays and the old line is cleared.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    fresh = {"node": None}
+
+    def write(acc, text, force=False):
+        assert force is True
+        if text == "":
+            acc.text = ""
+            return True
+        if fresh["node"] is None:
+            created = _Acc("paragraph", name="")
+            created.text = text
+            fresh["node"] = created
+            _adopt(cell, created, paragraph)
+            return False
+        acc.text = text
+        return True
+
+    monkeypatch.setattr(_atspi, "set_text", write)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert fresh["node"] is not None and fresh["node"].text == "NEWB2-1"
+    assert paragraph.text == ""
+    assert _atspi.writer_cell_text(cell) == "NEWB2-1"
 
 
 def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:

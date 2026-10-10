@@ -3403,6 +3403,13 @@ def writer_text_cell(acc) -> bool:
     return bool(_writer_paragraphs(acc))
 
 
+# How long a Writer cell may take to publish the paragraph that set_text
+# just replaced. The first reads often still show the old line, or the new
+# line plus the old paragraph, while the view rebuilds that child. A stable
+# wrong sample inside this window is not a miss.
+_WRITER_CELL_SETTLE_S = 1.5
+
+
 def writer_cell_text(acc) -> str:
     """The paragraph text of a Writer table cell, one line per paragraph."""
     parts = []
@@ -3430,11 +3437,16 @@ def writer_cell_outcome_text(requested: str, cell) -> str | None:
 def replace_writer_cell_text(acc, value: str) -> None:
     """Replace the paragraph text of a Writer table cell.
 
-    ``set_text`` on the first paragraph replaces that paragraph. Extra
-    paragraphs are cleared only after that replace is the cell's text.
-    When the read-back is not ``value``, each paragraph is put back to
-    the text it had before this call, and this raises ``text_mismatch``.
-    A miss does not leave the new line in front of the old one.
+    The write is ``set_text_contents`` on a paragraph resolved from the
+    cell on each try. Writer may still return the previous line, an empty
+    child list, or the new line in front of the old paragraph while it
+    rebuilds that child. Those reads are polled for
+    ``_WRITER_CELL_SETTLE_S`` seconds. A paragraph that already holds
+    ``value`` is kept, and a sibling that still holds the old line is
+    cleared. Nothing is selected and no key is sent. When the window ends
+    on some other text, each paragraph is put back and this raises
+    ``text_mismatch``. The error's actual text is the read-back from
+    before that restore.
     """
     paragraphs = _writer_paragraphs(acc)
     if not paragraphs:
@@ -3458,24 +3470,74 @@ def replace_writer_cell_text(acc, value: str) -> None:
 
     if matches():
         return
+    lines = value.split("\n") if value else []
+
+    def blank_leftovers() -> None:
+        """Drop siblings that are not the requested text.
+
+        A committed edit can show the new paragraph in front of the old one
+        for a moment, or replace the accessible the write was aimed at.
+        The paragraphs are read from the cell again, not from the list
+        captured before the write.
+        """
+        live = _writer_paragraphs(acc)
+        texts = [(_full_text(child) or "") for child in live]
+        nonempty = [text for text in texts if text]
+        if value == "":
+            return
+        if nonempty == [value] or nonempty == lines:
+            return
+        if value not in nonempty and nonempty != lines:
+            return
+        for child, text in zip(live, texts):
+            if text and text != value and text not in lines:
+                set_text(child, "", force=True)
+
     # A paragraph is blocked in set_text so a Firefox page is not selected.
-    # This cell's paragraph is the value, so the write is forced.
-    set_text(paragraphs[0], value, force=True)
-    if matches():
-        for extra in paragraphs[1:]:
-            if (_full_text(extra) or "") != "":
-                set_text(extra, "", force=True)
+    # This cell's paragraph is the value, so the write is forced. The forced
+    # path does not select or type. Another write waits, so a lagging read
+    # of the old line is not a second insert.
+    deadline = time.monotonic() + _WRITER_CELL_SETTLE_S
+    next_write = 0.0
+    while True:
         if matches():
             return
+        blank_leftovers()
+        if matches():
+            return
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        if now >= next_write:
+            live = _writer_paragraphs(acc)
+            target = None
+            for child in live:
+                if (_full_text(child) or "") != value:
+                    target = child
+                    break
+            if target is None and live:
+                target = live[0]
+            if target is not None:
+                set_text(target, value, force=True)
+                next_write = time.monotonic() + 0.4
+                if matches():
+                    return
+                blank_leftovers()
+                if matches():
+                    return
+        time.sleep(0.05)
+    # Report the text that failed the check. Restoring first would make the
+    # error show the original paragraph instead of the read-back.
+    failed = writer_cell_text(acc)
     current = _writer_paragraphs(acc)
     for child, original in zip(current, originals):
         if (_full_text(child) or "") != original:
             set_text(child, original, force=True)
     raise _text_mismatch(
         "text_mismatch",
-        f"the value read back does not match {value!r}",
+        f"the value read back {failed!r} does not match {value!r}",
         expected=value,
-        actual=writer_cell_text(acc),
+        actual=failed,
         formula=None,
     )
 
@@ -5239,6 +5301,34 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     return False
 
 
+def _shown_is(acc, text: str) -> bool:
+    """True when a fresh snapshot read equals ``text``.
+
+    ``None`` is a failed read, not an empty field. An empty request still
+    accepts the blank contenteditable newline.
+    """
+    shown = _full_text(acc)
+    if not isinstance(shown, str):
+        return False
+    if text == "":
+        return _text_is_blank(shown)
+    return (shown == text or _texts_match(shown, text)) and _qt_text_count_matches(acc, text)
+
+
+def _replace_editable_text(acc, text: str) -> bool:
+    """Replace ``acc`` through EditableText. No key and no selection.
+
+    One ``set_text_contents``. The caller polls the cell: Writer can
+    rebuild the paragraph, so a delete or ctrl+a aimed at this object
+    would hit the document or the line that was just written.
+    """
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    _call_first(eti, ("set_text_contents",), text, default=False)
+    return _shown_is(acc, text)
+
+
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -5277,10 +5367,13 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     A paragraph, panel, document, or combo is not replaced. Firefox exposes
     EditableText on those nodes, and selecting one selects the page. This
     returns false before any selection or key. ``force`` is the Writer
-    table-cell path: that paragraph is the cell value and is replaced.
+    table-cell path: one EditableText replace, with no selection and no
+    keys. The cell writer polls until the new paragraph is the value.
     """
     if not force and _blocks_text_replace(acc):
         return False
+    if force:
+        return _replace_editable_text(acc, text)
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
