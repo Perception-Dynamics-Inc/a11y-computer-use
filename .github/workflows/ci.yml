@@ -194,7 +194,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi python3-pyqt6 \
             libreoffice-calc libreoffice-gtk3 libreoffice-writer \
-            xvfb dbus dbus-x11 openbox xdotool x11-utils xclip \
+            xvfb dbus dbus-x11 openbox xdotool x11-utils xclip tesseract-ocr \
             curl xz-utils libdbus-glib-1-2 libxt6t64 libasound2t64 \
             pcmanfm xterm mousepad
       # No setup-python here on purpose: apt's python3-gi is built for the
@@ -280,7 +280,10 @@ jobs:
             ( openbox >/dev/null 2>&1 & )
             sleep 2
             # 1200s: the Calc bus test launches LibreOffice ten times through MCP.
-            timeout -k 5 1200 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
+            # The [ocr] extra is installed here, after the hermetic suite, so
+            # the base install under test stays free of RapidOCR.
+            .venv/bin/pip install -e ".[ocr]" &&
+            A11Y_OCR_LIVE=1 timeout -k 5 1200 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
 
   package:

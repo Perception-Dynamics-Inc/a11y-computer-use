@@ -92,6 +92,14 @@ linux = [
 # Chrome DevTools Protocol. Only a WebSocket client is needed: CDP target
 # discovery uses stdlib urllib and the AX/DOM tree comes over the socket.
 browser = ["websocket-client"]
+# Linux vision-fallback OCR. RapidOCR (PP-OCRv5 mobile, ONNX Runtime, CPU)
+# is the default engine; it downloads its own models and this package does
+# not vendor weights. The system `tesseract` binary is the fallback when
+# this extra is not installed. Surya and EasyOCR are not dependencies.
+ocr = [
+    "rapidocr>=3.10",
+    "onnxruntime",
+]
 
 [project.scripts]
 a11y-computer-use = "a11y_computer_use.cli:main"

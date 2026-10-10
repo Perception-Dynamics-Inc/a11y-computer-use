@@ -97,7 +97,7 @@ Linux (the `linux` job), on Ubuntu 24.04:
 
 ```bash
 sudo apt-get install -y --no-install-recommends at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi \
-  libreoffice-calc libreoffice-gtk3 \
+  libreoffice-calc libreoffice-gtk3 tesseract-ocr \
   xvfb dbus dbus-x11 openbox xdotool x11-utils xclip curl xz-utils \
   libdbus-glib-1-2 libxt6t64 libasound2t64 pcmanfm xterm
 python3 -m venv --system-site-packages .venv
@@ -111,7 +111,8 @@ xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
   ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
   ( openbox >/dev/null 2>&1 & )
   sleep 2
-  timeout -k 5 600 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_agent_live.py -q -rs
+  .venv/bin/pip install -e ".[ocr]" &&
+  A11Y_OCR_LIVE=1 timeout -k 5 1200 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs
 '
 ```
 
