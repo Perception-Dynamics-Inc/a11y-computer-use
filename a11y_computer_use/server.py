@@ -4635,14 +4635,20 @@ class Runtime:
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
-        (``page_unchanged``) is not the end of the search while the other
-        direction has not been tried: the search comes back one line at a
-        time. If that direction does not move either, the still-page error
-        stands. The still grab does not install a new head. A scroll that
-        moved the pixels while the in-scroll row read was still the old head
-        (``rows_stale``) is not the end of the search either: the page did
-        move, and the next iteration snapshots the tree again instead of
-        aborting or turning around."""
+        (``page_unchanged``) is tried once more in that same direction: the
+        on-screen rows are often still the pre-scroll tree. A second still
+        page is not the end of the search while the other direction has not
+        been tried. The return uses the same line count, not one line. One
+        line from the bottom of a long list never reaches an early row, and
+        the one-line bar step is what falls through to a track click and
+        jumps over that row. Five lines stays inside the rows already on
+        screen, so the return still overlaps. If the return does not move
+        either, the still-page error stands. The still grab does not
+        install a new head. A scroll that moved the pixels while the
+        in-scroll row read was still the old head (``rows_stale``) is not
+        the end of the search either: the page did move, and the next
+        iteration snapshots the tree again instead of aborting or turning
+        around."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -4669,14 +4675,19 @@ class Runtime:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "rows_stale"
 
         def execute() -> str:
-            # Several lines per step can jump past the target. On the 0.4.17
-            # retest the search reached ITEM-193 and stopped on page_unchanged
-            # while ITEM-180 had never been shown. One still page in this
-            # direction turns the search around, one line at a time. A second
-            # still page means both ends have been reached.
+            # Several lines per step can pass the target and stop at the end
+            # of the list. On the 0.4.17 retest the search reached ITEM-193
+            # and stopped on page_unchanged while ITEM-180 had never been
+            # shown. One still page can be the tree lagging the paint, so
+            # that step is repeated. A second still page turns the search
+            # around by the same line count. Coming back one line at a time
+            # does not reach an early row, and that one-line step is the one
+            # a track click replaces with a page. A second still page in the
+            # return direction means both ends have been reached.
             step = dy
             issued = 0
             turned = False
+            stalls = 0
             limit = max_scrolls
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
@@ -4710,17 +4721,28 @@ class Runtime:
                         # call was still the previous head. Snapshot again
                         # instead of aborting or reversing.
                         issued += 1
+                        stalls = 0
                         continue
                     if not page_unchanged(exc):
                         raise
                     issued += 1
+                    stalls += 1
+                    if stalls == 1:
+                        # The rows can still be the pre-scroll tree. One more
+                        # step in this direction before turning or stopping.
+                        # The last budgeted step still gets that retry.
+                        if issued >= limit:
+                            limit = issued + 1
+                        continue
+                    stalls = 0
                     if turned:
                         raise
                     turned = True
-                    step = -1 if step > 0 else 1
+                    step = -abs(dy) if step > 0 else abs(dy)
                     limit = issued + max_scrolls
                     continue
                 issued += 1
+                stalls = 0
             return f"not found after {issued} scroll(s): no element matches text={text!r} role={role!r}"
 
         # Each injected scroll has its own receipt, including those that
@@ -6561,12 +6583,15 @@ def build_server(
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. A wheel that does not move the page
-        (page_unchanged) does not end the search while the other direction has
-        not been tried and the target has not been shown; that return pass is
-        one line at a time. If the other direction does not move either, the
-        still-page error stands. A scroll that moved the page but reported
-        rows_stale does not end the search and does not reverse: the next
-        pass snapshots the tree again. Pass ref to wheel over a specific
+        (page_unchanged) is repeated once: the tree can still be the pre-scroll
+        rows. A second still page does not end the search while the other
+        direction has not been tried and the target has not been shown. The
+        return pass uses the same line count, so an early row above the
+        current window is reached without a one-line crawl or a page jump.
+        If the other direction does not move either, the still-page error
+        stands. A scroll that moved the page but reported rows_stale does
+        not end the search and does not reverse: the next pass snapshots
+        the tree again. Pass ref to wheel over a specific
         scrolling element (the list itself); otherwise the anchor is the
         overflow list, or the document on a body-scroll page, not the
         window's tab strip. Gated at tier 'click' (it scrolls).

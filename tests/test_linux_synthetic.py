@@ -4227,9 +4227,10 @@ def test_scroll_to_find_comes_back_after_the_page_stops_past_the_target(
 
     A 5-line step jumps the window by 40 rows, from ITEM-001 to ITEM-193,
     and never shows ITEM-180. The next wheel does not change the grab, so
-    the driver raises page_unchanged and does not install a new head. The
-    search then steps back one line at a time (four rows per step here)
-    until the window contains ITEM-180. This does not prove the live Chrome list.
+    the driver raises page_unchanged and does not install a new head. That
+    still page is repeated once. The search then steps back five lines at
+    a time (four rows per step in this fake) until the window contains
+    ITEM-180. This does not prove the live Chrome list.
     """
     from a11y_computer_use import server
 
@@ -4270,10 +4271,10 @@ def test_scroll_to_find_comes_back_after_the_page_stops_past_the_target(
 
     out = runtime.scroll_to_find("chrome", text="ITEM-180", max_scrolls=6)
     assert "ITEM-180" in out
-    assert "found after 10 scroll(s)" in out
+    assert "found after 11 scroll(s)" in out
     assert "found after 0 scroll" not in out
-    assert hit.steps == [5, 5, 5, 5, 5, 5, -1, -1, -1, -1]
-    assert -5 not in hit.steps
+    assert hit.steps == [5, 5, 5, 5, 5, 5, 5, -5, -5, -5, -5]
+    assert -1 not in hit.steps
     titles = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert "ITEM-180" in titles
     assert titles[0] == "ITEM-177"
@@ -4285,8 +4286,8 @@ def test_scroll_to_find_stops_when_the_chrome_list_will_not_move(
     """Synthetic Chromium list, not a live Chrome window.
 
     The window is ITEM-193 through ITEM-200. ITEM-180 is not in it. Neither
-    direction changes the grab, so both wheels are page_unchanged. The
-    search stops on the second one and the snapshot head stays ITEM-193.
+    direction changes the grab. Each direction is page_unchanged twice,
+    and the search stops on the second return. The snapshot head stays ITEM-193.
     A hit test that names ITEM-192 is not installed. This does not prove
     the live Chrome list.
     """
@@ -4320,8 +4321,8 @@ def test_scroll_to_find_stops_when_the_chrome_list_will_not_move(
     assert error.value.code is ErrorCode.UNSUPPORTED
     assert error.value.detail["reason"] == "page_unchanged"
     assert error.value.detail["mean_abs"] == 0
-    assert error.value.detail["dy"] == -1
-    assert hit.steps == [5, -1]
+    assert error.value.detail["dy"] == -5
+    assert hit.steps == [5, 5, -5, -5]
     kept = _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))
     assert kept[0] == "ITEM-193"
     assert "ITEM-200" in kept
