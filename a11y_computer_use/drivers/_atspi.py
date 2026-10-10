@@ -207,6 +207,7 @@ class _ReplyWatch:
         self.target = target
         self.unanswered = 0
         self.unanswered_s = 0.0
+        self.checked_stopped = False
 
 
 @contextmanager
@@ -301,6 +302,68 @@ def process_in_startup(pid: int | None) -> bool:
     return age is not None and age < ATSPI_STARTUP_GRACE_S
 
 
+def stopped_pid_for_app(app: str) -> int | None:
+    """The stopped pid for ``app``, when one process is unambiguously it.
+
+    Window owners come first: a single managed window whose process is
+    ``T``/``t``. A GTK fixture registers on AT-SPI as its program name
+    (``cuatestapp``) while ``/proc/<pid>/comm`` stays ``python``, so the
+    window lookup misses. The fallback is the one stopped process whose
+    command line contains that program name. A live window owner is not
+    replaced by some other stopped process.
+    """
+    needle = (app or "").strip().lower()
+    if len(needle) < 3:
+        return None
+    try:
+        from a11y_computer_use.drivers import _linux_system
+
+        owners = _linux_system.pids_matching(app)
+    except Exception:
+        owners = set()
+    if owners:
+        stopped = [pid for pid in owners if process_is_stopped(pid)]
+        if len(owners) == 1 and len(stopped) == 1:
+            return stopped[0]
+        return None
+    found: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if not process_is_stopped(pid):
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        text = raw.replace(b"\x00", b" ").decode("utf-8", "replace").lower()
+        if needle in text:
+            found.append(pid)
+            if len(found) > 1:
+                return None
+    return found[0] if found else None
+
+
+def raise_if_app_stopped(app: str) -> None:
+    """Raise ``app_not_responding`` when ``app`` is already stopped.
+
+    A ``SIGSTOP`` is visible in ``/proc`` before the next AT-SPI call. Waiting
+    for that call to time out walks every other desktop child first, which
+    turned a stopped GTK fixture into an 8s snapshot. The pid check is the
+    whole test.
+    """
+    pid = stopped_pid_for_app(app)
+    if not isinstance(pid, int) or pid <= 0 or not process_is_stopped(pid):
+        return
+    _raise_not_responding(_ReplyWatch(app or "application", pid, None))
+
+
 def _raise_not_responding(watch: _ReplyWatch) -> None:
     pid = watch.pid
     pid_text = f" (pid {pid})" if isinstance(pid, int) and pid > 0 else ""
@@ -360,6 +423,11 @@ def _note_answered(watch: _ReplyWatch) -> None:
 def _note_unanswered(watch: _ReplyWatch, elapsed: float) -> None:
     watch.unanswered += 1
     watch.unanswered_s += elapsed
+    if not watch.checked_stopped and not process_is_stopped(watch.pid):
+        watch.checked_stopped = True
+        stopped = stopped_pid_for_app(watch.app)
+        if isinstance(stopped, int) and stopped > 0:
+            watch.pid = stopped
     if process_is_stopped(watch.pid):
         _raise_not_responding(watch)
     # A just-started app misses reads while it builds its tree. The snapshot

@@ -78,6 +78,19 @@ def test_stopped_process_unanswered_call_names_the_app_and_pid(monkeypatch) -> N
     _assert_not_responding(caught.value, "mousepad", 4242)
 
 
+def test_stopped_program_name_is_found_when_the_watch_has_no_pid(monkeypatch) -> None:
+    """A GTK fixture's comm is python. The stopped pid still comes from /proc."""
+    monkeypatch.setattr(_atspi, "stopped_pid_for_app", lambda app: 4242 if app == "cuatestapp" else None)
+    monkeypatch.setattr(_atspi, "process_is_stopped", lambda pid: pid == 4242)
+    started = time.monotonic()
+    with pytest.raises(ComputerUseError) as caught:
+        with _atspi.app_reply_watch("cuatestapp", None):
+            _atspi._safe(_slow, default=None)
+            raise AssertionError("the frozen read continued")
+    assert time.monotonic() - started < 2.0
+    _assert_not_responding(caught.value, "cuatestapp", 4242)
+
+
 def test_slow_but_answering_app_is_not_frozen(monkeypatch) -> None:
     """A busy app that still returns is not app_not_responding.
 

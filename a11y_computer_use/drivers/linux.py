@@ -810,6 +810,10 @@ class LinuxDriver:
     def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use.drivers import _atspi
 
+        # A stopped process is already visible in /proc. Raising here skips
+        # the desktop scan, which otherwise spends a D-Bus timeout on every
+        # sibling before this app's own read fails.
+        _atspi.raise_if_app_stopped(app)
         # A name find_root already answers is the AT-SPI application. Two
         # Python windows share the comm python3; resolving that name to the
         # comm first would snapshot the other window. LibreOffice is the
