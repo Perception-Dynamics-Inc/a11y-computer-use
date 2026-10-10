@@ -941,6 +941,78 @@ def test_agent_form_result_text(tmp_path, isolated_home, pages) -> None:
 
 
 @requires_display
+def test_agent_clicks_a_target_inside_a_chrome_canvas(tmp_path, isolated_home, pages) -> None:
+    """A scripted model clicks a drawn canvas target after the tree cannot name it.
+
+    The first two turns look for a missing ref and get text only. The third
+    turn is the one that receives a crop or a window screenshot, then the
+    coordinate click. The page records whether that point hit the red square.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    browser.navigate(site.url("canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Ready" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    trace = tmp_path / "trace-canvas"
+    trace.mkdir()
+    seen: list = []
+
+    def _attached(messages) -> list:
+        found = []
+        for message in messages:
+            content = message.content
+            blocks = content if isinstance(content, list) else []
+            found.extend(
+                block for block in blocks
+                if isinstance(block, dict) and block.get("type") == "image"
+            )
+        return found
+
+    def script(messages):
+        seen.append(messages)
+        attached = _attached(messages)
+        if len(seen) < 3:
+            assert not attached, "image attached before the tree was insufficient"
+            ref = "e99991" if len(seen) == 1 else "e99992"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+        if len(seen) == 3:
+            assert attached, "expected a crop or screenshot after repeated not-found"
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]),
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert len(seen) >= 3
+    _assert_trace(result, trace)
+
+
+@requires_display
 def test_agent_checkout_stops_for_a_human_payment(tmp_path, isolated_home, pages) -> None:
     """A saved-card Pay now click stops. The prompt names the button, URL, and reason."""
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
