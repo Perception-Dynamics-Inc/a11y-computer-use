@@ -6321,9 +6321,9 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
 def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
     """Synthetic Writer document. The textarea node stays empty.
 
-    Paragraph breaks compare equal across newline, CR, U+2029, U+2028, and
-    U+FFFC. A repeated break, a missing break, and a space stay different.
-    A Mousepad document is not this path.
+    Paragraph breaks compare equal across newline, CR, CRLF, VT, FF, NEL,
+    U+2029, U+2028, and U+FFFC. A repeated break, a trailing break, a missing
+    break, and a space stay different. A Mousepad document is not this path.
     """
     app = _Acc("application", name="soffice.bin")
     doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
@@ -6360,10 +6360,20 @@ def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
     assert _atspi.paragraph_breaks_match("a\r\nb", "a\nb") is True
     assert _atspi.paragraph_breaks_match("a\u2029b\u2028c", "a\nb\nc") is True
     assert _atspi.paragraph_breaks_match("a\ufffcb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u000bb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u000cb", "a\nb") is True
+    assert _atspi.paragraph_breaks_match("a\u0085b", "a\nb") is True
     assert _atspi.paragraph_breaks_match("a\n\nb", "a\nb") is False
     assert _atspi.paragraph_breaks_match("a\r\n\nb", "a\nb") is False
     assert _atspi.paragraph_breaks_match("a b", "a\nb") is False
     assert _atspi.paragraph_breaks_match("ab", "a\nb") is False
+    assert _atspi.paragraph_breaks_match("a\n", "a") is False
+    ended = _Acc("paragraph", name="")
+    ended.text = "Quarterly Update\u0085"
+    follow = _Acc("paragraph", name="")
+    follow.text = "Next\u000c"
+    _adopt(doc, ended, follow)
+    assert _atspi.writer_document_text(doc) == "Quarterly Update\nNext"
     mousepad = _Acc("application", name="mousepad")
     other = _Acc("document text", name="notes")
     other.text = ""
@@ -6373,6 +6383,145 @@ def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
     _adopt(other, note)
     assert _atspi.writer_document_text(other) is None
     assert _atspi.writer_document_outcome_text("68.3755", other) is None
+
+
+def test_writer_document_waits_for_later_paragraphs_and_does_not_clear(fake_atspi, monkeypatch) -> None:
+    """Later paragraphs are the read-back. A partial line is not a miss.
+
+    The document cache is dropped on each read. The document is not selected
+    or deleted while a later paragraph is still unpublished. A stable value
+    that already has every break and differs returns before the deadline.
+    """
+    import time
+
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.get_application = lambda: app
+    deleted = {"n": 0}
+    cleared = {"n": 0}
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        return True
+
+    def clear_cache():
+        cleared["n"] += 1
+
+    lines = ["Quarterly Update", "Revenue grew 12%.", "We will hire."]
+    children = []
+    for line in lines:
+        child = _Acc("paragraph", name="")
+        child.text = line
+        children.append(child)
+    reads = {"n": 0}
+
+    def get_child_count():
+        reads["n"] += 1
+        visible = children[:1] if reads["n"] < 4 else children
+        doc.children = list(visible)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    def set_text_contents(_text):
+        return True
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.set_text_contents = set_text_contents
+    doc.delete_text = delete_text
+    doc.clear_cache = clear_cache
+    doc.get_child_count = get_child_count
+    value = "\n".join(lines)
+    assert _atspi.set_text(doc, value) is True
+    assert deleted["n"] == 0
+    assert cleared["n"] > 1
+    assert reads["n"] >= 4
+    assert _atspi.writer_document_text(doc) == value
+
+    wrong = []
+    for line in ("Other heading", "Other body", "Other close"):
+        child = _Acc("paragraph", name="")
+        child.text = line
+        wrong.append(child)
+
+    def show_wrong():
+        doc.children = list(wrong)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    doc.get_child_count = show_wrong
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 2.0)
+    started = time.monotonic()
+    assert _atspi.set_text(doc, value) is False
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0
+    assert deleted["n"] == 0
+
+    def show_first():
+        doc.children = [children[0]]
+        children[0].parent = doc
+        return 1
+
+    doc.get_child_count = show_first
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    started = time.monotonic()
+    assert _atspi.set_text(doc, value) is False
+    elapsed = time.monotonic() - started
+    assert elapsed >= 0.4
+    assert elapsed < 1.0
+    assert deleted["n"] == 0
+
+
+def test_writer_document_without_editable_text_types_and_waits(fake_atspi, monkeypatch) -> None:
+    """No EditableText, and the document text read fails. Keys still insert.
+
+    The generic key replace treats a missing text read as a miss and deletes
+    the field after a few hundredths of a second. This document is typed,
+    then the paragraphs are polled. Nothing is selected.
+    """
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc("document text", name="Untitled 1 - LibreOffice Document")
+    doc.text = ""
+    doc.text_error = True
+    doc.get_application = lambda: app
+    deleted = {"n": 0}
+    typed = {"n": 0}
+    value = "Quarterly Update\nRevenue grew 12%."
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        return True
+
+    def type_into(_acc, text):
+        typed["n"] += 1
+        assert text == value
+        lines = []
+        for line in text.split("\n"):
+            child = _Acc("paragraph", name="")
+            child.text = line
+            lines.append(child)
+        _adopt(doc, *lines)
+
+    doc.delete_text = delete_text
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
+    assert _atspi.set_text(doc, value) is True
+    assert typed["n"] == 1
+    assert deleted["n"] == 0
+    assert _atspi.writer_document_text(doc) == value
+
+    bare = _Acc("document text", name="Untitled 2 - LibreOffice Document")
+    bare.text = ""
+    bare.get_application = lambda: app
+    bare.delete_text = delete_text
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: False)
+    assert _atspi.set_text(bare, value) is False
+    assert deleted["n"] == 0
+    assert typed["n"] == 1
+
 
 def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:
     """The new paragraph in front of the old line is the committed edit.

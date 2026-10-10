@@ -1190,6 +1190,8 @@ def test_done_accepts_writer_paragraph_breaks_and_rejects_a_different_text():
     assert crlf[0]["ok"] is True
     sep = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u2029")}}], snap)
     assert sep[0]["ok"] is True
+    nel = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u0085")}}], snap)
+    assert nel[0]["ok"] is True
     missing = check_conditions([{"value": {"ref": "e2", "equals": "Quarterly Update"}}], snap)
     assert missing[0]["ok"] is False
     collapsed = check_conditions(
