@@ -3430,11 +3430,15 @@ def writer_cell_outcome_text(requested: str, cell) -> str | None:
 def replace_writer_cell_text(acc, value: str) -> None:
     """Replace the paragraph text of a Writer table cell.
 
-    ``set_text`` on the first paragraph replaces that paragraph. Extra
-    paragraphs are cleared only after that replace is the cell's text.
-    When the read-back is not ``value``, each paragraph is put back to
-    the text it had before this call, and this raises ``text_mismatch``.
-    A miss does not leave the new line in front of the old one.
+    ``set_text`` on the first paragraph replaces that paragraph. A read
+    that still shows the previous line is polled; it is not treated as a
+    miss, and the paragraph is not selected with ctrl+a. Extra paragraphs
+    are cleared only after that replace is the cell's text. When the
+    read-back settles on something other than ``value``, each paragraph is
+    put back to the text it had before this call, and this raises
+    ``text_mismatch``. The error's actual text is the read-back from
+    before that restore. A miss does not leave the new line in front of
+    the old one.
     """
     paragraphs = _writer_paragraphs(acc)
     if not paragraphs:
@@ -3459,23 +3463,52 @@ def replace_writer_cell_text(acc, value: str) -> None:
     if matches():
         return
     # A paragraph is blocked in set_text so a Firefox page is not selected.
-    # This cell's paragraph is the value, so the write is forced.
+    # This cell's paragraph is the value, so the write is forced. The forced
+    # path polls a lagging paragraph read and does not send ctrl+a.
     set_text(paragraphs[0], value, force=True)
-    if matches():
+
+    def settled() -> bool:
+        """True once the cell reads ``value``. A line that changed and stayed
+        wrong is a miss. The previous line, or an empty walk, can still be
+        the read from before the paragraph updated.
+        """
+        deadline = time.monotonic() + 0.4
+        last: tuple[str, ...] | None = None
+        same = 0
+        previous = tuple(text for text in originals if text)
+        while True:
+            if matches():
+                return True
+            parts = tuple(parts_of(acc))
+            same = same + 1 if parts == last else 0
+            last = parts
+            if same >= 2 and parts and parts != previous:
+                return False
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def clear_extras() -> None:
         for extra in paragraphs[1:]:
             if (_full_text(extra) or "") != "":
                 set_text(extra, "", force=True)
-        if matches():
+
+    if matches() or settled():
+        clear_extras()
+        if matches() or settled():
             return
+    # Report the text that failed the check. Restoring first would make the
+    # error show the original paragraph instead of the read-back.
+    failed = writer_cell_text(acc)
     current = _writer_paragraphs(acc)
     for child, original in zip(current, originals):
         if (_full_text(child) or "") != original:
             set_text(child, original, force=True)
     raise _text_mismatch(
         "text_mismatch",
-        f"the value read back does not match {value!r}",
+        f"the value read back {failed!r} does not match {value!r}",
         expected=value,
-        actual=writer_cell_text(acc),
+        actual=failed,
         formula=None,
     )
 
@@ -5239,6 +5272,55 @@ def _set_contenteditable_by_keys(acc, text: str) -> bool:
     return False
 
 
+def _shown_is(acc, text: str) -> bool:
+    """True when a fresh snapshot read equals ``text``.
+
+    ``None`` is a failed read, not an empty field. An empty request still
+    accepts the blank contenteditable newline.
+    """
+    shown = _full_text(acc)
+    if not isinstance(shown, str):
+        return False
+    if text == "":
+        return _text_is_blank(shown)
+    return (shown == text or _texts_match(shown, text)) and _qt_text_count_matches(acc, text)
+
+
+def _await_shown(acc, text: str, timeout: float) -> bool:
+    """Poll the snapshot read until it equals ``text`` or ``timeout`` elapses."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if _shown_is(acc, text):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _replace_editable_text(acc, text: str) -> bool:
+    """Replace ``acc`` through EditableText. No key and no selection.
+
+    Writer's ``set_text_contents`` replaces the paragraph, then the
+    accessibility read can still show the previous line. Selecting that
+    paragraph with ctrl+a selects the document, so a lagging read is
+    polled. A settled wrong line is deleted through EditableText and
+    written once more. There is still no keyboard fallback.
+    """
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    _call_first(eti, ("set_text_contents",), text, default=False)
+    if _await_shown(acc, text, 1.0):
+        return True
+    current = _full_text(acc)
+    if isinstance(current, str) and current != "":
+        _call_first(eti, ("delete_text",), 0, len(current), default=False)
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        if _await_shown(acc, text, 0.5):
+            return True
+    return False
+
+
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -5277,10 +5359,13 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     A paragraph, panel, document, or combo is not replaced. Firefox exposes
     EditableText on those nodes, and selecting one selects the page. This
     returns false before any selection or key. ``force`` is the Writer
-    table-cell path: that paragraph is the cell value and is replaced.
+    table-cell path: that paragraph is replaced through EditableText and
+    a lagging read is polled. It does not select the paragraph or type.
     """
     if not force and _blocks_text_replace(acc):
         return False
+    if force:
+        return _replace_editable_text(acc, text)
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):

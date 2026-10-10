@@ -5695,6 +5695,53 @@ def test_writer_cell_replace_writes_a_paragraph_set_text_refuses(fake_atspi) -> 
     assert paragraph.text == "NEWB2-1"
 
 
+def test_writer_cell_replace_waits_for_a_stale_paragraph_read(fake_atspi, monkeypatch) -> None:
+    """The paragraph write sticks when the first reads still show the old line.
+
+    ``set_text_contents`` has already replaced the line. A snapshot read can
+    still return ``Cell B2``. That lag is not a miss, and it must not select
+    the paragraph: ctrl+a in Writer selects the document.
+    """
+    table = _Acc("table", name="Table1-1")
+    cell = _Acc("table cell", name="B2")
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Cell B2"
+    reads = {"n": 0}
+
+    def set_text_contents(text):
+        paragraph.text = text
+        return True
+
+    def delete_text(*_args):
+        raise AssertionError("delete")
+
+    paragraph.get_editable_text_iface = lambda: paragraph
+    paragraph.set_text_contents = set_text_contents
+    paragraph.delete_text = delete_text
+    _adopt(table, cell)
+    _adopt(cell, paragraph)
+    real_text = _atspi._full_text
+
+    def lagging(acc):
+        shown = real_text(acc)
+        if acc is not paragraph:
+            return shown
+        reads["n"] += 1
+        if reads["n"] <= 4:
+            return "Cell B2"
+        return shown
+
+    monkeypatch.setattr(_atspi, "_full_text", lagging)
+
+    def selected(*_args, **_kwargs):
+        raise AssertionError("ctrl+a")
+
+    monkeypatch.setattr(_atspi, "_x11_select_all_and_delete", selected)
+    _atspi.replace_writer_cell_text(cell, "NEWB2-1")
+    assert paragraph.text == "NEWB2-1"
+    assert reads["n"] > 4
+
+
 def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_atspi, monkeypatch) -> None:
     """A Writer cell named B2 is not a Calc write. The paragraph is replaced.
 
@@ -5736,7 +5783,8 @@ def test_writer_table_cell_replaces_the_paragraph_and_restores_on_a_miss(fake_at
     with pytest.raises(ComputerUseError) as exc:
         _atspi.replace_writer_cell_text(cell, "NEWB2-1")
     assert exc.value.detail["reason"] == "text_mismatch"
-    assert exc.value.detail["actual"] == "Cell B2"
+    assert exc.value.detail["actual"] == "NEWB2-1\nCell B2"
+    assert "NEWB2-1\\nCell B2" in exc.value.message
     assert paragraph.text == "Cell B2"
     assert calls["n"] == 2
 
