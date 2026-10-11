@@ -12,6 +12,7 @@ from a11y_computer_use.agent import Agent, ReservedPermission, tool_schemas
 from a11y_computer_use.agent.actions import Action
 from a11y_computer_use.agent.core import (
     _action_key,
+    _file_text,
     _same_intent,
     check_conditions,
     forced_method,
@@ -967,13 +968,21 @@ def test_contains_normalizes_breaks_and_flags_a_plain_text_bom(tmp_path, monkeyp
         "We will hire two engineers in November."
     )
     plain = tmp_path / "memo.txt"
-    plain.write_text(memo.replace("\n", "\r\n"), encoding="utf-8")
+    # Bytes, not Path.write_text. On Windows, text mode rewrites each LF as
+    # CRLF, so a string that already uses CRLF would be stored as CR CR LF.
+    crlf_bytes = memo.replace("\n", "\r\n").encode("utf-8")
+    plain.write_bytes(crlf_bytes)
+    assert b"\r\r\n" not in plain.read_bytes()
+    assert plain.read_bytes().count(b"\r\n") == memo.count("\n")
+    raw = _file_text(str(plain))
+    assert "\r\n" in raw
+    assert "\r\r" not in raw
     crlf = check_conditions([{"file_exists": str(plain), "contains": memo}], None)
     assert crlf[0]["ok"] is True, crlf[0]
     assert "bom_present" not in crlf[0]["detail"]
     for sep in ("\r", "\u2028", "\u2029", "\ufffc"):
         path = tmp_path / f"break-{ord(sep):x}.txt"
-        path.write_text(memo.replace("\n", sep), encoding="utf-8")
+        path.write_bytes(memo.replace("\n", sep).encode("utf-8"))
         checked = check_conditions([{"file_exists": str(path), "contains": memo}], None)
         assert checked[0]["ok"] is True, (ascii(sep), checked[0])
     missing = check_conditions(

@@ -2157,19 +2157,20 @@ def _file_text(path: str) -> str:
     """Text ``contains`` searches.
 
     Plain files are the raw bytes decoded as UTF-8, including one leading
-    BOM when the file has one. ``.odt`` and ``.ods`` contribute
-    ``content.xml``. ``.docx`` contributes ``word/document.xml``.
-    ``.xlsx`` contributes ``xl/sharedStrings.xml`` and the sheet XML. A
-    paragraph end or a line break in that XML is a newline. A file with one
-    of those suffixes that is not that zip is read as plain text.
+    BOM when the file has one. The read does not translate newlines, so a
+    CRLF file still contains ``\\r\\n`` until the contains normalizer folds
+    it. ``.odt`` and ``.ods`` contribute ``content.xml``. ``.docx``
+    contributes ``word/document.xml``. ``.xlsx`` contributes
+    ``xl/sharedStrings.xml`` and the sheet XML. A paragraph end or a line
+    break in that XML is a newline. A file with one of those suffixes that
+    is not that zip is read as plain text.
     """
     suffix = Path(path).suffix.lower()
     if suffix in _OFFICE_SUFFIXES:
         extracted = _office_document_text(path, suffix)
         if extracted is not None:
             return extracted
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read()
+    return Path(path).read_bytes().decode("utf-8", errors="replace")
 
 
 def _office_document_text(path: str, suffix: str) -> str | None:
