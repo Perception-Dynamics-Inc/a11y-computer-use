@@ -7202,6 +7202,172 @@ def test_linux_chrome_canvas_ref_click_lands_on_the_center(tmp_path) -> None:
         _stop_group(proc)
 
 
+def test_linux_chrome_canvas_fallback_button_activates_and_sibling_button_works(tmp_path) -> None:
+    """A button nested in a canvas runs its handler. A button outside it does too.
+
+    The fallback button is in the accessibility tree and is not painted. A
+    coordinate click at its box hits the canvas, so the canvas listener runs
+    and the button handler does not. The click activates the button. The
+    button after the canvas is painted and still receives a click. The canvas
+    element itself stays a center click, covered by
+    ``test_linux_chrome_canvas_ref_click_lands_on_the_center``.
+    """
+    import socket
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome/Chromium is required for the canvas fallback click test"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "canvas-fallback.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuafallback</title>"
+        "<canvas id=c width=400 height=200 role=application aria-label=DrawPad>"
+        "<button id=fb onclick=\"mark('fallback')\">FallbackBtn</button>"
+        "</canvas>"
+        "<button id=after onclick=\"mark('after')\">AfterBtn</button>"
+        "<div id=o aria-live=polite>out:none</div>"
+        "<script>"
+        "window.__hits = [];"
+        "function mark(kind) {"
+        " window.__hits.push(kind);"
+        " if (kind === 'fallback') o.textContent = 'out:fallback';"
+        " else if (kind === 'after') o.textContent = 'out:after';"
+        "}"
+        "document.getElementById('c').addEventListener('click', function (event) {"
+        " var id = (event.target && (event.target.id || event.target.tagName)) || '';"
+        " window.__hits.push('canvas:' + id);"
+        " if (event.target === c) o.textContent = 'out:canvas-miss';"
+        "});"
+        "</script>"
+    )
+    profile = tmp_path / "chrome-canvas-fallback-profile"
+    profile.mkdir()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = int(sock.getsockname()[1])
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            f"--remote-debugging-port={port}", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+
+    def read_page():
+        pages = page_targets(f"http://127.0.0.1:{port}")
+        ws = next(
+            (item.get("webSocketDebuggerUrl") for item in pages if item.get("webSocketDebuggerUrl")),
+            None,
+        )
+        if not ws:
+            return None
+        transport = connect(str(ws), timeout=3.0)
+        session = CDPSession(transport, default_timeout=3.0)
+        try:
+            reply = session.call(
+                "Runtime.evaluate",
+                {
+                    "expression": "({hits: window.__hits || [], text: (document.getElementById('o') || {}).textContent || ''})",
+                    "returnByValue": True,
+                },
+            )
+        finally:
+            transport.close()
+        value = (reply.get("result") or {}).get("value")
+        return value if isinstance(value, dict) else None
+
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the canvas")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            rendered = observe.render_text(shot)
+            last = rendered[:500]
+            if "FallbackBtn" in rendered and "AfterBtn" in rendered and "DrawPad" in rendered:
+                snap = shot
+                break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose the fallback button\n{last}"
+        fallback = next(el for el in snap.elements if el.role == "AXButton" and el.title == "FallbackBtn")
+        canvas = next(el for el in snap.elements if el.title == "DrawPad" and el.clickable)
+        assert canvas.ref != fallback.ref
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        runtime._current = snap
+        driver.activate_app("chrome")
+        result = runtime.click(fallback.ref)
+        assert str(result).startswith("clicked "), result
+        assert result.outcome != "suspected_noop", (result.outcome, result.evidence)
+        assert "canvas_fallback" not in str(result)
+
+        state = None
+        read_error = ""
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                state = read_page()
+            except Exception as exc:
+                read_error = str(exc)
+                state = None
+            hits = list((state or {}).get("hits") or [])
+            text = str((state or {}).get("text") or "")
+            if "fallback" in hits and text == "out:fallback":
+                break
+            time.sleep(0.25)
+        assert state is not None, read_error
+        hits = list(state.get("hits") or [])
+        assert "fallback" in hits, state
+        assert "canvas:c" not in hits, state
+        assert state.get("text") == "out:fallback", state
+
+        after_snap = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            if any(el.title == "AfterBtn" and el.role == "AXButton" for el in shot.elements):
+                after_snap = shot
+                if "out:fallback" in observe.render_text(shot):
+                    break
+            time.sleep(0.25)
+        assert after_snap is not None
+        rendered = observe.render_text(after_snap)
+        assert "out:fallback" in rendered, rendered
+        after = next(el for el in after_snap.elements if el.role == "AXButton" and el.title == "AfterBtn")
+        runtime._current = after_snap
+        sibling = runtime.click(after.ref)
+        assert str(sibling).startswith("clicked "), sibling
+        final = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                final = read_page()
+            except Exception as exc:
+                read_error = str(exc)
+                final = None
+            if final and final.get("text") == "out:after":
+                break
+            time.sleep(0.25)
+        assert final is not None and final.get("text") == "out:after", (final, read_error, sibling)
+        assert "after" in list(final.get("hits") or []), final
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_statictext_click_activates_the_button(tmp_path) -> None:
     """Live Chrome. A statictext ref for a button label activates that button.
 

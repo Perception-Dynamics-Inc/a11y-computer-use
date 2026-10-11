@@ -42,13 +42,14 @@ class _App:
 
 class _Node:
     def __init__(self, role, name, *, actions=(), x=0, y=0, w=0, h=0,
-                 toolkit="Chromium", attrs=None, pid=4242):
+                 toolkit="Chromium", attrs=None, pid=4242, parent=None):
         self.role = role
         self.name = name
         self.actions = list(actions)
         self.rect = _Rect(x, y, w, h)
         self.attrs = dict(attrs or {})
         self.app = _App(toolkit, pid)
+        self.parent = parent
         self.action_log: list[str] = []
 
     def get_role_name(self):
@@ -64,7 +65,7 @@ class _Node:
         return self.app.pid
 
     def get_parent(self):
-        return None
+        return self.parent
 
     def get_attributes(self):
         return self.attrs
@@ -218,3 +219,110 @@ def test_gtk_image_still_uses_the_action(atspi, monkeypatch) -> None:
     assert clicks == []
     assert seen == []
     assert node.action_log == ["click"]
+
+
+def _canvas(**kwargs):
+    return _Node(
+        "embedded", "DrawPad", actions=["click"], x=40, y=80, w=400, h=200,
+        attrs={"tag": "canvas", "id": "c"}, **kwargs,
+    )
+
+
+def test_canvas_fallback_is_content_inside_a_chromium_canvas(atspi) -> None:
+    """A button under a canvas is fallback content. The canvas itself is not.
+
+    Chrome reports the canvas as role ``embedded`` with ``tag=canvas``. A
+    GTK drawing area, an image ancestor, and a non-Chromium tree are not
+    this case. The canvas element stays on the center-click path.
+    """
+    canvas = _canvas()
+    button = _Node(
+        "push button", "FallbackBtn", actions=["press"], x=40, y=80, w=400, h=11,
+        attrs={"tag": "button", "id": "fb"}, parent=canvas,
+    )
+    assert _atspi.canvas_fallback_content(button) is True
+    assert _atspi.canvas_fallback_content(canvas) is False
+    assert _atspi.coordinate_click_target(canvas) is True
+
+    wrapped = _Node("section", "", parent=canvas)
+    nested = _Node("push button", "FallbackBtn", attrs={"tag": "button"}, parent=wrapped)
+    assert _atspi.canvas_fallback_content(nested) is True
+
+    drawing = _Node("drawing area", "Pad", toolkit="gtk")
+    gtk_button = _Node("push button", "FallbackBtn", toolkit="gtk", parent=drawing)
+    assert _atspi.canvas_fallback_content(gtk_button) is False
+
+    image = _Node("image", "Picture", attrs={"tag": "img"})
+    under_image = _Node("push button", "FallbackBtn", attrs={"tag": "button"}, parent=image)
+    assert _atspi.canvas_fallback_content(under_image) is False
+
+    foreign = _Node("embedded", "DrawPad", attrs={"tag": "canvas"}, toolkit="gtk")
+    foreign_button = _Node(
+        "push button", "FallbackBtn", attrs={"tag": "button"}, toolkit="gtk", parent=foreign,
+    )
+    assert _atspi.canvas_fallback_content(foreign_button) is False
+
+    document = _Node("document web", "page")
+    plain = _Node("push button", "AfterBtn", attrs={"tag": "button"}, parent=document)
+    assert _atspi.canvas_fallback_content(plain) is False
+
+
+def test_canvas_fallback_press_uses_the_action_and_not_the_pointer(atspi, monkeypatch) -> None:
+    canvas = _canvas()
+    node = _Node(
+        "push button", "FallbackBtn", actions=["press"], x=40, y=80, w=400, h=11,
+        attrs={"tag": "button", "id": "fb"}, parent=canvas,
+    )
+    element = Element(
+        "e28", "AXButton", "FallbackBtn", None, Bounds(0, 40, 80, 400, 11), "snap", clickable=True,
+    )
+    ok, clicks, seen = _press(node, element, monkeypatch)
+    assert ok is True
+    assert clicks == []
+    assert seen == []
+    assert node.action_log == ["press"]
+
+
+def test_canvas_fallback_uses_a_dom_click_when_the_action_is_missing(atspi, monkeypatch) -> None:
+    canvas = _canvas()
+    node = _Node(
+        "push button", "FallbackBtn", x=40, y=80, w=400, h=11,
+        attrs={"tag": "button", "id": "fb"}, parent=canvas,
+    )
+    element = Element(
+        "e28", "AXButton", "FallbackBtn", None, Bounds(0, 40, 80, 400, 11), "snap", clickable=True,
+    )
+    activated: list[dict] = []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._dom_activate_canvas_fallback",
+        lambda info: activated.append(info) or True,
+    )
+    ok, clicks, _seen = _press(node, element, monkeypatch)
+    assert ok is True
+    assert clicks == []
+    assert node.action_log == []
+    assert activated and activated[0]["element_id"] == "fb"
+    assert activated[0]["label"] == "FallbackBtn"
+    assert activated[0]["tag"] == "button"
+
+
+def test_canvas_fallback_refuses_when_activation_cannot_be_done(atspi, monkeypatch) -> None:
+    canvas = _canvas()
+    node = _Node(
+        "push button", "FallbackBtn", x=40, y=80, w=400, h=11,
+        attrs={"tag": "button", "id": "fb"}, parent=canvas,
+    )
+    element = Element(
+        "e28", "AXButton", "FallbackBtn", None, Bounds(0, 40, 80, 400, 11), "snap", clickable=True,
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._dom_activate_canvas_fallback",
+        lambda _info: False,
+    )
+    with pytest.raises(ComputerUseError) as exc:
+        _press(node, element, monkeypatch)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "canvas_fallback"
+    assert "no pointer click was sent" in exc.value.message
+    assert node.pointer == []
+    assert node.action_log == []

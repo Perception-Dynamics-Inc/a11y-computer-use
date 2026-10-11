@@ -513,6 +513,84 @@ def test_linux_onscreen_button_click_uses_the_pointer() -> None:
     assert calls["press"] == ["e9", "e3"]
 
 
+def test_linux_canvas_fallback_button_is_not_a_pointer_click(monkeypatch) -> None:
+    """A button inside a canvas is activated, not clicked at its box.
+
+    The box sits on the painted canvas. A pointer click reports success and
+    runs the canvas handler. Right-click and double-click are refused the
+    same way: a pointer event would land on the canvas. An activation that
+    does not change the tree is an error, not ``clicked``.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.schema import Bounds, Element
+
+    button = Element(
+        ref="e28", role="AXButton", title="FallbackBtn", value=None,
+        bounds=Bounds(0, 59, 140, 395, 11), snapshot_id="s", clickable=True,
+    )
+    snap = type("S", (), {"app": "chrome", "pid": 0, "elements": (button,), "snapshot_id": ""})()
+    calls = {"press": [], "click": []}
+
+    class _D:
+        name = "linux"
+        resolves_apps = False
+
+        def press_element(self, element):
+            calls["press"].append(element.ref)
+            return True
+
+        def click(self, target, **_kwargs):
+            calls["click"].append(getattr(target, "ref", None))
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(_atspi, "canvas_fallback_content", lambda _acc: True)
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._operation_lock = __import__("threading").Lock()
+    rt._closed = False
+    rt._screen_text = None
+    rt.driver = _D()
+    rt._current = snap
+    rt._resolve = lambda ref, kind: (snap, button)
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._dismiss_open_menu = lambda app: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._effect_after = lambda pre: ""
+
+    assert "clicked" in rt.click("e28")
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    for kwargs in ({"button": "right"}, {"count": 2}, {"modifiers": ["ctrl"]}):
+        with pytest.raises(ComputerUseError) as caught:
+            rt.click("e28", **kwargs)
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "canvas_fallback"
+        assert "no pointer click was sent" in caught.value.message
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    same = Snapshot(
+        snapshot_id="", scope=Scope.WINDOW, app="chrome", pid=0,
+        created_at=0.0, displays=(), elements=(button,),
+    )
+
+    class _Still(_D):
+        def snapshot(self, scope, app):
+            return same
+
+    rt.driver = _Still()
+    rt._current = same
+    rt._resolve = lambda ref, kind: (same, button)
+    with pytest.raises(ComputerUseError) as unconfirmed:
+        rt.click("e28")
+    assert unconfirmed.value.code is ErrorCode.UNSUPPORTED
+    assert unconfirmed.value.detail["reason"] == "canvas_fallback"
+    assert "not confirmed" in unconfirmed.value.message
+    assert calls["click"] == []
+
+
 def test_linux_recheck_treats_prgname_and_comm_as_one_process(monkeypatch) -> None:
     """A pointer click gated on the AT-SPI name still lands on that process.
 

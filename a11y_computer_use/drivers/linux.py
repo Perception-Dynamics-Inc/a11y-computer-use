@@ -440,6 +440,94 @@ def _dom_click_box(info: dict) -> dict | None:
     return None
 
 
+def _dom_activate_canvas_fallback(info: dict) -> bool:
+    """Click the DOM node for canvas fallback content. False when it cannot.
+
+    The node has to be inside a ``<canvas>`` and must not be the canvas
+    itself. ``element.click()`` runs the control's handler. A coordinate
+    click is not sent: the canvas is what is painted at that box.
+    """
+    pid = info.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    port = _debug_port_for_pid(pid)
+    if port is None:
+        return False
+    import json
+
+    spec = {
+        "id": str(info.get("element_id") or ""),
+        "label": str(info.get("label") or ""),
+        "tag": str(info.get("tag") or ""),
+    }
+    expression = (
+        "(() => {"
+        f" const spec = {json.dumps(spec)};"
+        " const insideCanvas = (node) => {"
+        "  if (!node || String(node.tagName || '').toUpperCase() === 'CANVAS') return false;"
+        "  let parent = node.parentElement;"
+        "  while (parent) {"
+        "   if (String(parent.tagName || '').toUpperCase() === 'CANVAS') return true;"
+        "   parent = parent.parentElement;"
+        "  }"
+        "  return false;"
+        " };"
+        " const find = () => {"
+        "  if (spec.id) {"
+        "   const byId = document.getElementById(spec.id);"
+        "   if (insideCanvas(byId)) return byId;"
+        "  }"
+        "  if (spec.label) {"
+        "   const nodes = document.querySelectorAll(spec.tag || '*');"
+        "   for (const node of nodes) {"
+        "    if (!insideCanvas(node)) continue;"
+        "    const label = node.getAttribute('aria-label') || '';"
+        "    const text = (node.textContent || '').trim();"
+        "    if (label === spec.label || text === spec.label) return node;"
+        "   }"
+        "  }"
+        "  if (spec.tag) {"
+        "   const all = [];"
+        "   for (const node of document.getElementsByTagName(spec.tag)) {"
+        "    if (insideCanvas(node)) all.push(node);"
+        "   }"
+        "   if (all.length === 1) return all[0];"
+        "  }"
+        "  return null;"
+        " };"
+        " const el = find();"
+        " if (!el || typeof el.click !== 'function') return false;"
+        " el.click();"
+        " return true;"
+        "})()"
+    )
+    try:
+        from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+        pages = page_targets(f"http://127.0.0.1:{port}")
+    except Exception:
+        return False
+    for page in pages:
+        ws = page.get("webSocketDebuggerUrl")
+        if not ws:
+            continue
+        try:
+            transport = connect(str(ws), timeout=3.0)
+            session = CDPSession(transport, default_timeout=3.0)
+            try:
+                reply = session.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                )
+            finally:
+                transport.close()
+        except Exception:
+            continue
+        if (reply.get("result") or {}).get("value") is True:
+            return True
+    return False
+
+
 def _coordinate_click_box(info: dict, bounds: Bounds) -> tuple[float, float, float, float] | None:
     """Full screen box. AT-SPI size wins; a zero size uses the DOM box."""
     atspi_box = info.get("box")
@@ -1165,6 +1253,30 @@ class LinuxDriver:
             # grant real widget focus; EditableText does not need it).
             self._focused_editable = handle
             return self._run(lambda: _atspi.grab_focus(handle) or _atspi.do_press(handle) or True)
+        # Fallback content inside a <canvas> is in the tree and is not painted.
+        # A pointer click at its box lands on the canvas, so the control's
+        # handler never runs. Activate the accessible, then the DOM node.
+        # Neither path moves the pointer. Failure is an error, not a click.
+        if self._run(lambda: _atspi.canvas_fallback_content(handle)):
+            if self._run(lambda: _atspi.do_press(handle)):
+                return True
+            spec = self._run(lambda: _atspi.canvas_fallback_dom_spec(handle))
+            if spec and _dom_activate_canvas_fallback(spec):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role} {element.title!r}) is inside a canvas "
+                "and was not activated; no pointer click was sent",
+                detail={
+                    "ref": element.ref,
+                    "role": element.role,
+                    "reason": "canvas_fallback",
+                    "hint": (
+                        "this control is fallback content inside a canvas and is not painted; "
+                        "a coordinate click would land on the canvas"
+                    ),
+                },
+            )
         # Chrome's click action on a canvas or image has no position, so the
         # page sees offset 0,0. A pointer click uses the full AT-SPI box, or
         # the DOM box when that size is 0, and lands on the center.
