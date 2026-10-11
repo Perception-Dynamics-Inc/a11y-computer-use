@@ -134,7 +134,7 @@ skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
 is `HoloLocalGrounding` for `Hcompany/Holo-3.1-0.8B` on CPU, from the
-optional `[holo]` extra (`torch` and `transformers>=5.6,<5.20`). The loop
+optional `[holo]` extra (`torch`, `torchvision`, and `transformers>=5.6,<5.20`). The loop
 does not construct it, does not download weights at import, and does not
 call a hosted model. The adapter puts the screenshot in the chat template
 as an image part, asks for `{"x","y"}` on a 0..1000 grid, and scales that
@@ -577,8 +577,9 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   `display` setting `$DISPLAY`
 - the Holo parser scaling a 0..1000 `{"x","y"}` reply onto image pixels,
   the chat template and the processor both receiving the image, and torch
-  threads staying at most 4 (`tests/test_grounding.py`). Those tests mock
-  the stack. They do not download weights.
+  threads staying at most 4 (`tests/test_grounding.py`). A processor load
+  that fails because torchvision is missing names that package. Those tests
+  mock the stack. They do not download weights.
 - the click order tree, then an OCR word, then Holo
   (`tests/test_vision_order.py`): a line box is not a target, an OCR match
   does not call Holo, a model `x`/`y` is kept when OCR misses, a Holo point

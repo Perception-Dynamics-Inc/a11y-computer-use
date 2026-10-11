@@ -9,8 +9,11 @@ card at https://huggingface.co/Hcompany/Holo-3.1-0.8B says
 ``license: apache-2.0`` and "License: Apache 2.0 License". Apache 2.0
 permits commercial use. This package does not vendor the weights, does not
 download them at import, and does not call a hosted API. Install the
-optional ``[holo]`` extra. The adapter stays on CPU: it loads bfloat16 when
-that dtype runs, otherwise float16, otherwise float32, and it caps torch at
+optional ``[holo]`` extra (``torch``, ``torchvision``, and ``transformers``).
+``AutoProcessor`` builds ``Qwen3VLVideoProcessor``, and that class imports
+torchvision even though ``ground`` only sends an image. The adapter stays on
+CPU: it loads bfloat16 when that dtype runs, otherwise float16, otherwise
+float32, and it caps torch at
 4 threads. The reply is ``{"x", "y"}`` on a 0..1000 grid, scaled onto the
 image. The adapter never moves the model to a CUDA device.
 """
@@ -268,10 +271,11 @@ class HoloLocalGrounding:
 
     Constructing this class does not import torch and does not download
     weights. ``ground`` does both, and raises `GroundingUnavailable` when
-    the local stack or the weights are missing. No other model id is
-    accepted. ``threads`` is capped at 4. ``dtype`` ``auto`` (the default)
-    uses bfloat16 when that dtype runs, otherwise float16, otherwise
-    float32.
+    the local stack or the weights are missing. A failed import names the
+    missing distribution (``torch``, ``torchvision``, or ``transformers``).
+    No other model id is accepted. ``threads`` is capped at 4. ``dtype``
+    ``auto`` (the default) uses bfloat16 when that dtype runs, otherwise
+    float16, otherwise float32.
     """
 
     def __init__(
@@ -369,9 +373,7 @@ class HoloLocalGrounding:
         except GroundingUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - a missing weight download stays local
-            raise GroundingUnavailable(
-                f"could not load {self.model_id} on CPU: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise _load_unavailable(self.model_id, exc) from exc
         return model, processor
 
 
@@ -409,15 +411,91 @@ def _open_rgb(png: bytes):
         raise GroundingUnavailable("not a decodable image") from exc
 
 
+#: Imported before any weight download. The processor imports torchvision
+#: while it builds the video processor, including for an image-only call.
+_HOLO_IMPORTS = ("torch", "torchvision", "transformers")
+
+#: Longer names first so "torchvision" is not reported as "torch".
+_HOLO_PACKAGES = ("torchvision", "transformers", "torch")
+
+
+def _try_import(name: str) -> object:
+    return __import__(name)
+
+
+def _package_in_text(text: str) -> str | None:
+    lowered = text.lower()
+    for package in _HOLO_PACKAGES:
+        if package in lowered:
+            return package
+    return None
+
+
+def _package_named_by(exc: BaseException) -> str | None:
+    """The holo distribution an import failure is about, when it names one."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ImportError):
+            named = _package_in_text(getattr(current, "name", None) or "")
+            if named:
+                return named
+            named = _package_in_text(str(current))
+            if named:
+                return named
+        cause = current.__cause__
+        if cause is not None:
+            current = cause
+            continue
+        if current.__suppress_context__:
+            break
+        current = current.__context__
+    return None
+
+
+def _format_package_list(packages: list[str]) -> str:
+    if len(packages) == 1:
+        return packages[0]
+    if len(packages) == 2:
+        return f"{packages[0]} and {packages[1]}"
+    return ", ".join(packages[:-1]) + f", and {packages[-1]}"
+
+
+def _load_unavailable(model_id: str, exc: BaseException) -> GroundingUnavailable:
+    """A weight or processor load failure. An import error names its package."""
+    missing = _package_named_by(exc)
+    detail = f"{type(exc).__name__}: {exc}"
+    if missing:
+        return GroundingUnavailable(
+            f"could not load {model_id} on CPU: missing package {missing} "
+            f"(pip install 'a11y-computer-use[holo]'): {detail}"
+        )
+    return GroundingUnavailable(f"could not load {model_id} on CPU: {detail}")
+
+
 def _torch_stack():
-    try:
-        import torch
-        from transformers import AutoModelForImageTextToText, AutoProcessor
-    except ImportError as exc:
+    missing: list[str] = []
+    failure: ImportError | None = None
+    for name in _HOLO_IMPORTS:
+        try:
+            _try_import(name)
+        except ImportError as exc:
+            if failure is None:
+                failure = exc
+            package = _package_named_by(exc) or name
+            if package not in missing:
+                missing.append(package)
+    if missing:
+        listed = _format_package_list(missing)
+        verb = "is" if len(missing) == 1 else "are"
         raise GroundingUnavailable(
-            "local grounding needs torch and transformers, which are not installed "
+            f"local grounding needs {listed}, which {verb} not installed "
             "(pip install 'a11y-computer-use[holo]')"
-        ) from exc
+        ) from failure
+    import torch
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
     return torch, AutoModelForImageTextToText, AutoProcessor
 
 
