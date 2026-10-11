@@ -168,8 +168,9 @@ SNAPSHOT_MODES = ("full", "interactive", "diff")
 
 #: Roles kept by the interactive view even when the platform exposes no press
 #: action on them: rows are what an agent selects in lists/tables/trees, tabs
-#: switch panes, sliders take values. Cells are folded into their row's text.
-_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXIncrementor"})
+#: switch panes, sliders and ARIA spin buttons take values. Cells are folded
+#: into their row's text.
+_INTERACTIVE_ROLES = frozenset({"AXRow", "AXTab", "AXSlider", "AXSpinButton", "AXIncrementor"})
 #: Containers the interactive view keeps as structure (even untitled) so refs
 #: inside them stay disambiguated: windows/dialogs, menus, toolbars, tab groups.
 _STRUCTURAL_ROLES = frozenset(
