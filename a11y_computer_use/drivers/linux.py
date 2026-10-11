@@ -651,6 +651,9 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        # Final field text when type replaced an active selection. The
+        # outcome check confirms that string instead of an append.
+        self._type_expected: str | None = None
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -1854,6 +1857,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._type_expected = None
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -1926,6 +1930,9 @@ class LinuxDriver:
             # take this branch.
             landed = self._run(lambda: _atspi.chromium_contenteditable_type(handle, text))
             if landed is True:
+                expected = getattr(_atspi.chromium_contenteditable_type, "last_expected", None)
+                if isinstance(expected, str):
+                    self._type_expected = expected
                 return len(text)
             if landed is False:
                 after = self._run(lambda: _atspi._readable_text(handle))
@@ -1960,6 +1967,26 @@ class LinuxDriver:
             # LibreOffice verifies against the open cell editor. Every other
             # app uses the focused node's text.
             before = self._typed_readback(app_id)
+        # A contenteditable selection has to be read before the keys replace
+        # it. The expected result is that range replaced, not the old text
+        # with the typed string appended.
+        selection = None
+        editor_before = None
+        editor_selection = None
+        if location is None and bar_before is None and app_id and not _atspi.libreoffice_app(app_id):
+            def _spans():
+                acc, truncated = _atspi._focused_node(app_id)
+                focused_span = None
+                if not truncated and acc is not None:
+                    focused_span = _atspi._selection_span(acc, before)
+                editor = _atspi._focused_contenteditable(app_id)
+                editor_text = _atspi._readable_text(editor) if editor is not None else None
+                editor_span = (
+                    _atspi._selection_span(editor, editor_text) if editor is not None else None
+                )
+                return focused_span, editor_text, editor_span
+
+            selection, editor_before, editor_selection = self._run(_spans)
         # Chrome's omnibox drops the tail of a URL at the default key pace.
         # A contenteditable and a Calc cell keep that pace.
         if location is not None or bar_before is not None:
@@ -1969,6 +1996,8 @@ class LinuxDriver:
         if location is not None:
             return self._location_read_back(location, before, text, app_id)
         after = self._typed_readback(app_id)
+        if selection and _atspi._typed_visible(before, after, text, selection=selection):
+            self._type_expected = _atspi._matched_replacement(before, after, text, selection)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -2003,19 +2032,33 @@ class LinuxDriver:
             app_id
             and after is not None
             and not _atspi.libreoffice_app(app_id)
-            and not _atspi._typed_visible(before, after, text)
+            and not _atspi._typed_visible(before, after, text, selection=selection)
         ):
             focused = self._run(lambda: _atspi._focused_contenteditable(app_id))
             if focused is not None:
                 # Sleep between reads on this thread. Each read is its own
                 # AT-SPI call, so the a11y thread is not held for the wait.
+                # The selection was taken before the keys. When focus sits on
+                # a child text node, the editor read-back is the parent, and
+                # that parent's span is the one that was captured.
+                poll_before = before
+                poll_selection = selection
+                if editor_selection is not None and editor_before not in (None, before):
+                    poll_before = editor_before
+                    poll_selection = editor_selection
                 after = _atspi._poll_typed_text(
                     lambda: self._run(lambda: _atspi._readable_text(focused)),
-                    before,
+                    poll_before,
                     text,
                     chrome=True,
+                    selection=poll_selection,
                 )
-                if _atspi._typed_visible(before, after, text, chrome=True):
+                if _atspi._typed_visible(
+                    poll_before, after, text, chrome=True, selection=poll_selection,
+                ):
+                    self._type_expected = _atspi._matched_replacement(
+                        poll_before, after, text, poll_selection, chrome=True,
+                    )
                     return len(text)
             elif self._run(lambda: _atspi.focused_chrome_rewrite(app_id)) is not None:
                 # The address bar publishes a short URL while suggestions
@@ -2039,7 +2082,9 @@ class LinuxDriver:
                     return len(text)
         # No readable text means the read-back is not possible. A terminal
         # screen that shows the inverted string is a mismatch, not a success.
-        if after is not None and not _atspi._typed_visible(before, after, text):
+        if after is not None and not _atspi._typed_visible(
+            before, after, text, selection=selection,
+        ):
             if app_id and bar_before is not None:
                 bar_after = self._run(lambda: _atspi.address_bar_text(app_id))
                 if bar_after == bar_before:

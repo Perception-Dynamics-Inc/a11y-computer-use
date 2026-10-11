@@ -6508,6 +6508,129 @@ def test_linux_chrome_crop_of_a_scrolled_off_button_is_off_screen(tmp_path) -> N
         shutil.rmtree(profile, ignore_errors=True)
 
 
+def _contenteditable_text_node(root, text: str):
+    """The descendant whose own text is ``text``, not an embedded-object parent."""
+    from a11y_computer_use.drivers import _atspi
+
+    found = []
+
+    def walk(acc, depth: int) -> None:
+        if acc is None or depth > 8 or found:
+            return
+        raw = _atspi._full_text(acc) or ""
+        if raw == text:
+            found.append(acc)
+            return
+        for index in range(min(_atspi._child_count(acc), 16)):
+            walk(_atspi._child_at(acc, index), depth + 1)
+
+    walk(root, 0)
+    return found[0] if found else None
+
+
+def test_linux_chrome_type_replaces_a_selected_word(tmp_path) -> None:
+    """Live Chrome. Typing over a selected word replaces it and is confirmed.
+
+    The editor is the contenteditable from the report: ``world`` is selected,
+    ``type`` sends ``WORD``, and the read-back is that word replaced. The
+    outcome is confirmed. Appending onto ``world`` is not the result.
+    Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the selected-word type test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "rteselected.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>RTEPROBE</title>"
+        "<div contenteditable=true role=textbox aria-multiline=true "
+        "aria-label=\"Story editor\"><p>Hello <b>world</b> start</p>"
+        "<p>Second line</p></div>"
+    )
+    profile = tmp_path / "chrome-selected-word"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--disable-component-update", f"--user-data-dir={profile}",
+            "--window-size=900,700", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                if any(el.title == "Story editor" and el.editable for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, last
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = snap
+        editor = next(el for el in snap.elements if el.title == "Story editor" and el.editable)
+        runtime.click(editor.ref)
+        handle = observe.ax_handle_for(editor.snapshot_id, editor.ref)
+        assert handle is not None
+        word = _contenteditable_text_node(handle, "world")
+        assert word is not None, _atspi._readable_text(handle)
+        Atspi = _atspi._atspi()
+        assert Atspi.Text.set_selection(word, 0, 0, len("world"))
+        # The parent text is one object character per paragraph. The selection
+        # shows up on the paragraph a beat after set_selection.
+        readable = _atspi._readable_text(handle) or ""
+        span = None
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            readable = _atspi._readable_text(handle) or readable
+            span = _atspi._selection_span(handle, readable)
+            if span is not None and readable[span[0]:span[1]].replace("\u00a0", " ") == "world":
+                break
+            time.sleep(0.05)
+        assert span is not None and readable[span[0]:span[1]].replace("\u00a0", " ") == "world", (
+            span, readable, _atspi._full_text(handle),
+        )
+        # The report typed from the keyboard after the word was selected.
+        # The click above remembered the editor, so drop that handle and
+        # take the same key path. The read-back is the word replaced.
+        driver._focused_editable = None
+        typed = runtime.type_text("WORD")
+        assert str(typed).startswith("typed ")
+        assert typed.outcome == "confirmed", (typed.outcome, getattr(typed, "evidence", None))
+        shown = ""
+        last_shot = snap
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "chrome")
+            current = next((el for el in last_shot.elements if el.title == "Story editor"), None)
+            shown = "" if current is None or current.value is None else str(current.value)
+            folded = shown.replace("\u00a0", " ").replace("\n", "")
+            if "WORD" in folded and "world" not in folded:
+                break
+            time.sleep(0.25)
+        folded = shown.replace("\u00a0", " ").replace("\n", "")
+        assert "Hello WORD start" in folded, shown
+        assert "world" not in folded, shown
+        assert "Second line" in folded, shown
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None:
     """Live Chrome. The four retest gaps that show up in Chrome.
 
