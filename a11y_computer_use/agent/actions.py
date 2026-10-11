@@ -18,9 +18,20 @@ from typing import Any
 from a11y_computer_use.agent.models.base import ToolCall
 from a11y_computer_use.schema import unknown_fields_message
 
+#: Pointer gestures. Each one is a click. The name sets button and count.
+#: An explicit ``x,y`` is that point and is not moved onto another element.
+POINTER_CLICKS: dict[str, dict[str, str | int]] = {
+    "click": {},
+    "left_click": {"button": "left", "count": 1},
+    "double_click": {"button": "left", "count": 2},
+    "triple_click": {"button": "left", "count": 3},
+    "right_click": {"button": "right", "count": 1},
+    "middle_click": {"button": "middle", "count": 1},
+}
+
 #: Desktop actions. ``done`` and ``ask_human`` end or pause the run.
 ACTION_NAMES = frozenset({
-    "click",
+    *POINTER_CLICKS,
     "type",
     "key",
     "set_value",
@@ -210,8 +221,8 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         kind = str(args.get("kind") or "other")
         if kind not in {"login", "captcha", "2fa", "payment", "other"}:
             return f"ask_human kind {kind!r} is not one of login, captcha, 2fa, payment, other"
-    if action.name == "click":
-        point_error = _click_target_error(args)
+    if action.name in POINTER_CLICKS:
+        point_error = _click_target_error(args, name=action.name)
         if point_error is not None:
             return point_error
     if action.name == "crop" and not args.get("ref"):
@@ -227,12 +238,34 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     return None
 
 
-def _click_target_error(args: dict) -> str | None:
+def pointer_to_click(action: Action) -> Action:
+    """Map a pointer gesture onto ``click``, keeping the point and the gesture.
+
+    ``double_click`` is a left click with count 2. ``right_click`` is the
+    right button. The gesture name sets button and count; arguments on the
+    call do not override that. An explicit ``x,y`` stays on the action.
+    ``click`` itself is returned unchanged.
+    """
+    gesture = POINTER_CLICKS.get(action.name)
+    if gesture is None or action.name == "click":
+        return action
+    args = {
+        key: value
+        for key, value in action.args.items()
+        if key not in {"button", "count"}
+    }
+    args.update(gesture)
+    return replace(action, name="click", args=args)
+
+
+def _click_target_error(args: dict, *, name: str = "click") -> str | None:
     """Reject a click that names two targets, or names none.
 
     A ref together with ``x`` or ``y`` is ``invalid_arguments``: the call
     must not silently drop the point. ``label`` is the only other target,
-    and it stands alone. A point needs both coordinates.
+    and it stands alone. A point needs both coordinates. ``name`` is the
+    gesture the model called (``click``, ``double_click``, ``right_click``,
+    and the other pointer names).
     """
     ref = str(args.get("ref") or "").strip()
     label = str(args.get("label") or "").strip()
@@ -240,17 +273,17 @@ def _click_target_error(args: dict) -> str | None:
     has_y = args.get("y") is not None
     if ref and (has_x or has_y):
         return (
-            "invalid_arguments: click: ref and x/y are both set; "
+            f"invalid_arguments: {name}: ref and x/y are both set; "
             "pass a ref or a point, not both"
         )
     if label and (ref or has_x or has_y):
         return (
-            "invalid_arguments: click: label cannot be combined with ref or x/y"
+            f"invalid_arguments: {name}: label cannot be combined with ref or x/y"
         )
     if has_x != has_y:
-        return "click requires both x and y"
+        return f"{name} requires both x and y"
     if not ref and not label and not (has_x and has_y):
-        return "click requires ref or x and y"
+        return f"{name} requires ref or x and y"
     return None
 
 
@@ -477,22 +510,66 @@ _INT = {"type": "integer"}
 _NUM = {"type": "number"}
 _OBJ = {"type": "object"}
 
+_CLICK_PROPERTIES = {
+    "ref": _STR,
+    "label": _STR,
+    "button": _STR,
+    "count": _INT,
+    "x": _INT,
+    "y": _INT,
+    "display_id": _INT,
+}
+_CLICK_TARGET_RULES = (
+    "Pass only one target: a ref, an exact label, or x and y. "
+    "A ref together with x or y is invalid_arguments. "
+    "A missing ref is resolved only from that ref's last-known role and name, "
+    "never from the goal. An x,y point is not moved onto a different element. "
+    "scroll at x,y is that scroll, not a click on a word from the goal."
+)
+
 _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     (
         "click",
         "Click an element by accessibility ref, by an exact label, or at x,y. "
-        "Pass only one of those targets. A ref together with x or y is invalid_arguments. "
-        "A missing ref is resolved only from that ref's last-known role and name, "
-        "never from the goal. An x,y click is not moved onto a different element.",
-        {
-            "ref": _STR,
-            "label": _STR,
-            "button": _STR,
-            "count": _INT,
-            "x": _INT,
-            "y": _INT,
-            "display_id": _INT,
-        },
+        + _CLICK_TARGET_RULES
+        + " double_click, right_click, middle_click, triple_click, and left_click "
+        "are the same rules; the name sets the button and count.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "left_click",
+        "Left-click (left button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "double_click",
+        "Double-click (left button, count 2). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "triple_click",
+        "Triple-click (left button, count 3). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "right_click",
+        "Right-click (right button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
+        [],
+    ),
+    (
+        "middle_click",
+        "Middle-click (middle button, count 1). " + _CLICK_TARGET_RULES
+        + " button and count on this call are ignored; the name sets them.",
+        _CLICK_PROPERTIES,
         [],
     ),
     (
@@ -672,6 +749,8 @@ _EXEC_SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
 __all__ = [
     "ACTION_NAMES",
     "EXEC_ACTION_NAMES",
+    "POINTER_CLICKS",
+    "pointer_to_click",
     "Action",
     "ReservedPermission",
     "approval_target",

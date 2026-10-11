@@ -161,8 +161,14 @@ confirm gates, so those gates see the resolved target:
 
 A ref that is already in the tree is not rewritten. A click with `x` and
 `y` and no `ref` is that coordinate click. It is not moved onto a tree
-element, an OCR word, or a point from Holo. `click` with both a `ref` and
-`x` or `y` is `invalid_arguments` and is not sent. Worker threads
+element, an OCR word, or a point from Holo. `double_click`, `right_click`,
+`middle_click`, `triple_click`, and `left_click` use the same rules. The
+name sets the button and count (`double_click` is a left click with count
+2, `right_click` is the right button). An `x`/`y` on any of them stays on
+that point. `scroll` at `x`/`y` stays that scroll. A name the loop does not
+know is an error and is not turned into a click on a word from the goal.
+`click` (and each of those gestures) with both a `ref` and `x` or `y` is
+`invalid_arguments` and is not sent. Worker threads
 (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and
 `torch.set_num_threads` when torch is already imported) are capped at 4
 before fallback OCR and before a grounding suggestion. A pool already set
@@ -585,12 +591,14 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   mock the stack. They do not download weights.
 - click resolution (`tests/test_vision_order.py`): a missing ref is not
   chosen from the goal, including "Do not click Archive"; an explicit
-  `x`/`y` stays on that point; `ref` together with `x`/`y` is
-  `invalid_arguments`; a missing ref resolves only to the same role and
-  exact name it last had; an ambiguous or inexact name is an error. Word
-  boxes, the 200 by 40 snap helper, and the thread cap of 4 are still
-  checked. No weights are downloaded. The 11 October 2026 figures of 42 of
-  47 and 29 of 47 are not a measurement of this resolver.
+  `x`/`y` stays on that point, including a `double_click` that must not
+  move onto a control named Upload; `right_click`, `middle_click`,
+  `triple_click`, `left_click`, and `scroll` at `x`/`y` stay on that point;
+  `ref` together with `x`/`y` is `invalid_arguments`; a missing ref resolves
+  only to the same role and exact name it last had; an ambiguous or inexact
+  name is an error. Word boxes, the 200 by 40 snap helper, and the thread
+  cap of 4 are still checked. No weights are downloaded. The 11 October
+  2026 figures of 42 of 47 and 29 of 47 are not a measurement of this resolver.
 - `crop` returning an image block on the tool message, and a failed crop
   staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the

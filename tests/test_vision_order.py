@@ -298,6 +298,99 @@ def test_b5_and_d3_coordinate_clicks_stay_on_their_points(monkeypatch) -> None:
     assert runtime.calls == [("click", d3)]
 
 
+def test_double_click_point_is_not_rewritten_to_upload(monkeypatch) -> None:
+    """B5's x/y double-click stays on that point. Upload in the goal is not the target.
+
+    The same point rule covers right_click and the other pointer gestures,
+    and a scroll at x/y. A name the loop does not know is an error, not a
+    click on Upload.
+    """
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("an x/y double-click must not start OCR")
+
+    monkeypatch.setattr(ocr, "ocr", fail_ocr)
+    elements = window(
+        el("e2", "AXButton", "Upload", parent="e1", clickable=True),
+        el("e3", "AXButton", "B5", parent="e1", clickable=True),
+        el("e4", "AXButton", "Chrome", parent="e1", clickable=True),
+    )
+    point = {"x": 640, "y": 360, "display_id": 0}
+    goal = "Open the B5 total in Chrome. Do not click Upload."
+    gestures = {
+        "double_click": {"button": "left", "count": 2},
+        "right_click": {"button": "right", "count": 1},
+        "middle_click": {"button": "middle", "count": 1},
+        "triple_click": {"button": "left", "count": 3},
+        "left_click": {"button": "left", "count": 1},
+    }
+    for name, gesture in gestures.items():
+        _result, runtime = _run(
+            goal,
+            elements,
+            turn(ToolCall(name, {**point, "button": "right", "count": 1})),
+            max_steps=1,
+            look_again=False,
+        )
+        assert runtime.calls == [("click", {**point, **gesture})], name
+        assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+
+    _result, runtime = _run(
+        goal,
+        elements,
+        turn(ToolCall("scroll", {**point, "dy": -3})),
+        max_steps=1,
+        look_again=False,
+    )
+    assert runtime.calls == [("scroll", {**point, "dx": 0, "dy": -3})]
+    assert all(call[0] != "click" for call in runtime.calls)
+
+    for name in ("drag", "hover", "mouse_move"):
+        result, runtime = _run(
+            goal,
+            elements,
+            turn(ToolCall(name, point)),
+            max_steps=1,
+            look_again=False,
+        )
+        assert runtime.calls == [], name
+        assert result.step_log[0].error == f"unknown action {name!r}"
+
+    rejected, runtime = _run(
+        goal,
+        elements,
+        turn(ToolCall("double_click", {"ref": "e2", "x": 640, "y": 360})),
+        max_steps=1,
+    )
+    assert runtime.calls == []
+    error = rejected.step_log[0].error or ""
+    assert error.startswith("invalid_arguments: double_click:")
+    assert "ref and x/y" in error
+
+
+def test_pointer_gestures_still_stop_for_payment_and_send() -> None:
+    """A double-click on Pay now and a right-click on Send use the click gates."""
+    pay = window(el("e2", "AXButton", "Pay now", parent="e1", clickable=True))
+    stopped, runtime = _run(
+        "finish the form",
+        pay,
+        turn(ToolCall("double_click", {"ref": "e2"})),
+        max_steps=1,
+    )
+    assert stopped.status == "needs_human", stopped
+    assert stopped.needs_human["kind"] == "payment"
+    assert runtime.calls == []
+
+    send = window(el("e2", "AXButton", "Send", parent="e1", clickable=True))
+    refused, runtime = _run(
+        "finish the form",
+        send,
+        turn(ToolCall("right_click", {"ref": "e2"})),
+        max_steps=2,
+    )
+    assert runtime.calls == []
+    assert any("approval_denied" in (step.error or "") for step in refused.step_log)
+
+
 def test_existing_ref_is_not_rewritten(monkeypatch) -> None:
     def fail_ocr(*_args, **_kwargs):
         raise AssertionError("a ref in the tree is the click")
