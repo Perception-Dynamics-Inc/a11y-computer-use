@@ -9,7 +9,14 @@ import time
 from types import SimpleNamespace
 
 from a11y_computer_use.agent import Agent, ReservedPermission, tool_schemas
-from a11y_computer_use.agent.core import check_conditions
+from a11y_computer_use.agent.actions import Action
+from a11y_computer_use.agent.core import (
+    _action_key,
+    _same_intent,
+    check_conditions,
+    forced_method,
+    strategy_action,
+)
 from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 from a11y_computer_use.observe import render_text
@@ -1207,7 +1214,10 @@ def test_done_accepts_writer_paragraph_breaks_and_rejects_a_different_text():
 
 
 def test_stuck_alternate_ref_then_coordinate_then_keyboard():
-    save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
     other = el("e9", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 200, 30, 80, 24))
     result, _events, runtime, _agent = run(
         ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
@@ -1228,6 +1238,102 @@ def test_stuck_alternate_ref_then_coordinate_then_keyboard():
     assert runtime.calls[1] == ("click", {"x": 60, "y": 42, "display_id": 0})
     assert runtime.calls[2] == ("key", {"chord": "Return"})
     assert result.steps == 3
+
+
+def test_repeated_click_on_a_missing_ref_does_not_press_return(tmp_path):
+    """A stale ref stays a click error. Return is not sent to the focused field."""
+    field = el(
+        "e2", "AXTextField", "Message", parent="e1", editable=True, focused=True,
+        value="draft not ready",
+    )
+    send = el(
+        "e3", "AXButton", "Send", parent="e1", clickable=True,
+        bounds=Bounds(0, 200, 30, 80, 24),
+    )
+    elements = window(field, send)
+    runtime = FakeRuntime(elements)
+    runtime.fail["e990"] = ComputerUseError(
+        ErrorCode.STALE_REF, "stale_ref: e990 is not in the current snapshot",
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e990"})),
+            turn(ToolCall("click", {"ref": "e990"})),
+            turn(ToolCall("ask_human", {"message": "the save button is missing", "kind": "other"})),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+    )
+    assert result.status == "needs_human"
+    assert [step.action for step in result.step_log[:2]] == ["click", "click"]
+    assert "stale_ref" in (result.step_log[1].error or "")
+    clicks = [call for call in runtime.calls if call[0] == "click"]
+    assert clicks == [("click", {"ref": "e990"}), ("click", {"ref": "e990"})]
+    assert all(call[1].get("chord") != "Return" for call in runtime.calls if call[0] == "key")
+
+
+def test_unfocused_click_does_not_escalate_to_return(tmp_path):
+    """Return is not the next rung when the requested button is not focused."""
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=False,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    _result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(save),
+        max_steps=4,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert all(call[0] != "key" for call in runtime.calls)
+    assert all(call[0] == "click" for call in runtime.calls)
+
+
+def test_focused_send_is_denied_before_return_can_run(tmp_path):
+    """A focused Send click is the approval gate. It is not turned into Return."""
+    send = el(
+        "e2", "AXButton", "Send", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(send),
+        max_steps=3,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls == []
+    assert result.step_log[0].action == "click"
+    assert result.step_log[0].error is not None
+    assert "sending" in result.step_log[0].error
+    assert all(step.action != "key" for step in result.step_log)
+
+
+def test_return_on_the_focused_target_is_approved_as_that_click(tmp_path):
+    """Return runs only after the click on the focused target was approved."""
+    send = el(
+        "e2", "AXButton", "Send", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 0, 0, 0, 0),
+    )
+    seen: list = []
+
+    def approve(action):
+        seen.append(action)
+        return True
+
+    _result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(send),
+        approve=approve,
+        max_steps=2,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert runtime.calls[1] == ("key", {"chord": "Return"})
+    assert seen
+    assert all(action.name == "click" for action in seen)
+    assert all(action.reason_kind == "send" for action in seen)
+    assert all("Send" in (action.target_name or "") for action in seen)
 
 
 def test_repeated_screen_becomes_stuck():
@@ -1253,7 +1359,198 @@ def test_repeated_screen_becomes_stuck():
     assert stuck[0].data["terminal"] is False
     assert stuck[-1].data["terminal"] is True
     assert any("different strategy" in text for text in seen)
-    assert len(runtime.calls) == 5
+    assert runtime.calls
+    assert all(name == "click" for name, _params in runtime.calls)
+
+
+def test_escalation_keeps_the_requested_intent():
+    """Every ladder step is the same action or the same target and payload.
+
+    A different chord, a type, and a menu do not become Return, a click, or
+    focus. A missing ref stays a click. Return remains only for a focused
+    click target, which is the approval-gated activation from #306.
+    """
+    button = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    unfocused = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=False,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    field = el(
+        "e25", "AXCell", "A1", parent="e1", editable=True,
+        bounds=Bounds(0, 40, 200, 80, 24),
+    )
+    snap_focused = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(window(button)))
+    snap_plain = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(window(unfocused)))
+    snap_field = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(window(field)))
+    escape = Action("key", {"chord": "Escape"})
+    select_all = Action("key", {"chord": "ctrl+a"})
+    typed = Action("type", {"ref": "e25", "text": "Item\tQ1"})
+    menu = Action("menu", {"path": "Edit > Select All", "action": "press"})
+    missing = Action("click", {"ref": "e990"})
+    click = Action("click", {"ref": "e2"})
+
+    cases = [
+        (escape, 4, None, "key", "Escape"),
+        (select_all, 4, None, "key", "ctrl+a"),
+        (typed, 3, snap_field, "type", "Item\tQ1"),
+        (menu, 3, snap_focused, "menu", "Edit > Select All"),
+        (missing, 3, snap_focused, "click", "e990"),
+    ]
+    for action, level, snap, name, marker in cases:
+        forced, _label = forced_method(
+            action, level, snap, ("foreground", "keyboard", "coordinates", "ref"), "demo",
+        )
+        assert _same_intent(action, forced, snap), (action.name, forced.name, forced.args)
+        assert forced.name == name
+        blob = " ".join(str(value) for value in forced.args.values())
+        assert marker in blob
+        assert forced.name != "app"
+        if action.name != "click":
+            assert forced.args.get("chord") != "Return"
+
+    forced, label = forced_method(click, 1, snap_plain)
+    assert forced.name == "click" and forced.args["x"] == 60 and label == "coordinate_click:60,42"
+    assert forced.args["_source_ref"] == "e2"
+    again, again_label = forced_method(click, 4, snap_plain)
+    assert again.name == "click" and again_label == "coordinate_click:60,42"
+
+    returned, return_label = forced_method(click, 2, snap_focused)
+    assert returned.name == "key" and returned.args["chord"] == "Return"
+    assert return_label == "keyboard:Return"
+    assert _same_intent(click, returned, snap_focused)
+
+    assert strategy_action("foreground", menu, snap_focused, "demo", recovering=True) is None
+    assert strategy_action("keyboard", escape, None, None, recovering=True) is None
+    assert strategy_action("coordinates", typed, snap_field, None, recovering=False) is None
+    assert _action_key(escape) != _action_key(select_all)
+    assert _action_key(typed) != _action_key(Action("type", {"ref": "e25", "text": "other"}))
+    assert _action_key(menu) != _action_key(Action("menu", {"path": "File > Save", "action": "press"}))
+
+
+def test_a_noop_key_does_not_turn_the_next_chord_into_return(tmp_path):
+    elements = window(el("e2", "AXButton", "Open", parent="e1", clickable=True))
+    seen: list[str] = []
+
+    def script(messages):
+        for message in messages:
+            if message.role == "tool" and isinstance(message.content, str):
+                seen.append(message.content)
+        if len(seen) == 0:
+            return turn(ToolCall("key", {"chord": "Escape"}))
+        if len(seen) == 1:
+            return turn(ToolCall("key", {"chord": "ctrl+a"}))
+        return turn(done("left it", [{"element": {"role": "AXButton", "name": "Open"}}]))
+
+    result, _events, runtime, agent = run(
+        ScriptedModel(script),
+        elements,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls[0] == ("key", {"chord": "Escape"})
+    assert runtime.calls[1] == ("key", {"chord": "ctrl+a"})
+    assert all(call[1].get("chord") != "Return" for call in runtime.calls if call[0] == "key")
+    assert result.step_log[0].action == "key"
+    assert result.step_log[0].args.get("chord") == "Escape"
+    assert result.step_log[1].args.get("chord") == "ctrl+a"
+    assert result.status == "success"
+    del seen, agent
+
+
+def test_a_failed_type_is_not_a_click_and_keeps_its_error(tmp_path):
+    field = el(
+        "e25", "AXCell", "A1", parent="e1", editable=True,
+        bounds=Bounds(0, 40, 200, 80, 24),
+    )
+    elements = window(field)
+    runtime = FakeRuntime(elements)
+    runtime.fail["e25"] = ComputerUseError(ErrorCode.STALE_REF, "stale_ref: e25 is gone")
+    result, _events, runtime, agent = run(
+        ScriptedModel([
+            turn(ToolCall("type", {"ref": "e25", "text": "Rent"})),
+            turn(ToolCall("type", {"ref": "e25", "text": "Rent"})),
+            turn(done("typed", [{"element": {"role": "AXCell", "name": "A1"}}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls
+    assert all(name == "type" for name, _params in runtime.calls)
+    assert all("Rent" in params.get("text", "") for _name, params in runtime.calls)
+    assert result.step_log[0].error and "e25" in result.step_log[0].error
+    assert result.step_log[1].error and "e25" in result.step_log[1].error
+    tool_text = " ".join(
+        message.content for message in agent._messages
+        if message.role == "tool" and isinstance(message.content, str)
+    )
+    assert "e25" in tool_text
+
+
+def test_a_failed_menu_is_not_focus_and_keeps_its_error(tmp_path):
+    elements = window(el("e2", "AXMenuItem", "Select All", parent="e1"))
+    runtime = FakeRuntime(elements)
+
+    def on_call(name, params, runtime):
+        del params, runtime
+        if name == "menu":
+            raise ComputerUseError(ErrorCode.UNSUPPORTED, "menu item was not found")
+
+    runtime.on_call = on_call
+    result, _events, runtime, agent = run(
+        ScriptedModel([
+            turn(ToolCall("menu", {"path": "Edit > Select All", "action": "press"})),
+            turn(ToolCall("menu", {"path": "Edit > Select All", "action": "press"})),
+            turn(done("opened", [{"element": {"role": "AXMenuItem", "name": "Select All"}}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls
+    assert all(name == "menu" for name, _params in runtime.calls)
+    assert result.step_log[0].action == "menu"
+    assert result.step_log[0].error and "not found" in result.step_log[0].error
+    assert all(step.action != "app" for step in result.step_log)
+    tool_text = " ".join(
+        message.content for message in agent._messages
+        if message.role == "tool" and isinstance(message.content, str)
+    )
+    assert "not found" in tool_text
+
+
+def test_coordinate_escalation_reports_the_original_miss(tmp_path):
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=False,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    elements = window(save)
+    result, _events, runtime, agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}])),
+        ]),
+        elements,
+        trace_dir=tmp_path,
+        max_steps=3,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert runtime.calls[1][0] == "click"
+    assert runtime.calls[1][1]["x"] == 60
+    assert all(call[0] != "key" for call in runtime.calls)
+    assert result.step_log[0].error is None
+    assert result.step_log[0].verified is False
+    assert result.step_log[1].error and "not verified" in result.step_log[1].error
+    tool_text = " ".join(
+        message.content for message in agent._messages
+        if message.role == "tool" and isinstance(message.content, str)
+    )
+    assert "not verified" in tool_text
+    assert "requested click" in tool_text
+    assert "executed click" in tool_text
 
 
 def test_stale_ref_backtracks_then_succeeds(tmp_path):
@@ -1276,8 +1573,11 @@ def test_stale_ref_backtracks_then_succeeds(tmp_path):
         runtime=runtime,
         trace_dir=tmp_path,
     )
-    assert ("key", {"chord": "Escape"}) in runtime.calls
     assert ("click", {"ref": "e2"}) in runtime.calls
+    assert ("key", {"chord": "Escape"}) not in runtime.calls
+    assert all(call[1].get("chord") != "Return" for call in runtime.calls if call[0] == "key")
+    assert result.step_log[0].action == "click"
+    assert result.step_log[0].error and "e999" in result.step_log[0].error
     assert result.status == "success"
     assert result.reason == "done"
 
@@ -1584,6 +1884,105 @@ def test_fallback_fences_stubbed_ocr_and_survives_a_missing_engine(tmp_path, mon
     assert "OCR did not return text" in body
 
 
+def test_fallback_ocr_includes_screen_bounds_and_crops_the_canvas(tmp_path, monkeypatch):
+    """The OCR sample is the canvas, and each word carries [x,y,w,h]."""
+    import a11y_computer_use.ocr as ocr_mod
+
+    frame = el(
+        "e8", "opaque_region", "", parent="e1", clickable=True,
+        bounds=Bounds(0, 4, 40, 1271, 755),
+    )
+    canvas = el(
+        "e25", "opaque_region", "", parent="e8", clickable=True,
+        bounds=Bounds(0, 12, 153, 302, 123),
+    )
+    elements = window(frame, canvas)
+    runtime = FakeRuntime(elements)
+    cropped: list[str] = []
+
+    def crop(ref, padding=0, scale=1.0):
+        del padding, scale
+        cropped.append(ref)
+        return (f"crop {ref}", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+    seen: list = []
+
+    def fake_ocr(image, **kwargs):
+        del kwargs
+        _png, bounds = image
+        seen.append(bounds)
+        return [{
+            "text": "SUBMIT",
+            "bounds": {
+                "x": int(bounds.x) + 8,
+                "y": int(bounds.y) + 9,
+                "width": 40,
+                "height": 16,
+            },
+            "confidence": 0.95,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake_ocr)
+
+    def script(_messages):
+        return turn(done("read", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script), elements, runtime=runtime, trace_dir=tmp_path,
+    )
+    assert result.status == "success", result
+    assert cropped[0] == "e25"
+    assert "e8" not in cropped
+    assert seen[0].width == 302 and seen[0].height == 123
+    assert seen[0].x == 12 and seen[0].y == 153
+    body = agent._messages[2].content[0]["text"]
+    assert "SUBMIT" in body
+    assert "[20,162,40,16]" in body
+    assert "<untrusted nonce=" in body
+
+
+def test_vision_crop_orders_page_regions_ahead_of_browser_frames():
+    """Deepest page canvas, then its sibling. Frame views and duplicates drop."""
+    from a11y_computer_use.agent.core import _vision_crop_elements
+
+    elements = window(
+        el("e7", "AXGroup", "", parent="e1", bounds=Bounds(0, 4, 0, 1271, 795)),
+        el(
+            "e8", "opaque_region", "", parent="e7", clickable=True,
+            bounds=Bounds(0, 4, 40, 1271, 755),
+        ),
+        el("e19", "AXGroup", "", parent="e7", bounds=Bounds(0, 4, 86, 1271, 709)),
+        el("e21", "AXGroup", "", parent="e19", bounds=Bounds(0, 4, 87, 1271, 708)),
+        el(
+            "e22", "opaque_region", "", parent="e21", clickable=True,
+            bounds=Bounds(0, 4, 87, 1271, 708),
+        ),
+        el("e24", "AXGroup", "F117", parent="e21", bounds=Bounds(0, 4, 87, 1271, 708)),
+        el(
+            "e25", "opaque_region", "", parent="e24", clickable=True,
+            bounds=Bounds(0, 12, 153, 302, 123),
+        ),
+        el(
+            "e28", "opaque_region", "", parent="e24", clickable=True,
+            bounds=Bounds(0, 318, 175, 200, 101),
+        ),
+        el(
+            "e9", "opaque_region", "", parent="e1", clickable=True,
+            bounds=Bounds(0, 0, 0, 16, 16),
+        ),
+        el("e30", "AXGroup", "", parent="e1", bounds=Bounds(0, 900, 10, 40, 40)),
+        el(
+            "e31", "opaque_region", "", parent="e30", clickable=True,
+            bounds=Bounds(0, 900, 10, 40, 40),
+        ),
+    )
+    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(elements))
+    refs = [element.ref for element in _vision_crop_elements(snap, "not_found")]
+    assert refs == ["e28", "e25", "e9"]
+    assert _vision_crop_elements(snap, "opaque_region")[0].ref == "e28"
+
+
 def test_fallback_uses_a_scripted_grounding_model_and_ignores_a_broken_one(tmp_path):
     """A stub point is fenced. A model that cannot run does not end the task."""
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
@@ -1683,7 +2082,7 @@ def test_vision_attaches_crops_of_unnamed_elements_then_the_window(tmp_path):
     assert all("crop-e" in image["path"] for image in images[:4])
     assert "observe-" in images[-1]["path"]
     assert os.path.isfile(images[-1]["path"])
-    assert "does not read these pixels" in content[0]["text"]
+    assert "[x, y, width, height]" in content[0]["text"]
 
 
 def test_crop_action_returns_an_image_and_does_not_recover(tmp_path):

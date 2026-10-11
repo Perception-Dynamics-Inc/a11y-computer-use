@@ -509,7 +509,9 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "crop",
         "Return a PNG of one element's on-screen bounds. Use it for an unnamed "
         "image, a canvas, or any opaque control. padding (0..512) and scale "
-        "(greater than 0, at most 8) are optional. The library does not read the pixels.",
+        "(greater than 0, at most 8) are optional. When an OCR engine is "
+        "installed, the result lists each word with [x, y, width, height] in "
+        "screen pixels, fenced as untrusted. A missing engine says no text was read.",
         {"ref": _STR, "padding": _INT, "scale": _NUM},
         ["ref"],
     ),

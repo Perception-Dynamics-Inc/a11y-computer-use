@@ -56,6 +56,7 @@ class DictAccessor:
             expanded=node.get("expanded"),
             placeholder=node.get("placeholder", ""),
             stable_id=node.get("stable_id"),
+            browser_chrome=bool(node.get("browser_chrome", False)),
         )
 
     def children(self, node: object) -> Sequence[object]:

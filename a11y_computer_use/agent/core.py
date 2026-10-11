@@ -29,7 +29,6 @@ from a11y_computer_use.untrusted import (
     looks_like_url,
     navigation_url,
     trim_untrusted,
-    unwrap,
 )
 from a11y_computer_use.agent.actions import (
     EXEC_ACTION_NAMES,
@@ -78,13 +77,16 @@ refused, or needs a human, later calls in that turn do not run.
 Use element refs from the latest observation. Prefer set_value and select for
 fields and options. click, type, key, scroll, app, window, menu, wait, and
 crop are available. crop(ref) returns a PNG of that element's on-screen bounds
-(optional padding and scale). The library does not read those pixels. Use it
-for an unnamed image, a canvas, or any control whose title is missing. When
+(optional padding and scale). When an OCR engine is installed, the result
+lists each word with [x, y, width, height] in screen pixels. Those words are
+fenced as untrusted. A missing engine says no text was read. Use crop for an
+unnamed image, a canvas, or any control whose title is missing. When
 the tree is insufficient (an opaque region or canvas and no other named
 control, an empty or near-empty tree, or a target that was not found twice),
 the loop attaches a
-crop of that region or a window screenshot if you accept images. Click that
-target with x and y. Words in the image, OCR lines, and any grounding
+crop of the page-content region, not a browser-frame view that contains it,
+or a window screenshot if you accept images. Click that
+target with x and y from the OCR bounds. Words in the image, OCR lines, and any grounding
 suggestion are untrusted screen data. A model
 that cannot accept images stops for a human instead. Request
 the action. The loop approves or denies app quit, closing a window, sending a
@@ -318,6 +320,7 @@ class Agent:
         self._messages: list[Message] = []
         self._levels: dict[tuple, int] = {}
         self._hints: dict[tuple, tuple[str, ...]] = {}
+        self._failures: dict[tuple, str] = {}
         self._stuck_token: str | None = None
         self._digests: list[str] = []
         self._replans = 0
@@ -641,14 +644,25 @@ class Agent:
 
         key = _action_key(requested)
         level = self._levels.get(key, 0)
+        prior_failure = self._failures.get(key)
         executed, forced = forced_method(
             requested, level, self._last_snap, self._hints.get(key), self._app_name(),
         )
+        if not _same_intent(requested, executed, self._last_snap):
+            executed, forced = requested, None
+        # Return is the click on the focused target, which this step already
+        # approved. If that is not the focused element, keep the click and
+        # return its error instead of pressing a key.
+        if forced == "keyboard:Return" and not _return_matches_focused_click(
+            requested, executed, self._last_snap,
+        ):
+            executed, forced = requested, None
         recovery = [forced] if forced else []
         pre_snap = self._last_snap
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
+        first_error = error
         if error and self.max_retries > 0 and requested.name != "crop" and not self._stop_requested():
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
@@ -660,7 +674,11 @@ class Agent:
         self._last_observation = observation
         self._last_snap = snap
         after = snapshot_digest(snap, observation)
-        verified = _verified(executed, before, after, error, marker)
+        attempt_error = error
+        verified = _verified(executed, before, after, attempt_error, marker)
+        error = _carried_error(
+            requested, executed, first_error, attempt_error, prior_failure, recovery,
+        )
         if (
             executed.name == "app"
             and str(executed.args.get("action") or "") in {"launch", "focus"}
@@ -672,9 +690,11 @@ class Agent:
         if verified:
             self._levels[key] = 0
             self._hints.pop(key, None)
+            self._failures.pop(key, None)
             self._stuck_token = None
             self._not_found_streak = 0
         else:
+            self._failures[key] = error or "not verified"
             if _not_found_failure(error) or _target_missing(requested, pre_snap):
                 self._not_found_streak += 1
             self._levels[key] = level + 1
@@ -705,7 +725,9 @@ class Agent:
             index, verified=verified, error=error, result=result,
             skipped=skipped, turn_stop=turn_stop, ran=ran,
         ))
-        feedback = _tool_feedback(executed, result, error, recovery, marker)
+        feedback = _tool_feedback(
+            executed, result, error, recovery, marker, requested=requested,
+        )
         if turn_stop:
             feedback = _with_stop_note(feedback, remaining, turn_stop)
         content: str | list[dict] = feedback
@@ -888,39 +910,27 @@ class Agent:
     def _recover(
         self, requested: Action, executed: Action, hint: tuple[str, ...] | None,
     ) -> tuple[tuple[Action, str, str | None, outcome.ActionResult | None] | None, list[str]]:
-        """Follow ``next`` after a refusal. Escape is the keyboard backtrack.
+        """Try another method only when it is the same intent.
 
-        A plain failure with no outcome keeps the previous behavior: one
-        alternate ref, then Escape. Escape does not replace the failed result.
-        Bounded by ``max_retries``.
+        Bounded by ``max_retries`` for this step, and the level counter is
+        per action and per target. A different key, a bare click in place of
+        typing, and focus in place of a menu are not tried. Escape is not
+        sent as a backtrack.
         """
         notes: list[str] = []
         attempts = 0
-        if hint is None:
-            alt = alternate_action(requested, self._last_snap)
-            if alt is not None and alt[0].args.get("ref") != executed.args.get("ref"):
-                attempts += 1
-                action, label = alt
-                result, error, marker = self._invoke(action)
-                notes.append(label)
-                if not error:
-                    return (action, result, error, marker), notes
-            if attempts < self.max_retries:
-                notes.append(self._backtrack())
-            return None, notes
-        for strategy in hint:
+        strategies = hint if hint is not None else ("ref", "coordinates", "cdp", "keyboard")
+        for strategy in strategies:
             if attempts >= self.max_retries:
                 break
-            if strategy == "keyboard":
-                attempts += 1
-                notes.append(self._backtrack())
-                continue
             built = strategy_action(
                 strategy, requested, self._last_snap, self._app_name(), recovering=True,
             )
             if built is None:
                 continue
             action, label = built
+            if not _same_intent(requested, action, self._last_snap):
+                continue
             if action.name == executed.name and _public_args(action.args) == _public_args(executed.args):
                 continue
             attempts += 1
@@ -929,13 +939,6 @@ class Agent:
             if error is None and (marker is None or marker.outcome == "confirmed"):
                 return (action, result, error, marker), notes
         return None, notes
-
-    def _backtrack(self) -> str:
-        try:
-            self.runtime.call_tool("key", {"chord": "Escape"}, confirm=self._safety_confirm)  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001 - backtrack is best-effort
-            return f"backtrack failed: {type(exc).__name__}"
-        return "backtrack:Escape"
 
     def _invoke(self, action: Action) -> tuple[str, str | None, outcome.ActionResult | None]:
         from a11y_computer_use.server import ActionRefused, error_text, refusal_text
@@ -1252,7 +1255,8 @@ class Agent:
 
         A runtime with no ``crop`` method, or a crop that fails, is skipped.
         The window image stays last so a capture-only double still ends the
-        observation with that shot. The library does not read the pixels.
+        observation with that shot. OCR, when an engine is installed, adds
+        fenced words and screen bounds. It does not click.
         ``reason`` is set when the tree itself is insufficient, and then the
         images are attached even if ``vision`` was left off.
         """
@@ -1287,7 +1291,8 @@ class Agent:
             note = (
                 "PNG crops of unnamed or opaque elements are attached before the "
                 "window screenshot. Call crop(ref) with optional padding and scale "
-                "for another. The library does not read these pixels."
+                "for another. When an OCR engine is installed, crop lists each "
+                "word with [x, y, width, height] in screen pixels."
             )
         return images, note
 
@@ -2025,12 +2030,15 @@ def forced_method(
     strategies: tuple[str, ...] | None = None,
     app: str | None = None,
 ) -> tuple[Action, str | None]:
-    """Replace a repeated no-op with the next method.
+    """Replace a repeated no-op with the next same-intent method.
 
-    Level 0 is the model's action. With no ``strategies``, the ladder is
-    alternate ref, coordinate click, then a keyboard fallback. When the last
-    result named ``next``, that list is the ladder. ``crop`` stays a crop: a
-    failed crop is not turned into a click.
+    Level 0 is the model's action. A higher level may retry that action or
+    switch method only when the target and the payload stay the same: another
+    ref with the same role and name, a coordinate click on that element, or
+    Return when the focused element is that click. Typing is retyped. A key
+    is never a different chord. A type is never a bare click. A menu is never
+    focus. A missing ref stays the click. ``crop`` stays a crop. When no
+    same-intent method remains, the model's action is returned unchanged.
     """
     if action.name == "crop":
         return action, None
@@ -2040,19 +2048,21 @@ def forced_method(
     if strategies is not None:
         for name in strategies:
             built = strategy_action(name, action, snap, app, recovering=False)
-            if built is not None:
+            if built is not None and _same_intent(action, built[0], snap):
                 options.append(built)
-        if not options:
-            return action, None
     else:
-        alternate = alternate_action(action, snap)
-        if alternate is not None:
-            options.append(alternate)
-        coordinate = coordinate_action(action, snap)
-        if coordinate is not None:
-            options.append(coordinate)
-        options.append(keyboard_action(action))
+        for built in (
+            alternate_action(action, snap),
+            coordinate_action(action, snap),
+            keyboard_action(action, snap),
+        ):
+            if built is not None and _same_intent(action, built[0], snap):
+                options.append(built)
+    if not options:
+        return action, None
     chosen, label = options[min(level, len(options)) - 1]
+    if not _same_intent(action, chosen, snap):
+        return action, None
     return chosen, label
 
 
@@ -2064,7 +2074,13 @@ def strategy_action(
     *,
     recovering: bool,
 ) -> tuple[Action, str] | None:
-    """One escalation step. ``keyboard`` during recovery is Escape."""
+    """One same-intent escalation step.
+
+    ``keyboard`` is retype, or Return on the focused click target. It is not
+    Escape, including during recovery. ``foreground`` is not used: focusing
+    the app is not the action the model requested.
+    """
+    del recovering, app
     if strategy == "ref":
         return alternate_action(action, snap)
     if strategy == "coordinates":
@@ -2081,14 +2097,7 @@ def strategy_action(
             f"cdp:set_value:{element.ref}",
         )
     if strategy == "keyboard":
-        if recovering:
-            return Action("key", {"chord": "Escape"}, action.id), "backtrack:Escape"
-        return keyboard_action(action)
-    if strategy == "foreground":
-        name = app or (None if snap is None else snap.app)
-        if not name or name == "unknown":
-            return None
-        return Action("app", {"action": "focus", "name": str(name)}, action.id), f"foreground:{name}"
+        return keyboard_action(action, snap)
     return None
 
 
@@ -2117,6 +2126,9 @@ def alternate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str
 
 
 def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str] | None:
+    """A click at the same element's center. Not a substitute for type or menu."""
+    if action.name != "click":
+        return None
     element = _element_for(action, snap)
     if element is None or element.bounds is None:
         return None
@@ -2134,7 +2146,15 @@ def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, st
     return Action("click", args, action.id), f"coordinate_click:{x},{y}"
 
 
-def keyboard_action(action: Action) -> tuple[Action, str]:
+def keyboard_action(action: Action, snap: Snapshot | None = None) -> tuple[Action, str] | None:
+    """The keyboard rung, or None when the key would hit a different control.
+
+    Typing actions become ``type`` and keep a requested ref. A click becomes
+    Return only when the focused element is that click's target. The click
+    was already approved as a click on that element, and Return is that
+    activation. A missing or stale ref, an unfocused target, and any other
+    action do not become a key: Return is not sent to whatever has focus.
+    """
     if action.name in {"type", "set_value", "select"}:
         text = action.args.get("text", action.args.get("value", ""))
         args = {"text": "" if text is None else str(text)}
@@ -2142,7 +2162,117 @@ def keyboard_action(action: Action) -> tuple[Action, str]:
         if isinstance(ref, str) and ref.strip():
             args["ref"] = ref.strip()
         return Action("type", args, action.id), "keyboard:type"
-    return Action("key", {"chord": "Return"}, action.id), "keyboard:Return"
+    if action.name != "click":
+        return None
+    element = _element_for(action, snap)
+    if element is None or not element.focused:
+        return None
+    ref = action.args.get("ref")
+    if isinstance(ref, str) and ref.strip() and element.ref != ref.strip():
+        return None
+    return (
+        Action("key", {"chord": "Return", "_source_ref": element.ref}, action.id),
+        "keyboard:Return",
+    )
+
+
+def _same_intent(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    """True when ``executed`` is ``requested`` or the same target and payload.
+
+    A click may move to another ref with the same role and name, to that
+    element's center, or to Return when that element is focused. Typing may
+    be retyped or set on the same ref. A key keeps its chord. A menu keeps
+    its path. Focus, a different key, and a bare click are not the same intent.
+    """
+    if (
+        executed.name == requested.name
+        and _public_args(executed.args) == _public_args(requested.args)
+    ):
+        return True
+    if requested.name == "click" and executed.name == "click":
+        return _same_click_target(requested, executed, snap)
+    if requested.name == "click" and executed.name == "key":
+        return _return_matches_focused_click(requested, executed, snap)
+    if requested.name in {"type", "set_value", "select"} and executed.name in {"type", "set_value"}:
+        if _payload_text(requested) != _payload_text(executed):
+            return False
+        return _same_named_target(requested, executed, snap)
+    if requested.name == "key" and executed.name == "key":
+        return str(requested.args.get("chord") or "") == str(executed.args.get("chord") or "")
+    if requested.name == "menu" and executed.name == "menu":
+        return (
+            str(requested.args.get("path") or "") == str(executed.args.get("path") or "")
+            and str(requested.args.get("action") or "press") == str(executed.args.get("action") or "press")
+        )
+    return False
+
+
+def _payload_text(action: Action) -> str:
+    value = action.args.get("text", action.args.get("value", ""))
+    return "" if value is None else str(value)
+
+
+def _same_click_target(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    wanted = str(requested.args.get("ref") or requested.args.get("_source_ref") or "")
+    source = str(executed.args.get("_source_ref") or executed.args.get("ref") or "")
+    if wanted and source and wanted == source:
+        return True
+    return _same_named_target(requested, executed, snap)
+
+
+def _same_named_target(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    left_ref = requested.args.get("ref") or requested.args.get("_source_ref")
+    right_ref = executed.args.get("ref") or executed.args.get("_source_ref")
+    if left_ref and right_ref and str(left_ref) == str(right_ref):
+        return True
+    left = _element_for(requested, snap)
+    right = _element_for(executed, snap)
+    if left is None or right is None:
+        return False
+    if not left.title or left.title.casefold() != right.title.casefold():
+        return False
+    return left.role == right.role
+
+
+def _carried_error(
+    requested: Action,
+    executed: Action,
+    first_error: str | None,
+    attempt_error: str | None,
+    prior_failure: str | None,
+    recovery: list[str],
+) -> str | None:
+    """Keep the original failure beside an escalation outcome.
+
+    A step that ran the requested action and did not recover returns that
+    attempt's error. An escalated step names the earlier failure even when
+    the later method itself reported none.
+    """
+    same = (
+        executed.name == requested.name
+        and _public_args(executed.args) == _public_args(requested.args)
+    )
+    if same and not recovery:
+        return attempt_error
+    original = prior_failure or first_error
+    if original and attempt_error and attempt_error != original:
+        return f"{original} | {attempt_error}"
+    return original or attempt_error
+
+
+def _return_matches_focused_click(
+    requested: Action, executed: Action, snap: Snapshot | None,
+) -> bool:
+    """True when Return activates the click target and that target is focused."""
+    if requested.name != "click" or executed.name != "key":
+        return False
+    if str(executed.args.get("chord") or "") != "Return":
+        return False
+    target = _element_for(requested, snap)
+    focused = _element_for(executed, snap)
+    if target is None or focused is None or not focused.focused:
+        return False
+    return target.ref == focused.ref
 
 
 def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
@@ -2421,7 +2551,10 @@ def _vision_fallback_note(
     )
     parts = [instruction]
     if ocr_text:
-        parts.append("OCR text from the image, already fenced as untrusted:")
+        parts.append(
+            "OCR text from the image, already fenced as untrusted. "
+            "Each line is followed by [x, y, width, height] in screen pixels:"
+        )
         parts.append(ocr_text)
     else:
         parts.append("OCR did not return text. A missing OCR extra is not an error.")
@@ -2434,15 +2567,17 @@ def _vision_fallback_note(
 
 
 def _fallback_ocr(png: bytes, bounds: object) -> str | None:
-    """Fenced OCR lines, or None when no engine is installed.
+    """Fenced OCR lines with screen bounds, or None when no engine is installed.
 
     Calls ``a11y_computer_use.ocr.ocr``. That function already fences
-    ``text``. A missing engine raises ``ComputerUseError`` with
+    ``text``. Each line is ``<untrusted ...>word</untrusted ...> [x,y,w,h]``
+    in screen pixels so a model that cannot see the image can still click.
+    A missing engine raises ``ComputerUseError`` with
     ``detail["reason"] == "missing_dependency"`` and leaves the screenshot
     in place. A bad image does the same. The loop does not install the
     ``[ocr]`` extra.
     """
-    from a11y_computer_use.ocr import ocr
+    from a11y_computer_use.ocr import format_ocr_lines, ocr
     from a11y_computer_use.schema import ComputerUseError
 
     payload: object = png if bounds is None else (png, bounds)
@@ -2455,19 +2590,7 @@ def _fallback_ocr(png: bytes, bounds: object) -> str | None:
         return None
     if not isinstance(spans, (list, tuple)):
         return None
-    lines: list[str] = []
-    for span in spans:
-        if not isinstance(span, dict):
-            continue
-        text = str(span.get("text") or "").strip()
-        if not text:
-            continue
-        if unwrap(text) is None:
-            text = fence(text).text
-        lines.append(text)
-    if not lines:
-        return None
-    return "\n".join(lines)
+    return format_ocr_lines(spans)
 
 
 def _ground_point(hit: object) -> tuple[int, int] | None:
@@ -2485,12 +2608,110 @@ def _ground_point(hit: object) -> tuple[int, int] | None:
 
 
 def _vision_crop_elements(snap: Snapshot, reason: str | None) -> list:
-    """Opaque regions first when the tree cannot name the target."""
-    if reason == "opaque_region":
-        opaque = [element for element in snap.elements if _is_opaque_role(element.role)]
-        if opaque:
-            return opaque
+    """Page-content opaque regions when the tree cannot name the target.
+
+    A browser-frame view is a large region that contains another opaque
+    region, or a childless box that only duplicates an ancestor. The crop
+    is the deepest remaining region, and the smallest one at that depth, so
+    a canvas inside the page is chosen ahead of Chrome's full-window view.
+    """
+    if reason in {"opaque_region", "not_found"}:
+        page = _page_content_opaque(snap)
+        if page:
+            return page
     return _opaque_elements(snap)
+
+
+def _positive_bounds(element) -> bool:
+    bounds = element.bounds
+    return bounds is not None and bounds.width > 0 and bounds.height > 0
+
+
+def _ancestor_depth(element, snap: Snapshot) -> int:
+    depth = 0
+    seen: set[str] = set()
+    current = element
+    while current is not None and current.ref not in seen and current.parent:
+        seen.add(current.ref)
+        current = _by_ref(snap, current.parent)
+        depth += 1
+        if depth > 64:
+            break
+    return depth
+
+
+def _strictly_contains(outer, inner) -> bool:
+    """True when ``outer``'s box contains ``inner`` and is strictly larger."""
+    ob = outer.bounds
+    ib = inner.bounds
+    if not _positive_bounds(outer) or not _positive_bounds(inner):
+        return False
+    if int(ob.display_id) != int(ib.display_id):
+        return False
+    if ob.x > ib.x or ob.y > ib.y:
+        return False
+    if ob.x + ob.width < ib.x + ib.width or ob.y + ob.height < ib.y + ib.height:
+        return False
+    return (ob.width * ob.height) > (ib.width * ib.height)
+
+
+def _duplicates_ancestor(element, snap: Snapshot) -> bool:
+    """True when this box is the same rectangle as a parent, within a few pixels."""
+    bounds = element.bounds
+    if not _positive_bounds(element):
+        return False
+    parent_ref = element.parent
+    seen: set[str] = set()
+    while parent_ref and parent_ref not in seen:
+        seen.add(parent_ref)
+        parent = _by_ref(snap, parent_ref)
+        if parent is None or not _positive_bounds(parent):
+            break
+        other = parent.bounds
+        if (
+            int(other.display_id) == int(bounds.display_id)
+            and abs(other.x - bounds.x) <= 4
+            and abs(other.y - bounds.y) <= 4
+            and abs(other.width - bounds.width) <= 4
+            and abs(other.height - bounds.height) <= 4
+        ):
+            return True
+        parent_ref = parent.parent
+    return False
+
+
+def _page_content_opaque(snap: Snapshot) -> list:
+    """Opaque regions that are page content, deepest then smallest.
+
+    A region that contains another opaque region is a frame around that
+    content. A region that copies an ancestor's box is the same frame.
+    Those are dropped when any other region remains. The rest are ordered
+    so the deepest page region is first, and the smallest one at that depth
+    wins a tie.
+    """
+    opaque = [
+        element for element in snap.elements
+        if _is_opaque_role(element.role) and _positive_bounds(element)
+    ]
+    if not opaque:
+        return []
+    leaves = [
+        element for element in opaque
+        if not any(
+            _strictly_contains(element, other)
+            for other in opaque
+            if other.ref != element.ref
+        )
+    ]
+    pool = leaves or list(opaque)
+    content = [element for element in pool if not _duplicates_ancestor(element, snap)]
+    chosen = content or pool
+    chosen.sort(key=lambda element: (
+        -_ancestor_depth(element, snap),
+        element.bounds.width * element.bounds.height,
+        element.ref,
+    ))
+    return chosen
 
 
 def _element_at_point(snap: Snapshot, x: object, y: object, display_id: object):
@@ -2553,9 +2774,26 @@ def _user_content(
 
 
 def _action_key(action: Action) -> tuple:
+    """Retry identity: the action, its target, and the chord or text.
+
+    A no-op Escape does not raise the level of ``ctrl+a``. A failed type of
+    one string does not escalate a type of another. A menu path does not
+    share a budget with a different path.
+    """
     args = action.args
-    target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or args.get("text") or ""
-    return (action.name, str(target))
+    name = action.name
+    if name == "key":
+        return ("key", str(args.get("chord") or ""), str(args.get("app") or args.get("ref") or ""))
+    if name in {"type", "set_value", "select"}:
+        text = args.get("text", args.get("value", ""))
+        target = args.get("ref") or args.get("name") or ""
+        return (name, str(target), "" if text is None else str(text))
+    if name == "menu":
+        return ("menu", str(args.get("path") or ""), str(args.get("action") or "press"))
+    target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or ""
+    if name == "click" and not target and args.get("x") is not None and args.get("y") is not None:
+        target = f"{args.get('x')},{args.get('y')},{args.get('display_id', '')}"
+    return (name, str(target), "")
 
 
 def _action_label(action: Action, snap: Snapshot | None) -> str | None:
@@ -2644,17 +2882,31 @@ def _with_stop_note(text: str, remaining: list[dict], reason: str) -> str:
     return f"{text}\nStopped this turn ({reason}). Did not run: {names}."
 
 
+def _describe_action(action: Action) -> str:
+    payload = _public_args(action.args)
+    body = ", ".join(f"{key}={payload[key]!r}" for key in sorted(payload))
+    return f"{action.name}({body})"
+
+
 def _tool_feedback(
     action: Action,
     result: str,
     error: str | None,
     recovery: list[str],
     marker: outcome.ActionResult | None = None,
+    requested: Action | None = None,
 ) -> str:
-    if error:
+    if error and result:
+        text = f"{action.name} failed: {error}\noutcome: {result}"
+    elif error:
         text = f"{action.name} failed: {error}"
     else:
         text = result or f"{action.name} ok"
+    if requested is not None and (
+        requested.name != action.name
+        or _public_args(requested.args) != _public_args(action.args)
+    ):
+        text += f"\nrequested {_describe_action(requested)}\nexecuted {_describe_action(action)}"
     if marker is not None:
         text += f"\noutcome: {marker.outcome}"
         if marker.evidence:

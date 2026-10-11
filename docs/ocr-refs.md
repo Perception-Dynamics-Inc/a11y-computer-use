@@ -83,7 +83,9 @@ one more capture plus recognition before the click when rematching is on.
   the system `tesseract` binary, then Vision. An explicit engine name does
   not fall through. A missing engine raises `unsupported` with
   `detail["reason"] == "missing_dependency"`. Returned text is
-  `fence_untrusted` output, and bounds are screen pixels. RapidOCR downloads
+  `fence_untrusted` output, and bounds are screen pixels. RapidOCR is asked
+  for word boxes, so a detector line that spans several controls is split
+  before adjacent words are grouped. RapidOCR downloads
   its models; this repository does not vendor them. Surya and EasyOCR are
   not used. Linux `file_dialog` stays unsupported.
 - Vision reads image bytes, so the engine works without Screen Recording; the

@@ -920,7 +920,11 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_agent_follows_next_after_a_hidden_ref(tmp_path) -> None:
+def test_hidden_ref_click_does_not_become_focus(tmp_path) -> None:
+    """A hidden ref stays that click. Focusing the app is not the same intent.
+
+    The error names the refusal. The model can ask for focus on a later turn.
+    """
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = FakeRuntime(elements)
 
@@ -954,18 +958,23 @@ def test_agent_follows_next_after_a_hidden_ref(tmp_path) -> None:
         runtime=runtime,
         trace_dir=tmp_path,
     )
-    assert ("app", {"action": "focus", "name": "demo"}) in runtime.calls
+    assert all(name != "app" for name, _params in runtime.calls)
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
     finished = next(
         event for event in events
         if event.type == "step_finished" and event.data.get("index") == 1
     )
-    assert finished.data["verified"] is True
-    assert finished.data["error"] is None
+    assert finished.data["verified"] is False
+    assert finished.data["error"] and "not showing" in finished.data["error"]
+    assert result.step_log[0].error and "not showing" in result.step_log[0].error
     assert result.status == "success"
 
 
 def test_agent_escalates_a_noop_and_counts_it_as_stuck(tmp_path) -> None:
-    save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
     clock = el("clock", "AXStaticText", "t0", parent="e1")
     elements = window(save, clock)
     runtime = FakeRuntime(elements)
