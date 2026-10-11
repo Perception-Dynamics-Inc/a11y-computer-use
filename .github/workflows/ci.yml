@@ -277,8 +277,6 @@ jobs:
         run: |
           xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
-            ( openbox >/dev/null 2>&1 & )
-            sleep 2
             # 1800s. CI runs 38047628453 (this branch) and 38060125035
             # (main, after the OCR live cases) killed this step with exit
             # 124 at the old 1200s ceiling while pytest was still printing
@@ -287,8 +285,44 @@ jobs:
             # suite and runs the OCR live cases plus the opaque-region
             # launches. Line-buffered so a killed run names the test in
             # progress.
+            # openbox starts after that install. Run 38107287671 started it
+            # first and then installed the [ocr] wheels; the live pytest
+            # then saw no _NET_SUPPORTING_WM_CHECK. Snapshots still found
+            # Chrome and Firefox on AT-SPI, and activate_app failed with
+            # "no running application matches" for the rest of the file.
+            # Its own session keeps a later killpg from reaping the WM.
             .venv/bin/pip install -e ".[ocr]" &&
             export PYTHONUNBUFFERED=1
+            setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
+            .venv/bin/python - << "PY"
+import time
+from Xlib import display
+deadline = time.monotonic() + 20
+last = "no _NET_SUPPORTING_WM_CHECK"
+while time.monotonic() < deadline:
+    d = None
+    try:
+        d = display.Display()
+        root = d.screen().root
+        atom = d.intern_atom("_NET_SUPPORTING_WM_CHECK")
+        prop = root.get_full_property(atom, 0)
+        if prop is not None:
+            raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        last = str(exc)
+    finally:
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
+    time.sleep(0.25)
+print(last)
+raise SystemExit(1)
+PY
+            || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
             A11Y_OCR_LIVE=1 timeout -k 5 1800 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
 

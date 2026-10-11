@@ -634,6 +634,145 @@ def _settle_shown_names(run, handle) -> None:
             return
 
 
+def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: int) -> int:
+    """How far the on-screen head moved, in names. Positive is later names.
+
+    A shared prefix, such as the document title, is ignored. The new head
+    at index ``k`` of what remains of ``before`` is a move of ``k`` toward
+    the end. The old head at index ``k`` of ``after`` is a move of ``k``
+    toward the start. No shared name is a move of at least the whole
+    remaining sample, in the direction ``sign`` asked for.
+    """
+    shared = 0
+    while shared < len(before) and shared < len(after) and before[shared] == after[shared]:
+        shared += 1
+    before = before[shared:]
+    after = after[shared:]
+    # A document title stays at the front of both samples. The rows after
+    # it are the move. Nothing left on one side means the head did not move.
+    if not before or not after:
+        return 0
+    if after[0] in before:
+        return before.index(after[0])
+    if before[0] in after:
+        return -after.index(before[0])
+    return sign * len(before)
+
+
+def _name_source(run, handle):
+    """A node whose on-screen names still describe the document after a wheel.
+
+    The anchor is often one cell. That cell leaves the tree as soon as the
+    page moves, so its names cannot say whether the step was one row or a
+    whole viewport. An ancestor that lists several rows stays.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    source = handle
+    try:
+        before = run(lambda: _showing_names(handle))
+    except Exception:
+        return handle, ()
+    if len(before) >= 4:
+        return handle, before
+    current = handle
+    for _ in range(8):
+        try:
+            parent = run(lambda node=current: _atspi._parent_of(node))
+        except Exception:
+            break
+        if parent is None:
+            break
+        current = parent
+        try:
+            names = run(lambda node=current: _showing_names(node))
+        except Exception:
+            break
+        if len(names) > len(before):
+            source, before = current, names
+        if len(before) >= 4:
+            break
+    return source, before
+
+
+def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> None:
+    """Wheel a document by about ``dy`` lines, then wait until the tree says so.
+
+    Chrome's document is a group, so this is the notch path, not the list
+    bar. One notch moves several rows, and a burst of ``|dy|`` notches
+    jumps about a viewport, so a search that lands on the target scrolls
+    past it before the next read. A burst can also collapse into one row
+    on a busy runner. Notches go out one at a time. Each one waits until
+    the on-screen head settles. The step stops when that head has moved
+    by about ``|dy|`` names, or a notch leaves the names unchanged.
+    """
+    from a11y_computer_use.drivers import _atspi, _linux_input
+
+    wanted = abs(int(dy))
+    sign = 1 if int(dy) > 0 else -1
+
+    def plain() -> None:
+        _linux_input.scroll(x, y, dx=dx, dy=dy)
+        if handle is not None:
+            _settle_shown_names(run, handle)
+
+    if handle is None or wanted == 0:
+        _linux_input.scroll(x, y, dx=dx, dy=dy)
+        return
+    try:
+        if not run(lambda: hasattr(handle, "__gpointer__")):
+            plain()
+            return
+        if not run(lambda: _atspi._chromium_app(handle)):
+            plain()
+            return
+    except Exception:
+        plain()
+        return
+    source, before = _name_source(run, handle)
+    if len(before) < 2:
+        plain()
+        return
+
+    moved = 0
+    for notch in range(wanted * 2):
+        _linux_input.scroll(
+            x, y,
+            dx=int(dx) if notch == 0 else 0,
+            dy=sign,
+        )
+        saw = False
+        stable = 0
+        last: int | None = None
+        settled = moved
+        for _ in range(30):
+            try:
+                after = run(lambda node=source: _showing_names(node))
+                nxt = _shown_name_advance(before, after, sign)
+            except Exception:
+                return
+            if after != before:
+                saw = True
+            if abs(nxt) >= wanted:
+                return
+            if nxt == last:
+                stable += 1
+            else:
+                stable = 0
+                last = nxt
+            if stable >= 2 and saw:
+                settled = nxt
+                break
+            time.sleep(0.05)
+        else:
+            settled = last if last is not None else moved
+        # A notch that does not move the head is the end of the page, or a
+        # sample that cannot be measured. More notches would repeat it.
+        if not saw or abs(settled) <= abs(moved):
+            return
+        moved = settled
+
+
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
 
 
@@ -1684,7 +1823,12 @@ class LinuxDriver:
         Chrome document. When the window's process was started with
         ``--remote-debugging-port``, a line step is a DOM ``scrollBy`` of
         about 40 pixels per line, kept only when ``scrollTop`` changes.
-        Otherwise the wheel is sent as before.
+        Otherwise the notches are sent one at a time. A burst of the
+        whole request jumps about a viewport, and on a busy runner that
+        same burst can collapse into one row. Each notch waits until the
+        on-screen head settles, and the step stops when that head has
+        moved by about the requested number of names. A notch that leaves
+        the names unchanged stops the step.
         ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back when a bar is exposed. GTK scrolled
         windows expose the value in pixels. A missing bar tries a CDP DOM
@@ -1734,8 +1878,8 @@ class LinuxDriver:
                 dx=int(dx) * _PIXELS_PER_LINE,
                 dy=int(dy) * _PIXELS_PER_LINE,
             ):
-                _linux_input.scroll(x, y, dx=dx, dy=dy)
-            if handle is not None:
+                _wheel_chromium_document(self._run, handle, x, y, dx=int(dx), dy=int(dy))
+            elif handle is not None:
                 _settle_shown_names(self._run, handle)
             return None
         box = self._run(lambda: _atspi.list_screen_box(container))

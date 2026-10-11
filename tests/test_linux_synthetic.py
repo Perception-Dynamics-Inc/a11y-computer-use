@@ -2236,6 +2236,49 @@ def test_chromium_document_scroll_waits_until_shown_names_change(
     assert any(event[0] == _X_BPRESS and event[1] == 5 for event in events)
 
 
+def test_chromium_document_scroll_tops_up_a_short_head_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A five-line request that only moves the head by one name sends more notches.
+
+    Synthetic names, not a live Chrome. Notches go out one at a time. A
+    notch that moves a single row is not the whole step: more follow until
+    the head has moved by about the request. A step that sent all five
+    notches at once would jump a viewport and skip the row the search is
+    counting on.
+    """
+    events, _display = xtest_recorder
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    script = [tuple(f"ROW-{i:04d}" for i in range(1, 9))]
+    # Each notch advances the head by one row. Three identical reads settle it.
+    for head in range(2, 7):
+        shown = tuple(f"ROW-{i:04d}" for i in range(head, head + 8))
+        script.extend((shown, shown, shown))
+    index = {"i": 0}
+
+    def names(_handle, limit=6):
+        item = script[min(index["i"], len(script) - 1)]
+        index["i"] += 1
+        return item
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    # One notch per row, from ROW-0001 to ROW-0006.
+    assert len(presses) == 5, len(presses)
+
+
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:
     events, _display = xtest_recorder
 
