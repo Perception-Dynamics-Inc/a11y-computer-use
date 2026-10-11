@@ -121,6 +121,28 @@ not construct it and does not call a hosted model. A model with
 instead of continuing without the picture. A runtime with no `crop` method
 still receives the window screenshot.
 
+Before a coordinate click is sent, the loop looks again once. It crops
+about 160 pixels around the point, draws a magenta crosshair on that crop,
+and asks a verifier to accept the point or return a better one in the crop.
+A reply that is not a point counts as accept, and the original point stays.
+When `grounding` is set, that local model is the verifier (`HoloLocalGrounding`
+or a test `ScriptedGrounding`). Otherwise the verifier is one short image
+turn on the main model, with no tools. The check does not call a hosted or
+paid grounding service. `Agent(..., look_again=False)`, or
+`A11Y_COMPUTER_USE_LOOK_AGAIN=0` when the argument is omitted, skips it.
+A model with `supports_images` false and no grounding model skips it too,
+and the trajectory records `skipped` `no_image_support`. A screenshot that
+cannot be decoded is the same kind of skip (`no_screenshot`); the original
+click still goes through the approval gate. After the verifier answers, a
+point inside an element that is not a window, group, or canvas is clicked
+by that ref. A point inside an OCR word box from `a11y_computer_use.ocr`
+is clicked at that word's center. A missing OCR engine does not fail the
+click. The marked crop, the decision (`accept`, `refine`, `unavailable`,
+or `skipped`), and the snap are lines in `trajectory.jsonl` (`kind`
+`look_again`) and on the step. The click that is actually sent, including
+a snapped ref, still uses the approval gate, the payment stop, and typed
+outcomes. One verifier call per coordinate click.
+
 ## CLI
 
 ```bash

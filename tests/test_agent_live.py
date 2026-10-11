@@ -1013,6 +1013,86 @@ def test_agent_clicks_a_target_inside_a_chrome_canvas(tmp_path, isolated_home, p
 
 
 @requires_display
+def test_agent_look_again_refines_an_off_target_canvas_click(tmp_path, isolated_home, pages) -> None:
+    """A point a few pixels off the red square is refined onto it.
+
+    The scripted model asks for a miss. ``ScriptedGrounding`` returns the
+    marked pixel shifted back by that same distance, in the crop's own
+    pixels, and the page records ``canvas-hit``.
+    """
+    import io
+    import re
+
+    from PIL import Image
+
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.schema import Scope
+
+    browser, site, _endpoint = pages
+    browser.navigate(site.url("canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Ready" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    offset = 30
+    trace = tmp_path / "trace-look"
+    trace.mkdir()
+
+    def ground(png, instruction):
+        match = re.search(r"proposed image pixel \((\d+), (\d+)\)", instruction)
+        size = re.search(r"Crop screen size (\d+)x(\d+)", instruction)
+        assert match and size, instruction
+        mx, my = int(match.group(1)), int(match.group(2))
+        screen_w = int(size.group(1))
+        with Image.open(io.BytesIO(png)) as image:
+            image_w = image.size[0]
+        dx = int(round(offset * image_w / screen_w))
+        return GroundingHit(mx - dx, my)
+
+    stub = ScriptedGrounding(ground)
+    seen = {"n": 0}
+
+    def script(messages):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]) + offset,
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=6,
+        grounding=stub,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert len(stub.seen) == 1
+    rows = [json.loads(line) for line in (trace / "trajectory.jsonl").read_text().splitlines()]
+    notes = [row for row in rows if row.get("kind") == "look_again"]
+    assert notes and notes[0]["decision"] == "refine"
+    assert notes[0]["snap"]["type"] != "ref"
+    _assert_trace(result, trace)
+
+
+@requires_display
 def test_agent_checkout_stops_for_a_human_payment(tmp_path, isolated_home, pages) -> None:
     """A saved-card Pay now click stops. The prompt names the button, URL, and reason."""
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
