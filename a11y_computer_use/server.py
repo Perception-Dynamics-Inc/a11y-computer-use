@@ -5093,6 +5093,11 @@ class Runtime:
     #: need well over 20 s. Override with A11Y_COMPUTER_USE_LAUNCH_WAIT_S.
     APP_LAUNCH_WAIT_S = float(os.environ.get("A11Y_COMPUTER_USE_LAUNCH_WAIT_S", "60"))
     APP_FOCUS_WAIT_S = 5.0
+    #: After a Calc, Writer, or Impress window exists, LibreOffice can still
+    #: publish the Start Center title ``LibreOffice 24.2`` for a moment, or
+    #: list that frame beside the document. This is how long launch keeps
+    #: looking for the module title before reporting the title it has.
+    OFFICE_DOCUMENT_WAIT_S = 15.0
 
     def _list_gate_key(self) -> str:
         """The app `app list` is gated against. The list reveals app identities
@@ -5492,6 +5497,65 @@ class Runtime:
                 return title
         return fallback
 
+    def _office_module_word(
+        self, name: str, launch_name: str, argv: tuple[str, ...] | None,
+    ) -> str | None:
+        """``Calc``, ``Writer``, or ``Impress`` for a module launch.
+
+        A bare ``libreoffice`` or ``soffice`` launch has no module word. Its
+        Start Center title is the first window and is reported as is.
+        ``localc`` does not contain the letters ``calc``.
+        """
+        pieces: set[str] = set()
+        for part in (name, launch_name, *(argv or ())):
+            if not part:
+                continue
+            text = str(part).lower()
+            pieces.add(text)
+            pieces.add(os.path.basename(text))
+            for bit in text.replace("\\", "/").split("/"):
+                for token in bit.replace("_", " ").replace("-", " ").split():
+                    if token:
+                        pieces.add(token)
+        if "loimpress" in pieces or "impress" in pieces or "--impress" in pieces:
+            return "Impress"
+        if "lowriter" in pieces or "writer" in pieces or "--writer" in pieces:
+            return "Writer"
+        if "localc" in pieces or "calc" in pieces or "--calc" in pieces:
+            return "Calc"
+        return None
+
+    def _window_title_containing(self, word: str) -> str | None:
+        """The first window title that contains ``word``, or None."""
+        try:
+            rows = list(self.driver.windows() or [])
+        except (ComputerUseError, AttributeError):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "")
+            if word in title:
+                return title
+        return None
+
+    def _wait_office_document_title(self, word: str, fallback: str, timeout_s: float) -> str:
+        """Poll until a window title names ``word``, else return ``fallback``.
+
+        The first frame of ``soffice --calc`` is often ``LibreOffice 24.2``.
+        The document window, or that same frame once it is retitled, is
+        ``Untitled 1 - LibreOffice Calc``. A launch that never opens the
+        module keeps the Start Center title.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            found = self._window_title_containing(word)
+            if found:
+                return found
+            if time.monotonic() >= deadline:
+                return fallback
+            time.sleep(0.25)
+
     def _prepare_launch(self, name: str) -> tuple[str, str, tuple[str, ...] | None]:
         """``(launch_name, gate_key, argv)`` for an OS ``app launch``.
 
@@ -5625,9 +5689,19 @@ class Runtime:
                     f"launched {name}; no window appeared within {self.APP_LAUNCH_WAIT_S:.0f}s",
                     tool="app", verdict=("partial", "no window appeared"),
                 )
+            module = self._office_module_word(name, launch_name, launch_argv)
+            if module and module not in (title or ""):
+                title = self._wait_office_document_title(
+                    module, title or "", self.OFFICE_DOCUMENT_WAIT_S,
+                )
             tip = self._dismiss_libreoffice_tip(name, launch_name, launch_argv, title or "")
             if tip and "tip of the day" in (title or "").lower():
                 title = self._document_window_title(title)
+            elif module and module not in (title or ""):
+                # The sheet title can land when the tip dialog closes.
+                settled = self._window_title_containing(module)
+                if settled:
+                    title = settled
             text = f"launched {name}; first window: {title!r}"
             detail = f"first window {title!r} appeared"
             if tip:
