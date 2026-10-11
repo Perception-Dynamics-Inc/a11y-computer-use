@@ -131,6 +131,9 @@ _GENERIC_REGION_NAMES = frozenset({
     "unknown",
     "group",
 })
+#: Chrome's name for an ``<img>`` that has no alt. It is a placeholder, not
+#: a description of the pixels, so the image is still an opaque region.
+_CHROME_IMAGE_PLACEHOLDER = "to get missing image descriptions"
 _PRESS_ACTIONS = frozenset({"AXPress", "AXOpen", "AXConfirm", "AXPick"})
 _CLICKABLE_ROLES = frozenset(
     {
@@ -242,6 +245,10 @@ class RawNode:
     #: dialog; descendants inherit it while the tree is flattened. None when
     #: the backend has no document identity for the node.
     document_id: str | None = None
+    #: Chromium or Firefox UI outside a content document. Default false, so
+    #: macOS, Windows, GTK, and page content are unchanged. A childless group
+    #: with this flag is the browser frame, not a page region.
+    browser_chrome: bool = False
 
 
 class TreeAccessor(Protocol):
@@ -1338,6 +1345,7 @@ def _prune_inner(
     in_page: bool = False,
     in_web: bool = False,
     web: _WebWalk | None = None,
+    parent_bounds: Bounds | None = None,
 ) -> _PNode | None:
     """``depth`` is the raw tree depth; ``kept_depth`` is the exact pruned depth
     of this node. A wrapper candidate adds a level for its children only when it
@@ -1402,7 +1410,8 @@ def _prune_inner(
     # which is what keeps the macOS/Windows walk count unchanged.
     if past_cap and in_web and depth < _MAX_RAW_DEPTH and web is not None and web.scan_reads > 0:
         kept, elided = _open_nested_frames(
-            raw_children, accessor, geometry, depth, child_in_page, child_in_web, web
+            raw_children, accessor, geometry, depth, child_in_page, child_in_web, web,
+            parent_bounds=bounds,
         )
     elif past_cap:
         elided = len(raw_children)
@@ -1440,6 +1449,7 @@ def _prune_inner(
                 in_page=child_in_page,
                 in_web=child_in_web,
                 web=web,
+                parent_bounds=bounds,
             )
             if pruned is not None:
                 kept.append(pruned)
@@ -1469,7 +1479,7 @@ def _prune_inner(
     if candidate and len(kept) == 1 and elided == 0:
         return kept[0]  # collapse single-child wrapper (keeps the child's own handle)
     if bounds is not None:
-        raw = _as_opaque_region(raw, kept, elided)
+        raw = _as_opaque_region(raw, kept, elided, bounds=bounds, parent_bounds=parent_bounds)
     clickable, editable, _ = _target_flags(raw)
     return _PNode(
         raw=raw,
@@ -1489,6 +1499,8 @@ def _open_nested_frames(
     in_page: bool,
     in_web: bool,
     web: _WebWalk,
+    *,
+    parent_bounds: Bounds | None = None,
 ) -> tuple[list[_PNode], int]:
     """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
 
@@ -1528,6 +1540,7 @@ def _open_nested_frames(
                 in_page=page,
                 in_web=web_here,
                 web=web,
+                parent_bounds=parent_bounds,
             )
             if pruned is not None:
                 kept.append(pruned)
@@ -1615,7 +1628,16 @@ def _keep_priority(node: _PNode) -> int:
 
 
 def _generic_region_name(text: str) -> bool:
-    return text.strip().casefold() in _GENERIC_REGION_NAMES
+    """True for an empty name or one that does not describe the pixels.
+
+    Chrome names an ``<img>`` without alt ``To get missing image descriptions,
+    open the context menu.`` That sentence is the same kind of placeholder as
+    ``image``.
+    """
+    folded = text.strip().casefold()
+    if folded in _GENERIC_REGION_NAMES:
+        return True
+    return folded.startswith(_CHROME_IMAGE_PLACEHOLDER)
 
 
 def _no_accessible_content(raw: RawNode) -> bool:
@@ -1636,17 +1658,47 @@ def _positive_extent(raw: RawNode) -> bool:
     return size is not None and size[0] > 0 and size[1] > 0
 
 
-def _as_opaque_region(raw: RawNode, kept: list[_PNode], elided: int) -> RawNode:
+def _bounds_duplicate(bounds: Bounds | None, parent: Bounds | None) -> bool:
+    """True when ``bounds`` is the same box as ``parent``, within one pixel.
+
+    A childless group with its parent's box is not a separate region. Chrome's
+    nested wrappers copy the page box; the shorter content-area view is a
+    browser-frame group instead. A canvas or an image keeps its own role
+    even when the boxes match.
+    """
+    if bounds is None or parent is None or bounds.display_id != parent.display_id:
+        return False
+    return (
+        abs(bounds.x - parent.x) <= 1
+        and abs(bounds.y - parent.y) <= 1
+        and abs(bounds.width - parent.width) <= 1
+        and abs(bounds.height - parent.height) <= 1
+    )
+
+
+def _as_opaque_region(
+    raw: RawNode,
+    kept: list[_PNode],
+    elided: int,
+    *,
+    bounds: Bounds | None = None,
+    parent_bounds: Bounds | None = None,
+) -> RawNode:
     """Rename a pixel surface or a childless dead group to ``opaque_region``.
 
     A canvas stays opaque even when it has a real name: the name does not
-    describe the pixels. An image needs an empty or generic name.     A group is
+    describe the pixels. An image needs an empty or generic name. A group is
     opaque only when it has a real box, nothing to read, and no kept or
     elided children. The box has to be at least 32 by 32. A smaller childless
     panel is a layout spacer; marking it clickable would crowd the child cap
     and hide a titled document that sits beside it. A zero-size wrapper keeps
     its role so a hollow section around a form is not reported as a clickable
     surface. An editable node stays an entry.
+
+    A browser-frame view stays a group. So does a childless group whose box
+    only duplicates its parent: that view is the frame again, not page
+    content. A canvas, a WebGL surface, an unnamed image, and an empty page
+    region that has its own box stay opaque.
     """
     if raw.editable or not _positive_extent(raw):
         return raw
@@ -1663,6 +1715,8 @@ def _as_opaque_region(raw: RawNode, kept: list[_PNode], elided: int) -> RawNode:
     if surface and raw.role == "AXImage" and not _no_accessible_content(raw):
         return raw
     if not surface and not dead:
+        return raw
+    if dead and (raw.browser_chrome or _bounds_duplicate(bounds, parent_bounds)):
         return raw
     title = "" if _generic_region_name(raw.title) else raw.title
     description = "" if _generic_region_name(raw.description) else raw.description

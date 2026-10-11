@@ -2179,6 +2179,13 @@ class LinuxDriver:
         text = text.replace("\r\n", "\n")
         if not text:
             return 0
+        # Writer keeps the lines in paragraph children. The document node's
+        # own text stays empty, so the read-back is those paragraphs,
+        # captured before the insert.
+        writer_doc = self._run(lambda: _atspi.writer_document_for(handle))
+        writer_before = ""
+        if writer_doc is not None:
+            writer_before = self._run(lambda: _atspi.writer_document_text(writer_doc)) or ""
         before = self._run(lambda: _atspi._readable_text(handle))
         try:
             inserted = self._run(lambda: _atspi.insert_text(handle, text))
@@ -2209,6 +2216,13 @@ class LinuxDriver:
         )
         if _atspi._typed_visible(before, after, text, chrome=chrome):
             return len(text)
+        if writer_doc is not None:
+            shown = self._run(
+                lambda: _atspi.poll_writer_document(writer_doc, writer_before, text)
+            )
+            if _atspi._writer_typed_visible(writer_before, shown, text):
+                return len(text)
+            after = shown if shown is not None else after
         raise _atspi._text_mismatch(
             "text_mismatch",
             f"the text read back does not contain {text!r}",
@@ -2348,6 +2362,11 @@ class LinuxDriver:
             # LibreOffice verifies against the open cell editor. Every other
             # app uses the focused node's text.
             before = self._typed_readback(app_id)
+        # A Writer document's own text is empty. The paragraphs are the
+        # read-back, taken before the keys so a later line is not missed.
+        writer_before = None
+        if app_id and location is None and bar_before is None and _atspi.libreoffice_app(app_id):
+            writer_before = self._run(lambda: _atspi.writer_type_before(app_id))
         # A contenteditable selection has to be read before the keys replace
         # it. The expected result is that range replaced, not the old text
         # with the typed string appended.
@@ -2414,6 +2433,18 @@ class LinuxDriver:
                     expected=text,
                     actual=after,
                 )
+            # Not a sheet. Writer publishes one paragraph at a time, and the
+            # focused node's text stays empty. The same settle set_value uses
+            # confirms the lines. A document that is not Writer leaves
+            # writer_before unset.
+            if writer_before is not None:
+                shown = self._run(
+                    lambda: _atspi.poll_focused_writer_type(app_id, writer_before, text)
+                )
+                if _atspi._writer_typed_visible(writer_before, shown, text):
+                    return len(text)
+                if shown is not None:
+                    after = shown
         if (
             app_id
             and after is not None
