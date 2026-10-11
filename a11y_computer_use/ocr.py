@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from a11y_computer_use.schema import Bounds, ComputerUseError, Display, ErrorCode, Point
-from a11y_computer_use.untrusted import fence_untrusted
+from a11y_computer_use.untrusted import fence, fence_untrusted, unwrap
 
 #: Default confidence floor for a recognised line (engines report 0..1).
 DEFAULT_MIN_CONFIDENCE = 0.5
@@ -285,6 +285,9 @@ class RapidOcr:
     downloads the mobile detection and recognition models into its own package
     directory on first use. This class does not select a GPU execution
     provider. The instance loads those models on the first `recognize`.
+    Recognition asks for word boxes. A detector line that spans several
+    controls is split so the box sits on the word. A result with no word
+    boxes stays one box per detector line.
     """
 
     name = "rapidocr"
@@ -302,7 +305,7 @@ class RapidOcr:
         except Exception as exc:  # noqa: BLE001 - PIL's decoder errors are not one class
             raise ValueError("not a decodable image") from exc
         try:
-            result = engine(np.asarray(image))
+            result = _call_rapid(engine, np.asarray(image))
         except ImportError as exc:
             raise _missing_engine("rapidocr", _RAPID_HINT) from exc
         return _boxes_from_rapid(result)
@@ -333,7 +336,30 @@ class RapidOcr:
         return self._engine
 
 
+def _call_rapid(engine: object, image: object) -> object:
+    """Run one RapidOCR call, requesting word boxes when the engine allows it.
+
+    Older builds raise ``TypeError`` for the keyword. Those still return
+    detector lines, and `_boxes_from_rapid` keeps that line as one box.
+    """
+    call = getattr(engine, "__call__", None)
+    if not callable(call):
+        raise TypeError("OCR engine is not callable")
+    try:
+        return call(image, return_word_box=True)
+    except TypeError:
+        return call(image)
+
+
 def _boxes_from_rapid(result: object) -> list[TextBox]:
+    """Word boxes when RapidOCR returned them, otherwise one box per line."""
+    words = _boxes_from_rapid_words(getattr(result, "word_results", None))
+    if words:
+        return words
+    return _boxes_from_rapid_lines(result)
+
+
+def _boxes_from_rapid_lines(result: object) -> list[TextBox]:
     boxes = getattr(result, "boxes", None)
     texts = getattr(result, "txts", None)
     scores = getattr(result, "scores", None)
@@ -345,8 +371,11 @@ def _boxes_from_rapid(result: object) -> list[TextBox]:
         raw = str(text).strip()
         if not raw:
             continue
-        xs = [float(point[0]) for point in quad]
-        ys = [float(point[1]) for point in quad]
+        points = _quad_points(quad)
+        if points is None:
+            continue
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
         left, top = min(xs), min(ys)
         score = float(score_list[index]) if index < len(score_list) else 1.0
         if score > 1.0:
@@ -362,6 +391,107 @@ def _boxes_from_rapid(result: object) -> list[TextBox]:
             )
         )
     return found
+
+
+def _boxes_from_rapid_words(word_results: object) -> list[TextBox]:
+    """``(text, score, quad)`` rows from ``return_word_box``."""
+    if not word_results:
+        return []
+    try:
+        lines = list(word_results)
+    except TypeError:
+        return []
+    found: list[TextBox] = []
+    for line in lines:
+        if _is_word_triple(line):
+            box = _word_triple_box(line)
+            if box is not None:
+                found.append(box)
+            continue
+        try:
+            items = list(line)
+        except TypeError:
+            continue
+        for item in items:
+            if not _is_word_triple(item):
+                continue
+            box = _word_triple_box(item)
+            if box is not None:
+                found.append(box)
+    return found
+
+
+def _is_word_triple(item: object) -> bool:
+    if not isinstance(item, (list, tuple)) or len(item) != 3:
+        return False
+    text, _score, box = item
+    return isinstance(text, str) and _quad_points(box) is not None
+
+
+def _word_triple_box(item: object) -> TextBox | None:
+    text, score, box = item  # type: ignore[misc]
+    raw = str(text).strip()
+    points = _quad_points(box)
+    if not raw or points is None:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    left, top = min(xs), min(ys)
+    try:
+        confidence = float(score)
+    except (TypeError, ValueError):
+        confidence = 1.0
+    if confidence > 1.0:
+        confidence /= 100.0
+    return TextBox(
+        text=raw,
+        x=int(round(left)),
+        y=int(round(top)),
+        w=max(1, int(round(max(xs) - left))),
+        h=max(1, int(round(max(ys) - top))),
+        confidence=confidence,
+    )
+
+
+def _quad_points(box: object) -> list[tuple[float, float]] | None:
+    """Corners of a RapidOCR quad, or None when ``box`` is not one."""
+    if box is None:
+        return None
+    try:
+        raw = list(box)
+    except TypeError:
+        return None
+    if len(raw) >= 8 and len(raw) % 2 == 0 and all(_as_float(value) is not None for value in raw):
+        pairs = [_as_float(value) for value in raw]
+        return [
+            (pairs[index], pairs[index + 1])  # type: ignore[misc]
+            for index in range(0, len(pairs), 2)
+        ]
+    points: list[tuple[float, float]] = []
+    for point in raw:
+        try:
+            pair = list(point)
+        except TypeError:
+            return None
+        if len(pair) < 2:
+            return None
+        x = _as_float(pair[0])
+        y = _as_float(pair[1])
+        if x is None or y is None:
+            return None
+        points.append((x, y))
+    if len(points) < 2:
+        return None
+    return points
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 class TesseractOcr:
@@ -502,8 +632,11 @@ def ocr(
 
     Each item is ``{"text", "bounds", "confidence"}``. ``text`` is
     `fence_untrusted` output. ``bounds`` is
-    ``{display_id, x, y, width, height}`` in screen pixels. Words on one
-    line are one item. Items under ``min_confidence`` are omitted.
+    ``{display_id, x, y, width, height}`` in screen pixels. Adjacent words
+    on one line, with a gap under 0.8 of the line height, are one item.
+    RapidOCR's detector line is split into word boxes before that grouping,
+    so a line that spans several controls is not one box. A line with no
+    word boxes stays one item. Items under ``min_confidence`` are omitted.
 
     ``engine`` is ``"rapidocr"``, ``"tesseract"``, ``"vision"``, None, or
     an object with ``recognize(png) -> list[TextBox]`` (tests). None uses
@@ -567,6 +700,44 @@ def _spans(
             }
         )
     return spans
+
+
+def format_ocr_lines(spans: object) -> str | None:
+    """Fenced OCR lines with ``[x,y,width,height]`` in screen pixels.
+
+    ``spans`` is the list `ocr` returns. Text that is not already a fence
+    from this process is fenced. The bounds sit outside the fence so a
+    model can click them. None when no line has text.
+    """
+    if not isinstance(spans, (list, tuple)):
+        return None
+    lines: list[str] = []
+    for span in spans:
+        if not isinstance(span, Mapping):
+            continue
+        text = str(span.get("text") or "").strip()
+        if not text:
+            continue
+        if unwrap(text) is None:
+            text = fence(text).text
+        box = _box_suffix(span.get("bounds"))
+        lines.append(f"{text} {box}" if box else text)
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
+def _box_suffix(bounds: object) -> str | None:
+    if not isinstance(bounds, Mapping):
+        return None
+    try:
+        x = int(bounds["x"])
+        y = int(bounds["y"])
+        width = int(bounds["width"])
+        height = int(bounds["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"[{x},{y},{width},{height}]"
 
 
 def _image_and_bounds(image_or_region: object) -> tuple[bytes, Bounds]:
@@ -901,6 +1072,7 @@ __all__ = [
     "crop_png",
     "default_engine",
     "find_lines",
+    "format_ocr_lines",
     "group_lines",
     "is_ocr_ref",
     "ocr",

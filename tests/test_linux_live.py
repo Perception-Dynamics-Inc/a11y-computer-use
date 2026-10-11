@@ -5583,7 +5583,9 @@ _GTK_SWATCH = textwrap.dedent(
 
 def test_linux_crop_of_a_red_control_matches_size_and_color(tmp_path) -> None:
     """crop(ref) returns the control's pixels. Size matches the snapshot bounds
-    and the dominant color is the red the widget painted. No OCR."""
+    and the dominant color is the red the widget painted. The live step
+    installs the optional [ocr] extra, so the text may include OCR lines;
+    this swatch paints no word, and the check is the pixels."""
     import io
 
     from PIL import Image
@@ -5617,7 +5619,7 @@ def test_linux_crop_of_a_red_control_matches_size_and_color(tmp_path) -> None:
         swatch = next((el for el in current.elements if el.title == "Swatch"), None)
         assert swatch is not None, [(el.role, el.title, el.bounds) for el in current.elements]
         text, image = runtime.crop(swatch.ref)
-        assert "No text was read" in text
+        assert text.startswith("crop of ") and "PNG." in text
         assert image.width == swatch.bounds.width
         assert image.height == swatch.bounds.height
         opened = Image.open(io.BytesIO(image.png)).convert("RGB")

@@ -156,6 +156,92 @@ def test_canvas_unnamed_image_and_dead_group_are_opaque_regions() -> None:
     assert observe.find_elements(snap, role="opaque_region") == tuple(opaque)
 
 
+def test_chrome_frame_views_stay_groups_and_a_placeholder_image_is_opaque() -> None:
+    """Chrome's own childless views are not page regions.
+
+    A full-window browser view and a childless group that only copies its
+    parent stay groups, so interactive mode does not list them as clickable
+    opaque regions. A canvas, a named canvas, an empty page region, and an
+    image whose name is Chrome's missing-alt placeholder stay opaque. A
+    described image stays an image. Synthetic tree. No live Chrome.
+    """
+    page = ax(
+        "AXGroup",
+        title="F117",
+        at=(0.0, 86.0),
+        size=(1271.0, 709.0),
+        focused=True,
+        children=[
+            ax("AXCanvas", at=(12.0, 153.0), size=(302.0, 123.0)),
+            ax("AXCanvas", title="Game board", at=(318.0, 175.0), size=(200.0, 101.0)),
+            ax(
+                "AXImage",
+                title="To get missing image descriptions, open the context menu.",
+                at=(12.0, 300.0),
+                size=(64.0, 65.0),
+            ),
+            ax("AXImage", description="Sync status", at=(100.0, 300.0), size=(24.0, 24.0)),
+            ax("AXGroup", at=(40.0, 400.0), size=(180.0, 80.0)),
+            ax("AXGroup", at=(0.0, 86.0), size=(1271.0, 709.0)),
+        ],
+    )
+    tree = ax(
+        "AXWindow",
+        title="F117 - Google Chrome",
+        at=(0.0, 0.0),
+        size=(1280.0, 800.0),
+        children=[
+            ax(
+                "AXGroup",
+                at=(0.0, 40.0),
+                size=(1271.0, 755.0),
+                browser_chrome=True,
+            ),
+            ax(
+                "AXGroup",
+                at=(0.0, 0.0),
+                size=(1271.0, 36.0),
+                browser_chrome=True,
+            ),
+            ax(
+                "AXGroup",
+                at=(0.0, 86.0),
+                size=(1271.0, 709.0),
+                children=[
+                    ax(
+                        "AXGroup",
+                        at=(0.0, 86.0),
+                        size=(1271.0, 709.0),
+                        browser_chrome=True,
+                    ),
+                    page,
+                    ax("AXButton", title="Marker", at=(20.0, 100.0), size=(80.0, 30.0), actions=("AXPress",)),
+                ],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    opaque = [el for el in snap.elements if el.role == "opaque_region"]
+    assert len(opaque) == 4
+    assert all(el.clickable for el in opaque)
+    window = snap.element("e1")
+    assert all(el.bounds.width < window.bounds.width - 20 for el in opaque)
+    assert any(el.title == "Game board" for el in opaque)
+    assert not any("context menu" in (el.title or "") for el in snap.elements)
+    assert any(el.role == "AXImage" and el.title == "Sync status" for el in snap.elements)
+    wide = [
+        el for el in snap.elements
+        if el.role == "AXGroup" and not el.title and el.bounds.width >= 2000
+    ]
+    assert len(wide) >= 3
+    assert all(not el.clickable for el in wide)
+    interactive = render_text(snap, mode="interactive")
+    assert interactive.count("opaque_region") == 4
+    assert "Marker" in interactive
+    assert "context menu" not in interactive
+    assert observe.find_elements(snap, role="opaque_region") == tuple(opaque)
+
+
 def test_controls_inside_an_empty_text_container_are_kept() -> None:
     """A label or paragraph with no text of its own is not a reason to drop its controls.
 

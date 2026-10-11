@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -117,6 +118,77 @@ def test_auto_prefers_rapidocr_then_tesseract_then_vision(monkeypatch) -> None:
 def test_unknown_engine_name_is_rejected() -> None:
     with pytest.raises(ValueError):
         ocr.choose_engine_name("easyocr")
+
+
+def test_rapid_word_boxes_split_a_detector_line() -> None:
+    """A menu-bar line becomes one box per word, and a wide gap stays two items."""
+    line = (
+        ("File", 0.91, [[0, 0], [30, 0], [30, 12], [0, 12]]),
+        ("Edit", 0.80, [[80, 0], [120, 0], [120, 12], [80, 12]]),
+    )
+    result = SimpleNamespace(
+        boxes=[[[0, 0], [400, 0], [400, 12], [0, 12]]],
+        txts=("File Edit View Go",),
+        scores=(0.95,),
+        word_results=(line,),
+    )
+    boxes = ocr._boxes_from_rapid(result)
+    assert [box.text for box in boxes] == ["File", "Edit"]
+    assert boxes[0].x == 0 and boxes[1].x == 80
+    spans = ocr.ocr(_png(400, 20), engine=ocr.FakeOcr(boxes))
+    assert [unwrap(str(span["text"])) for span in spans] == ["File", "Edit"]
+    assert spans[0]["bounds"]["x"] == 0
+    assert spans[1]["bounds"]["x"] == 80
+    assert spans[0]["bounds"]["width"] == 30
+
+
+def test_rapid_without_word_boxes_keeps_the_detector_line() -> None:
+    result = SimpleNamespace(
+        boxes=[[[0, 0], [90, 0], [90, 12], [0, 12]]],
+        txts=("File Edit",),
+        scores=(0.9,),
+        word_results=(None,),
+    )
+    boxes = ocr._boxes_from_rapid(result)
+    assert [box.text for box in boxes] == ["File Edit"]
+    assert boxes[0].w == 90
+
+
+def test_rapid_call_requests_word_boxes_and_accepts_an_older_engine() -> None:
+    seen: dict[str, bool] = {}
+
+    class Engine:
+        def __call__(self, image, return_word_box=False):
+            del image
+            seen["flag"] = return_word_box
+            return "ok"
+
+    assert ocr._call_rapid(Engine(), "img") == "ok"
+    assert seen["flag"] is True
+
+    class Old:
+        def __call__(self, image):
+            del image
+            return "line"
+
+    assert ocr._call_rapid(Old(), "img") == "line"
+
+
+def test_format_ocr_lines_puts_bounds_outside_the_fence() -> None:
+    text = ocr.format_ocr_lines([
+        {
+            "text": "SUBMIT",
+            "bounds": {"x": 12, "y": 40, "width": 48, "height": 14},
+            "confidence": 0.9,
+        },
+        {"text": "   ", "bounds": {"x": 0, "y": 0, "width": 1, "height": 1}},
+    ])
+    assert text is not None
+    fence_text, box = text.rsplit(" ", 1)
+    assert box == "[12,40,48,14]"
+    assert unwrap(fence_text) == "SUBMIT"
+    assert ocr.format_ocr_lines([]) is None
+    assert ocr.format_ocr_lines([{"text": "", "bounds": {"x": 1, "y": 2, "width": 3, "height": 4}}]) is None
 
 
 def test_base_install_does_not_depend_on_ocr_and_the_repo_has_no_weights() -> None:
