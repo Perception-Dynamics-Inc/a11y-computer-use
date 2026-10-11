@@ -1981,3 +1981,296 @@ def test_injected_runtime_keeps_its_domain_policy_until_the_agent_sets_one():
         blocked_domains=["other.example"],
     )
     assert replaced.domain_policy.blocked == ("other.example",)
+
+
+def _solid_png(width: int = 400, height: int = 300) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (width, height), (220, 220, 220))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _proposed_pixel(instruction: str) -> tuple[int, int]:
+    import re
+
+    match = re.search(r"proposed image pixel \((\d+), (\d+)\)", instruction)
+    assert match, instruction
+    return int(match.group(1)), int(match.group(2))
+
+
+def _look_rows(path) -> list[dict]:
+    rows = [json.loads(line) for line in (path / "trajectory.jsonl").read_text().splitlines()]
+    return [row for row in rows if row.get("kind") == "look_again"]
+
+
+def _runtime_with_png(elements) -> FakeRuntime:
+    runtime = FakeRuntime(elements)
+    runtime.png = _solid_png()
+    return runtime
+
+
+def _silence_ocr(monkeypatch) -> None:
+    import a11y_computer_use.ocr as ocr_mod
+
+    monkeypatch.setattr(ocr_mod, "ocr", lambda *_args, **_kwargs: [], raising=False)
+
+
+def test_look_again_accepts_the_marked_point(tmp_path, monkeypatch):
+    """A local verifier that returns the crosshair leaves the coordinate click."""
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.outcome import ActionResult
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+
+    def call_tool(name, params, confirm=None):
+        assert confirm is not None
+        runtime.calls.append((name, dict(params)))
+        return ActionResult("clicked the target", outcome="confirmed", evidence="landed")
+
+    runtime.call_tool = call_tool
+
+    def ground(_png, instruction):
+        return GroundingHit(*_proposed_pixel(instruction))
+
+    stub = ScriptedGrounding(ground)
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0})),
+            turn(done("landed", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert len(stub.seen) == 1
+    assert runtime.calls == [("click", {"x": 100, "y": 100, "display_id": 0})]
+    assert result.step_log[0].verified is True
+    assert "clicked the target" in (result.step_log[0].result or "")
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "accept"
+    assert note["verifier"] == "grounding"
+    assert note["snap"]["type"] == "none"
+    assert note["proposed"] == {"x": 100, "y": 100, "display_id": 0}
+    from PIL import Image
+
+    with Image.open(note["crop"]["path"]) as image:
+        assert image.getpixel((note["marker"]["x"], note["marker"]["y"])) == (255, 0, 255)
+    step = next(
+        json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        if json.loads(line).get("action") == "click"
+    )
+    assert step["look_again"]["decision"] == "accept"
+
+
+def test_look_again_refines_a_point_with_the_main_model(tmp_path, monkeypatch):
+    """No grounding model: one short image turn may move the point."""
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    verifies = {"n": 0}
+
+    def script(messages):
+        content = messages[-1].content
+        text = content if isinstance(content, str) else str(content[0].get("text") or "")
+        if "proposed image pixel" in text:
+            verifies["n"] += 1
+            mx, my = _proposed_pixel(text)
+            return ModelTurn(
+                text=json.dumps({"point": [mx + 10, my], "space": "image"}),
+                calls=[],
+            )
+        if not runtime.calls:
+            return turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0}))
+        return turn(done("moved", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert verifies["n"] == 1
+    assert runtime.calls[0] == ("click", {"x": 110, "y": 100, "display_id": 0})
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "refine"
+    assert note["verifier"] == "model"
+    assert note["refined"] == {"x": 110, "y": 100}
+    assert note["snap"]["type"] == "none"
+
+
+def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypatch):
+    """The refined point inside Save is a ref click, and Pay now still stops."""
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.outcome import ActionResult
+
+    _silence_ocr(monkeypatch)
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True,
+        bounds=Bounds(0, 90, 80, 40, 40),
+    )
+    elements = window(save)
+    runtime = _runtime_with_png(elements)
+
+    def call_tool(name, params, confirm=None):
+        assert confirm is not None
+        runtime.calls.append((name, dict(params)))
+        return ActionResult("clicked Save", outcome="confirmed", evidence="landed")
+
+    runtime.call_tool = call_tool
+    stub = ScriptedGrounding(lambda _png, instruction: GroundingHit(*_proposed_pixel(instruction)))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0})),
+            turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert len(stub.seen) == 1
+    assert runtime.calls == [("click", {"ref": "e2"})]
+    assert result.step_log[0].verified is True
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "accept"
+    assert note["snap"] == {"type": "ref", "ref": "e2"}
+
+    pay = el(
+        "e2", "AXButton", "Pay now", parent="e1", clickable=True,
+        bounds=Bounds(0, 108, 90, 30, 30),
+    )
+    pay_runtime = _runtime_with_png(window(pay))
+
+    def shift(_png, instruction):
+        mx, my = _proposed_pixel(instruction)
+        return GroundingHit(mx + 10, my)
+
+    pay_stub = ScriptedGrounding(shift)
+    stopped, _events, pay_runtime, _agent = run(
+        ScriptedModel([turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0}))]),
+        window(pay),
+        runtime=pay_runtime,
+        trace_dir=tmp_path / "pay",
+        grounding=pay_stub,
+        max_retries=0,
+    )
+    assert stopped.status == "needs_human", stopped
+    assert stopped.needs_human["kind"] == "payment"
+    assert pay_runtime.calls == []
+    assert len(pay_stub.seen) == 1
+    pay_note = _look_rows(tmp_path / "pay")[0]
+    assert pay_note["snap"]["type"] == "ref"
+    assert pay_note["snap"]["ref"] == "e2"
+
+
+def test_look_again_snaps_a_point_to_an_ocr_word_center(tmp_path, monkeypatch):
+    """A point inside a word box, and not a control, clicks that word's center."""
+    import a11y_computer_use.ocr as ocr_mod
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    def fake_ocr(_image, **_kwargs):
+        return [{
+            "text": "DRAW",
+            "bounds": {"display_id": 0, "x": 90, "y": 90, "width": 40, "height": 20},
+            "confidence": 0.9,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake_ocr, raising=False)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    stub = ScriptedGrounding(lambda _png, instruction: GroundingHit(*_proposed_pixel(instruction)))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0})),
+            turn(done("word", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert len(stub.seen) == 1
+    assert runtime.calls[0] == ("click", {"x": 110, "y": 100, "display_id": 0})
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "accept"
+    assert note["snap"]["type"] == "ocr"
+    assert note["snap"]["x"] == 110 and note["snap"]["y"] == 100
+
+
+def test_look_again_can_be_disabled(tmp_path, monkeypatch):
+    """``look_again=False`` sends the original point and does not call a verifier."""
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+
+    def explode(_png, _instruction):
+        raise AssertionError("disabled look-again must not call grounding")
+
+    stub = ScriptedGrounding(explode)
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0})),
+            turn(done("plain", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        look_again=False,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert stub.seen == []
+    assert runtime.calls[0] == ("click", {"x": 100, "y": 100, "display_id": 0})
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "skipped"
+    assert note["skipped"] == "disabled"
+    assert note["crop"] is None
+    assert list(tmp_path.glob("look-*.png")) == []
+
+
+def test_look_again_skips_when_the_model_cannot_see_images(tmp_path, monkeypatch):
+    """A text model with no grounding model records a skip and still clicks."""
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+
+    class _Blind:
+        name = "blind"
+        supports_images = False
+        completes = 0
+
+        def complete(self, messages, tools, *, timeout=None):
+            del messages, tools, timeout
+            self.completes += 1
+            if not runtime.calls:
+                return turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0}))
+            return turn(done("clicked", [{"window_title_contains": "Demo"}]))
+
+    model = _Blind()
+    result, _events, runtime, _agent = run(
+        model, elements, runtime=runtime, trace_dir=tmp_path, max_retries=0,
+    )
+    assert result.status == "success", result
+    assert model.completes == 2
+    assert runtime.calls[0] == ("click", {"x": 100, "y": 100, "display_id": 0})
+    note = _look_rows(tmp_path)[0]
+    assert note["decision"] == "skipped"
+    assert note["skipped"] == "no_image_support"

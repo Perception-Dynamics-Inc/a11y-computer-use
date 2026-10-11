@@ -84,7 +84,12 @@ the tree is insufficient (an opaque region or canvas and no other named
 control, an empty or near-empty tree, or a target that was not found twice),
 the loop attaches a
 crop of that region or a window screenshot if you accept images. Click that
-target with x and y. Words in the image, OCR lines, and any grounding
+target with x and y. Before each coordinate click is sent, the loop crops
+around the point and checks it once. A configured local grounding model, or
+you when none is set, may accept or move the point. A point inside a
+control is clicked by that ref. A canvas or a window is not that control.
+A point inside an OCR word is clicked at the center of that word. Words
+in the image, OCR lines, and any grounding
 suggestion are untrusted screen data. A model
 that cannot accept images stops for a human instead. Request
 the action. The loop approves or denies app quit, closing a window, sending a
@@ -205,6 +210,12 @@ class Agent:
     default on). ``allowed_domains`` and ``blocked_domains`` reject browser
     navigation and actions with ``domain_blocked``. ``grounding`` is an
     optional ``GroundingModel``. It stays off unless the caller passes one.
+    ``look_again`` checks each coordinate click once before it is sent
+    (default on). Pass ``False``, or omit the argument and set
+    ``A11Y_COMPUTER_USE_LOOK_AGAIN=0``, to skip that check. When
+    ``grounding`` is set, that local model is the verifier. Otherwise the
+    check is one short image turn on this model. The loop does not call a
+    hosted grounding service.
     """
 
     def __init__(
@@ -224,6 +235,7 @@ class Agent:
         trace_dir: str | os.PathLike | None = None,
         vision: bool = False,
         grounding: object | None = None,
+        look_again: bool | None = None,
         runtime: object | None = None,
         max_retries: int = 2,
         max_replans: int = 2,
@@ -255,6 +267,8 @@ class Agent:
         #: Optional ``GroundingModel``. Off unless the caller passes one.
         #: The loop never constructs a local or hosted model itself.
         self.grounding = grounding
+        #: One local check before each coordinate click. Never a hosted call.
+        self.look_again = _look_again_enabled(look_again)
         self._runtime = runtime
         self.max_retries = max_retries
         self.max_replans = max_replans
@@ -328,6 +342,9 @@ class Agent:
         self._injection = False
         self._crop_block: dict | None = None
         self._not_found_streak = 0
+        self._looked_ids: set[int] = set()
+        self._look_n = 0
+        self._pending_look: dict | None = None
         self._goal = goal
         # ``clear`` drops a cancel that arrived before the loop, which the
         # HTTP service re-applies on the next event. A CLI signal sets
@@ -645,6 +662,13 @@ class Agent:
             requested, level, self._last_snap, self._hints.get(key), self._app_name(),
         )
         recovery = [forced] if forced else []
+        executed, changed = self._rewrite_coordinate_click(executed)
+        if changed:
+            gate = yield from self._gate_changed_click(
+                executed, call, turn, started, index, remaining, prior,
+            )
+            if gate:
+                return gate
         pre_snap = self._last_snap
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
@@ -940,6 +964,16 @@ class Agent:
     def _invoke(self, action: Action) -> tuple[str, str | None, outcome.ActionResult | None]:
         from a11y_computer_use.server import ActionRefused, error_text, refusal_text
 
+        # Recovery builds a fresh coordinate click. The main path already
+        # rewrote this object, so the id set makes that call a no-op.
+        action, changed = self._rewrite_coordinate_click(action)
+        if changed:
+            blocked = self._click_block_reason(action)
+            if blocked:
+                text = self._fence_tool_text(_click_block_text(blocked))
+                marker = outcome.ActionResult(text, outcome="refused", next=(), evidence=text)
+                return "", text, marker
+
         self._crop_block = None
         try:
             tool, params = to_runtime_call(action, self._app_name())
@@ -984,6 +1018,256 @@ class Agent:
         if isinstance(raw, outcome.ActionResult):
             return self._fence_tool_text(str(raw)), None, raw
         return self._fence_tool_text(_stringify(raw)), None, None
+
+    def _rewrite_coordinate_click(self, action: Action) -> tuple[Action, bool]:
+        """Crop, verify, and snap one coordinate click. One check per action.
+
+        A ref click is unchanged. The same object is not checked twice, so
+        recovery and the main path do not each pay for a verifier call.
+        ``changed`` is true when the click that will be sent is not the one
+        the caller passed in.
+        """
+        if not _is_coordinate_click(action):
+            return action, False
+        looked = getattr(self, "_looked_ids", None)
+        if looked is None:
+            looked = set()
+            self._looked_ids = looked
+        if id(action) in looked:
+            return action, False
+        looked.add(id(action))
+        proposed = _click_point(action)
+        if not self.look_again:
+            self._record_look(_look_note(
+                proposed, decision="skipped", skipped="disabled",
+            ))
+            return action, False
+        ground = _grounding_fn(self.grounding)
+        images = bool(getattr(self.model, "supports_images", False))
+        if ground is None and not images:
+            self._record_look(_look_note(
+                proposed, decision="skipped", skipped="no_image_support",
+            ))
+            return action, False
+        crop = self._look_crop(proposed)
+        if crop is None:
+            self._record_look(_look_note(
+                proposed, decision="skipped", skipped="no_screenshot",
+            ))
+            return action, False
+        marked, block, marker = crop
+        verdict = self._verify_look(marked, block, marker, ground)
+        refined = _screen_point(crop, verdict[0], verdict[1])
+        snap = self._snap_look(marked, refined, proposed)
+        revised = _apply_snap(action, refined, snap)
+        self._record_look(_look_note(
+            proposed,
+            decision=verdict[2],
+            verifier=verdict[3],
+            refined=refined,
+            snap=snap,
+            crop=block,
+            marker={"x": marker[0], "y": marker[1]},
+        ))
+        looked.add(id(revised))
+        if revised.name == action.name and _public_args(revised.args) == _public_args(action.args):
+            return action, False
+        return revised, True
+
+    def _look_crop(
+        self, proposed: dict,
+    ) -> tuple[bytes, dict | None, tuple[int, int]] | None:
+        """Marked crop, its trajectory block, and the marker pixel.
+
+        ``zoom`` is the native crop. A screenshot crop is the fallback.
+        The first item is a ``_LookFrame`` so OCR can read the unmarked PNG.
+        """
+        frame = _capture_look_crop(self, proposed)
+        if frame is None:
+            return None
+        png, bounds, marker = frame
+        try:
+            marked = _mark_png(png, marker[0], marker[1])
+        except Exception:  # noqa: BLE001 - a bad image skips the check
+            return None
+        self._look_n = int(getattr(self, "_look_n", 0)) + 1
+        index = len(getattr(self, "_steps", ()) or ()) + 1
+        block = self._save_named_png(marked, f"look-{index:04d}-{self._look_n:02d}")
+        marked_holder = _LookFrame(marked, png, bounds, marker)
+        return marked_holder, block, marker
+
+    def _verify_look(
+        self,
+        frame: object,
+        block: dict | None,
+        marker: tuple[int, int],
+        ground: Callable[..., object] | None,
+    ) -> tuple[int, int, str, str]:
+        """One verifier call. Returns image pixel, decision, and which verifier."""
+        mx, my = marker
+        png = frame.marked if isinstance(frame, _LookFrame) else b""
+        width, height = _png_size(png)
+        bounds = frame.bounds if isinstance(frame, _LookFrame) else None
+        screen_w = int(getattr(bounds, "width", 0) or 0)
+        screen_h = int(getattr(bounds, "height", 0) or 0)
+        instruction = (
+            f"proposed image pixel ({mx}, {my}). "
+            f"Crop screen size {screen_w}x{screen_h}. "
+            "A magenta crosshair marks that pixel in this crop. "
+            "Return that point to accept the click, or a better point in image pixels. "
+            f"Goal: {(self._goal or '')[:240]}"
+        )
+        if ground is not None:
+            try:
+                hit = ground(png, instruction)
+            except Exception:  # noqa: BLE001 - a local model must not end the run
+                return mx, my, "unavailable", "grounding"
+            point = _ground_point(hit)
+            if point is None:
+                return mx, my, "unavailable", "grounding"
+            return _classify_point(point, mx, my, width, height) + ("grounding",)
+        point = self._verify_with_model(block, png, mx, my, width, height, instruction)
+        if point is None:
+            return mx, my, "unavailable", "model"
+        return _classify_point(point, mx, my, width, height) + ("model",)
+
+    def _verify_with_model(
+        self,
+        block: dict | None,
+        png: bytes,
+        mx: int,
+        my: int,
+        width: int,
+        height: int,
+        instruction: str,
+    ) -> tuple[int, int] | None:
+        """One short image turn. Tools are empty so this is not another action."""
+        import base64
+
+        text = (
+            "Look again before this coordinate click. " + instruction + " "
+            'Reply with JSON only: {"decision":"accept"} or '
+            '{"point":[x,y],"space":"image"}. Do not call tools.'
+        )
+        image = block
+        if image is None and png:
+            image = {
+                "type": "image",
+                "b64": base64.b64encode(png).decode("ascii"),
+                "mime": "image/png",
+            }
+        content: str | list[dict] = text
+        if image is not None:
+            content = [{"type": "text", "text": text}, image]
+        try:
+            turn = self.model.complete(  # type: ignore[union-attr]
+                [Message(role="user", content=content)],
+                [],
+                timeout=self.model_timeout_s,
+            )
+        except Exception:  # noqa: BLE001 - the click still proceeds
+            return None
+        from a11y_computer_use.agent.grounding import parse_grounding_text
+
+        hit = parse_grounding_text(turn.text or "", max(width, 1), max(height, 1))
+        if hit is None:
+            return (mx, my)
+        return (hit.x, hit.y)
+
+    def _snap_look(
+        self,
+        frame: object,
+        refined: tuple[int, int],
+        proposed: dict,
+    ) -> dict:
+        """Ref first, then an OCR word whose box contains the refined point."""
+        display_id = proposed.get("display_id")
+        if self._last_snap is not None:
+            element = _control_at_point(self._last_snap, refined[0], refined[1], display_id)
+            if element is not None and element.ref:
+                return {"type": "ref", "ref": element.ref}
+        if not isinstance(frame, _LookFrame):
+            return {"type": "none"}
+        word = _word_at_point(frame.plain, frame.bounds, refined[0], refined[1])
+        if word is None:
+            return {"type": "none"}
+        return {"type": "ocr", "x": word[0], "y": word[1], "text": word[2]}
+
+    def _record_look(self, note: dict) -> None:
+        self._pending_look = note
+        if self.trace is not None:
+            self.trace.append(note)
+
+    def _gate_changed_click(
+        self,
+        action: Action,
+        call: ToolCall,
+        turn: ModelTurn,
+        started: float,
+        index: int,
+        remaining: list[dict],
+        prior: list[dict],
+    ) -> Iterator[Event]:
+        """Approval and payment gates for a click the verifier moved."""
+        kind = target_human_kind(action, self._last_snap)
+        if kind is not None and action.name in {"type", "set_value", "select", "click", "key"}:
+            info = human_info(kind, _element_for(action, self._last_snap), self._last_snap)
+            info = {
+                **info,
+                "ran": prior,
+                "skipped": [_call_view(call), *remaining],
+                "turn_stop": "needs_human",
+            }
+            self._finish("needs_human", "", info["message"], started, needs_human=info)
+            yield Event("needs_human", info)
+            return "stop_run"
+        label = _action_label(action, self._last_snap)
+        prepared = self._prepare_approval(action, label)
+        if prepared[5] == "payment" and not self.allow_payments:
+            info = self._payment_info(action, prepared)
+            info = {
+                **info,
+                "ran": prior,
+                "skipped": [_call_view(call), *remaining],
+                "turn_stop": "needs_human",
+            }
+            self._finish("needs_human", "", info["message"], started, needs_human=info)
+            yield Event("needs_human", info)
+            return "stop_run"
+        allowed, denial = self._allowed(action, label, prepared)
+        if not allowed:
+            self._commit(
+                action, action, denial or "approval_denied", verified=False,
+                error=denial, duration=0.0, recovery=[], turn=turn,
+                started_at=time.perf_counter(),
+                skipped=remaining, turn_stop="refusal",
+            )
+            yield Event("action", _action_event(index, action, self._last_snap))
+            yield Event("step_finished", _step_finished(
+                index, verified=False, error=denial, skipped=remaining, turn_stop="refusal",
+                ran=[*prior, _call_view(call)],
+            ))
+            self._messages.append(Message(
+                role="tool",
+                content=_with_stop_note(denial or "approval_denied", remaining, "refusal"),
+                tool_call_id=call.id, name=action.name,
+            ))
+            return "stop_turn"
+        return None
+
+    def _click_block_reason(self, action: Action) -> str | None:
+        """Why a rewritten click must not be sent, for the recovery path."""
+        kind = target_human_kind(action, self._last_snap)
+        if kind is not None and action.name in {"type", "set_value", "select", "click", "key"}:
+            return f"needs_human:{kind}"
+        label = _action_label(action, self._last_snap)
+        prepared = self._prepare_approval(action, label)
+        if prepared[5] == "payment" and not self.allow_payments:
+            return "payment"
+        allowed, denial = self._allowed(action, label, prepared)
+        if not allowed:
+            return denial or "approval_denied"
+        return None
 
     def _fence_tool_text(self, text: str) -> str:
         """Wrap a tool result or error when this agent fences untrusted text.
@@ -1445,6 +1729,9 @@ class Agent:
             "turn_stop": turn_stop,
             "injection": bool(self._injection),
         }
+        if self._pending_look is not None:
+            entry["look_again"] = self._pending_look
+            self._pending_look = None
         if self.trace is not None:
             self.trace.record(entry, step.to_dict())
 
@@ -2482,18 +2769,349 @@ def _vision_crop_elements(snap: Snapshot, reason: str | None) -> list:
     return _opaque_elements(snap)
 
 
+_LOOK_CROP = 160
+_LOOK_ACCEPT_PX = 4
+
+
+class _LookFrame:
+    """One crop: the marked PNG the verifier sees, and the plain PNG OCR sees."""
+
+    __slots__ = ("marked", "plain", "bounds", "marker")
+
+    def __init__(self, marked: bytes, plain: bytes, bounds: object, marker: tuple[int, int]) -> None:
+        self.marked = marked
+        self.plain = plain
+        self.bounds = bounds
+        self.marker = marker
+
+
+def _look_again_enabled(value: bool | None) -> bool:
+    """``look_again`` argument, else ``A11Y_COMPUTER_USE_LOOK_AGAIN`` (default on)."""
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        return bool(value)
+    raw = os.environ.get("A11Y_COMPUTER_USE_LOOK_AGAIN")
+    if raw is None or not str(raw).strip():
+        return True
+    return str(raw).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def _is_coordinate_click(action: Action) -> bool:
+    if action.name != "click" or action.args.get("ref"):
+        return False
+    return action.args.get("x") is not None and action.args.get("y") is not None
+
+
+def _click_point(action: Action) -> dict:
+    point: dict = {"x": int(action.args["x"]), "y": int(action.args["y"])}
+    display = action.args.get("display_id")
+    if display is not None:
+        try:
+            point["display_id"] = int(display)
+        except (TypeError, ValueError):
+            point["display_id"] = display
+    return point
+
+
+def _look_note(
+    proposed: dict,
+    *,
+    decision: str,
+    skipped: str | None = None,
+    verifier: str | None = None,
+    refined: tuple[int, int] | None = None,
+    snap: dict | None = None,
+    crop: dict | None = None,
+    marker: dict | None = None,
+) -> dict:
+    return {
+        "kind": "look_again",
+        "decision": decision,
+        "skipped": skipped,
+        "verifier": verifier,
+        "proposed": proposed,
+        "refined": None if refined is None else {"x": int(refined[0]), "y": int(refined[1])},
+        "snap": snap or {"type": "none"},
+        "crop": crop,
+        "marker": marker,
+    }
+
+
+def _grounding_fn(model: object) -> Callable[..., object] | None:
+    if model is None:
+        return None
+    ground = getattr(model, "ground", None)
+    return ground if callable(ground) else None
+
+
+def _classify_point(
+    point: tuple[int, int], mx: int, my: int, width: int, height: int,
+) -> tuple[int, int, str]:
+    ix = min(max(0, int(point[0])), max(0, width - 1))
+    iy = min(max(0, int(point[1])), max(0, height - 1))
+    if abs(ix - mx) <= _LOOK_ACCEPT_PX and abs(iy - my) <= _LOOK_ACCEPT_PX:
+        return mx, my, "accept"
+    return ix, iy, "refine"
+
+
+def _click_block_text(blocked: str) -> str:
+    if blocked == "payment":
+        return "Stopped for a human (payment): look-again moved the click onto a payment."
+    if blocked.startswith("needs_human:"):
+        return (
+            f"Stopped for a human ({blocked.split(':', 1)[1]}): "
+            "look-again moved the click."
+        )
+    return blocked
+
+
+def _apply_snap(action: Action, refined: tuple[int, int], snap: dict) -> Action:
+    if snap.get("type") == "ref" and snap.get("ref"):
+        args: dict = {"ref": snap["ref"]}
+        if action.args.get("button"):
+            args["button"] = action.args["button"]
+        if action.args.get("count"):
+            args["count"] = int(action.args["count"])
+        return Action("click", args, action.id)
+    x, y = refined
+    if snap.get("type") == "ocr":
+        x, y = int(snap["x"]), int(snap["y"])
+    args = {"x": int(x), "y": int(y)}
+    if action.args.get("display_id") is not None:
+        args["display_id"] = int(action.args["display_id"])
+    if action.args.get("button"):
+        args["button"] = action.args["button"]
+    if action.args.get("count"):
+        args["count"] = int(action.args["count"])
+    return Action("click", args, action.id)
+
+
+def _screen_point(crop: tuple, ix: int, iy: int) -> tuple[int, int]:
+    frame = crop[0]
+    bounds = frame.bounds
+    width, height = _png_size(frame.plain)
+    sx = int(bounds.width) / max(1, width)
+    sy = int(bounds.height) / max(1, height)
+    return (
+        int(bounds.x) + int(round(ix * sx)),
+        int(bounds.y) + int(round(iy * sy)),
+    )
+
+
+def _png_size(png: bytes) -> tuple[int, int]:
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png)) as image:
+        return int(image.size[0]), int(image.size[1])
+
+
+def _mark_png(png: bytes, x: int, y: int) -> bytes:
+    """A magenta crosshair with a white halo, centered on ``(x, y)``."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    image = Image.open(io.BytesIO(png)).convert("RGB")
+    draw = ImageDraw.Draw(image)
+    for width, color, radius, arm in (
+        (5, (255, 255, 255), 12, 18),
+        (3, (255, 0, 255), 10, 16),
+    ):
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius),
+            outline=color, width=width,
+        )
+        draw.line((x - arm, y, x + arm, y), fill=color, width=width)
+        draw.line((x, y - arm, x, y + arm), fill=color, width=width)
+    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(255, 0, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _capture_look_crop(agent: Agent, proposed: dict):
+    """Unmarked PNG, screen bounds, and the marker pixel. None when no image."""
+    x, y = int(proposed["x"]), int(proposed["y"])
+    display = proposed.get("display_id")
+    zoomed = _zoom_crop(agent, x, y, display)
+    if zoomed is not None:
+        return zoomed
+    return _screenshot_crop(agent, x, y, display)
+
+
+def _zoom_crop(agent: Agent, x: int, y: int, display: object):
+    zoom = getattr(agent.runtime, "zoom", None)
+    if not callable(zoom):
+        return None
+    half = _LOOK_CROP // 2
+    try:
+        display_id = 0 if display is None else int(display)
+        raw = zoom(display_id, x - half, y - half, _LOOK_CROP, _LOOK_CROP)
+    except Exception:  # noqa: BLE001 - fall back to the screenshot crop
+        return None
+    if not isinstance(raw, tuple) or len(raw) != 2:
+        return None
+    png = raw[0] if isinstance(raw[0], (bytes, bytearray)) else _png_of(raw[0])
+    if not isinstance(png, (bytes, bytearray)):
+        return None
+    bounds = _bounds_of_region(raw[1])
+    if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+        return None
+    try:
+        width, height = _png_size(bytes(png))
+    except Exception:  # noqa: BLE001 - not a decodable crop
+        return None
+    if width < 8 or height < 8:
+        return None
+    mx = int(round((x - int(bounds.x)) * width / int(bounds.width)))
+    my = int(round((y - int(bounds.y)) * height / int(bounds.height)))
+    mx = min(max(0, mx), width - 1)
+    my = min(max(0, my), height - 1)
+    return bytes(png), bounds, (mx, my)
+
+
+def _screenshot_crop(agent: Agent, x: int, y: int, display: object):
+    import io
+
+    from PIL import Image
+
+    raw = agent._grab()
+    png = _png_of(raw)
+    if not png:
+        return None
+    image_obj = raw[1] if isinstance(raw, tuple) and len(raw) == 2 else raw
+    try:
+        with Image.open(io.BytesIO(png)) as image:
+            img_w, img_h = image.size
+            source_w = int(getattr(image_obj, "source_width", 0) or 0) or img_w
+            source_h = int(getattr(image_obj, "source_height", 0) or 0) or img_h
+            if source_w <= 0 or source_h <= 0:
+                source_w, source_h = img_w, img_h
+            ix = min(max(0, int(round(x * img_w / source_w))), img_w - 1)
+            iy = min(max(0, int(round(y * img_h / source_h))), img_h - 1)
+            size = min(_LOOK_CROP, img_w, img_h)
+            if size < 8:
+                return None
+            left = min(max(0, ix - size // 2), img_w - size)
+            top = min(max(0, iy - size // 2), img_h - size)
+            crop = image.crop((left, top, left + size, top + size)).convert("RGB")
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG")
+            cropped = buffer.getvalue()
+    except Exception:  # noqa: BLE001 - a fake or missing screenshot skips the check
+        return None
+    from a11y_computer_use.schema import Bounds
+
+    screen_left = int(round(left * source_w / img_w))
+    screen_top = int(round(top * source_h / img_h))
+    screen_w = max(1, int(round(size * source_w / img_w)))
+    screen_h = max(1, int(round(size * source_h / img_h)))
+    display_id = 0 if display is None else int(display)
+    bounds = Bounds(display_id, screen_left, screen_top, screen_w, screen_h)
+    return cropped, bounds, (ix - left, iy - top)
+
+
+def _bounds_of_region(region: object):
+    from a11y_computer_use.schema import Bounds
+
+    if isinstance(region, Bounds):
+        return region
+    if isinstance(region, dict):
+        try:
+            return Bounds(
+                int(region.get("display_id", 0)),
+                int(region["x"]), int(region["y"]),
+                int(region["width"]), int(region["height"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+    if all(hasattr(region, name) for name in ("x", "y", "width", "height")):
+        try:
+            return Bounds(
+                int(getattr(region, "display_id", 0) or 0),
+                int(region.x), int(region.y), int(region.width), int(region.height),
+            )
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _word_at_point(png: bytes, bounds: object, x: int, y: int):
+    """Center of the smallest OCR word box that contains ``(x, y)``, or None."""
+    from a11y_computer_use.ocr import ocr
+    from a11y_computer_use.schema import ComputerUseError
+
+    try:
+        spans = ocr((png, bounds))
+    except (ComputerUseError, ValueError, OSError):
+        return None
+    if not isinstance(spans, (list, tuple)):
+        return None
+    hits = []
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        box = span.get("bounds")
+        if not isinstance(box, dict):
+            continue
+        try:
+            bx, by = int(box["x"]), int(box["y"])
+            bw, bh = int(box["width"]), int(box["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if bw <= 0 or bh <= 0:
+            continue
+        if bx <= x < bx + bw and by <= y < by + bh:
+            hits.append((
+                bw * bh,
+                bx + bw // 2,
+                by + bh // 2,
+                str(span.get("text") or ""),
+            ))
+    if not hits:
+        return None
+    hits.sort(key=lambda item: item[0])
+    _area, cx, cy, text = hits[0]
+    return cx, cy, text
+
+
 def _element_at_point(snap: Snapshot, x: object, y: object, display_id: object):
     """The smallest element whose bounds contain the coordinate click."""
+    hits = _hits_at_point(snap, x, y, display_id)
+    return hits[0] if hits else None
+
+
+def _control_at_point(snap: Snapshot, x: object, y: object, display_id: object):
+    """Smallest named control under the point, skipping canvases and containers.
+
+    An opaque region has a ref and still does not name the drawn target, so
+    a coordinate click inside it stays a coordinate click. A window or a
+    group that merely contains the point is not the click either.
+    """
+    for element in _hits_at_point(snap, x, y, display_id):
+        if _is_opaque_role(element.role):
+            continue
+        if _role_key(element.role) in _STRUCTURAL_ROLES:
+            continue
+        if element.ref:
+            return element
+    return None
+
+
+def _hits_at_point(snap: Snapshot, x: object, y: object, display_id: object) -> list:
     try:
         px, py = int(x), int(y)
     except (TypeError, ValueError):
-        return None
+        return []
     wanted = None
     if display_id is not None:
         try:
             wanted = int(display_id)
         except (TypeError, ValueError):
-            return None
+            return []
     hits = []
     for element in snap.elements:
         bounds = element.bounds
@@ -2503,10 +3121,8 @@ def _element_at_point(snap: Snapshot, x: object, y: object, display_id: object):
             continue
         if bounds.x <= px < bounds.x + bounds.width and bounds.y <= py < bounds.y + bounds.height:
             hits.append(element)
-    if not hits:
-        return None
     hits.sort(key=lambda element: (element.bounds.width * element.bounds.height, element.ref))
-    return hits[0]
+    return hits
 
 
 def _opaque_elements(snap: Snapshot) -> list:
