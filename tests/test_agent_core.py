@@ -1782,7 +1782,32 @@ def test_scripted_spec_and_schemas(tmp_path):
     assert "python" not in names
     done_schema = next(item for item in tool_schemas() if item["name"] == "done")
     assert "conditions" in done_schema["parameters"]["properties"]
+    assert done_schema["parameters"]["additionalProperties"] is False
     assert ReservedPermission.EXEC == "exec"
+
+
+def test_validate_action_rejects_unknown_fields() -> None:
+    from a11y_computer_use.agent.actions import ACTION_NAMES, EXEC_ACTION_NAMES, Action, validate_action
+
+    for name in sorted(ACTION_NAMES):
+        problem = validate_action(Action(name, {"not_a_real_argument": "x"}))
+        assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
+        assert "unknown field 'not_a_real_argument'" in problem
+    for name in sorted(EXEC_ACTION_NAMES):
+        assert validate_action(Action(name, {"not_a_real_argument": "x"})) == "exec is not allowed"
+        problem = validate_action(
+            Action(name, {"not_a_real_argument": "x"}), allow_exec=True,
+        )
+        assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
+    refused = validate_action(Action("type", {"text": "hi", "ref": "e1"}))
+    assert refused == "invalid_arguments: type: unknown field 'ref'; expected app, text"
+    assert validate_action(Action("type", {"text": "hi"})) is None
+    assert validate_action(Action("click", {"x": 1, "y": 2, "_source_ref": "e2"})) == (
+        "invalid_arguments: click: unknown field '_source_ref'; "
+        "expected button, count, display_id, ref, x, y"
+    )
+    for schema in tool_schemas(allow_exec=True):
+        assert schema["parameters"]["additionalProperties"] is False
 
 
 def test_injection_text_is_fenced_and_not_followed(tmp_path):
