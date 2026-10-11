@@ -298,6 +298,27 @@ def test_judge_uses_readback_state_and_process_death() -> None:
     assert outcome.judge(
         changed=True, requested="a", readback="hella", before_value="hell",
     )[0] == "confirmed"
+    replaced = outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD start",
+        before_value="Hello world start",
+        selection=(6, 11),
+    )
+    assert replaced == ("confirmed", "read back 'Hello WORD start'")
+    assert outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD start",
+        before_value="Hello world start",
+    )[0] == "partial"
+    assert outcome.judge(
+        changed=True,
+        requested="WORD",
+        readback="Hello WORD startSecond line",
+        before_value="Hello world start",
+        expected="Hello WORD startSecond line",
+    )[0] == "confirmed"
     assert outcome.judge(
         changed=True, requested="hello", readback="help", before_value="",
     )[0] == "partial"
