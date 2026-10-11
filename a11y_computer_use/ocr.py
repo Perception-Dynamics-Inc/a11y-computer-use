@@ -630,13 +630,15 @@ def ocr(
     rectangle in screen pixels. Boxes are scaled from image pixels onto
     that rectangle.
 
-    Each item is ``{"text", "bounds", "confidence"}``. ``text`` is
+    Each item is ``{"text", "bounds", "confidence", "words"}``. ``text`` is
     `fence_untrusted` output. ``bounds`` is
     ``{display_id, x, y, width, height}`` in screen pixels. Adjacent words
     on one line, with a gap under 0.8 of the line height, are one item.
     RapidOCR's detector line is split into word boxes before that grouping,
     so a line that spans several controls is not one box. A line with no
-    word boxes stays one item. Items under ``min_confidence`` are omitted.
+    word boxes stays one item. ``words`` is one plain-text box per input
+    box, so a click can use a word without using the line's union. Items
+    under ``min_confidence`` are omitted.
 
     ``engine`` is ``"rapidocr"``, ``"tesseract"``, ``"vision"``, None, or
     an object with ``recognize(png) -> list[TextBox]`` (tests). None uses
@@ -697,6 +699,11 @@ def _spans(
                     "height": max(1, int(round((bottom - top) * sy))),
                 },
                 "confidence": min(box.confidence for box in group),
+                # One entry per input box, before this line's union. A click
+                # uses these. The union above is the line and is not a target.
+                "words": [
+                    _span_word(box, bounds, sx, sy) for box in group
+                ],
             }
         )
     return spans
@@ -738,6 +745,20 @@ def _box_suffix(bounds: object) -> str | None:
     except (KeyError, TypeError, ValueError):
         return None
     return f"[{x},{y},{width},{height}]"
+
+
+def _span_word(box: TextBox, bounds: Bounds, sx: float, sy: float) -> dict[str, object]:
+    """One input box in screen pixels. Text is plain; the line text is fenced."""
+    return {
+        "text": box.text.strip(),
+        "bounds": {
+            "display_id": bounds.display_id,
+            "x": int(round(box.x * sx)) + bounds.x,
+            "y": int(round(box.y * sy)) + bounds.y,
+            "width": max(1, int(round(box.w * sx))),
+            "height": max(1, int(round(box.h * sy))),
+        },
+    }
 
 
 def _image_and_bounds(image_or_region: object) -> tuple[bytes, Bounds]:

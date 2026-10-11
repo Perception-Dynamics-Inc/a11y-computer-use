@@ -2079,6 +2079,7 @@ def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
                 "--window-size=1100,800", url,
             ],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         return proc, "chrome"
     binary = _firefox_binary()
@@ -2096,6 +2097,7 @@ def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
     proc = subprocess.Popen(
         [binary, "-no-remote", "-profile", str(profile), url],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     return proc, "firefox"
 
@@ -2308,7 +2310,7 @@ def test_linux_chrome_paragraph_label_and_contenteditable(tmp_path) -> None:
         _para_page_lists_controls(driver, runtime, app)
         _para_page_edits_contenteditable(driver, runtime, app)
     finally:
-        _stop(proc)
+        _stop_group(proc)
 
 
 _ROLELESS_PAGE = """<!doctype html><meta charset=utf-8><title>cuaroleless</title>
@@ -2375,6 +2377,7 @@ def test_linux_chrome_roleless_contenteditable(tmp_path) -> None:
             "--window-size=1100,800", page.resolve().as_uri(),
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + 30
@@ -2434,7 +2437,7 @@ def test_linux_chrome_roleless_contenteditable(tmp_path) -> None:
         assert cleared.startswith("set "), cleared
         _wait_roleless_value(driver, app, "Notes box", "")
     finally:
-        _stop(proc)
+        _stop_group(proc)
 
 
 def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
@@ -2453,7 +2456,7 @@ def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
         runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
         _para_page_lists_controls(driver, runtime, app)
     finally:
-        _stop(proc)
+        _stop_group(proc)
 
 
 def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:

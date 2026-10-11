@@ -125,7 +125,8 @@ each line. `crop` itself includes those lines when an engine is installed.
 `ocr` reads a window screenshot, a `crop` result, or
 `(image, bounds)` and returns fenced `{text, bounds, confidence}` in screen
 pixels. Adjacent words are one item; RapidOCR detector lines are split into
-word boxes first. A missing engine (`unsupported`, reason `missing_dependency`) is
+word boxes first. Each span also carries `words`, one plain-text box per
+input box. A missing engine (`unsupported`, reason `missing_dependency`) is
 skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
@@ -136,7 +137,36 @@ call a hosted model. The adapter puts the screenshot in the chat template
 as an image part, asks for `{"x","y"}` on a 0..1000 grid, and scales that
 point onto the image. It loads bfloat16 when that dtype runs, otherwise
 float16, stops generation on `}` with `max_new_tokens` 14 and the
-tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored. A model with
+tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored.
+
+When the model clicks a ref that is not in the snapshot, the loop resolves
+the click in this order before the payment and approval gates, so the click
+that runs is the one those gates see:
+
+1. The accessibility tree. An enabled element whose title is a label in the
+   goal (or in the model's turn text) is clicked by that ref. Window, group,
+   and opaque roles are not candidates.
+2. OCR text match. RapidOCR runs on the screenshot. When a line matches a
+   label, the click is the center of the word box on that line. A RapidOCR
+   line box, and any box whose text contains whitespace, is not a click
+   target. `words` on the span are the input boxes; the span bounds are the
+   line union.
+3. Holo, only when step 2 finds no word and the click did not already
+   include `x` and `y`. The caller must have passed `grounding`. A point
+   snaps to a tree element box or a word box only when that box is at most
+   200 by 40 pixels; otherwise the raw point is used. Icons with no text
+   take this step.
+
+A ref that is already in the tree is not rewritten. A click that already
+has `x` and `y` stays on that point when OCR does not match, so the
+planner's coordinate is not replaced by Holo. Worker threads
+(`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and
+`torch.set_num_threads` when torch is already imported) are capped at 4
+before OCR and before Holo. A pool already set lower is not raised. Torch
+is not imported by this step. The 11 October 2026 local eval of this order
+measured 42 of 47 targets with OCR then Holo, and 29 of 47 with Holo alone.
+Look-again is a later check on the coordinate click this order returns. It
+is not part of this loop. A model with
 `supports_images` false stops as `needs_human` with `kind` `unsupported`
 instead of continuing without the picture. A runtime with no `crop` method
 still receives the window screenshot.
@@ -499,6 +529,11 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   the chat template and the processor both receiving the image, and torch
   threads staying at most 4 (`tests/test_grounding.py`). Those tests mock
   the stack. They do not download weights.
+- the click order tree, then an OCR word, then Holo
+  (`tests/test_vision_order.py`): a line box is not a target, an OCR match
+  does not call Holo, a model `x`/`y` is kept when OCR misses, a Holo point
+  snaps only into a box at most 200 by 40, and worker threads stay at or
+  under 4. No weights are downloaded.
 - `crop` returning an image block on the tool message, and a failed crop
   staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the
@@ -571,6 +606,9 @@ Not in this change:
   are not implemented. No hosted grounding API is called.
   `HoloLocalGrounding` loads only when the caller constructs it. The
   `[holo]` extra is not installed by the test run.
+  Look-again (a second crop around a Holo point) is not implemented here.
+  The click order returns a ref or a coordinate click so that check can
+  run later on the coordinate.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
