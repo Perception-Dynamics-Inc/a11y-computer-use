@@ -269,7 +269,7 @@ a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| `POST` | `/runs` | `{goal, model, display, limits, allowed_domains, blocked_domains, allow_exec}` | `202 {"id"}`. `409` when that display already has an active run |
+| `POST` | `/runs` | `{goal, model, display, limits, allowed_domains, blocked_domains, allow_exec, allow_payments}` | `202 {"id"}`. `409` when that display already has an active run |
 | `GET` | `/runs/{id}` | | The same fields as `a11y-agent run --json`. `status` is `running` until the run finishes. `pending_approvals` is present only while an approval is waiting |
 | `GET` | `/runs/{id}/events` | | `text/event-stream`. Each event is `id`, `event` (the type), and `data` (`seq`, `type`, `data`). The stream replays, then stays open until the run finishes, then closes |
 | `POST` | `/runs/{id}/cancel` | | `202 {"id", "cancel": true}` |
@@ -277,9 +277,13 @@ a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
 | `GET` | `/runs/{id}/trace` | | `{"trajectory", "files"}`. `trajectory` is the JSONL with UI text fenced |
 | `GET` | `/runs/{id}/trace/{name}` | | One file from that directory (a screenshot, for example). Names that contain a slash or `..` are `404` |
 
-`limits` is `{"max_steps", "max_time_s"}`. `allowed_domains` and
+`limits` is `{"max_steps", "max_time_s", "model_timeout_s"}`. `allowed_domains` and
 `blocked_domains` are lists of strings or one comma-separated string. Both
-are forwarded to `Agent`. `allow_exec` defaults to false.
+are forwarded to `Agent`. `allow_exec` defaults to false. A field that is
+not in that body, including a key inside `limits`, is `400` with
+`invalid_arguments` and does not start a run. A cancel body with any field,
+or an approve body with any field other than `approve`, is the same error
+and does not cancel or answer.
 
 One run may be active per display. An omitted display shares the `default`
 slot. A second `POST /runs` for that display returns `409` with `run_id` of

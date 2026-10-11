@@ -5488,6 +5488,21 @@ class Runtime:
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
+            # macOS can start an app behind the current one (`open -g`).
+            # Other drivers ignore `activate` and still launch, which reports
+            # success for a request they did not perform.
+            if activate is False and not getattr(self.driver, "background_input", False):
+                platform = str(getattr(self.driver, "name", None) or "this driver")
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"app launch activate=false is not supported on {platform}; "
+                    "the app was not launched",
+                    detail={
+                        "driver": platform,
+                        "reason": "activate_unsupported",
+                        "hint": "omit activate to launch on this driver",
+                    },
+                )
             if name and looks_like_url(name):
                 self._reject_domain(destination=name)
             if self._resolves_apps():
@@ -6202,7 +6217,9 @@ _INSTRUCTIONS = (
     "COEXIST: the user keeps working while you act. Ref clicks, set_value, menu, file_dialog, and "
     "type/key with app=<the app you observed> never activate anything; app focus and coordinate "
     "clicks pull the user's screen to the app, so avoid them unless a coordinate click is the "
-    "only way (then say so). Launch with activate=false. "
+    "only way (then say so). On macOS, launch with activate=false. On Linux, "
+    "Windows, and the browser driver, omit activate: activate=false is "
+    "unsupported and the app is not launched. "
     "GRANTS: on macOS the host app needs the Accessibility (and, for screenshots, Screen "
     "Recording) grant; a permission_denied_* error already opened the system dialog and the "
     "settings pane: tell the user which app to switch on, then call request_permission(kind), "
@@ -6918,10 +6935,12 @@ def build_server(
         launcher such as gtk-launch exiting 0 is not the app exiting.
         'quit' sends the quit chord and reports a save-changes dialog (an
         AT-SPI dialog or alert, or a dialog window) instead of "still running".
-        It does not click Discard. activate=false starts it
+        It does not click Discard. On macOS, activate=false starts it
         behind the current app so the user's screen and Space stay put (the
         default in background focus mode); refs, set_value, menus, and
-        type/key with app=... all work without focus. 'focus' brings it to the
+        type/key with app=... all work without focus. On Linux, Windows, and
+        the browser driver, activate=false is unsupported and the app is not
+        launched; omit activate. 'focus' brings it to the
         front and waits until it is frontmost: this switches the user's screen,
         so use it only when they should see the app or when coordinate clicks
         are unavoidable. 'quit' sends the quit chord and reports whether a
