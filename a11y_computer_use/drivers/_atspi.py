@@ -7545,6 +7545,106 @@ def activate_qt_table_cell(acc) -> bool:
     return False
 
 
+def _aria_bool(acc, key: str) -> bool | None:
+    """``true`` or ``false`` from an object attribute, else None."""
+    raw = str(_get_attributes(acc).get(key) or "").strip().lower()
+    if raw in {"true", "false"}:
+        return raw == "true"
+    return None
+
+
+def _row_toggle_state(acc) -> tuple[bool | None, bool | None]:
+    """``(expanded, checked)`` for a row that can toggle, else None per side.
+
+    An ARIA treeitem publishes ``EXPANDABLE`` while collapsed and ``EXPANDED``
+    after it opens. ``aria-expanded`` is that bit when the state set has not
+    been filled in. A checkable row uses ``CHECKED`` the same way. A row that
+    is neither is ``(None, None)`` and is not a toggle.
+    """
+    expanded: bool | None = None
+    if _state_has(acc, "EXPANDABLE") or _state_has(acc, "EXPANDED"):
+        expanded = _state_has(acc, "EXPANDED")
+    else:
+        flag = _aria_bool(acc, "aria-expanded")
+        if flag is not None:
+            expanded = flag
+    checked: bool | None = None
+    if _state_has(acc, "CHECKABLE") or _state_has(acc, "CHECKED"):
+        checked = _state_has(acc, "CHECKED")
+    else:
+        flag = _aria_bool(acc, "aria-checked")
+        if flag is not None:
+            checked = flag
+    return expanded, checked
+
+
+def _row_can_toggle(state: tuple[bool | None, bool | None]) -> bool:
+    return state[0] is not None or state[1] is not None
+
+
+def _row_toggle_committed(before: tuple[bool | None, bool | None], acc) -> bool:
+    """True when expanded or checked flipped and the new state stayed.
+
+    Chrome's ``doAction("click")`` returns before ``EXPANDED`` updates. The
+    read in the same turn still sees the collapsed treeitem, and a second
+    click then flips ``aria-expanded`` back. This waits through that beat.
+    The new state has to survive one more read. A row that cannot toggle is
+    false with no wait. Hermetic fakes patch ``time.sleep``.
+    """
+    if not _row_can_toggle(before):
+        return False
+    for attempt in range(8):
+        if _row_toggle_state(acc) != before:
+            time.sleep(0.04)
+            if _row_toggle_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def row_toggle_state(acc) -> tuple[bool | None, bool | None]:
+    """Expanded and checked bits to compare after ``select_contained_row``.
+
+    Read this before that call. The click action inside it returns before
+    Chrome publishes the new ``EXPANDED`` state.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None:
+        return None, None
+    return _row_toggle_state(target)
+
+
+def row_toggle_blocks_pointer(acc) -> bool:
+    """True when a center click would activate a toggle row a second time.
+
+    ``select_contained_row`` already performed the click or toggle action
+    when this is true. A pointer click is another activation. An ARIA
+    treeitem's handler flips ``aria-expanded``, so the second click
+    collapses the node the first click opened, and ``SELECTED`` never
+    appears when the item has no ``aria-selected``. A list option that is
+    not expandable or checkable still uses the pointer fallback. A GTK
+    cell whose action is expand or activate is not this case: that action
+    is not performed here.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None or not _row_can_toggle(_row_toggle_state(target)):
+        return False
+    return _first_press_action(acc) in _SELECTING_ACTION_NAMES
+
+
+def row_toggle_committed(before: tuple[bool | None, bool | None], acc) -> bool:
+    """True when the row's expanded or checked state flipped and stayed.
+
+    ``before`` is ``row_toggle_state`` from before the click action. Chrome
+    publishes the new state a beat after ``doAction`` returns.
+    """
+    _parent, _index, target = _selection_parent(acc)
+    if target is None:
+        return False
+    return _row_toggle_committed(before, target)
+
+
 def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 
