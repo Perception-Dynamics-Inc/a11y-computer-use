@@ -965,7 +965,10 @@ def test_agent_follows_next_after_a_hidden_ref(tmp_path) -> None:
 
 
 def test_agent_escalates_a_noop_and_counts_it_as_stuck(tmp_path) -> None:
-    save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
     clock = el("clock", "AXStaticText", "t0", parent="e1")
     elements = window(save, clock)
     runtime = FakeRuntime(elements)

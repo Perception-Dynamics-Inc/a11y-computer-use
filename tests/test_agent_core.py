@@ -1207,7 +1207,10 @@ def test_done_accepts_writer_paragraph_breaks_and_rejects_a_different_text():
 
 
 def test_stuck_alternate_ref_then_coordinate_then_keyboard():
-    save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
     other = el("e9", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 200, 30, 80, 24))
     result, _events, runtime, _agent = run(
         ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
@@ -1228,6 +1231,102 @@ def test_stuck_alternate_ref_then_coordinate_then_keyboard():
     assert runtime.calls[1] == ("click", {"x": 60, "y": 42, "display_id": 0})
     assert runtime.calls[2] == ("key", {"chord": "Return"})
     assert result.steps == 3
+
+
+def test_repeated_click_on_a_missing_ref_does_not_press_return(tmp_path):
+    """A stale ref stays a click error. Return is not sent to the focused field."""
+    field = el(
+        "e2", "AXTextField", "Message", parent="e1", editable=True, focused=True,
+        value="draft not ready",
+    )
+    send = el(
+        "e3", "AXButton", "Send", parent="e1", clickable=True,
+        bounds=Bounds(0, 200, 30, 80, 24),
+    )
+    elements = window(field, send)
+    runtime = FakeRuntime(elements)
+    runtime.fail["e990"] = ComputerUseError(
+        ErrorCode.STALE_REF, "stale_ref: e990 is not in the current snapshot",
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"ref": "e990"})),
+            turn(ToolCall("click", {"ref": "e990"})),
+            turn(ToolCall("ask_human", {"message": "the save button is missing", "kind": "other"})),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+    )
+    assert result.status == "needs_human"
+    assert [step.action for step in result.step_log[:2]] == ["click", "click"]
+    assert "stale_ref" in (result.step_log[1].error or "")
+    clicks = [call for call in runtime.calls if call[0] == "click"]
+    assert clicks == [("click", {"ref": "e990"}), ("click", {"ref": "e990"})]
+    assert all(call[1].get("chord") != "Return" for call in runtime.calls if call[0] == "key")
+
+
+def test_unfocused_click_does_not_escalate_to_return(tmp_path):
+    """Return is not the next rung when the requested button is not focused."""
+    save = el(
+        "e2", "AXButton", "Save", parent="e1", clickable=True, focused=False,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    _result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(save),
+        max_steps=4,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert all(call[0] != "key" for call in runtime.calls)
+    assert all(call[0] == "click" for call in runtime.calls)
+
+
+def test_focused_send_is_denied_before_return_can_run(tmp_path):
+    """A focused Send click is the approval gate. It is not turned into Return."""
+    send = el(
+        "e2", "AXButton", "Send", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 20, 30, 80, 24),
+    )
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(send),
+        max_steps=3,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls == []
+    assert result.step_log[0].action == "click"
+    assert result.step_log[0].error is not None
+    assert "sending" in result.step_log[0].error
+    assert all(step.action != "key" for step in result.step_log)
+
+
+def test_return_on_the_focused_target_is_approved_as_that_click(tmp_path):
+    """Return runs only after the click on the focused target was approved."""
+    send = el(
+        "e2", "AXButton", "Send", parent="e1", clickable=True, focused=True,
+        bounds=Bounds(0, 0, 0, 0, 0),
+    )
+    seen: list = []
+
+    def approve(action):
+        seen.append(action)
+        return True
+
+    _result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        window(send),
+        approve=approve,
+        max_steps=2,
+        trace_dir=tmp_path,
+    )
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert runtime.calls[1] == ("key", {"chord": "Return"})
+    assert seen
+    assert all(action.name == "click" for action in seen)
+    assert all(action.reason_kind == "send" for action in seen)
+    assert all("Send" in (action.target_name or "") for action in seen)
 
 
 def test_repeated_screen_becomes_stuck():
@@ -1584,6 +1683,105 @@ def test_fallback_fences_stubbed_ocr_and_survives_a_missing_engine(tmp_path, mon
     assert "OCR did not return text" in body
 
 
+def test_fallback_ocr_includes_screen_bounds_and_crops_the_canvas(tmp_path, monkeypatch):
+    """The OCR sample is the canvas, and each word carries [x,y,w,h]."""
+    import a11y_computer_use.ocr as ocr_mod
+
+    frame = el(
+        "e8", "opaque_region", "", parent="e1", clickable=True,
+        bounds=Bounds(0, 4, 40, 1271, 755),
+    )
+    canvas = el(
+        "e25", "opaque_region", "", parent="e8", clickable=True,
+        bounds=Bounds(0, 12, 153, 302, 123),
+    )
+    elements = window(frame, canvas)
+    runtime = FakeRuntime(elements)
+    cropped: list[str] = []
+
+    def crop(ref, padding=0, scale=1.0):
+        del padding, scale
+        cropped.append(ref)
+        return (f"crop {ref}", SimpleNamespace(png=PNG))
+
+    runtime.crop = crop
+    seen: list = []
+
+    def fake_ocr(image, **kwargs):
+        del kwargs
+        _png, bounds = image
+        seen.append(bounds)
+        return [{
+            "text": "SUBMIT",
+            "bounds": {
+                "x": int(bounds.x) + 8,
+                "y": int(bounds.y) + 9,
+                "width": 40,
+                "height": 16,
+            },
+            "confidence": 0.95,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake_ocr)
+
+    def script(_messages):
+        return turn(done("read", [{"window_title_contains": "Demo"}]))
+
+    result, _events, _runtime, agent = run(
+        ScriptedModel(script), elements, runtime=runtime, trace_dir=tmp_path,
+    )
+    assert result.status == "success", result
+    assert cropped[0] == "e25"
+    assert "e8" not in cropped
+    assert seen[0].width == 302 and seen[0].height == 123
+    assert seen[0].x == 12 and seen[0].y == 153
+    body = agent._messages[2].content[0]["text"]
+    assert "SUBMIT" in body
+    assert "[20,162,40,16]" in body
+    assert "<untrusted nonce=" in body
+
+
+def test_vision_crop_orders_page_regions_ahead_of_browser_frames():
+    """Deepest page canvas, then its sibling. Frame views and duplicates drop."""
+    from a11y_computer_use.agent.core import _vision_crop_elements
+
+    elements = window(
+        el("e7", "AXGroup", "", parent="e1", bounds=Bounds(0, 4, 0, 1271, 795)),
+        el(
+            "e8", "opaque_region", "", parent="e7", clickable=True,
+            bounds=Bounds(0, 4, 40, 1271, 755),
+        ),
+        el("e19", "AXGroup", "", parent="e7", bounds=Bounds(0, 4, 86, 1271, 709)),
+        el("e21", "AXGroup", "", parent="e19", bounds=Bounds(0, 4, 87, 1271, 708)),
+        el(
+            "e22", "opaque_region", "", parent="e21", clickable=True,
+            bounds=Bounds(0, 4, 87, 1271, 708),
+        ),
+        el("e24", "AXGroup", "F117", parent="e21", bounds=Bounds(0, 4, 87, 1271, 708)),
+        el(
+            "e25", "opaque_region", "", parent="e24", clickable=True,
+            bounds=Bounds(0, 12, 153, 302, 123),
+        ),
+        el(
+            "e28", "opaque_region", "", parent="e24", clickable=True,
+            bounds=Bounds(0, 318, 175, 200, 101),
+        ),
+        el(
+            "e9", "opaque_region", "", parent="e1", clickable=True,
+            bounds=Bounds(0, 0, 0, 16, 16),
+        ),
+        el("e30", "AXGroup", "", parent="e1", bounds=Bounds(0, 900, 10, 40, 40)),
+        el(
+            "e31", "opaque_region", "", parent="e30", clickable=True,
+            bounds=Bounds(0, 900, 10, 40, 40),
+        ),
+    )
+    snap = Snapshot("snap", Scope.WINDOW, "demo", 1, 0.0, (), tuple(elements))
+    refs = [element.ref for element in _vision_crop_elements(snap, "not_found")]
+    assert refs == ["e28", "e25", "e9"]
+    assert _vision_crop_elements(snap, "opaque_region")[0].ref == "e28"
+
+
 def test_fallback_uses_a_scripted_grounding_model_and_ignores_a_broken_one(tmp_path):
     """A stub point is fenced. A model that cannot run does not end the task."""
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
@@ -1683,7 +1881,7 @@ def test_vision_attaches_crops_of_unnamed_elements_then_the_window(tmp_path):
     assert all("crop-e" in image["path"] for image in images[:4])
     assert "observe-" in images[-1]["path"]
     assert os.path.isfile(images[-1]["path"])
-    assert "does not read these pixels" in content[0]["text"]
+    assert "[x, y, width, height]" in content[0]["text"]
 
 
 def test_crop_action_returns_an_image_and_does_not_recover(tmp_path):
