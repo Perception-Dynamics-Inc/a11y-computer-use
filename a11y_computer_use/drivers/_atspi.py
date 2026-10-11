@@ -4682,6 +4682,19 @@ def insert_text(acc, text: str) -> int | None:
             "the field text could not be read, so type was not reported as success",
         )
     caret, start, end = _caret_and_selection(acc, len(current))
+    if "\n" in typed and _writer_document_type_target(acc) is not None:
+        if end > start:
+            _call_first(eti, ("delete_text",), start, end, default=False)
+            cleared = _full_text(acc)
+            wanted = current[:start] + current[end:]
+            if cleared != wanted:
+                raise _text_mismatch(
+                    "selection_not_replaced",
+                    "the selection was not removed, so the text was not inserted",
+                    expected=_excerpt(wanted),
+                    actual=_excerpt(cleared),
+                )
+        return _type_writer_paragraphs(acc, typed, eti)
     if end > start:
         _call_first(eti, ("delete_text",), start, end, default=False)
         cleared = _full_text(acc)
@@ -5560,14 +5573,19 @@ def _paragraph_line(text: str) -> str:
 
     The join between paragraphs is the break. A separator at the end of the
     paragraph text is that same break, so it is not a second one. A break
-    before that end mark stays.
+    before that end mark stays. U+2028 inside the paragraph is a line break,
+    not the next paragraph, so it is not turned into ``\\n``.
     """
     from a11y_computer_use.outcome import normalize_paragraph_breaks
 
-    body = normalize_paragraph_breaks(text or "")
+    raw = text or ""
+    if raw.endswith("\u2028"):
+        raw = raw[:-1]
+    token = "\ue000"
+    body = normalize_paragraph_breaks(raw.replace("\u2028", token))
     if body.endswith("\n"):
-        return body[:-1]
-    return body
+        body = body[:-1]
+    return body.replace(token, "\u2028")
 
 
 def writer_document_text(acc) -> str | None:
@@ -5595,6 +5613,269 @@ def writer_document_matches(acc, text: str) -> bool:
     if shown is None:
         return False
     return paragraph_breaks_match(shown, text)
+
+
+def _writer_document_type_target(acc):
+    """The Writer document a type into ``acc`` lands in, or None.
+
+    A paragraph of that document counts. A table cell does not: a newline
+    there belongs to the cell, not the document body.
+    """
+    node = acc
+    for _ in range(8):
+        if node is None:
+            return None
+        try:
+            role = _role_name(node)
+        except Exception:
+            return None
+        if role == "table cell":
+            return None
+        if is_writer_document(node):
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def _type_wanted_paragraphs(text: str) -> list[str]:
+    """Paragraphs ``text`` asks for. ``\\n`` is a paragraph. U+2028 is not.
+
+    CR, CRLF, VT, FF, NEL, U+2029, and U+FFFC are paragraph breaks here, the
+    same as ``\\n``. U+2028 stays inside its paragraph: the caller asked for
+    a line break.
+    """
+    import re
+
+    normalized = (text or "").replace("\u00a0", " ").replace("\r\n", "\n")
+    normalized = re.sub(r"[\r\u000b\u000c\u0085\u2029\ufffc]", "\n", normalized)
+    return normalized.split("\n")
+
+
+def _type_paragraph_body(text: str) -> str:
+    """One paragraph as type read it, keeping an internal line break.
+
+    One trailing separator is the paragraph end. U+2028 and ``\\n`` before
+    that end stay, so a line break inside the paragraph is not a new one.
+    """
+    body = (text or "").replace("\u00a0", " ")
+    if body.endswith("\r\n"):
+        return body[:-2]
+    if body and body[-1] in "\n\r\u000b\u000c\u0085\u2029\ufffc\u2028":
+        return body[:-1]
+    return body
+
+
+def _type_shown_paragraphs(acc) -> list[str] | None:
+    """Paragraph bodies of a Writer document. None for any other node.
+
+    U+2028 inside a paragraph stays U+2028. The cache is dropped first.
+    """
+    if not is_writer_document(acc):
+        return None
+    _call_first(acc, ("clear_cache", "clearCache"))
+    return [
+        _type_paragraph_body(_full_text(child) or "")
+        for child in _document_paragraphs(acc)
+    ]
+
+
+def _type_lines_match(shown: list[str], wanted: list[str]) -> bool:
+    """True when ``shown`` is exactly the paragraphs ``wanted`` asked for.
+
+    One empty paragraph the document already had, before or after the typed
+    lines, does not hide a match. A line break inside one paragraph does
+    not count as those paragraphs.
+    """
+    if shown == wanted:
+        return True
+    if wanted and (shown == [""] + wanted or shown == wanted + [""]):
+        return True
+    return False
+
+
+def _writer_conflict_lines(shown: list[str], wanted: list[str]) -> bool:
+    """True when the characters match but paragraph and line break do not.
+
+    One paragraph ``a\\u2028b`` is not the two paragraphs ``a`` and ``b``.
+    Two paragraphs are not the line break the caller asked for with U+2028.
+    """
+    import re
+
+    if _type_lines_match(shown, wanted):
+        return False
+    folded_shown = "\n".join(part.replace("\u2028", "\n") for part in shown)
+    folded_wanted = "\n".join(part.replace("\u2028", "\n") for part in wanted)
+    if folded_shown == folded_wanted:
+        return True
+    pieces = []
+    for part in shown:
+        pieces.extend(re.split(r"\u2028|\n", part) if part else [""])
+    return _type_lines_match(pieces, [
+        piece
+        for part in wanted
+        for piece in (re.split(r"\u2028|\n", part) if part else [""])
+    ]) and shown != wanted
+
+
+def writer_type_readback(acc) -> str | None:
+    """Document text with a line break kept distinct from a paragraph join."""
+    shown = _type_shown_paragraphs(acc)
+    if shown is None:
+        return None
+    return "\n".join(part.replace("\n", "\u2028") for part in shown)
+
+
+def writer_type_conflict(acc, text: str) -> bool:
+    """True when ``text`` landed with the wrong paragraph or line-break shape."""
+    shown = _type_shown_paragraphs(acc)
+    if shown is None:
+        return False
+    return _writer_conflict_lines(shown, _type_wanted_paragraphs(text))
+
+
+def _writer_type_landed(document, text: str) -> bool:
+    """Poll until Writer paragraphs match ``text``, or the shape is wrong.
+
+    A later paragraph that is not published yet is not a miss. A stable
+    read that has the characters as line breaks inside one paragraph is a
+    miss: that is not the paragraphs ``\\n`` asked for. U+2028 in ``text``
+    has to stay a line break inside its paragraph.
+    """
+    wanted = _type_wanted_paragraphs(text)
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last: object = object()
+    stable_since = None
+    while True:
+        shown = _type_shown_paragraphs(document)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        if held and shown is not None and _type_lines_match(shown, wanted):
+            return True
+        if held and shown is not None and _writer_conflict_lines(shown, wanted):
+            return False
+        if (
+            held
+            and shown is not None
+            and len(shown) >= len(wanted)
+            and not _type_lines_match(shown, wanted)
+        ):
+            return False
+        if now >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _insert_writer_piece(acc, eti, piece: str) -> None:
+    """Insert ``piece`` at the caret. ``piece`` has no newline and no U+2028."""
+    if piece == "":
+        return
+    current = _full_text(acc)
+    if current is None:
+        current = ""
+    caret, _start, _end = _caret_and_selection(acc, len(current))
+    insert = None
+    for name in ("insert_text", "insertText"):
+        insert = getattr(eti, name, None)
+        if insert is not None:
+            break
+    length = _insert_length(insert, piece, acc) if insert is not None else len(piece)
+    _call_first(
+        eti, ("insert_text", "insertText"), int(caret), piece, int(length), default=False,
+    )
+
+
+def _press_writer_line_break(acc) -> None:
+    """Shift+Return. That is a line break inside the paragraph, not a new one."""
+    if _focus_on_target(acc) is False:
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord("shift+return")
+
+
+def _insert_writer_segment(acc, eti, segment: str) -> None:
+    """Insert one paragraph. U+2028 in ``segment`` is a line break."""
+    pieces = segment.split("\u2028")
+    for index, piece in enumerate(pieces):
+        if piece:
+            _insert_writer_piece(acc, eti, piece)
+        if index + 1 < len(pieces):
+            if _x11_keys_available():
+                _press_writer_line_break(acc)
+            else:
+                _insert_writer_piece(acc, eti, "\u2028")
+
+
+def _type_writer_paragraphs(acc, text: str, eti) -> int | None:
+    """Type ``text`` so each ``\\n`` is Return, then read the paragraphs back.
+
+    U+2028 stays Shift+Return. ``insertText`` of a newline is not used: in
+    Writer that is a line break inside the current paragraph, and a read-back
+    that treats it as the next paragraph would report success for the wrong
+    document. When the characters landed that way anyway, the error says
+    they were inserted as line breaks. None when the paragraphs are still
+    what they were, so the caller may send keys.
+    """
+    document = _writer_document_type_target(acc)
+    before = writer_document_text(document) if document is not None else None
+    parts = text.split("\n")
+    if len(parts) > 1 and not _x11_keys_available():
+        raise _text_mismatch(
+            "text_mismatch",
+            "a newline in a Writer document needs Return to become a paragraph",
+            expected=text,
+            actual=writer_type_readback(document) if document is not None else None,
+        )
+    for index, part in enumerate(parts):
+        _insert_writer_segment(acc, eti, part)
+        if index + 1 < len(parts):
+            _type_into_target(acc, "\n")
+    if document is not None and _writer_type_landed(document, text):
+        return len(text)
+    actual = writer_type_readback(document) if document is not None else None
+    if document is not None and writer_type_conflict(document, text):
+        raise _text_mismatch(
+            "text_mismatch",
+            "inserted as line breaks",
+            expected=text,
+            actual=actual,
+        )
+    # The paragraphs did not change. The caller may send keys. A different
+    # paragraph text is still a mismatch, and keys are not sent on top of it.
+    if document is not None and (writer_document_text(document) or "") == (before or ""):
+        return None
+    raise _text_mismatch(
+        "text_mismatch",
+        "the field text after type does not match what was inserted",
+        expected=text,
+        actual=actual,
+        inserted_chars=len(text),
+        unchanged=False,
+    )
+
+
+def focused_writer_document(app: str):
+    """The Writer document that has focus, or None."""
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    return _writer_document_type_target(acc)
+
+
+def writer_type_landed(document, text: str) -> bool:
+    """True when ``document`` now holds ``text`` as paragraphs, not line breaks."""
+    if document is None or not is_writer_document(document):
+        return False
+    return _writer_type_landed(document, text)
 
 
 # How long a Writer document may take to publish every paragraph. A 1.5s
@@ -5677,11 +5958,24 @@ def writer_document_outcome_text(requested: str, acc) -> str | None:
     """The requested string when a Writer document's paragraphs now hold it.
 
     None for any other node, and when a paragraph break is actually missing
-    or extra. The snapshot value is the same paragraph text.
+    or extra. A line break inside one paragraph is not that paragraph break:
+    the returned text keeps U+2028, so the outcome is not confirmed. The
+    snapshot value is the same paragraph text.
     """
     if not requested or acc is None:
         return None
-    if not writer_document_matches(acc, requested):
+    document = acc if is_writer_document(acc) else _writer_document_type_target(acc)
+    if document is None:
+        return None
+    shown = _type_shown_paragraphs(document)
+    if shown is None:
+        return None
+    wanted = _type_wanted_paragraphs(requested)
+    if _type_lines_match(shown, wanted):
+        return requested
+    if _writer_conflict_lines(shown, wanted):
+        return writer_type_readback(document)
+    if not writer_document_matches(document, requested):
         return None
     return requested
 

@@ -7475,8 +7475,10 @@ def build_server(
         Gated at tier 'full' against the target app; refuses with
         secure_field when a password field has focus or the ref is a secure
         field — secrets are typed by the human, never by this tool. The
-        text is unchanged. Structured content adds outcome, next, and
-        evidence."""
+        text is unchanged. In a LibreOffice Writer document a newline is
+        Return, a new paragraph; U+2028 stays a line break. Line breaks
+        where paragraphs were requested are not confirmed. Structured
+        content adds outcome, next, and evidence."""
         return _publish(await run(
             runtime.type_text, text, app, ref, _outcome=True, _tool="type",
         ))
