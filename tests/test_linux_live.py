@@ -6784,6 +6784,126 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
         _stop(proc)
 
 
+def test_linux_chrome_folded_table_find_and_expand(tmp_path) -> None:
+    """find and expand reach row 200 of a 300-row table the snapshot folds.
+
+    Live Chrome, not a synthetic tree. The page is one local ``<table>``
+    with a text cell per row. Row 200 says Elevation. The first snapshot
+    keeps the on-screen band and records the rest as ``… N more``. ``find``
+    returns Elevation three times from the top of the page. ``expand`` of
+    the folded node lists a later page, and further expands keep moving
+    until Elevation is in the listing. Skips when no Chrome binary is on
+    PATH or the display bus is down.
+    """
+    import re
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the folded-table test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        f"<tr><td>{'Elevation' if index == 200 else f'Row {index:03d}'}</td></tr>"
+        for index in range(1, 301)
+    )
+    page = tmp_path / "fold300.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cufold300</title>"
+        "<style>body{margin:0;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td{padding:2px 8px}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));</script>"
+        f"<table>{rows}</table>"
+    )
+    profile = tmp_path / "chrome-fold300-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1100,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    def marks(text: str) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(re.findall(r"Row \d{3}|Elevation", text)))
+
+    try:
+        def wait_at_top(timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            shown: list[str] = []
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"Chrome exited with status {proc.returncode} before the table top"
+                    )
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.APP_NOT_FOUND:
+                        raise
+                else:
+                    titles = _titles(shot)
+                    shown = sorted(title for title in titles if title.startswith("Row "))[:8]
+                    if "Row 001" in titles and "Elevation" not in titles:
+                        return
+                time.sleep(0.4)
+            raise AssertionError(f"Chrome did not show the folded table top without Elevation: {shown}")
+
+        wait_at_top(45)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        visible = runtime.find("chrome", text="Row 001")
+        assert "no elements match" not in visible, visible
+        assert "Row 001" in visible, visible
+        for _pass in range(3):
+            if _pass:
+                runtime.key("f5")
+                wait_at_top(30)
+            found = runtime.find("chrome", text="Elevation")
+            assert "no elements match" not in found, found
+            assert "Elevation" in found, found
+        runtime.key("f5")
+        wait_at_top(30)
+        listed = runtime.desktop_snapshot("chrome")
+        assert "Elevation" not in listed, listed
+        assert "more" in listed, listed
+        snap = runtime._current
+        folded = observe.folded_children(snap)
+        assert folded, listed
+        ref, hidden = folded[0]
+        assert hidden > 0
+        before = marks(listed)
+        assert "Elevation" not in before
+        pages: list[tuple[str, ...]] = []
+        reached = False
+        for _page in range(12):
+            opened = runtime.expanded_children("chrome", ref)
+            assert "no further children" not in opened, opened
+            tokens = marks(opened)
+            assert tokens, opened
+            assert tokens not in pages, tokens
+            assert tokens != before, tokens
+            pages.append(tokens)
+            if "Elevation" in opened:
+                reached = True
+                break
+            fresh = runtime._current
+            again = observe.folded_children(fresh)
+            if again:
+                ref = again[0][0]
+            else:
+                table = next(el for el in fresh.elements if el.role == "AXTable")
+                ref = table.ref
+        assert reached, pages
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
 
