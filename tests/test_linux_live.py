@@ -2832,6 +2832,7 @@ def test_linux_chrome_click_resolution_does_not_follow_the_goal(tmp_path) -> Non
     coordinate clicks that must not move onto a button named in the goal.
     """
     import json
+    import socket
 
     from a11y_computer_use import observe, safety, server
     from a11y_computer_use.agent.core import Agent
@@ -2867,19 +2868,27 @@ document.getElementById('discard').onclick = function () { mark('DISCARDED'); };
 document.getElementById('chrome').onclick = function () { mark('CHROME'); };
 document.getElementById('save').onclick = function () { mark('SAVED'); };
 document.getElementById('b5').onclick = function () { mark('B5'); };
-document.getElementById('ping').onclick = function () {
-  mark('PING');
-  var save = document.getElementById('save');
-  save.textContent = 'Gone';
-  save.setAttribute('aria-label', 'Gone');
+window.__swapSave = function () {
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('button'));
+  var saves = buttons.filter(function (btn) {
+    return (btn.getAttribute('aria-label') || '').trim() === 'Save draft';
+  });
+  if (window.__swapped && saves.length === 1) return 'ready';
+  window.__swapped = true;
+  saves.forEach(function (btn) { btn.remove(); });
   var neu = document.createElement('button');
   neu.type = 'button';
   neu.id = 'save2';
   neu.textContent = 'Save draft';
   neu.setAttribute('aria-label', 'Save draft');
   neu.onclick = function () { mark('SAVED'); };
-  save.after(neu);
+  var ping = document.getElementById('ping');
+  if (ping && ping.parentNode) ping.parentNode.insertBefore(neu, ping);
+  else document.body.appendChild(neu);
+  mark('PING');
+  return 'swapped';
 };
+document.getElementById('ping').onclick = function () { window.__swapSave(); };
 var pad = document.getElementById('pad');
 var ctx = pad.getContext('2d');
 ctx.fillStyle = '#ddd';
@@ -2899,11 +2908,15 @@ pad.addEventListener('click', function (event) {
     )
     profile = tmp_path / "resolve-profile"
     profile.mkdir()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        debug_port = int(sock.getsockname()[1])
     proc = subprocess.Popen(
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={profile}", "--window-size=1100,800", page.resolve().as_uri(),
+            f"--user-data-dir={profile}", "--window-size=1100,800",
+            f"--remote-debugging-port={debug_port}", page.resolve().as_uri(),
         ],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -3092,23 +3105,55 @@ pad.addEventListener('click', function (event) {
 
         orig_snap = runtime.desktop_snapshot
 
+        def cdp_eval(expression: str) -> str:
+            from a11y_computer_use.drivers._cdp import CDPSession, connect, page_targets
+
+            pages = page_targets(f"http://127.0.0.1:{debug_port}")
+            ws = next(
+                (item.get("webSocketDebuggerUrl") for item in pages if item.get("webSocketDebuggerUrl")),
+                None,
+            )
+            if not ws:
+                return "no page target"
+            transport = connect(str(ws), timeout=3.0)
+            session = CDPSession(transport, default_timeout=3.0)
+            try:
+                reply = session.call(
+                    "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True},
+                )
+            finally:
+                transport.close()
+            value = (reply.get("result") or {}).get("value")
+            return "" if value is None else str(value)
+
         def desktop_snapshot(app, **kwargs):
             text = orig_snap(app, **kwargs)
             if not state["pinged"] or state["waited"]:
                 return text
-            deadline = time.monotonic() + 8
+            try:
+                state["swap"] = cdp_eval("window.__swapSave()")
+            except Exception as exc:
+                state["swap"] = f"{type(exc).__name__}: {exc}"
+            deadline = time.monotonic() + 15
+            seen = ""
             while time.monotonic() < deadline:
+                text = orig_snap(app, **kwargs)
                 current = getattr(runtime, "_current", None)
                 elements = () if current is None else current.elements
                 old = state["save"]
                 old_el = next((el for el in elements if el.ref == old), None)
                 saves = [el for el in elements if el.title == "Save draft"]
+                seen = ", ".join(
+                    f"{el.ref}:{el.role}:{el.title}" for el in elements if el.title in {"Save draft", "Gone", "Ping"}
+                )
                 if (old_el is None or old_el.title != "Save draft") and len(saves) == 1 and saves[0].ref != old:
                     state["waited"] = True
+                    state["new_save"] = saves[0].ref
                     return text
                 time.sleep(0.3)
-                text = orig_snap(app, **kwargs)
             state["waited"] = True
+            state["wait_error"] = f"swap={state.get('swap')!r} tree={seen}"
             return text
 
         runtime.desktop_snapshot = desktop_snapshot
@@ -3119,10 +3164,20 @@ pad.addEventListener('click', function (event) {
             trace="known",
             max_steps=4,
         )
-        assert resolved.status == "needs_human", (resolved.reason, resolved.step_log)
+        assert resolved.status == "needs_human", (resolved.reason, resolved.step_log, state.get("wait_error"))
+        assert not state.get("wait_error"), state.get("wait_error")
+        logged = [
+            (step.action, step.result, step.error) for step in resolved.step_log
+        ]
         note = next(
-            (step.result or "") for step in resolved.step_log if "resolved " in (step.result or "")
+            (
+                (step.result or "") + "\n" + (step.error or "")
+                for step in resolved.step_log
+                if "resolved " in (step.result or "") or "resolved " in (step.error or "")
+            ),
+            "",
         )
+        assert note, logged
         assert state["save"] in note and "Save draft" in note
         assert "Archive" not in note
         resolved_clicks = [params for name, params in sent if name == "click"]
