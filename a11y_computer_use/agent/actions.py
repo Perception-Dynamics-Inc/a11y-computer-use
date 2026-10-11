@@ -210,8 +210,10 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         kind = str(args.get("kind") or "other")
         if kind not in {"login", "captcha", "2fa", "payment", "other"}:
             return f"ask_human kind {kind!r} is not one of login, captcha, 2fa, payment, other"
-    if action.name == "click" and not args.get("ref") and (args.get("x") is None or args.get("y") is None):
-        return "click requires ref or x and y"
+    if action.name == "click":
+        point_error = _click_target_error(args)
+        if point_error is not None:
+            return point_error
     if action.name == "crop" and not args.get("ref"):
         return "crop requires ref"
     if action.name == "find" and not _find_filter(args):
@@ -222,6 +224,33 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "scroll_to_find requires text or role"
     if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up"):
         return "scroll_to_find direction must be down or up"
+    return None
+
+
+def _click_target_error(args: dict) -> str | None:
+    """Reject a click that names two targets, or names none.
+
+    A ref together with ``x`` or ``y`` is ``invalid_arguments``: the call
+    must not silently drop the point. ``label`` is the only other target,
+    and it stands alone. A point needs both coordinates.
+    """
+    ref = str(args.get("ref") or "").strip()
+    label = str(args.get("label") or "").strip()
+    has_x = args.get("x") is not None
+    has_y = args.get("y") is not None
+    if ref and (has_x or has_y):
+        return (
+            "invalid_arguments: click: ref and x/y are both set; "
+            "pass a ref or a point, not both"
+        )
+    if label and (ref or has_x or has_y):
+        return (
+            "invalid_arguments: click: label cannot be combined with ref or x/y"
+        )
+    if has_x != has_y:
+        return "click requires both x and y"
+    if not ref and not label and not (has_x and has_y):
+        return "click requires ref or x and y"
     return None
 
 
@@ -451,8 +480,19 @@ _OBJ = {"type": "object"}
 _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     (
         "click",
-        "Click an element by accessibility ref, or at x,y inside an opaque region or when a ref click cannot land.",
-        {"ref": _STR, "button": _STR, "count": _INT, "x": _INT, "y": _INT, "display_id": _INT},
+        "Click an element by accessibility ref, by an exact label, or at x,y. "
+        "Pass only one of those targets. A ref together with x or y is invalid_arguments. "
+        "A missing ref is resolved only from that ref's last-known role and name, "
+        "never from the goal. An x,y click is not moved onto a different element.",
+        {
+            "ref": _STR,
+            "label": _STR,
+            "button": _STR,
+            "count": _INT,
+            "x": _INT,
+            "y": _INT,
+            "display_id": _INT,
+        },
         [],
     ),
     (

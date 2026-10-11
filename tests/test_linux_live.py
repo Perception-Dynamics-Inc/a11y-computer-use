@@ -2823,6 +2823,323 @@ def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:
 
 
 
+def test_linux_chrome_click_resolution_does_not_follow_the_goal(tmp_path) -> None:
+    """Live Chrome: goal words do not choose a click. Coordinates stay put.
+
+    Archive is not clicked for "Do not click Archive". An x/y click is sent
+    as that point. A ref plus x/y is invalid_arguments. A missing ref
+    resolves only to the role and name it last had. B5 and D3 are two more
+    coordinate clicks that must not move onto a button named in the goal.
+    """
+    import json
+
+    from a11y_computer_use import observe, safety, server
+    from a11y_computer_use.agent.core import Agent
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the click-resolution test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "resolve.html"
+    page.write_text(
+        """<!doctype html><meta charset=utf-8><title>cua333</title>
+<style>body{margin:8px;font:16px sans-serif}button{margin:4px;padding:8px}</style>
+<button id=archive type=button aria-label="Archive">Archive</button>
+<button id=discard type=button aria-label="Discard">Discard</button>
+<button id=chrome type=button aria-label="Chrome">Chrome</button>
+<button id=save type=button aria-label="Save draft">Save draft</button>
+<button id=ping type=button aria-label="Ping">Ping</button>
+<button id=b5 type=button aria-label="B5">B5</button>
+<canvas id=pad width=800 height=400 aria-label="Drawing" style="display:block"></canvas>
+<div id=out role=status aria-label="out:none">out:none</div>
+<script>
+function mark(name) {
+  var node = document.getElementById('out');
+  node.textContent = 'out:' + name;
+  node.setAttribute('aria-label', 'out:' + name);
+}
+document.getElementById('archive').onclick = function () { mark('ARCHIVED'); };
+document.getElementById('discard').onclick = function () { mark('DISCARDED'); };
+document.getElementById('chrome').onclick = function () { mark('CHROME'); };
+document.getElementById('save').onclick = function () { mark('SAVED'); };
+document.getElementById('b5').onclick = function () { mark('B5'); };
+document.getElementById('ping').onclick = function () {
+  mark('PING');
+  var save = document.getElementById('save');
+  save.textContent = 'Gone';
+  save.setAttribute('aria-label', 'Gone');
+  var neu = document.createElement('button');
+  neu.type = 'button';
+  neu.id = 'save2';
+  neu.textContent = 'Save draft';
+  neu.setAttribute('aria-label', 'Save draft');
+  neu.onclick = function () { mark('SAVED'); };
+  save.after(neu);
+};
+var pad = document.getElementById('pad');
+var ctx = pad.getContext('2d');
+ctx.fillStyle = '#ddd';
+ctx.fillRect(0, 0, 800, 400);
+ctx.fillStyle = '#080';
+ctx.fillRect(400, 150, 100, 30);
+ctx.fillStyle = '#000';
+ctx.fillText('SUBMIT', 420, 170);
+pad.addEventListener('click', function (event) {
+  var x = event.offsetX, y = event.offsetY;
+  var submit = x >= 400 && x < 500 && y >= 150 && y < 180;
+  mark(submit ? 'submit' : ('canvas:' + x + ',' + y));
+});
+</script>
+""",
+        encoding="utf-8",
+    )
+    profile = tmp_path / "resolve-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1100,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 25
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                if {"Archive", "Save draft", "Chrome", "Ping", "B5", "Drawing"} <= titles:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, "Chrome did not expose the resolution page"
+        store = safety.PermissionStore(tmp_path / "resolve-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != "chrome":
+            store.set_tier(front, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store,
+            audit=safety.AuditLog(tmp_path / "resolve-audit"),
+            driver=driver,
+        )
+        sent: list[tuple[str, dict]] = []
+        orig_call = runtime.call_tool
+
+        def call_tool(name, params, confirm=None):
+            sent.append((name, dict(params)))
+            return orig_call(name, params, confirm=confirm)
+
+        runtime.call_tool = call_tool
+
+        def titled(name: str) -> list[str]:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            return [el.ref for el in shot.elements if el.title == name]
+
+        def outcome() -> str:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            for el in shot.elements:
+                if (el.title or "").startswith("out:"):
+                    return el.title
+            rendered = observe.render_text(shot)
+            for token in ("out:ARCHIVED", "out:CHROME", "out:SAVED", "out:submit", "out:none", "out:PING"):
+                if token in rendered:
+                    return token
+            return ""
+
+        def run_agent(model, goal: str, *, trace: str, **kwargs):
+            agent = Agent(
+                model,
+                runtime=runtime,
+                trace_dir=tmp_path / trace,
+                max_steps=kwargs.pop("max_steps", 4),
+                max_retries=0,
+                **kwargs,
+            )
+            return agent.run(goal)
+
+        archive_refs = set(titled("Archive"))
+        chrome_refs = set(titled("Chrome"))
+        assert archive_refs and chrome_refs
+        sent.clear()
+        held = run_agent(
+            ScriptedModel([
+                ModelTurn(calls=[ToolCall("click", {"ref": "missing-ref"})]),
+                ModelTurn(calls=[ToolCall("ask_human", {"message": "held", "kind": "other"})]),
+            ]),
+            "Click the Save draft button in Chrome. Do not click Archive.",
+            trace="archive",
+        )
+        assert held.status == "needs_human", held
+        clicked_refs = {params.get("ref") for name, params in sent if name == "click"}
+        assert not clicked_refs & archive_refs
+        assert not clicked_refs & chrome_refs
+        assert outcome() != "out:ARCHIVED"
+
+        canvas = next(el for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.title == "Drawing")
+        point = {
+            "x": int(canvas.bounds.x) + 450,
+            "y": int(canvas.bounds.y) + 165,
+            "display_id": int(canvas.bounds.display_id),
+        }
+
+        def accept_look(messages):
+            from tests.agent_fixtures.harness import message_text
+
+            text = message_text(messages)
+            if "proposed image pixel" in text or "Look again before" in text:
+                return ModelTurn(text='{"decision":"accept"}', calls=[])
+            if not any(name == "click" for name, _params in sent):
+                return ModelTurn(calls=[ToolCall("click", dict(point))])
+            return ModelTurn(calls=[ToolCall("ask_human", {"message": "point", "kind": "other"})])
+
+        sent.clear()
+        pointed = run_agent(
+            ScriptedModel(accept_look),
+            "In the Chrome window, click the green SUBMIT button drawn on the canvas.",
+            trace="canvas",
+        )
+        assert pointed.status == "needs_human", pointed
+        clicks = [params for name, params in sent if name == "click"]
+        assert clicks and clicks[0].get("x") == point["x"] and clicks[0].get("y") == point["y"]
+        assert clicks[0].get("ref") is None
+        assert outcome() != "out:CHROME"
+        assert outcome() != "out:ARCHIVED"
+
+        b5 = {"x": point["x"] - 80, "y": point["y"] + 40, "display_id": point["display_id"]}
+        d3 = {"x": point["x"] + 30, "y": point["y"] - 40, "display_id": point["display_id"]}
+
+        def coordinate(messages, target):
+            from tests.agent_fixtures.harness import message_text
+
+            text = message_text(messages)
+            if "proposed image pixel" in text or "Look again before" in text:
+                return ModelTurn(text='{"point":[1,1],"space":"image"}', calls=[])
+            if not any(name == "click" for name, _params in sent):
+                return ModelTurn(calls=[ToolCall("click", dict(target))])
+            return ModelTurn(calls=[ToolCall("ask_human", {"message": "kept", "kind": "other"})])
+
+        sent.clear()
+        b5_run = run_agent(
+            ScriptedModel(lambda messages: coordinate(messages, b5)),
+            "Open the B5 total in Chrome.",
+            trace="b5",
+        )
+        assert b5_run.status == "needs_human", b5_run
+        b5_clicks = [params for name, params in sent if name == "click"]
+        assert b5_clicks and b5_clicks[0].get("x") == b5["x"] and b5_clicks[0].get("y") == b5["y"]
+        assert b5_clicks[0].get("ref") not in chrome_refs
+
+        sent.clear()
+        d3_run = run_agent(
+            ScriptedModel(lambda messages: coordinate(messages, d3)),
+            "Set D3. Do not click Archive.",
+            trace="d3",
+        )
+        assert d3_run.status == "needs_human", d3_run
+        d3_clicks = [params for name, params in sent if name == "click"]
+        assert d3_clicks and d3_clicks[0].get("x") == d3["x"] and d3_clicks[0].get("y") == d3["y"]
+        assert d3_clicks[0].get("ref") not in archive_refs
+        assert outcome() != "out:ARCHIVED"
+
+        save = next(el for el in driver.snapshot(Scope.WINDOW, "chrome").elements if el.title == "Save draft")
+        sent.clear()
+        rejected = run_agent(
+            ScriptedModel([
+                ModelTurn(calls=[ToolCall("click", {
+                    "ref": save.ref, "x": point["x"], "y": point["y"],
+                })]),
+                ModelTurn(calls=[ToolCall("ask_human", {"message": "rejected", "kind": "other"})]),
+            ]),
+            "Click Save draft.",
+            trace="both",
+        )
+        assert rejected.step_log[0].error and "invalid_arguments: click:" in rejected.step_log[0].error
+        assert "ref and x/y" in (rejected.step_log[0].error or "")
+        assert sent == [] or all(name != "click" for name, _params in sent)
+
+        from tests.agent_fixtures.harness import message_text, parse_snapshot
+
+        state: dict = {"save": None, "pinged": False, "waited": False}
+
+        def script(messages):
+            text = message_text(messages)
+            if "proposed image pixel" in text or "Look again before" in text:
+                return ModelTurn(text='{"decision":"accept"}', calls=[])
+            if state["save"] is None:
+                seen = parse_snapshot(text)
+                save_el = next(item for item in seen if item.name == "Save draft")
+                ping_el = next(item for item in seen if item.name == "Ping")
+                state["save"] = save_el.ref
+                state["pinged"] = True
+                return ModelTurn(calls=[ToolCall("click", {"ref": ping_el.ref})])
+            if state.get("phase") != "stale":
+                state["phase"] = "stale"
+                return ModelTurn(calls=[ToolCall("click", {"ref": state["save"]})])
+            return ModelTurn(calls=[ToolCall("ask_human", {"message": "resolved", "kind": "other"})])
+
+        orig_snap = runtime.desktop_snapshot
+
+        def desktop_snapshot(app, **kwargs):
+            text = orig_snap(app, **kwargs)
+            if not state["pinged"] or state["waited"]:
+                return text
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                current = getattr(runtime, "_current", None)
+                elements = () if current is None else current.elements
+                old = state["save"]
+                old_el = next((el for el in elements if el.ref == old), None)
+                saves = [el for el in elements if el.title == "Save draft"]
+                if (old_el is None or old_el.title != "Save draft") and len(saves) == 1 and saves[0].ref != old:
+                    state["waited"] = True
+                    return text
+                time.sleep(0.3)
+                text = orig_snap(app, **kwargs)
+            state["waited"] = True
+            return text
+
+        runtime.desktop_snapshot = desktop_snapshot
+        sent.clear()
+        resolved = run_agent(
+            ScriptedModel(script),
+            "Click the Save draft button in Chrome. Do not click Archive.",
+            trace="known",
+            max_steps=4,
+        )
+        assert resolved.status == "needs_human", (resolved.reason, resolved.step_log)
+        note = next(
+            (step.result or "") for step in resolved.step_log if "resolved " in (step.result or "")
+        )
+        assert state["save"] in note and "Save draft" in note
+        assert "Archive" not in note
+        resolved_clicks = [params for name, params in sent if name == "click"]
+        assert len(resolved_clicks) >= 2
+        assert resolved_clicks[1].get("ref") != state["save"]
+        assert resolved_clicks[1].get("ref") in note
+        assert all(params.get("ref") not in archive_refs for params in resolved_clicks)
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "known" / "trajectory.jsonl").read_text().splitlines()
+        ]
+        assert any(row.get("resolved_from") and "Save draft" in row["resolved_from"] for row in rows)
+        assert outcome() != "out:ARCHIVED"
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_key_reaches_an_open_gtk_menu(tmp_path) -> None:
     """Down and Return stay in the open File menu. The document is not edited."""
     from a11y_computer_use.drivers.linux import LinuxDriver

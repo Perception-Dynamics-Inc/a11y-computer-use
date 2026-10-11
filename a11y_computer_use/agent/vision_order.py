@@ -1,13 +1,10 @@
-"""Vision fallback order: accessibility tree, then an OCR word, then Holo.
+"""OCR word boxes and small-box geometry. The agent does not click from these.
 
-The tree is first. When the named control is not in the snapshot, a line
-from ``ocr`` whose text matches the label is clicked at the word box, never
-at the line's union. Holo runs only when that match fails. A Holo point
-snaps to a small tree-element box or a word box when the point lies inside
-one. A RapidOCR line box is not a snap target.
-
-Look-again is a later check on the coordinate click this module returns. This
-module does not crop, mark, or ask a second time.
+``words_from_spans`` keeps one box per input word. ``match_ocr_word``,
+``tree_for_labels``, and ``snap_point`` are exact-title and box helpers.
+The agent loop does not call them to choose a click, and it does not read
+the goal to name a target. A missing ref is resolved only from that ref's
+last-known role and name, or from a label on the model's own call.
 """
 
 from __future__ import annotations
