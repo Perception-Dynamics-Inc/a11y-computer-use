@@ -1388,6 +1388,62 @@ def test_vision_fallback_attaches_only_when_the_tree_is_insufficient(tmp_path):
     assert ("click", {"x": 12, "y": 18, "display_id": 0}) in runtime.calls
 
 
+def test_named_control_beside_an_opaque_region_waits_for_two_misses(tmp_path):
+    """A canvas next to Ready is not an insufficient tree on the first look.
+
+    Chrome publishes the canvas as ``opaque_region`` and still lists the
+    button. The picture stays off until the asked-for ref is missing
+    twice, then the coordinate click is the one that can land inside it.
+    """
+    mixed = window(
+        el("e2", "AXButton", "Ready", parent="e1", clickable=True),
+        el("e3", "opaque_region", "", parent="e1", bounds=Bounds(0, 0, 0, 400, 300)),
+    )
+    runtime = FakeRuntime(mixed)
+    runtime.fail["e99991"] = ComputerUseError(ErrorCode.STALE_REF, "ref e99991 is gone")
+    runtime.fail["e99992"] = ComputerUseError(ErrorCode.STALE_REF, "ref e99992 is gone")
+    seen: list = []
+
+    def _images(messages) -> list[dict]:
+        found: list[dict] = []
+        for message in messages:
+            found.extend(_image_blocks(message.content))
+        return found
+
+    def script(messages):
+        seen.append(list(messages))
+        attached = _images(messages)
+        if len(seen) < 3:
+            assert attached == [], attached
+            ref = "e99991" if len(seen) == 1 else "e99992"
+            return turn(ToolCall("click", {"ref": ref}))
+        if len(seen) == 3:
+            assert attached, attached
+            texts = []
+            for message in messages:
+                content = message.content
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list) and content and isinstance(content[0], dict):
+                    texts.append(str(content[0].get("text") or ""))
+            assert any("insufficient (not_found)" in text for text in texts), texts
+            assert not any("insufficient (opaque_region)" in text for text in texts)
+            return turn(ToolCall("click", {"x": 220, "y": 120, "display_id": 0}))
+        return turn(done("hit", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        mixed,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+        max_steps=6,
+    )
+    assert result.status == "success", result
+    assert len(seen) >= 3
+    assert ("click", {"x": 220, "y": 120, "display_id": 0}) in runtime.calls
+
+
 def test_coordinate_click_on_pay_still_stops_for_a_human(tmp_path):
     """A point inside Pay now uses the payment gate, not a raw click."""
     pay = el(

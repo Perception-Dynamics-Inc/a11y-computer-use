@@ -97,10 +97,12 @@ constructs a real `Runtime` after applying `display`.
 `vision=True` attaches PNG crops of unnamed images, unknown widgets, and
 unnamed clickables (at most four), then a whole-window screenshot, when the
 tree says it has no interactive elements or contains those refs. The same
-attachment runs without `vision=True` when the tree is insufficient: a target
-sits inside an `opaque_region` (or a canvas), the tree is empty or only
-structural nodes, or the same target was not found twice (`stale_ref` or a
-not-found error). The crop is `crop(ref)` of the opaque region when that ref
+attachment runs without `vision=True` when the tree is insufficient: an
+`opaque_region` or a canvas is present and no other node has a name, the
+tree is empty or only structural nodes, or the same target was not found
+twice (`stale_ref` or a not-found error). A named control beside the
+canvas, such as a button named Ready, keeps the first looks as text. The
+picture is attached once that control is not the target. The crop is `crop(ref)` of the opaque region when that ref
 exists; otherwise the loop attaches the window screenshot. Each image block
 is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
 clicks with `x` and `y` inside the region. Those coordinate clicks use the
