@@ -2559,7 +2559,15 @@ class Runtime:
                     handle = None
                     if anchor is not None:
                         handle = observe.ax_handle_for(anchor.snapshot_id, anchor.ref)
-                    better = _atspi.sheet_outcome_text(app or "", requested, handle)
+                    origin = getattr(self.driver, "_sheet_type_origin", None)
+                    grid_confirmed = isinstance(origin, str) and bool(origin) and bool(requested)
+                    if grid_confirmed:
+                        # type_text left this set only after every typed cell matched.
+                        self.driver._sheet_type_origin = None
+                        readback = requested
+                    better = None if grid_confirmed else _atspi.sheet_outcome_text(
+                        app or "", requested, handle,
+                    )
                     if better is None and handle is not None:
                         better = _atspi.writer_cell_outcome_text(requested, handle)
                     if better is None and handle is not None:
@@ -7383,8 +7391,11 @@ def build_server(
         helper. A CRLF is one newline; the reported count is the number of
         characters the field read back, and a mismatch is an error rather
         than success. LibreOffice Calc is confirmed from the open cell
-        editor or the selected cell's text. That editor is not a password
-        field. A sheet that does not show the characters is a mismatch.
+        editor or the selected cell's text. A tab or newline grid is read
+        back from every cell it touched, starting at the cell that was
+        active before typing, and the first cell that differs is the
+        mismatch. That editor is not a password field. A sheet that does
+        not show the characters is a mismatch.
         Chrome's address bar is polled until the URL is visible or the bar
         settles on its own string; a settled rewrite is not a mismatch. The
         find bar already showing exactly that query is a match. An empty

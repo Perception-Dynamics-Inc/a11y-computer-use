@@ -4308,6 +4308,102 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
+    """Live Calc. A tab and newline grid is confirmed from every cell.
+
+    The cursor ends on the last formula. That cell is not the whole
+    read-back. Each address is compared on its own, including the SUM
+    formulas. A missing soffice fails the test.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-calc is not installed"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-grid"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--calc", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    grid = (
+        "Item\tQ1\tQ2\n"
+        "Rent\t1200\t1250\n"
+        "Food\t450\t480\n"
+        "Transport\t120\t95\n"
+        "Total\t=SUM(B2:B4)\t=SUM(C2:C4)"
+    )
+    expected = {
+        "A1": "Item", "B1": "Q1", "C1": "Q2",
+        "A2": "Rent", "B2": "1200", "C2": "1250",
+        "A3": "Food", "B3": "450", "C3": "480",
+        "A4": "Transport", "B4": "120", "C4": "95",
+        "A5": "Total", "B5": "=SUM(B2:B4)", "C5": "=SUM(C2:C4)",
+    }
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                if _cell(shot, "A1") is not None and _cell(shot, "C5") is not None:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Calc did not expose A1 and C5\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        origin = _cell(current, "A1")
+        assert origin is not None
+        runtime.click(origin.ref)
+        typed = runtime.type_text(grid)
+        assert typed.outcome == "confirmed", (typed, typed.evidence)
+        assert "text_mismatch" not in str(typed)
+        assert "Item" in typed.evidence
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        for address, wanted in expected.items():
+            element = _cell(current, address)
+            assert element is not None, address
+            node = observe.ax_handle_for(element.snapshot_id, element.ref)
+            kind, actual = _atspi._classify_sheet_cell(node, wanted)
+            if kind == "editor":
+                opened = _atspi.committed_sheet_formula(node, "soffice")
+                assert _atspi.formulas_match(opened, wanted), (address, opened, wanted)
+            else:
+                assert kind == "match", (address, kind, actual, wanted)
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> None:
     """Live Calc. A range formula and a normalised number are not mismatches.
 

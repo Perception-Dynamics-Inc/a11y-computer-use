@@ -6371,6 +6371,63 @@ def test_sheet_number_match_accepts_calc_display_and_rejects_a_different_number(
     assert _atspi._numeric_texts_match("6", "=SUM(A1:A3)") is False
 
 
+def test_sheet_grid_names_the_first_differing_cell(fake_atspi, monkeypatch) -> None:
+    """A Calc grid is compared cell by cell from the starting address.
+
+    The first cell that disagrees is the mismatch. A displayed number is
+    not a formula, and a Formula attribute cut at the colon is not a prefix
+    of the request. F2 is not part of this scan.
+    """
+    assert _atspi.sheet_type_grid("Item\tQ1\nRent\t1200\n") == [
+        ["Item", "Q1"], ["Rent", "1200"],
+    ]
+    assert _atspi.sheet_type_grid("only") is None
+    assert _atspi.shift_sheet_address("A1", 2, 4) == "C5"
+    assert _atspi.shift_sheet_address("B2", 1, 0) == "C2"
+
+    def cell(text, formula=""):
+        node = _Acc("table cell", name="X")
+        node.text = text
+        captured = formula
+        node.get_attributes = lambda captured=captured: {"formula": captured} if captured else {}
+        return node
+
+    assert _atspi._classify_sheet_cell(cell("1200"), "1,200")[0] == "match"
+    assert _atspi._classify_sheet_cell(cell("42"), "=E2+31") == ("differ", "42")
+    assert _atspi._classify_sheet_cell(cell("2850", "SUM(C2\\"), "=SUM(C2:C4)")[0] == "editor"
+    assert _atspi.formulas_match("SUM(C2\\", "=SUM(C2:C4)") is False
+    assert _atspi.formulas_match("SUM(C2", "=SUM(C2:C4)") is False
+
+    nodes = {
+        "A1": cell("Item"),
+        "B1": cell("Q1"),
+        "A2": cell("999"),
+        "B2": cell("1250"),
+    }
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    scanned = _atspi._scan_sheet_grid("soffice", "A1", [["Item", "Q1"], ["1200", "1250"]])
+    assert scanned[0] == "differ"
+    assert scanned[1] == "A2"
+    assert scanned[2] == "1200"
+    assert scanned[3] == "999"
+
+    nodes["A2"] = cell("1200")
+    assert _atspi._scan_sheet_grid("soffice", "A1", [["Item", "Q1"], ["1200", "1250"]]) == (
+        "match", None,
+    )
+    nodes = {
+        "B5": cell("1770", "SUM(B2\\"),
+        "C5": cell("nope"),
+    }
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    scanned = _atspi._scan_sheet_grid(
+        "soffice", "B5", [["=SUM(B2:B4)", "1250"]],
+    )
+    assert scanned[0] == "editor"
+    assert scanned[2] == "differ"
+    assert scanned[3] == "C5"
+
+
 def test_cut_range_formula_outcome_reads_the_editor(fake_atspi, monkeypatch) -> None:
     """Synthetic cell. The cut Formula attribute is not the comparison.
 

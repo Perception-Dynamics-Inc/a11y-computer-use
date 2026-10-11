@@ -5895,6 +5895,201 @@ def poll_sheet_type(
     return latest if latest is not None else found
 
 
+def sheet_type_grid(text: str) -> list[list[str]] | None:
+    """Rows and cells a Calc type walks, or None for a single cell.
+
+    ``\\t`` moves right and ``\\n`` moves down. A trailing newline only
+    leaves the last row; it is not an extra empty row of cells. A blank
+    between tabs is a cell that was cleared.
+    """
+    if "\t" not in text and "\n" not in text:
+        return None
+    body = text.replace("\r\n", "\n")
+    if body.endswith("\n"):
+        body = body[:-1]
+    if body == "":
+        return None
+    return [row.split("\t") for row in body.split("\n")]
+
+
+def _column_index(letters: str) -> int:
+    column = 0
+    for char in letters:
+        column = column * 26 + (ord(char) - 64)
+    return column - 1
+
+
+def _column_letters(index: int) -> str:
+    number = index + 1
+    letters = ""
+    while number > 0:
+        number, remainder = divmod(number - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def shift_sheet_address(origin: str, columns: int, rows: int) -> str | None:
+    """``origin`` moved ``columns`` right and ``rows`` down. None when it is not an address."""
+    match = _SHEET_ADDRESS.match(origin or "")
+    if match is None:
+        return None
+    letters = "".join(char for char in origin if char.isalpha())
+    row_number = int("".join(char for char in origin if char.isdigit()))
+    column = _column_index(letters) + columns
+    row = row_number - 1 + rows
+    if column < 0 or row < 0:
+        return None
+    return f"{_column_letters(column)}{row + 1}"
+
+
+def _classify_sheet_cell(cell, wanted: str) -> tuple[str, str | None]:
+    """``match``, ``editor``, ``waiting``, or ``differ``, plus the text to show.
+
+    A truncated range formula is ``editor``: the Formula attribute is not
+    the whole request, and F2 is the caller's job, outside any poll. A
+    formula request is not the number the cell displays. An empty cell
+    that should hold text is ``waiting``, because the value can still be
+    on its way.
+    """
+    if cell is None:
+        return "differ", None
+    shown = _full_text(cell) or ""
+    formula = _sheet_formula(cell)
+    if wanted == "":
+        if shown.strip() == "" and not formula:
+            return "match", shown
+        return "differ", _sheet_formula_text(cell) or shown
+    if sheet_cell_matches(cell, wanted):
+        return "match", shown
+    if _formula_needs_editor(formula, wanted):
+        return "editor", _sheet_formula_text(cell) or shown
+    if shown.strip() == "" and not formula:
+        return "waiting", shown
+    return "differ", _sheet_formula_text(cell) or shown
+
+
+def _sheet_table(app: str):
+    try:
+        from a11y_computer_use.schema import Scope
+
+        root = find_root(app, Scope.WINDOW)
+    except Exception:
+        return None
+    if root is None:
+        return None
+    return _find_spreadsheet(root, [80])
+
+
+def _cell_for_address(app: str, address: str):
+    parts = shift_sheet_address(address, 0, 0)
+    if parts is None:
+        return None
+    table = _sheet_table(app)
+    if table is None:
+        return None
+    letters = "".join(char for char in address if char.isalpha())
+    row = int("".join(char for char in address if char.isdigit())) - 1
+    column = _column_index(letters)
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    return _safe(lambda: Atspi.Table.get_accessible_at(table, row, column))
+
+
+def _scan_sheet_grid(app: str, origin: str, grid: list[list[str]]):
+    """The first unresolved cell, or the formula cells that still need F2.
+
+    ``("match", None)`` when every cell matches without the editor.
+    ``("editor", [(address, wanted, cell), ...])`` when the only gaps are
+    range formulas cut at the colon. An earlier cut formula is unresolved,
+    so a later hard difference stays behind it until F2 runs. ``("waiting",
+    ...)`` is an empty cell that may still be publishing. ``("differ",
+    address, wanted, actual)`` is the first cell that already disagrees.
+    """
+    editors = []
+    for row_offset, row in enumerate(grid):
+        for column_offset, wanted in enumerate(row):
+            address = shift_sheet_address(origin, column_offset, row_offset)
+            cell = _cell_for_address(app, address) if address else None
+            kind, actual = _classify_sheet_cell(cell, wanted)
+            if kind == "match":
+                continue
+            if kind == "editor":
+                editors.append((address, wanted, cell))
+                continue
+            if editors:
+                return ("editor", editors, kind, address, wanted, actual)
+            if kind == "waiting":
+                return ("waiting", address, wanted, actual)
+            return ("differ", address, wanted, actual)
+    if editors:
+        return ("editor", editors)
+    return ("match", None)
+
+
+_SHEET_GRID_POLLS = 12
+_SHEET_GRID_PAUSE_S = 0.05
+
+
+def sheet_grid_check(app: str, origin: str, text: str):
+    """None when every typed cell matches. Otherwise ``(address, wanted, actual)``.
+
+    The rectangle starts at ``origin``, the cell that was active before the
+    keys. Comparison is per cell: formula text, or Calc's numeric display.
+    A formula is not accepted as the number it computes, and a Formula
+    attribute cut at ``:`` is not a prefix match. F2 runs once, after the
+    poll, and only for those cut formulas.
+    """
+    grid = sheet_type_grid(text)
+    if grid is None or not origin:
+        return (origin or "", text, None)
+    editors: list = []
+    waiting = None
+    pending = None
+    for attempt in range(_SHEET_GRID_POLLS):
+        scanned = _scan_sheet_grid(app, origin, grid)
+        kind = scanned[0]
+        if kind == "match":
+            return None
+        if kind == "differ":
+            _status, address, wanted, actual = scanned
+            return (address, wanted, actual)
+        if kind == "editor" and len(scanned) == 2:
+            editors = scanned[1]
+            waiting = None
+            pending = None
+            break
+        if kind == "editor":
+            # Cut formulas come first. Keep polling while a later cell is
+            # still empty; do not open the editor inside this loop.
+            _status, editors, later, address, wanted, actual = scanned
+            if later == "waiting":
+                waiting = (address, wanted, actual)
+                pending = None
+            else:
+                waiting = None
+                pending = (address, wanted, actual)
+                break
+        else:
+            _status, address, wanted, actual = scanned
+            waiting = (address, wanted, actual)
+            editors = []
+            pending = None
+        if attempt + 1 < _SHEET_GRID_POLLS:
+            time.sleep(_SHEET_GRID_PAUSE_S)
+    for address, wanted, cell in editors:
+        opened = committed_sheet_formula(cell, app) if cell is not None else None
+        if opened and formulas_match(opened, wanted):
+            continue
+        return (address, wanted, opened)
+    if pending is not None:
+        return pending
+    if waiting is not None:
+        return waiting
+    return None
+
+
 def sheet_address(title: str | None) -> str | None:
     """A Calc address such as ``B4``, or None when ``title`` is not one."""
     text = (title or "").strip()
