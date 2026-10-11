@@ -2468,6 +2468,21 @@ class LinuxDriver:
                 actual=actual,
                 cell=address,
             )
+        # A Writer newline is Return, which this key path already sends. The
+        # paragraphs are the read-back. One paragraph that holds the same
+        # characters as line breaks is not a match. A sheet is not this.
+        if app_id and "\n" in text and _atspi.libreoffice_app(app_id):
+            writer = self._run(lambda: _atspi.focused_writer_document(app_id))
+            if writer is not None and not self._run(lambda: _atspi.spreadsheet_open(app_id)):
+                if self._run(lambda: _atspi.writer_type_landed(writer, text)):
+                    return len(text)
+                if self._run(lambda: _atspi.writer_type_conflict(writer, text)):
+                    raise _atspi._text_mismatch(
+                        "text_mismatch",
+                        "inserted as line breaks",
+                        expected=text,
+                        actual=self._run(lambda: _atspi.writer_type_readback(writer)),
+                    )
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)

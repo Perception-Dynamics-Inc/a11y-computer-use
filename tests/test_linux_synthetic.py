@@ -6714,6 +6714,118 @@ def test_writer_document_set_text_confirms_from_paragraphs(fake_atspi) -> None:
     assert _atspi.writer_document_outcome_text("68.3755", other) is None
 
 
+def test_writer_type_newline_is_return_and_line_breaks_do_not_confirm(fake_atspi, monkeypatch) -> None:
+    """A Writer newline is Return. U+2028 stays a line break.
+
+    insertText of the whole string is what stored ``\\n`` as a line break
+    and still reported success. The read-back of that one paragraph does
+    not match the requested paragraphs. A text entry is not this path.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(
+        "document text", name="Untitled 1 - LibreOffice Document", states=("FOCUSED",),
+    )
+    doc.text = ""
+    doc.get_application = lambda: app
+    first = _Acc("paragraph", name="", states=("FOCUSED",))
+    first.text = ""
+    _adopt(doc, first)
+    current = {"node": first}
+    inserted: list[str] = []
+    returns: list[str] = []
+    chords: list[str] = []
+
+    def insert_text(_pos, text, _length):
+        inserted.append(text)
+        current["node"].text += text
+        return True
+
+    def type_string(text):
+        returns.append(text)
+        new = _Acc("paragraph", name="")
+        new.text = ""
+        current["node"] = new
+        doc.children.append(new)
+        new.parent = doc
+
+    def press_chord(chord):
+        chords.append(chord)
+        current["node"].text += "\u2028"
+
+    doc.insert_text = insert_text
+    doc.get_editable_text_iface = lambda: doc
+    first.insert_text = insert_text
+    first.get_editable_text_iface = lambda: first
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0.0)
+
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    assert _atspi.insert_text(first, value) == len(value)
+    assert returns == ["\n", "\n"]
+    assert chords == []
+    assert all("\n" not in piece for piece in inserted)
+    assert [child.text for child in doc.children] == value.split("\n")
+    assert _atspi.writer_document_outcome_text(value, doc) == value
+
+    broken = _Acc("paragraph", name="")
+    broken.text = value.replace("\n", "\u2028")
+    _adopt(doc, broken)
+    assert _atspi.writer_document_text(doc) == broken.text
+    assert _atspi.paragraph_breaks_match(broken.text, value) is True
+    assert _atspi.writer_type_conflict(doc, value) is True
+    readback = _atspi.writer_document_outcome_text(value, doc)
+    assert readback != value
+    assert readback is not None and "\u2028" in readback
+
+    _adopt(doc, first)
+    first.text = ""
+    current["node"] = first
+    inserted.clear()
+    returns.clear()
+    chords.clear()
+    assert _atspi.insert_text(first, "a\u2028b\nc") == len("a\u2028b\nc")
+    assert returns == ["\n"]
+    assert chords == ["shift+return"]
+    assert [child.text for child in doc.children] == ["a\u2028b", "c"]
+    assert _atspi.writer_document_outcome_text("a\u2028b\nc", doc) == "a\u2028b\nc"
+    assert _atspi.writer_type_conflict(doc, "a\nb\nc") is True
+
+    def stay_one_paragraph(text):
+        assert text == "\n"
+        current["node"].text += "\u2028"
+
+    monkeypatch.setattr(_atspi, "_type_string", stay_one_paragraph)
+    _adopt(doc, first)
+    first.text = ""
+    current["node"] = first
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.insert_text(first, "a\nb")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert "inserted as line breaks" in exc.value.message
+    assert "\n" not in "".join(inserted)
+
+    entry = _Acc("entry", name="note")
+    entry.text = ""
+
+    def entry_insert(_pos, text, _length):
+        entry.text += text
+        return True
+
+    entry.insert_text = entry_insert
+    entry.get_editable_text_iface = lambda: entry
+    assert _atspi.insert_text(entry, "a\nb") == 3
+    assert entry.text == "a\nb"
+
+
 def test_writer_document_waits_for_later_paragraphs_and_does_not_clear(fake_atspi, monkeypatch) -> None:
     """Later paragraphs are the read-back. A partial line is not a miss.
 

@@ -5479,6 +5479,144 @@ def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, mo
     _kill_libreoffice()
 
 
+
+def _empty_odt(path) -> None:
+    """A blank Writer file so Ctrl+S writes content.xml without a save dialog."""
+    import zipfile
+
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.3">
+<office:body><office:text><text:p/></office:text></office:body>
+</office:document-content>"""
+    manifest = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">
+<manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/>
+<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        archive.writestr(info, "application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", content)
+        archive.writestr("META-INF/manifest.xml", manifest)
+
+
+def _odt_paragraphs(path) -> tuple[list[str], int]:
+    """``(paragraph texts, line-break count)`` from a saved .odt."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read("content.xml")
+    root = ET.fromstring(xml)
+    ns = {"text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0"}
+    paragraphs = ["".join(node.itertext()) for node in root.findall(".//text:p", ns)]
+    breaks = root.findall(".//text:line-break", ns)
+    return paragraphs, len(breaks)
+
+
+def test_linux_writer_type_newline_inserts_paragraphs(tmp_path) -> None:
+    """Live Writer. type without a ref turns newlines into paragraphs.
+
+    The saved .odt has one text:p per line and no text:line-break. A missing
+    soffice fails the test. The bus may still skip when there is no display.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-writer is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    odt = tmp_path / "memo.odt"
+    _empty_odt(odt)
+    profile = tmp_path / "writer-type"
+    _writer_profile(profile)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(odt),
+        ],
+        env=env, start_new_session=True,
+    )
+    value = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    try:
+        deadline = time.monotonic() + 90
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:500]
+                area = next(
+                    (
+                        el for el in shot.elements
+                        if el.role == "AXTextArea" and "Document" in (el.title or "")
+                    ),
+                    None,
+                )
+                if area is not None and "Tip of the Day" not in last:
+                    break
+            time.sleep(0.4)
+        assert area is not None, f"Writer did not expose the document\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea" and "Document" in (el.title or ""))
+        runtime.click(area.ref)
+        typed = runtime.type_text(value)
+        assert typed.outcome == "confirmed", (typed, getattr(typed, "evidence", None))
+        assert "line break" not in typed.evidence.casefold()
+        assert "Quarterly Update" in typed.evidence
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        texts = [el.value or "" for el in current.elements if el.role == "AXStaticText"]
+        assert "Quarterly Update" in texts
+        assert "Revenue grew 12% compared with the previous quarter." in texts
+        assert "We will hire two engineers in November." in texts
+        driver.key_chord("ctrl+s")
+        saved = False
+        save_deadline = time.monotonic() + 20
+        paragraphs: list[str] = []
+        breaks = -1
+        while time.monotonic() < save_deadline:
+            try:
+                paragraphs, breaks = _odt_paragraphs(odt)
+            except Exception:
+                paragraphs, breaks = [], -1
+            if "Quarterly Update" in paragraphs and breaks == 0:
+                saved = True
+                break
+            time.sleep(0.4)
+        assert saved, (paragraphs, breaks)
+        filled = [text for text in paragraphs if text.strip()]
+        assert filled == value.split("\n"), paragraphs
+        assert breaks == 0
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def _soffice_displays() -> set[str]:
     found: set[str] = set()
     try:
