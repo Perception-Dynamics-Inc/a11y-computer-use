@@ -203,6 +203,54 @@ def test_runtime_crop_rejects_bad_padding_scale_and_a_huge_edge(tmp_path) -> Non
     assert driver.shots == shots
 
 
+def test_crop_includes_fenced_ocr_lines_with_screen_bounds(tmp_path, monkeypatch) -> None:
+    """crop reads words when an engine is installed and keeps the image either way."""
+    from a11y_computer_use import ocr as ocr_mod
+
+    display = Display(0, 100, 80, 1.0, True)
+    element = _element("e2", Bounds(0, 10, 12, 20, 16))
+    driver = CropDriver([element], _png(100, 80), display)
+    runtime = _runtime(tmp_path, driver)
+
+    def fake(image, **kwargs):
+        del kwargs
+        png, region = image
+        assert png.startswith(b"\x89PNG")
+        return [{
+            "text": "SUBMIT",
+            "bounds": {
+                "display_id": region.display_id,
+                "x": region.x + 4,
+                "y": region.y + 6,
+                "width": 40,
+                "height": 12,
+            },
+            "confidence": 0.9,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake)
+    text, image = runtime.crop("e2")
+    assert "SUBMIT" in text
+    assert "[14,18,40,12]" in text
+    assert "<untrusted nonce=" in text
+    assert "No text was read" not in text
+    assert image.width == 20 and image.height == 16
+
+    def missing(image, **kwargs):
+        del image, kwargs
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            "no OCR engine is available",
+            detail={"reason": "missing_dependency"},
+        )
+
+    monkeypatch.setattr(ocr_mod, "ocr", missing)
+    text, image = runtime.crop("e2")
+    assert "No text was read" in text
+    assert "SUBMIT" not in text
+    assert image.width == 20 and image.height == 16
+
+
 def test_crop_action_is_not_turned_into_a_click() -> None:
     action = Action("crop", {"ref": "e2"})
     forced, label = forced_method(action, 2, None)

@@ -309,14 +309,14 @@ jobs:
           PY
           xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
-            # 1800s. CI runs 38047628453 (this branch) and 38060125035
-            # (main, after the OCR live cases) killed this step with exit
-            # 124 at the old 1200s ceiling while pytest was still printing
-            # progress. The log was fully buffered, so it did not name a
-            # test. This step installs the [ocr] extra after the hermetic
-            # suite and runs the OCR live cases plus the opaque-region
-            # launches. Line-buffered so a killed run names the test in
-            # progress.
+            # 5400s. Runs 38134153855 (main) and 38134262805 (the click
+            # and OCR branch) were killed with exit 124 at the 1800s
+            # ceiling while pytest was still completing tests. The
+            # one-notch Chrome document scroll makes the long-page
+            # scroll_to_find cases slower than the 21-minute live step
+            # on 0.4.62. -v prints one line per test so a killed run
+            # names the last test. This step installs the [ocr] extra
+            # after the hermetic suite and runs the OCR live cases.
             # openbox starts after that install. Run 38107287671 started it
             # first and then installed the [ocr] wheels; the live pytest
             # then saw no _NET_SUPPORTING_WM_CHECK. Snapshots still found
@@ -327,7 +327,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 1800 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:
