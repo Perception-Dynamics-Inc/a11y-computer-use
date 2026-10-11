@@ -19,6 +19,7 @@ import re
 import time
 import threading
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 
 from a11y_computer_use import conditions, outcome
@@ -38,6 +39,15 @@ from a11y_computer_use.agent.actions import (
     risk_reason,
     tool_schemas,
     validate_action,
+)
+from a11y_computer_use.agent.vision_order import (
+    TreeBox,
+    cap_worker_threads,
+    labels_from_instruction,
+    match_ocr_word,
+    snap_point,
+    tree_for_labels,
+    words_from_spans,
 )
 from a11y_computer_use.agent.exec import (
     DEFAULT_EXEC_TIMEOUT_S,
@@ -545,6 +555,9 @@ class Agent:
                 tool_call_id=call.id, name=requested.name,
             ))
             return "stop_turn"
+        # Tree, then an OCR word, then Holo. A later look-again check, when
+        # one is installed, still sees the coordinate click this returns.
+        requested = self._apply_vision_order(requested, turn)
         if requested.name == "done":
             yield from self._done(requested, turn, started, remaining)
             if self._result is not None and self._result.status == "success":
@@ -1296,6 +1309,86 @@ class Agent:
             )
         return images, note
 
+    def _apply_vision_order(self, action: Action, turn: ModelTurn) -> Action:
+        """Resolve a click whose ref is missing: tree, then OCR word, then Holo.
+
+        A ref that is in the snapshot is left alone. A label match in the
+        tree becomes that element's ref. An OCR line match becomes a click
+        at the word's center. Holo runs only when OCR missed and the model
+        did not already pass ``x`` and ``y``. The point snaps to a small
+        tree box or a word box. This does not crop or ask a second time.
+        """
+        if action.name != "click":
+            return action
+        snap = self._last_snap
+        ref = str(action.args.get("ref") or "").strip()
+        if ref and _by_ref(snap, ref) is not None:
+            return action
+        labels = _click_labels(self._goal or "", getattr(turn, "text", None))
+        boxes = _vision_tree_boxes(snap)
+        if labels:
+            hit = tree_for_labels(boxes, labels)
+            if hit is not None:
+                return _click_ref(action, hit.ref)
+        has_point = action.args.get("x") is not None and action.args.get("y") is not None
+        words = []
+        if labels or (not has_point and self.grounding is not None):
+            words = self._vision_words()
+        if labels:
+            word = match_ocr_word(words, labels)
+            if word is not None:
+                cx, cy = word.center()
+                return _click_point(action, cx, cy, word.display_id)
+        if has_point or self.grounding is None:
+            return action
+        return self._vision_holo(action, boxes, words) or action
+
+    def _vision_words(self) -> list:
+        """Word boxes from RapidOCR on the current screenshot. Never a line box.
+
+        A missing engine or a screenshot that will not decode is no match.
+        Threads are capped before the engine runs. Torch is not imported.
+        """
+        cap_worker_threads()
+        raw = self._grab()
+        png = _png_of(raw)
+        if png is None:
+            return []
+        try:
+            from a11y_computer_use import ocr as ocr_mod
+            from a11y_computer_use.schema import ComputerUseError
+
+            spans = ocr_mod.ocr(_ocr_subject(raw, png))
+        except (ComputerUseError, ValueError, OSError, TypeError):
+            return []
+        except Exception:  # noqa: BLE001 - OCR must not end the run
+            return []
+        return words_from_spans(spans)
+
+    def _vision_holo(self, action: Action, boxes: list, words: list) -> Action | None:
+        """One grounding call. The point is in screen pixels, snapped when it fits."""
+        model = self.grounding
+        ground = getattr(model, "ground", None)
+        if not callable(ground):
+            return None
+        cap_worker_threads()
+        raw = self._grab()
+        png = _png_of(raw)
+        if png is None:
+            return None
+        try:
+            hit = ground(png, self._goal or "")
+        except Exception:  # noqa: BLE001 - a local model must not end the run
+            return None
+        point = _ground_point(hit)
+        if point is None:
+            return None
+        x, y, display = _screen_from_ground(point[0], point[1], raw)
+        snapped = snap_point(x, y, boxes, words)
+        if snapped is not None:
+            _kind, x, y, display = snapped
+        return _click_point(action, x, y, display)
+
     def _fallback_ground(self, png: bytes, bounds: object) -> str | None:
         """A fenced point from the optional grounding model, or None.
 
@@ -1309,6 +1402,7 @@ class Agent:
         ground = getattr(model, "ground", None)
         if not callable(ground):
             return None
+        cap_worker_threads()
         try:
             hit = ground(png, self._goal or "")
         except Exception:  # noqa: BLE001 - a local model must not end the run
@@ -2580,6 +2674,7 @@ def _fallback_ocr(png: bytes, bounds: object) -> str | None:
     from a11y_computer_use.ocr import format_ocr_lines, ocr
     from a11y_computer_use.schema import ComputerUseError
 
+    cap_worker_threads()
     payload: object = png if bounds is None else (png, bounds)
     try:
         spans = ocr(payload)
@@ -2591,6 +2686,88 @@ def _fallback_ocr(png: bytes, bounds: object) -> str | None:
     if not isinstance(spans, (list, tuple)):
         return None
     return format_ocr_lines(spans)
+
+
+_DISPLAY_ID = re.compile(r"display (-?\d+)")
+
+
+def _click_labels(goal: str, turn_text: object) -> list[str]:
+    """Labels named by the goal, and by the model's turn text when it sent any."""
+    parts = [goal]
+    if isinstance(turn_text, str) and turn_text.strip():
+        parts.append(turn_text)
+    return labels_from_instruction("\n".join(parts))
+
+
+def _vision_tree_boxes(snap: Snapshot | None) -> list[TreeBox]:
+    """Elements a pointer may hit. Windows, groups, and opaque regions are out."""
+    if snap is None:
+        return []
+    boxes: list[TreeBox] = []
+    for element in snap.elements:
+        if not getattr(element, "enabled", True):
+            continue
+        if _is_opaque_role(element.role) or _role_key(element.role) in _STRUCTURAL_ROLES:
+            continue
+        bounds = element.bounds
+        if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+            continue
+        boxes.append(TreeBox(
+            ref=element.ref,
+            title=element.title or "",
+            x=int(bounds.x),
+            y=int(bounds.y),
+            w=int(bounds.width),
+            h=int(bounds.height),
+            display_id=int(bounds.display_id),
+        ))
+    return boxes
+
+
+def _click_ref(action: Action, ref: str) -> Action:
+    args: dict = {"ref": ref}
+    if action.args.get("button"):
+        args["button"] = action.args["button"]
+    if action.args.get("count"):
+        args["count"] = action.args["count"]
+    return replace(action, args=args)
+
+
+def _click_point(action: Action, x: int, y: int, display_id: int) -> Action:
+    args: dict = {"x": int(x), "y": int(y), "display_id": int(display_id)}
+    if action.args.get("button"):
+        args["button"] = action.args["button"]
+    if action.args.get("count"):
+        args["count"] = action.args["count"]
+    return replace(action, args=args)
+
+
+def _ocr_subject(raw: object, png: bytes) -> object:
+    """The screenshot object OCR can scale, or the PNG bytes."""
+    image = raw[1] if isinstance(raw, tuple) and len(raw) == 2 else raw
+    if (
+        callable(getattr(image, "to_source", None))
+        and isinstance(getattr(image, "png", None), (bytes, bytearray))
+    ):
+        return image
+    return png
+
+
+def _screen_from_ground(x: int, y: int, raw: object) -> tuple[int, int, int]:
+    """Map a point in the image Holo saw onto display pixels."""
+    image = raw
+    display = 0
+    if isinstance(raw, tuple) and len(raw) == 2:
+        text, image = raw
+        if isinstance(text, str):
+            match = _DISPLAY_ID.search(text)
+            if match is not None:
+                display = int(match.group(1))
+    mapper = getattr(image, "to_source", None)
+    if callable(mapper):
+        sx, sy = mapper(int(x), int(y))
+        return int(sx), int(sy), display
+    return int(x), int(y), display
 
 
 def _ground_point(hit: object) -> tuple[int, int] | None:
