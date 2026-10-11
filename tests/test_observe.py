@@ -1620,3 +1620,46 @@ def test_value_is_binding_for_text_like_roles() -> None:
     with pytest.raises(ComputerUseError) as exc:
         resolve_ref(before, anchor.ref, live=after)
     assert exc.value.detail["reason"] == "title_changed"
+
+
+def test_optgroup_labels_render_as_group_lines() -> None:
+    """A select's optgroup labels stay group lines in both snapshot views."""
+    def item(title, y):
+        return ax("AXMenuItem", title=title, at=(40.0, y), size=(160.0, 22.0), actions=("AXPress",))
+
+    tree = ax(
+        "AXWindow", title="Page", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXComboBox", title="Fruit", value="Apple", expanded=False,
+                at=(20.0, 20.0), size=(180.0, 28.0), actions=("AXPress",),
+                children=[
+                    ax(
+                        "AXMenu", at=(20.0, 48.0), size=(180.0, 110.0),
+                        children=[
+                            ax(
+                                "AXGroup", title="Red", at=(20.0, 48.0), size=(180.0, 50.0),
+                                children=[item("Apple", 50.0), item("Cherry", 74.0)],
+                            ),
+                            ax(
+                                "AXGroup", title="Yellow", at=(20.0, 100.0), size=(180.0, 50.0),
+                                children=[item("Banana", 102.0), item("Lemon", 126.0)],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+    snap = snap_of(tree)
+    full = render_text(snap)
+    interactive = render_text(snap, mode="interactive")
+    for rendered in (full, interactive):
+        assert 'group "Red"' in rendered
+        assert 'group "Yellow"' in rendered
+        assert 'menuitem "Lemon"' in rendered
+    red = next(el for el in snap.elements if el.title == "Red")
+    assert red.role == "AXGroup"
+    assert any(el.title == "Lemon" and el.parent == next(
+        group.ref for group in snap.elements if group.title == "Yellow"
+    ) for el in snap.elements)

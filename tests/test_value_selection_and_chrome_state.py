@@ -553,6 +553,139 @@ def test_chrome_select_closes_the_popup_when_the_option_does_not_land(monkeypatc
     assert "collapse" in select.action_log
 
 
+def _select_option(name, *, selected=False):
+    """A Chrome menu item whose click selects it and leaves the popup open."""
+    node = _Node(
+        "menu item", name, actions=["click"],
+        states={"SELECTED"} if selected else set(),
+    )
+    node.toolkit = "Chromium"
+
+    def do_action(index, option=node):
+        option.action_log.append(option.actions[index])
+        root = option
+        while root.parent is not None:
+            root = root.parent
+
+        def walk(current):
+            if current.role == "menu item":
+                if current is option:
+                    current.states.add("SELECTED")
+                else:
+                    current.states.discard("SELECTED")
+            for child in current.children:
+                walk(child)
+
+        walk(root)
+        return True
+
+    node.do_action = do_action
+    return node
+
+
+def _optgroup_select(*, expanded=True):
+    """A Chromium select whose options sit under optgroup labels."""
+    apple = _select_option("Apple", selected=True)
+    cherry = _select_option("Cherry")
+    banana = _select_option("Banana")
+    lemon = _select_option("Lemon")
+    # Chrome exposes an optgroup as a panel named with the group's label.
+    red = _Node("panel", "Red", children=[apple, cherry])
+    yellow = _Node("panel", "Yellow", children=[banana, lemon])
+    menu = _Node("menu", "", children=[red, yellow])
+    states = {"EXPANDABLE", "ENABLED", "EXPANDED"} if expanded else {"EXPANDABLE", "ENABLED"}
+    select = _Node(
+        "combo box", "Fruit", text="\ufffc", children=[menu],
+        actions=["press", "collapse"], states=states,
+    )
+    select.toolkit = "Chromium"
+    for node in (red, yellow, menu):
+        node.toolkit = "Chromium"
+    return select, apple, lemon
+
+
+def test_chrome_optgroup_option_click_closes_the_popup(monkeypatch) -> None:
+    """A ref click that selects the option also collapses the select.
+
+    Collapse closes it, so Escape is not sent. The option stays selected.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    select, apple, lemon = _optgroup_select()
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, lemon)
+    element = _element("e8", "AXMenuItem", "Lemon", clickable=True)
+    assert driver.press_element(element) is True
+    assert lemon.action_log == ["click"]
+    assert "SELECTED" in lemon.states
+    assert "SELECTED" not in apple.states
+    assert "EXPANDED" not in select.states
+    assert "collapse" in select.action_log
+    assert keys == []
+    assert ATSPIAccessor().read(select).value == "Lemon"
+
+
+def test_chrome_optgroup_option_click_escapes_only_while_the_popup_stays_open(monkeypatch) -> None:
+    """Escape runs only when collapse left the select expanded.
+
+    A click that already collapsed the popup sends no key. A popup that
+    stays expanded after Escape is popup_open, not a successful click.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    closed, _apple, lemon = _optgroup_select(expanded=False)
+
+    def already_closed(index, option=lemon):
+        option.action_log.append(option.actions[index])
+        option.states.add("SELECTED")
+        return True
+
+    lemon.do_action = already_closed
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, lemon)
+    element = _element("e8", "AXMenuItem", "Lemon", clickable=True)
+    assert driver.press_element(element) is True
+    assert keys == []
+    assert "collapse" not in closed.action_log
+
+    stuck, _apple, lemon = _optgroup_select()
+
+    def ignore(index, node=stuck):
+        node.action_log.append(node.actions[index])
+        return True
+
+    stuck.do_action = ignore
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: lemon)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "popup_open"
+    assert "still open" in exc.value.message
+    assert "Lemon" in exc.value.message
+    assert keys == ["Escape", "Escape", "Escape", "Escape"]
+    assert "EXPANDED" in stuck.states
+    assert lemon.action_log == ["click"]
+
+
+def test_chrome_menu_item_outside_a_select_does_not_send_escape(monkeypatch) -> None:
+    """An application menu item is not a select option."""
+    from a11y_computer_use.drivers import _linux_input
+
+    item = _Node("menu item", "Save", actions=["click"])
+    item.toolkit = "Chromium"
+    menu = _Node("menu", "File", children=[item])
+    _Node("menu bar", "", children=[menu])
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, item)
+    element = _element("e3", "AXMenuItem", "Save", clickable=True)
+    assert driver.press_element(element) is True
+    assert item.action_log == ["click"]
+    assert keys == []
+
+
 def test_spin_button_uses_the_value_interface_and_rejects_out_of_range(monkeypatch) -> None:
     spin = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
     driver = _driver(monkeypatch, spin)
