@@ -5812,16 +5812,18 @@ def _insert_writer_segment(acc, eti, segment: str) -> None:
                 _insert_writer_piece(acc, eti, "\u2028")
 
 
-def _type_writer_paragraphs(acc, text: str, eti) -> int:
+def _type_writer_paragraphs(acc, text: str, eti) -> int | None:
     """Type ``text`` so each ``\\n`` is Return, then read the paragraphs back.
 
     U+2028 stays Shift+Return. ``insertText`` of a newline is not used: in
     Writer that is a line break inside the current paragraph, and a read-back
     that treats it as the next paragraph would report success for the wrong
     document. When the characters landed that way anyway, the error says
-    they were inserted as line breaks.
+    they were inserted as line breaks. None when the paragraphs are still
+    what they were, so the caller may send keys.
     """
     document = _writer_document_type_target(acc)
+    before = writer_document_text(document) if document is not None else None
     parts = text.split("\n")
     if len(parts) > 1 and not _x11_keys_available():
         raise _text_mismatch(
@@ -5844,6 +5846,10 @@ def _type_writer_paragraphs(acc, text: str, eti) -> int:
             expected=text,
             actual=actual,
         )
+    # The paragraphs did not change. The caller may send keys. A different
+    # paragraph text is still a mismatch, and keys are not sent on top of it.
+    if document is not None and (writer_document_text(document) or "") == (before or ""):
+        return None
     raise _text_mismatch(
         "text_mismatch",
         "the field text after type does not match what was inserted",

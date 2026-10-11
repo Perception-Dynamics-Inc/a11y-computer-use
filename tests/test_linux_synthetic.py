@@ -7000,22 +7000,34 @@ def _install_writer_lines(doc, text: str) -> None:
 def test_writer_insert_text_confirms_from_paragraphs_not_the_empty_node(fake_atspi, monkeypatch) -> None:
     """Synthetic Writer document. The textarea node stays empty.
 
-    EditableText inserts the lines as paragraphs. The document text
-    interface stays ``""``. That is a confirm, not a text_mismatch. An
-    insert that does not change the paragraphs returns None so the caller
-    can send keys, and does not report success.
+    EditableText inserts each line. Return, injected here, starts the next
+    paragraph. No X display is opened. The document text interface stays
+    ``""``. That is a confirm, not a text_mismatch. An insert that does not
+    change the paragraphs returns None so the caller can send keys, and
+    does not report success.
     """
     memo = _writer_memo()
     doc = _writer_doc()
     monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
     monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    cursor = {"node": doc.children[0]}
 
     def insert_text(_pos, text, _length):
-        _install_writer_lines(doc, text)
+        cursor["node"].text += text
         return True
+
+    def type_string(text):
+        assert text == "\n"
+        new = _Acc("paragraph", name="")
+        new.text = ""
+        doc.children.append(new)
+        new.parent = doc
+        cursor["node"] = new
 
     doc.get_editable_text_iface = lambda: doc
     doc.insert_text = insert_text
+    monkeypatch.setattr(_atspi, "_type_string", type_string)
     assert _atspi.insert_text(doc, memo) == len(memo)
     assert doc.text == ""
     assert _atspi.writer_document_text(doc) == memo
@@ -7029,6 +7041,7 @@ def test_writer_insert_text_confirms_from_paragraphs_not_the_empty_node(fake_ats
 
     empty.get_editable_text_iface = lambda: empty
     empty.insert_text = insert_nothing
+    monkeypatch.setattr(_atspi, "_type_string", lambda _text: None)
     assert _atspi.insert_text(empty, memo) is None
     assert _atspi.writer_document_text(empty) == ""
 
