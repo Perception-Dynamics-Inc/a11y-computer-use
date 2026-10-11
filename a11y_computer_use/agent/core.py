@@ -2132,7 +2132,11 @@ def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, st
 def keyboard_action(action: Action) -> tuple[Action, str]:
     if action.name in {"type", "set_value", "select"}:
         text = action.args.get("text", action.args.get("value", ""))
-        return Action("type", {"text": "" if text is None else str(text)}, action.id), "keyboard:type"
+        args = {"text": "" if text is None else str(text)}
+        ref = action.args.get("ref")
+        if isinstance(ref, str) and ref.strip():
+            args["ref"] = ref.strip()
+        return Action("type", args, action.id), "keyboard:type"
     return Action("key", {"chord": "Return"}, action.id), "keyboard:Return"
 
 
@@ -2160,6 +2164,8 @@ def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
         params = {"text": str(args.get("text", ""))}
         if args.get("app"):
             params["app"] = args["app"]
+        if args.get("ref"):
+            params["ref"] = args["ref"]
         return "type", params
     if name == "key":
         params = {"chord": str(args["chord"])}

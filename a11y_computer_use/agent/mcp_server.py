@@ -103,6 +103,9 @@ def build_agent_mcp(store: RunStore | None = None):
             raise ToolError(f"409 approval already answered: {approval_id}")
         return {"approval_id": approval_id, "approve": approve}
 
+    from a11y_computer_use.server import seal_mcp_tools
+
+    seal_mcp_tools(server)
     return server
 
 

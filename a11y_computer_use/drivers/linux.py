@@ -1832,6 +1832,131 @@ class LinuxDriver:
             },
         )
 
+    def type_into(self, element: Element, text: str) -> int:
+        """Type ``text`` into ``element`` only after focus is confirmed on it.
+
+        ``grab_focus`` runs first. A later read has to show keyboard focus on
+        that accessible, or on a descendant inside it. Anything else raises
+        ``focus_lost`` and does not insert and does not send keystrokes, so
+        the characters cannot land in a different field. A confirmed field
+        is written through EditableText on that accessible. When that
+        interface is missing or leaves the field unchanged, keystrokes are
+        sent only while focus stays on it, and the read-back is that same
+        accessible.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        self._focused_editable = None
+        if element.secure:
+            raise _secure_focus_error("the requested ref is a password field")
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            raise self._focus_lost_on(element)
+        self._refuse_hidden(element, handle)
+        if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
+            raise _not_editable(element)
+        self._run(lambda: _atspi.grab_focus(handle))
+        if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+            raise self._focus_lost_on(element)
+        self._focused_editable = handle
+        peers: dict = {}
+        try:
+            peers = self._run(lambda: _atspi.peer_field_texts(handle)) or {}
+        except Exception:
+            peers = {}
+        try:
+            count = self._type_confirmed_handle(handle, text)
+        except ComputerUseError as exc:
+            self._refuse_changed_peers(handle, peers, element, exc)
+            raise
+        self._raise_if_peers_changed(handle, peers, element)
+        return count
+
+    def _focus_lost_on(self, element: Element) -> ComputerUseError:
+        return ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            f"focus is not confirmed on {element.ref}; nothing was typed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "evidence": "focus did not land on the target, so no keystrokes were sent",
+            },
+        )
+
+    def _raise_if_peers_changed(self, handle, peers: dict, element: Element) -> None:
+        """After a type that reported success, another field must be unchanged."""
+        if handle is None or not peers:
+            return
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            changed = self._run(lambda: _atspi.changed_peer_fields(handle, peers))
+        except Exception:
+            return
+        if not changed:
+            return
+        raise ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            "type stopped because another field changed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "changed_fields": changed[:8],
+                "evidence": "another field changed during type",
+            },
+        )
+
+    def _type_confirmed_handle(self, handle, text: str) -> int:
+        """Insert ``text`` into a handle whose focus was already confirmed."""
+        from a11y_computer_use.drivers import _atspi
+
+        text = text.replace("\r\n", "\n")
+        if not text:
+            return 0
+        before = self._run(lambda: _atspi._readable_text(handle))
+        try:
+            inserted = self._run(lambda: _atspi.insert_text(handle, text))
+        except ComputerUseError as exc:
+            detail = exc.detail or {}
+            if detail.get("reason") == "text_mismatch" and detail.get("unchanged"):
+                inserted = None
+            elif detail.get("reason") == "selection_not_replaced" and self._run(
+                lambda: _atspi.is_location_entry(handle)
+            ):
+                app_id, _pid = self.frontmost_app()
+                return self._replace_location_selection(handle, text, app_id)
+            else:
+                raise
+        if isinstance(inserted, int) and not isinstance(inserted, bool):
+            return inserted
+        if inserted:
+            return len(text)
+        if not self._run(lambda: _atspi._x11_keys_available()):
+            raise _wayland_input_error("type")
+        self._run(lambda: _atspi._type_into_target(handle, text))
+        chrome = bool(self._run(lambda: _atspi._chromium_app(handle)))
+        after = _atspi._poll_typed_text(
+            lambda: self._run(lambda: _atspi._readable_text(handle)),
+            before,
+            text,
+            chrome=chrome,
+        )
+        if _atspi._typed_visible(before, after, text, chrome=chrome):
+            return len(text)
+        raise _atspi._text_mismatch(
+            "text_mismatch",
+            f"the text read back does not contain {text!r}",
+            expected=text,
+            actual=after,
+        )
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.

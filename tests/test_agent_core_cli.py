@@ -204,7 +204,7 @@ def test_approve_prompt_names_role_window_and_redacts_args(monkeypatch) -> None:
         if script.asked:  # type: ignore[attr-defined]
             return turn(done("held", [{"element": {"role": "AXButton", "name": "Pay now"}}]))
         script.asked = True  # type: ignore[attr-defined]
-        return turn(ToolCall("click", {"ref": "e2", "note": card}))
+        return turn(ToolCall("click", {"ref": "e2", "button": card}))
 
     script.asked = False  # type: ignore[attr-defined]
     agent = Agent(

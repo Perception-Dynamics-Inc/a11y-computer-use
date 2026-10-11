@@ -109,6 +109,29 @@ def unknown_display_message(display_id: int, displays: Sequence[Display]) -> str
     return f"unknown display_id {display_id}; valid ids: {ids}"
 
 
+def unknown_fields_message(given: object, allowed: object) -> str | None:
+    """Name keys in ``given`` that ``allowed`` does not declare.
+
+    None when every key is declared, or when ``given`` is not a mapping.
+    The wording matches an act step's unknown field: ``unknown field
+    'zoom'; expected app, ref, text``. Several keys use ``fields``. An empty
+    allowed set says ``expected no fields``.
+    """
+    if not isinstance(given, dict):
+        return None
+    try:
+        allowed_names = {str(name) for name in allowed}
+    except TypeError:
+        return None
+    extra = sorted((str(name) for name in given if str(name) not in allowed_names), key=str)
+    if not extra:
+        return None
+    expected = ", ".join(sorted(allowed_names)) if allowed_names else "no fields"
+    names = ", ".join(repr(name) for name in extra)
+    label = "field" if len(extra) == 1 else "fields"
+    return f"unknown {label} {names}; expected {expected}"
+
+
 def point_outside_display(x: object, y: object, display: Display, *, where: str = "point") -> str | None:
     """None when ``(x, y)`` is a pixel of ``display``.
 
@@ -332,8 +355,8 @@ class ErrorCode(str, Enum):
     decision and injection (same-window recheck, PLAN.md §6); re-observe."""
 
     FOCUS_LOST = "focus_lost"
-    """Keyboard focus was not on the set_value target. No further keystrokes
-    were sent. The outcome is refused."""
+    """Keyboard focus was not on the set_value or type target. No further
+    keystrokes were sent. The outcome is refused."""
 
     APP_NOT_FOUND = "app_not_found"
     """No running (or launchable) application matches the given identifier."""

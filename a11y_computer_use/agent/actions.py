@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any
 
 from a11y_computer_use.agent.models.base import ToolCall
+from a11y_computer_use.schema import unknown_fields_message
 
 #: Desktop actions. ``done`` and ``ask_human`` end or pause the run.
 ACTION_NAMES = frozenset({
@@ -176,9 +177,15 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
     if action.name in EXEC_ACTION_NAMES:
         if not allow_exec:
             return "exec is not allowed"
+        unknown = _unknown_argument(action)
+        if unknown is not None:
+            return unknown
         return _exec_error(action)
     if action.name not in ACTION_NAMES:
         return f"unknown action {action.name!r}"
+    unknown = _unknown_argument(action)
+    if unknown is not None:
+        return unknown
     args = action.args
     if action.name == "type" and "text" not in args:
         return "type requires text"
@@ -383,6 +390,28 @@ def _done_error(args: dict) -> str | None:
     return None
 
 
+def _declared_fields(name: str) -> set[str] | None:
+    for spec_name, _description, properties, _required in (*_SPECS, *_EXEC_SPECS):
+        if spec_name == name:
+            return set(properties)
+    return None
+
+
+def _unknown_argument(action: Action) -> str | None:
+    """An undeclared top-level argument. None when every key is in the schema.
+
+    ``_source_ref`` is not a model argument. Recovery adds it after this
+    check, on a click the runtime maps without that key.
+    """
+    allowed = _declared_fields(action.name)
+    if allowed is None:
+        return None
+    message = unknown_fields_message(action.args, allowed)
+    if message is None:
+        return None
+    return f"invalid_arguments: {action.name}: {message}"
+
+
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {
         "name": name,
@@ -391,6 +420,7 @@ def _schema(name: str, description: str, properties: dict, required: list[str]) 
             "type": "object",
             "properties": properties,
             "required": required,
+            "additionalProperties": False,
         },
     }
 
@@ -409,8 +439,11 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     ),
     (
         "type",
-        "Type text into the focused element. Never use this for passwords, OTP, or card numbers.",
-        {"text": _STR, "app": _STR},
+        "Type text. With ref, focus that element, confirm the focus landed, and type only "
+        "there; if focus cannot be confirmed, nothing is typed. Without ref, type into "
+        "the focused element. An undeclared argument is invalid_arguments and no text "
+        "is sent. Never use this for passwords, OTP, or card numbers.",
+        {"text": _STR, "app": _STR, "ref": _STR},
         ["text"],
     ),
     (

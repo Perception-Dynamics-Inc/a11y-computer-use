@@ -109,6 +109,29 @@ class WindowsDriver:
     def resolve_ref(self, snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
         raise _todo("re-walk UIA + observe._match_anchor (shared) against the live tree")
 
+    def focus_for_type(self, element: Element) -> bool:
+        """Focus ``element`` and confirm keyboard focus. Does not type."""
+        from a11y_computer_use import observe
+
+        if element.secure:
+            return False
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        try:
+            handle.SetFocus()
+        except Exception:
+            return False
+        focused = getattr(handle, "CurrentHasKeyboardFocus", None)
+        if callable(focused):
+            try:
+                focused = focused()
+            except Exception:
+                return False
+        if focused is None:
+            return False
+        return bool(focused)
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _uia
