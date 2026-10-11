@@ -2236,6 +2236,49 @@ def test_chromium_document_scroll_waits_until_shown_names_change(
     assert any(event[0] == _X_BPRESS and event[1] == 5 for event in events)
 
 
+def test_chromium_document_scroll_tops_up_a_short_head_move(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A five-line request that only moves the head by one name sends more notches.
+
+    Synthetic names, not a live Chrome. A burst that collapses into one row
+    would leave a 60-step search short of a row a few hundred down. The
+    extra notches stop once the head has moved by about the request.
+    """
+    events, _display = xtest_recorder
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", lambda _seconds: None)
+
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    script = []
+    base = tuple(f"ROW-{i:04d}" for i in range(1, 9))
+    script.append(base)
+    # The burst settles on a one-row move. Two stable reads end the wait.
+    script.extend((tuple(f"ROW-{i:04d}" for i in range(2, 10)),) * 4)
+    for head in range(3, 8):
+        script.append(tuple(f"ROW-{i:04d}" for i in range(head, head + 8)))
+    index = {"i": 0}
+
+    def names(_handle, limit=6):
+        item = script[min(index["i"], len(script) - 1)]
+        index["i"] += 1
+        return item
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    # Five in the burst, then one notch per missing row until the head is ROW-0006.
+    assert len(presses) == 9, len(presses)
+
+
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:
     events, _display = xtest_recorder
 

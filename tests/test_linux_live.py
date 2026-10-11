@@ -5575,6 +5575,120 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
         _stop(proc)
 
 
+def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
+    """Find row 300 of a long document table and click that row's button.
+
+    Live Chrome, not a synthetic tree. The page is a 5000-row ``<table>``
+    with no overflow wrapper, so the document scrolls. ``scroll_to_find``
+    for ROW-0300 has to leave the row on screen: a follow-up ``find`` for
+    its ``edit 300`` button must see it, and the click has to land.
+    Four passes in one Chrome process. Each pass after the first reloads
+    the page so the search starts at the top again. Skips when no Chrome
+    binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the large-table scroll test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        "<tr>"
+        f"<td>ROW-{i:04d}</td><td>val {i}</td>"
+        f"<td><button type=button onclick=\"clicks+=1;document.title='clicked-'+clicks\">"
+        f"edit {i}</button></td>"
+        "</tr>"
+        for i in range(1, 5001)
+    )
+    page = tmp_path / "rows-5000.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>rowtable</title>"
+        "<style>body{margin:0;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td{padding:0 8px}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));"
+        "let clicks=0</script>"
+        f"<table>{rows}</table>"
+    )
+    profile = tmp_path / "chrome-rowtable-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        def wait_at_top(timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            shown: list[str] = []
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"Chrome exited with status {proc.returncode} before the table top"
+                    )
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.APP_NOT_FOUND:
+                        raise
+                else:
+                    titles = _titles(shot)
+                    shown = sorted(title for title in titles if title.startswith("ROW-"))[:12]
+                    if any(title.startswith("ROW-0001") for title in titles) and not any(
+                        title.startswith("ROW-0300") for title in titles
+                    ):
+                        return
+                time.sleep(0.4)
+            raise AssertionError(f"Chrome did not show the top of the table without ROW-0300: {shown}")
+
+        wait_at_top(45)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        seen = 0
+        for _pass in range(4):
+            if _pass:
+                runtime.key("f5")
+                wait_at_top(30)
+            found = runtime.scroll_to_find(
+                "chrome", text="ROW-0300", direction="down", max_scrolls=60,
+            )
+            assert "ROW-0300" in found, found
+            assert "not found" not in found, found
+            assert "found after 0" not in found, found
+            located = runtime.find("chrome", text="edit 300")
+            assert "no elements match" not in located, located
+            button = next(
+                (
+                    el for el in runtime._current.elements
+                    if el.role == "AXButton" and (el.title or "").strip() == "edit 300"
+                ),
+                None,
+            )
+            assert button is not None, [
+                (el.role, el.title) for el in runtime._current.elements
+                if "edit" in (el.title or "")
+            ]
+            before = {str(row.get("title") or "") for row in driver.windows() or []}
+            runtime.click(button.ref)
+            clicked = None
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                titles = {str(row.get("title") or "") for row in driver.windows() or []}
+                if any(title.startswith("clicked-") for title in titles) and titles != before:
+                    clicked = titles
+                    break
+                time.sleep(0.15)
+            assert clicked is not None, driver.windows()
+            seen += 1
+        assert seen == 4
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
 
