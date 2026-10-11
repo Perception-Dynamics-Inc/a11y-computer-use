@@ -219,6 +219,172 @@ def test_launch_passes_office_module_argv_to_a_linux_driver(tmp_path, monkeypatc
     assert "LibreOffice Writer" in written
 
 
+def _office_title_runtime(tmp_path, monkeypatch, titles: list[str], which):
+    """A Linux runtime whose window list yields ``titles`` in order, then repeats the last."""
+    from a11y_computer_use import server
+
+    seen = {"n": 0}
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident, *, argv=None):
+            return {
+                "pid": 9, "proc": None, "identifier": ident,
+                "names": [ident, "soffice", "soffice.bin"], "is_launcher": False,
+            }
+
+        def windows(self):
+            seen["n"] += 1
+            title = titles[min(seen["n"] - 1, len(titles) - 1)]
+            return [{"window_id": 4, "app": "soffice.bin", "title": title, "pid": 9}]
+
+    monkeypatch.setattr("shutil.which", which)
+    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: [])
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda _ident: None)
+    monkeypatch.setattr(
+        server, "_running_app",
+        lambda _ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("soffice", Tier.CLICK)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    runtime.APP_LAUNCH_WAIT_S = 1
+    runtime.OFFICE_DOCUMENT_WAIT_S = 2
+    runtime._title_reads = seen
+    return runtime
+
+
+def test_launch_waits_past_the_libreoffice_start_center_for_calc(tmp_path, monkeypatch) -> None:
+    """The first frame is ``LibreOffice 24.2``. The document title is the result."""
+    runtime = _office_title_runtime(
+        tmp_path, monkeypatch,
+        ["LibreOffice 24.2", "LibreOffice 24.2", "Untitled 1 - LibreOffice Calc"],
+        lambda name: "/usr/bin/localc" if name == "localc" else None,
+    )
+    text = runtime.app("launch", "libreoffice-calc")
+    assert "first window: 'Untitled 1 - LibreOffice Calc'" in text
+    assert "LibreOffice 24.2" not in text
+
+
+def test_launch_reports_the_start_center_when_calc_never_opens(tmp_path, monkeypatch) -> None:
+    """A module launch that stays on the Start Center is not reported as Calc."""
+    runtime = _office_title_runtime(
+        tmp_path, monkeypatch,
+        ["LibreOffice 24.2"],
+        lambda name: "/usr/bin/localc" if name == "localc" else None,
+    )
+    runtime.OFFICE_DOCUMENT_WAIT_S = 0.3
+    text = runtime.app("launch", "libreoffice-calc")
+    assert "first window: 'LibreOffice 24.2'" in text
+    assert "Calc" not in text
+
+
+def test_launch_waits_past_the_start_center_for_writer(tmp_path, monkeypatch) -> None:
+    runtime = _office_title_runtime(
+        tmp_path, monkeypatch,
+        ["LibreOffice 24.2", "Untitled 1 - LibreOffice Writer"],
+        lambda name: "/usr/bin/soffice" if name in {"soffice", "libreoffice"} else None,
+    )
+    text = runtime.app("launch", "libreoffice-writer")
+    assert "first window: 'Untitled 1 - LibreOffice Writer'" in text
+    assert "LibreOffice 24.2" not in text
+
+
+def test_launch_reads_calc_when_the_tip_dialog_closes(tmp_path, monkeypatch) -> None:
+    """The sheet title can replace the Start Center title as the tip closes."""
+    from a11y_computer_use import server
+
+    class _El:
+        def __init__(self, role, title):
+            self.role = role
+            self.title = title
+            self.focused = title == "OK"
+
+    class _Snap:
+        def __init__(self, elements):
+            self.elements = elements
+
+    phase = {"pressed": False}
+
+    class _D:
+        resolves_apps = False
+        name = "linux"
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("shell", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def launch_app(self, ident, *, argv=None):
+            return {
+                "pid": 9, "proc": None, "identifier": ident,
+                "names": ["localc", "soffice.bin"], "is_launcher": False,
+            }
+
+        def windows(self):
+            title = "Untitled 1 - LibreOffice Calc" if phase["pressed"] else "LibreOffice 24.2"
+            return [{"window_id": 4, "app": "soffice.bin", "title": title, "pid": 9}]
+
+        def snapshot(self, _scope, _app):
+            if phase["pressed"]:
+                return _Snap([_El("AXCell", "A1")])
+            return _Snap([
+                _El("AXDialog", "Tip of the Day: 1/225"),
+                _El("AXButton", "OK"),
+            ])
+
+        def press_element(self, _el):
+            phase["pressed"] = True
+            return True
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/localc" if name == "localc" else None)
+    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: [])
+    monkeypatch.setattr(server, "_installed_bundle_id", lambda _ident: None)
+    monkeypatch.setattr(
+        server, "_running_app",
+        lambda _ident: (_ for _ in ()).throw(ComputerUseError(ErrorCode.APP_NOT_FOUND, "not running")),
+    )
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("soffice", Tier.CLICK)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    runtime.APP_LAUNCH_WAIT_S = 1
+    runtime.OFFICE_DOCUMENT_WAIT_S = 0.3
+    text = runtime.app("launch", "libreoffice-calc")
+    assert "first window: 'Untitled 1 - LibreOffice Calc'" in text
+    assert "dismissed 'Tip of the Day: 1/225'" in text
+    assert "LibreOffice 24.2" not in text
+
+
+def test_launch_of_bare_libreoffice_does_not_wait_for_a_module_title(tmp_path, monkeypatch) -> None:
+    """A suite launch has no module. The Start Center title is the first window."""
+    runtime = _office_title_runtime(
+        tmp_path, monkeypatch,
+        ["LibreOffice 24.2"],
+        lambda name: "/usr/bin/libreoffice" if name == "libreoffice" else None,
+    )
+    runtime.OFFICE_DOCUMENT_WAIT_S = 30
+    text = runtime.app("launch", "libreoffice")
+    assert "first window: 'LibreOffice 24.2'" in text
+    # One read records the windows already open, and one reads the new frame.
+    # A module wait would poll for OFFICE_DOCUMENT_WAIT_S.
+    assert runtime._title_reads["n"] == 2
+
+
 def test_launch_dismisses_the_tip_of_the_day_and_reports_it(tmp_path, monkeypatch) -> None:
     """Synthetic. The OK press is the driver's. No LibreOffice process."""
     from a11y_computer_use import server

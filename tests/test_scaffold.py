@@ -48,14 +48,14 @@ def test_bounds_center_is_display_qualified() -> None:
 def test_unknown_fields_message_names_the_keys() -> None:
     from a11y_computer_use.schema import unknown_fields_message
 
-    assert unknown_fields_message({"text": "hi"}, {"text", "app"}) is None
-    assert unknown_fields_message({"ref": "e1"}, {"text", "app"}) == (
-        "unknown field 'ref'; expected app, text"
+    assert unknown_fields_message({"text": "hi", "ref": "e1"}, {"text", "app", "ref"}) is None
+    assert unknown_fields_message({"zoom": 1}, {"text", "app", "ref"}) == (
+        "unknown field 'zoom'; expected app, ref, text"
     )
-    assert unknown_fields_message({"zoom": 1, "ref": "e1"}, {"app", "text"}) == (
-        "unknown fields 'ref', 'zoom'; expected app, text"
+    assert unknown_fields_message({"note": "x", "zoom": 1}, {"app", "ref", "text"}) == (
+        "unknown fields 'note', 'zoom'; expected app, ref, text"
     )
-    assert unknown_fields_message({"ref": "e1"}, ()) == "unknown field 'ref'; expected no fields"
+    assert unknown_fields_message({"zoom": 1}, ()) == "unknown field 'zoom'; expected no fields"
     assert unknown_fields_message("not a mapping", {"text"}) is None
 
 
