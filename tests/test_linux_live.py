@@ -5805,6 +5805,151 @@ def test_linux_gtk_file_chooser_is_a_real_window_and_opens_a_path(tmp_path) -> N
         _stop(proc)
 
 
+def test_linux_gtk_file_chooser_return_opens_one_file_five_times(tmp_path) -> None:
+    """Return after a typed path opens that file, five times, on a real GTK chooser.
+
+    The dialog is moved so its action row starts off the screen. Return does
+    not send the key: the Open button's accessibility action runs after the
+    window is brought back on screen. Each open has to close the dialog and
+    advance the host label. A dialog that merely closes leaves ``chosen=``.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    app = "cuafile5"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    script = tmp_path / "cuafile5.py"
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafile5")
+        folder = {str(folder)!r}
+        win = Gtk.Window(title="FileHost")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status = Gtk.Label(label="chosen=")
+        button = Gtk.Button(label="Browse")
+        count = {{"n": 0}}
+
+        def on_click(_btn):
+            dialog = Gtk.FileChooserDialog(
+                title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN,
+            )
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Open", Gtk.ResponseType.OK)
+            dialog.set_current_folder(folder)
+            dialog.set_default_size(880, 1400)
+            response = dialog.run()
+            name = dialog.get_filename() or ""
+            if response == Gtk.ResponseType.OK and name:
+                count["n"] += 1
+                status.set_text("chosen=" + name + " n=" + str(count["n"]))
+            else:
+                status.set_text("chosen=")
+            dialog.destroy()
+
+        button.connect("clicked", on_click)
+        box.pack_start(status, False, False, 0)
+        box.pack_start(button, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 160)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            try:
+                shot = _snap_within(driver, app, Scope.WINDOW)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(el.title == "Browse" and el.clickable for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.2)
+        assert snap is not None, "the file-chooser host never appeared"
+        runtime = _runtime_for(tmp_path, driver, app, "python3")
+        screen_h = int(driver.displays()[0].height)
+        for attempt in range(1, 6):
+            runtime._current = snap
+            browse = next(el for el in snap.elements if el.title == "Browse" and el.clickable)
+            runtime.click(browse.ref)
+            chooser = None
+            deadline = time.monotonic() + 4
+            last = snap
+            while time.monotonic() < deadline:
+                last = _snap_within(driver, app, Scope.APP)
+                titles = _titles(last)
+                if "Cancel" in titles and "Open" in titles:
+                    chooser = last
+                    break
+                time.sleep(0.1)
+            assert chooser is not None, (attempt, [(el.role, el.title) for el in last.elements])
+            runtime._current = chooser
+            runtime.key("ctrl+l")
+            editable = None
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                last = _snap_within(driver, app, Scope.APP)
+                editable = next((el for el in last.elements if el.editable), None)
+                if editable is not None:
+                    break
+                time.sleep(0.1)
+            assert editable is not None, (attempt, [(el.role, el.title, el.value) for el in last.elements])
+            runtime._current = last
+            runtime.click(editable.ref)
+            runtime.type_text(str(target))
+            confirmed = None
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                shot = _snap_within(driver, app, Scope.APP)
+                field = next((el for el in shot.elements if el.editable), None)
+                if field is not None and str(target) in str(field.value or ""):
+                    confirmed = shot
+                    break
+                time.sleep(0.1)
+            assert confirmed is not None, (attempt, [(el.role, el.title, el.value) for el in shot.elements])
+            dialog = next(
+                (row for row in driver.windows() if str(row.get("title") or "") == "Open File"),
+                None,
+            )
+            assert dialog is not None, (attempt, driver.windows())
+            driver.resize_window(int(dialog["window_id"]), 880, screen_h + 400)
+            driver.move_window(int(dialog["window_id"]), 30, max(0, screen_h - 36))
+            driver.focus_window(int(dialog["window_id"]))
+            runtime._current = confirmed
+            runtime.key("Return")
+            deadline = time.monotonic() + 4
+            shown = ""
+            while time.monotonic() < deadline:
+                shot = _snap_within(driver, app, Scope.APP)
+                shown = " ".join(f"{el.title} {el.value or ''}" for el in shot.elements)
+                if f"chosen={target} n={attempt}" in shown:
+                    break
+                time.sleep(0.15)
+            assert f"chosen={target} n={attempt}" in shown, (attempt, shown)
+            assert not any(
+                str(row.get("title") or "") == "Open File" for row in driver.windows()
+            ), attempt
+            snap = shot
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> None:
     """scroll_to_find reaches a row below the fold, and pixel scroll moves the page.
 

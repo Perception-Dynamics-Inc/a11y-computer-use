@@ -2691,11 +2691,185 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
+        # Return in a GTK file chooser's location entry closes the dialog
+        # and leaves the file unchosen. Activate Open or Save instead.
+        if self._confirm_file_chooser(chord):
+            return None
         if printable_chord(chord):
             self._refuse_xtest_password_focus()
         self._focused_editable = None
         _linux_input.press_chord(chord)
         return None
+
+    def _confirm_file_chooser(self, chord: str) -> bool:
+        """Activate the chooser's Open or Save button. True when this chord was that confirm.
+
+        A bare Return, Enter, or kp_enter is the confirm. The key is not
+        sent. The button is scrolled or the window is resized when its box
+        is missing or outside the screen, then its AT-SPI action runs. The
+        chooser window has to close and the opener has to show the file.
+        Anything else raises. A window that is not a chooser, and a chooser
+        with no accessibility button, returns False so the key is sent.
+        """
+        if not _bare_chooser_confirm(chord):
+            return False
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        active = _linux_system.active_window()
+        if not active or not _atspi.file_chooser_window_title(str(active.get("title") or "")):
+            return False
+        pid = int(active.get("pid") or 0) or None
+        title = str(active.get("title") or "")
+        try:
+            found = self._run(lambda: _atspi.file_chooser_controls(pid, title))
+        except ImportError:
+            return False
+        if found is None:
+            return False
+        button, path, app_root = found
+        base = _atspi.file_basename(path)
+        if not base:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no typed path or selected file to open",
+                detail={
+                    "reason": "file_not_chosen",
+                    "outcome": "refused",
+                    "window_id": int(active.get("window_id") or 0),
+                },
+            )
+        window_id = int(active.get("window_id") or 0)
+        self._reveal_file_chooser_button(window_id, button)
+        if not self._run(lambda: _atspi.do_press(button)):
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser's Open or Save button did not run its accessibility action",
+                detail={
+                    "reason": "file_chooser_action",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        self._verify_file_chooser(active, path, app_root)
+        return True
+
+    def _reveal_file_chooser_button(self, window_id: int, button) -> None:
+        """Scroll, then resize or move, when the accept button is not on screen."""
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        def box():
+            return _atspi.atspi_screen_box(button)
+
+        current = self._run(box)
+        if not _chooser_button_clipped(current):
+            return
+        self._run(lambda: _atspi.scroll_to(button))
+        current = self._run(box)
+        if not _chooser_button_clipped(current):
+            return
+        if window_id <= 0:
+            return
+        geom = _atspi.primary_geometry()[0]
+        margin = 32
+        dw = int(geom.display.width)
+        dh = int(geom.display.height)
+        fit_w = max(360, dw - 2 * margin)
+        fit_h = max(280, dh - 2 * margin)
+        rows = _linux_system.windows()
+        row = next((item for item in rows if int(item.get("window_id") or 0) == window_id), None)
+        bounds = (row or {}).get("bounds") or {}
+        width = int(bounds.get("width") or 0)
+        height = int(bounds.get("height") or 0)
+        x = int(bounds.get("x") or margin)
+        y = int(bounds.get("y") or margin)
+        if width > fit_w or height > fit_h or width <= 1 or height <= 1:
+            new_w = min(width, fit_w) if width > 1 else min(900, fit_w)
+            new_h = min(height, fit_h) if height > 1 else fit_h
+            _linux_system.resize_window(window_id, int(new_w), int(new_h))
+            rows = _linux_system.windows()
+            row = next((item for item in rows if int(item.get("window_id") or 0) == window_id), None)
+            bounds = (row or {}).get("bounds") or {}
+            width = int(bounds.get("width") or new_w)
+            height = int(bounds.get("height") or new_h)
+            x = int(bounds.get("x") or x)
+            y = int(bounds.get("y") or y)
+        nx, ny = x, y
+        if nx < margin:
+            nx = margin
+        if ny < margin:
+            ny = margin
+        if nx + max(width, 1) > dw - margin:
+            nx = max(margin, dw - margin - max(width, 1))
+        if ny + max(height, 1) > dh - margin:
+            ny = max(margin, dh - margin - max(height, 1))
+        if (nx, ny) != (x, y):
+            _linux_system.move_window(window_id, int(nx), int(ny))
+
+    def _verify_file_chooser(self, active: dict, path: str, app_root) -> None:
+        """The chooser window is gone and the opener shows the file."""
+        from a11y_computer_use.drivers import _atspi
+
+        window_id = int(active.get("window_id") or 0)
+        title = str(active.get("title") or "")
+        app = str(active.get("app") or "")
+        base = _atspi.file_basename(path)
+        deadline = time.monotonic() + 4.0
+        closed = False
+        while time.monotonic() < deadline:
+            if not _chooser_window_open(window_id, title, app):
+                closed = True
+                if self._opener_shows_file(app_root, path, title):
+                    return
+            time.sleep(0.1)
+        if not closed:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser stayed open after the Open or Save action",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"the file chooser closed without showing {base!r}",
+            detail={
+                "reason": "file_not_chosen",
+                "outcome": "refused",
+                "window_id": window_id,
+                "expected": base,
+                "path": path,
+            },
+        )
+
+    def _opener_shows_file(self, app_root, path: str, chooser_title: str) -> bool:
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        try:
+            if app_root is not None and self._run(
+                lambda: _atspi.tree_shows_file(app_root, path, skip_titles=(chooser_title,))
+            ):
+                return True
+        except Exception:
+            pass
+        base = _atspi.file_basename(path)
+        full = str(path or "").strip()
+        try:
+            rows = _linux_system.windows()
+        except ComputerUseError:
+            return False
+        for row in rows:
+            title = str(row.get("title") or "")
+            if _atspi.file_chooser_window_title(title):
+                continue
+            if base and base in title:
+                return True
+            if full and full in title:
+                return True
+        return False
 
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:
@@ -3044,6 +3218,45 @@ class LinuxDriver:
         _linux_system.write_clipboard(text)
 
 
+_CHOOSER_CONFIRM_KEYS = frozenset({"return", "enter", "kp_enter"})
+
+
+def _bare_chooser_confirm(chord: str) -> bool:
+    """True for Return/Enter with no modifier. Shift+Return stays a key."""
+    parts = [part.strip().lower() for part in str(chord).split("+") if part.strip()]
+    return len(parts) == 1 and parts[0] in _CHOOSER_CONFIRM_KEYS
+
+
+def _chooser_button_clipped(box) -> bool:
+    """True when ``box`` is missing, zero-sized, or outside the primary screen."""
+    if box is None:
+        return True
+    x, y, width, height = (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
+    if width <= 1 or height <= 1:
+        return True
+    from a11y_computer_use.drivers import _atspi
+
+    geom = _atspi.primary_geometry()[0]
+    ox, oy = geom.origin
+    dw = float(geom.display.width)
+    dh = float(geom.display.height)
+    return x < ox or y < oy or x + width > ox + dw or y + height > oy + dh
+
+
+def _chooser_window_open(window_id: int, title: str, app: str) -> bool:
+    """True while the chooser window id, or that title on the same app, is mapped."""
+    from a11y_computer_use.drivers import _linux_system
+
+    folded = " ".join(str(title or "").casefold().split())
+    for row in _linux_system.windows():
+        if window_id and int(row.get("window_id") or 0) == int(window_id):
+            return True
+        row_title = " ".join(str(row.get("title") or "").casefold().split())
+        if folded and row_title == folded and (not app or str(row.get("app") or "") == app):
+            return True
+    return False
+
+
 def _unsupported_file_dialog() -> ComputerUseError:
     """GTK and portal file choosers are not driven. The message is the limit."""
     return ComputerUseError(
@@ -3056,6 +3269,8 @@ def _unsupported_file_dialog() -> ComputerUseError:
                 "Open the chooser (for example menu 'File > Open'), then use the snapshot. "
                 "In a GTK 3 file chooser, Ctrl+L focuses the location bar. "
                 "set_value or type fills the location or name field. "
+                "Return activates Open or Save through that button's accessibility action "
+                "and checks that the dialog closed and the app shows the file. "
                 "An xdg-desktop-portal chooser is a separate dialog; drive the fields it exposes."
             ),
         },
