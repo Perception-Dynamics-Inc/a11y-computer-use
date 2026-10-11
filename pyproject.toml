@@ -106,8 +106,13 @@ ocr = [
 # The model config was written by transformers 5.6.2. 5.19.0 is the
 # release the adapter was checked against, so the extra stays on that
 # 5.6–5.19 line. The adapter keeps the model on CPU.
+# AutoProcessor.from_pretrained builds Qwen3VLVideoProcessor, which imports
+# torchvision even when ground() only sends an image. The dependency is the
+# default PyPI wheel (no CUDA package index). torch>=2.14, which that wheel
+# requires, is satisfied by a CPU build such as 2.14.1+cpu.
 holo = [
     "torch",
+    "torchvision",
     "transformers>=5.6,<5.20",
 ]
 

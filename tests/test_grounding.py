@@ -15,6 +15,8 @@ from a11y_computer_use.agent.grounding import (
     HOLO_MODEL_ID,
     GroundingUnavailable,
     HoloLocalGrounding,
+    _package_named_by,
+    _torch_stack,
     parse_grounding_text,
 )
 
@@ -48,6 +50,65 @@ def test_holo_adapter_accepts_only_its_model_id() -> None:
     assert model.model_id == HOLO_MODEL_ID
     with pytest.raises(ValueError):
         HoloLocalGrounding("some/other-model")
+
+
+def test_import_error_names_torchvision_rather_than_torch() -> None:
+    """The processor's message says Torchvision; the package is torchvision."""
+    exc = ImportError(
+        "Qwen3VLVideoProcessor requires the Torchvision library but it was "
+        "not found in your environment."
+    )
+    assert _package_named_by(exc) == "torchvision"
+    chained = ImportError("could not build the video processor")
+    chained.__cause__ = ModuleNotFoundError("No module named 'torchvision'", name="torchvision")
+    assert _package_named_by(chained) == "torchvision"
+    assert _package_named_by(ImportError("cannot import name 'missing_symbol'")) is None
+    assert _package_named_by(ModuleNotFoundError("No module named 'torch'", name="torch")) == "torch"
+
+
+def test_torch_stack_names_only_the_missing_package(monkeypatch) -> None:
+    def fake_import(name: str) -> object:
+        if name == "torchvision":
+            raise ModuleNotFoundError("No module named 'torchvision'", name="torchvision")
+        return object()
+
+    monkeypatch.setattr("a11y_computer_use.agent.grounding._try_import", fake_import)
+    with pytest.raises(GroundingUnavailable, match="torchvision") as raised:
+        _torch_stack()
+    message = str(raised.value)
+    assert "local grounding needs torchvision, which is not installed" in message
+    assert "transformers" not in message
+    assert "a11y-computer-use[holo]" in message
+
+
+def test_processor_load_names_the_missing_package(monkeypatch) -> None:
+    class _ProcessorCls:
+        def from_pretrained(self, model_id: str) -> None:
+            assert model_id == HOLO_MODEL_ID
+            raise ImportError(
+                "Qwen3VLVideoProcessor requires the Torchvision library but it was "
+                "not found in your environment."
+            )
+
+    _install_stack(monkeypatch, _Torch(), _ModelCls(), _ProcessorCls())
+    with pytest.raises(GroundingUnavailable, match="torchvision") as raised:
+        HoloLocalGrounding().ground(_png(8, 8), "the green SUBMIT button")
+    message = str(raised.value)
+    assert "missing package torchvision" in message
+    assert "missing package torch " not in message
+    assert "a11y-computer-use[holo]" in message
+
+
+def test_processor_load_keeps_an_unrelated_error(monkeypatch) -> None:
+    class _ProcessorCls:
+        def from_pretrained(self, model_id: str) -> None:
+            del model_id
+            raise RuntimeError("weights file is truncated")
+
+    _install_stack(monkeypatch, _Torch(), _ModelCls(), _ProcessorCls())
+    with pytest.raises(GroundingUnavailable, match="truncated") as raised:
+        HoloLocalGrounding().ground(_png(8, 8), "icon")
+    assert "missing package" not in str(raised.value)
 
 
 def test_holo_ground_reports_a_missing_local_stack(monkeypatch) -> None:
@@ -307,9 +368,12 @@ def test_holo_extra_pins_transformers_and_vendors_no_weights() -> None:
     extra = project["project"]["optional-dependencies"]["holo"]
     assert not any("torch" in dep.lower() or "transformers" in dep.lower() for dep in base)
     assert "holo" not in project["project"]["dependencies"]
-    joined = " ".join(extra)
-    assert any(dep == "torch" or dep.startswith("torch") for dep in extra)
-    assert "transformers>=5.6,<5.20" in joined
+    assert "torch" in extra
+    assert "torchvision" in extra
+    assert "transformers>=5.6,<5.20" in extra
+    # CPU torch (for example 2.14.1+cpu) satisfies torchvision's torch
+    # requirement. The extra does not point at a CUDA wheel index.
+    assert all("cuda" not in dep.lower() and "://" not in dep for dep in extra)
     root = Path(__file__).resolve().parents[1]
     weights = [
         path
