@@ -7786,8 +7786,11 @@ def build_server(
         are not driven, and the call does not report focus_changed. Open the
         chooser, then set_value or type into the
         location or name field shown in the snapshot (Ctrl+L focuses the
-        location bar in a GTK 3 chooser). Windows and the browser also return
-        unsupported."""
+        location bar in a GTK 3 chooser). Return then activates that
+        chooser's Open or Save button through its accessibility action,
+        after scrolling or resizing the button on screen, and checks that
+        the dialog closed and the app shows the file. Windows and the
+        browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
 
     @server.tool(name="notes")

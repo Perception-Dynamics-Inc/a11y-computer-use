@@ -1,0 +1,305 @@
+"""Return in a GTK file chooser activates Open or Save. It does not send the key.
+
+Synthetic trees and a stubbed window list. Not a live desktop. The live
+five-open run is ``test_linux_gtk_file_chooser_return_opens_one_file_five_times``.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+from a11y_computer_use.drivers.linux import LinuxDriver
+from a11y_computer_use.observe import DisplayGeometry
+from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
+
+
+class _Node:
+    def __init__(self, role, name="", text="", children=(), states=None):
+        self.role = role
+        self.name = name
+        self.text = text
+        self.children = list(children)
+        self.states = set(states or ())
+        self.pressed = False
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_text(self, _start, _end):
+        return self.text
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[int(index)]
+
+    def get_action_iface(self):
+        return self
+
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, _index):
+        return "click"
+
+    def do_action(self, _index):
+        self.pressed = True
+        return True
+
+
+def _screen(monkeypatch) -> None:
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    monkeypatch.setattr(
+        _atspi, "primary_geometry", lambda: (DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+
+
+def _clock(monkeypatch) -> None:
+    now = {"t": 1_000.0}
+
+    monkeypatch.setattr(time, "monotonic", lambda: now["t"])
+
+    def sleep(seconds) -> None:
+        now["t"] += float(seconds)
+
+    monkeypatch.setattr(time, "sleep", sleep)
+
+
+def _chooser(monkeypatch, *, path="/tmp/docs/picked.txt", box=(40, 40, 80, 30), close=True, show=True):
+    """Stub the active chooser. ``box`` is the Open button. Return the records."""
+    _screen(monkeypatch)
+    _clock(monkeypatch)
+    label = _Node("label", name="chosen=")
+    host = _Node("frame", name="FileHost", children=[label])
+    app = _Node("application", name="cuafileapp", children=[host])
+    button = _Node("push button", name="Open")
+    state = {
+        "open": True,
+        "x": 20,
+        "y": 0,
+        "w": 900,
+        "h": 1400,
+        "pressed": False,
+    }
+    scrolled = []
+    resized = []
+    moved = []
+    keys = []
+
+    def windows():
+        if not state["open"]:
+            return [{
+                "window_id": 3,
+                "app": "python3",
+                "title": "FileHost",
+                "bounds": {"x": 40, "y": 40, "width": 420, "height": 160},
+            }]
+        return [{
+            "window_id": 7,
+            "app": "python3",
+            "title": "Open File",
+            "bounds": {"x": state["x"], "y": state["y"], "width": state["w"], "height": state["h"]},
+        }]
+
+    def resize(_window_id, width, height):
+        state["w"] = int(width)
+        state["h"] = int(height)
+        resized.append((int(width), int(height)))
+        return True
+
+    def move(_window_id, x, y):
+        state["x"] = int(x)
+        state["y"] = int(y)
+        moved.append((int(x), int(y)))
+        return True
+
+    def controls(_pid, _title):
+        return button, path, app
+
+    def press(acc) -> bool:
+        acc.pressed = True
+        state["pressed"] = True
+        if close:
+            state["open"] = False
+        if show:
+            label.name = f"chosen={path}"
+        return True
+
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {
+        "window_id": 7, "app": "python3", "pid": 4242, "title": "Open File",
+    })
+    monkeypatch.setattr(_linux_system, "windows", windows)
+    monkeypatch.setattr(_linux_system, "resize_window", resize)
+    monkeypatch.setattr(_linux_system, "move_window", move)
+    monkeypatch.setattr(_atspi, "file_chooser_controls", controls)
+    monkeypatch.setattr(_atspi, "atspi_screen_box", lambda _acc: box)
+    monkeypatch.setattr(_atspi, "scroll_to", lambda acc: scrolled.append(acc) or False)
+    monkeypatch.setattr(_atspi, "do_press", press)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    return {
+        "button": button,
+        "label": label,
+        "scrolled": scrolled,
+        "resized": resized,
+        "moved": moved,
+        "keys": keys,
+        "state": state,
+    }
+
+
+def test_return_on_a_chooser_activates_open_and_does_not_send_the_key(monkeypatch) -> None:
+    found = _chooser(monkeypatch)
+    LinuxDriver().key_chord("Return")
+    assert found["keys"] == []
+    assert found["state"]["pressed"] is True
+    assert found["scrolled"] == []
+    assert found["resized"] == []
+
+
+def test_enter_and_kp_enter_use_the_same_button(monkeypatch) -> None:
+    first = _chooser(monkeypatch)
+    LinuxDriver().key_chord("Enter")
+    assert first["keys"] == []
+    assert first["state"]["pressed"] is True
+    second = _chooser(monkeypatch)
+    LinuxDriver().key_chord("kp_enter")
+    assert second["keys"] == []
+    assert second["state"]["pressed"] is True
+
+
+def test_a_clipped_open_button_is_scrolled_then_resized(monkeypatch) -> None:
+    found = _chooser(monkeypatch, box=(40, 9000, 80, 30))
+    LinuxDriver().key_chord("return")
+    assert found["keys"] == []
+    assert found["scrolled"]
+    assert found["resized"]
+    width, height = found["resized"][0]
+    assert width <= 1280 - 64
+    assert height <= 800 - 64
+    assert height < 1400
+    assert found["state"]["pressed"] is True
+
+
+def test_a_zero_size_open_button_is_scrolled_then_resized(monkeypatch) -> None:
+    found = _chooser(monkeypatch, box=(40, 40, 0, 0))
+    LinuxDriver().key_chord("Return")
+    assert found["scrolled"]
+    assert found["resized"]
+    assert found["keys"] == []
+
+
+def test_return_outside_a_chooser_still_sends_the_key(monkeypatch) -> None:
+    keys = []
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {
+        "window_id": 3, "app": "python3", "pid": 1, "title": "FileHost",
+    })
+    monkeypatch.setattr(
+        _atspi, "file_chooser_controls", lambda *_args: (_ for _ in ()).throw(AssertionError("walked")),
+    )
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    LinuxDriver().key_chord("Return")
+    assert keys == ["Return"]
+
+
+def test_ctrl_return_is_still_a_key(monkeypatch) -> None:
+    keys = []
+    monkeypatch.setattr(
+        _linux_system, "active_window", lambda: (_ for _ in ()).throw(AssertionError("window")),
+    )
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    LinuxDriver().key_chord("ctrl+Return")
+    assert keys == ["ctrl+Return"]
+
+
+def test_a_chooser_without_an_accessibility_button_still_sends_the_key(monkeypatch) -> None:
+    keys = []
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {
+        "window_id": 9, "app": "chrome", "pid": 8, "title": "Open File",
+    })
+    monkeypatch.setattr(_atspi, "file_chooser_controls", lambda *_args: None)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    LinuxDriver().key_chord("Return")
+    assert keys == ["Return"]
+
+
+def test_a_dialog_that_stays_open_is_an_error_and_the_key_was_not_sent(monkeypatch) -> None:
+    found = _chooser(monkeypatch, close=False, show=False)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().key_chord("Return")
+    assert found["keys"] == []
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "file_chooser_unchanged"
+
+
+def test_a_dialog_that_closes_without_the_file_is_an_error(monkeypatch) -> None:
+    found = _chooser(monkeypatch, close=True, show=False)
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().key_chord("Return")
+    assert found["keys"] == []
+    assert exc.value.detail["reason"] == "file_not_chosen"
+    assert exc.value.detail["expected"] == "picked.txt"
+
+
+def test_an_empty_location_does_not_send_return(monkeypatch) -> None:
+    found = _chooser(monkeypatch, path="")
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().key_chord("Return")
+    assert found["keys"] == []
+    assert found["state"]["pressed"] is False
+    assert exc.value.detail["reason"] == "file_not_chosen"
+
+
+def test_file_dialog_stays_unsupported() -> None:
+    with pytest.raises(ComputerUseError) as exc:
+        LinuxDriver().file_dialog("open", "/tmp/docs/picked.txt", "mousepad")
+    assert exc.value.detail["reason"] == "no_file_dialog"
+    assert "Return activates Open or Save" in exc.value.detail["hint"]
+
+
+def test_open_button_is_found_beside_a_long_file_list() -> None:
+    cells = [_Node("table cell", name=f"row-{index}.txt") for index in range(120)]
+    selected = _Node("table cell", name="other.txt", states={"SELECTED"})
+    table = _Node("table", children=[*cells, selected])
+    entry = _Node("text", name="Location", text="/tmp/docs/picked.txt", states={"FOCUSED"})
+    cancel = _Node("push button", name="Cancel")
+    opened = _Node("push button", name="Open")
+    frame = _Node("frame", name="Open File", children=[table, entry, cancel, opened])
+    found = _atspi.chooser_controls_under(frame, "Open File")
+    assert found is not None
+    button, path = found
+    assert button is opened
+    assert path == "/tmp/docs/picked.txt"
+
+
+def test_a_selected_file_is_the_path_when_the_location_entry_is_empty() -> None:
+    row = _Node("table cell", name="notes.txt", states={"SELECTED"})
+    table = _Node("table", children=[row])
+    opened = _Node("push button", name="Open")
+    frame = _Node("frame", name="Open File", children=[table, opened])
+    _button, path = _atspi.chooser_controls_under(frame, "Open File")
+    assert path == "notes.txt"
+
+
+def test_the_chooser_frame_does_not_count_as_the_app_showing_the_file() -> None:
+    dialog = _Node("frame", name="Open File", children=[
+        _Node("text", name="Location", text="/tmp/docs/picked.txt"),
+    ])
+    host = _Node("frame", name="FileHost", children=[_Node("label", name="chosen=")])
+    app = _Node("application", name="cuafileapp", children=[dialog, host])
+    assert _atspi.tree_shows_file(app, "/tmp/docs/picked.txt", skip_titles=("Open File",)) is False
+    host.children[0].name = "chosen=/tmp/docs/picked.txt n=2"
+    assert _atspi.tree_shows_file(app, "/tmp/docs/picked.txt", skip_titles=("Open File",)) is True
+
+
+def test_dry_run_does_not_activate_the_chooser(monkeypatch) -> None:
+    monkeypatch.setattr(
+        _linux_system, "active_window", lambda: (_ for _ in ()).throw(AssertionError("window")),
+    )
+    assert LinuxDriver().key_chord("Return", dry_run=True) is None

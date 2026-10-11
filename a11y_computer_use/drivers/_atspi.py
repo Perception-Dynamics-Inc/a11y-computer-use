@@ -3821,6 +3821,321 @@ def do_press(acc) -> bool:
     return False
 
 
+# Window titles of a GTK file chooser. A bare "Open" is a document title often
+# enough that Return in that window must stay a key.
+_FILE_CHOOSER_TITLES = frozenset({
+    "open file",
+    "save file",
+    "save as",
+    "select file",
+    "select a file",
+    "choose a file",
+    "open document",
+    "save document",
+})
+_FILE_CHOOSER_ACCEPT = frozenset({"open", "save", "ok", "select"})
+_FILE_CHOOSER_BUTTON_ROLES = frozenset({"push button", "button"})
+_FILE_CHOOSER_ENTRY_ROLES = frozenset({
+    "entry", "text", "editable text", "combo box", "combo-box", "text entry",
+})
+_FILE_CHOOSER_ROW_ROLES = frozenset({"table cell", "list item", "tree item", "table row"})
+_FILE_CHOOSER_TABLE_ROLES = frozenset({"table", "tree table", "tree", "list", "list box"})
+_CHOOSER_WALK_BUDGET = 500
+
+
+def file_chooser_window_title(title: str) -> bool:
+    """True when ``title`` is a GTK open or save dialog, not a document."""
+    return _folded_title(title) in _FILE_CHOOSER_TITLES
+
+
+def file_basename(path: str) -> str:
+    """The last path segment of ``path``, without a ``file://`` prefix."""
+    text = str(path or "").strip().replace("\\", "/")
+    if text.lower().startswith("file://"):
+        text = text[7:]
+    text = text.rstrip("/")
+    if not text:
+        return ""
+    return text.rsplit("/", 1)[-1]
+
+
+def file_chooser_controls(pid: int | None, title: str):
+    """``(button, path, app)`` for the active GTK chooser, or None.
+
+    ``button`` is the Open or Save push button. ``path`` is the location
+    entry text, or the selected file name when the entry is empty. ``app``
+    is the application accessible, so a later read can see the opener after
+    the dialog closes. None when the window title is not a chooser, or the
+    tree has no accept button. Chrome's chooser sets ``NO_AT_BRIDGE`` and
+    has no button here.
+    """
+    if not file_chooser_window_title(title):
+        return None
+    Atspi = _atspi()
+    desktop = _safe(lambda: Atspi.get_desktop(0))
+    if desktop is None:
+        return None
+    folded = _folded_title(title)
+    apps = _desktop_apps(desktop)
+    owned = [app for app in apps if pid and pid_of(app) == pid]
+    found = _chooser_in_apps(owned, folded, title, title_only=False)
+    if found is not None:
+        return found
+    rest = [app for app in apps if app not in owned]
+    return _chooser_in_apps(rest, folded, title, title_only=True)
+
+
+def chooser_controls_under(root, title: str):
+    """``(button, path)`` under ``root``, or None when no Open/Save button.
+
+    The file list is walked only for a selected name. Its rows are not
+    allowed to consume the budget before the action button, which sits
+    beside the list rather than inside it.
+    """
+    if root is None:
+        return None
+    accept: list[tuple[object, str]] = []
+    entries: list[tuple[str, bool, str]] = []
+    selected: list[str] = []
+    _walk_chooser(root, accept, entries, selected, [_CHOOSER_WALK_BUDGET], 0)
+    if not accept:
+        return None
+    return _prefer_accept(accept, title), _chooser_path(entries, selected)
+
+
+def tree_shows_file(root, filename: str, *, skip_titles: tuple[str, ...] = ()) -> bool:
+    """True when ``filename``'s basename appears outside a skipped chooser frame.
+
+    The chooser itself shows the typed path. That text does not mean the
+    opener accepted the file. Frames whose title is in ``skip_titles`` are
+    left out of the search.
+    """
+    base = file_basename(filename)
+    full = str(filename or "").strip()
+    if not base and not full:
+        return False
+    skip = {_folded_title(item) for item in skip_titles if _folded_title(item)}
+    blob: list[str] = []
+    _collect_opener_text(root, skip, blob, [_CHOOSER_WALK_BUDGET], 0)
+    text = "\n".join(blob)
+    if base and base in text:
+        return True
+    return bool(full and full in text)
+
+
+def _folded_title(title: str) -> str:
+    return " ".join(str(title or "").casefold().split())
+
+
+def _button_label(name: str) -> str:
+    text = str(name or "").replace("_", " ").strip().casefold()
+    return text.split("(", 1)[0].strip()
+
+
+def _desktop_apps(desktop) -> list:
+    count = _child_count(desktop)
+    if count < 0:
+        return []
+    apps = []
+    for index in range(min(int(count), 80)):
+        child = _child_at(desktop, index)
+        if child is not None:
+            apps.append(child)
+    return apps
+
+
+def _chooser_in_apps(apps, folded: str, title: str, *, title_only: bool):
+    for app in apps:
+        frames = _direct_children(app)
+        named = [
+            frame for frame in frames
+            if _folded_title(_node_name(frame)) == folded
+            or _role_name(frame) == "file chooser" and _folded_title(_node_name(frame)) in {"", folded}
+        ]
+        if named:
+            targets = named
+        elif title_only:
+            continue
+        else:
+            targets = [app]
+        for target in targets:
+            found = chooser_controls_under(target, title)
+            if found is not None:
+                button, path = found
+                return button, path, app
+    return None
+
+
+def _direct_children(acc) -> list:
+    count = _child_count(acc)
+    if count < 0:
+        return []
+    out = []
+    for index in range(min(int(count), 40)):
+        child = _child_at(acc, index)
+        if child is not None:
+            out.append(child)
+    return out
+
+
+def _walk_chooser(node, accept, entries, selected, budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 16:
+        return
+    budget[0] -= 1
+    role = _role_name(node)
+    name = _node_name(node)
+    if role in _FILE_CHOOSER_BUTTON_ROLES:
+        label = _button_label(name)
+        if label in _FILE_CHOOSER_ACCEPT and _chooser_enabled(node):
+            accept.append((node, label))
+    elif role in _FILE_CHOOSER_ENTRY_ROLES:
+        text = _chooser_field_text(node).strip()
+        if text:
+            entries.append((text, "FOCUSED" in _state_names(node), name.casefold()))
+    elif role in _FILE_CHOOSER_ROW_ROLES and "SELECTED" in _state_names(node):
+        label = name.strip() or _chooser_field_text(node).strip()
+        if label and label not in {".", ".."}:
+            selected.append(label)
+    structural, tables = [], []
+    for child in _direct_children(node):
+        if _role_name(child) in _FILE_CHOOSER_TABLE_ROLES:
+            tables.append(child)
+        else:
+            structural.append(child)
+    for child in structural:
+        _walk_chooser(child, accept, entries, selected, budget, depth + 1)
+    for child in tables:
+        _walk_chooser_selection(child, selected, [40], 0)
+
+
+def _walk_chooser_selection(node, selected, budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 8:
+        return
+    budget[0] -= 1
+    role = _role_name(node)
+    if role in _FILE_CHOOSER_ROW_ROLES and "SELECTED" in _state_names(node):
+        label = _node_name(node).strip() or _chooser_field_text(node).strip()
+        if label and label not in {".", ".."}:
+            selected.append(label)
+    count = _child_count(node)
+    if count < 0:
+        return
+    for index in range(min(int(count), 40)):
+        _walk_chooser_selection(_child_at(node, index), selected, budget, depth + 1)
+
+
+def _chooser_enabled(node) -> bool:
+    states = _state_names(node)
+    if not states:
+        return True
+    if "SENSITIVE" in states or "ENABLED" in states:
+        return True
+    return not ({"SHOWING", "VISIBLE", "FOCUSABLE"} & states)
+
+
+def _chooser_path(entries, selected) -> str:
+    """Location text when it was typed, otherwise the selected file name."""
+    for text, focused, name in entries:
+        if focused and ("/" in text or "\\" in text or "location" in name or name == "name"):
+            return text
+    for text, _focused, name in entries:
+        if "location" in name or name in {"name", "filename"}:
+            return text
+    for text, _focused, _name in entries:
+        if "/" in text or "\\" in text:
+            return text
+    if selected:
+        return selected[-1]
+    if entries:
+        return entries[-1][0]
+    return ""
+
+
+def _prefer_accept(accept, title: str):
+    folded = title.casefold()
+    want = "save" if "save" in folded else "open"
+    for button, label in accept:
+        if label == want:
+            return button
+    for button, label in accept:
+        if label in _FILE_CHOOSER_ACCEPT:
+            return button
+    return accept[0][0]
+
+
+def _chooser_field_text(acc) -> str:
+    """Text of a chooser entry. A real accessible uses ``Text.get_text``.
+
+    ``Accessible.get_text`` is the deprecated wrapper. A test double has no
+    GObject pointer and exposes ``get_text`` or ``text`` itself.
+    """
+    if getattr(acc, "__gpointer__", None) is not None:
+        try:
+            got = _full_text(acc)
+        except Exception:
+            return ""
+        return got or ""
+    getter = getattr(acc, "get_text", None)
+    if callable(getter):
+        got = None
+        try:
+            try:
+                got = getter(0, -1)
+            except TypeError:
+                got = getter()
+        except Exception:
+            got = None
+        if isinstance(got, str):
+            return got
+    direct = getattr(acc, "text", None)
+    if isinstance(direct, str):
+        return direct
+    return ""
+
+
+def _state_names(acc) -> set[str]:
+    direct = getattr(acc, "states", None)
+    if isinstance(direct, (set, frozenset, list, tuple)) and direct:
+        return {str(item).upper() for item in direct}
+    sset = _call_first(acc, ("get_state_set",))
+    if sset is None:
+        return set()
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return set()
+    st = getattr(Atspi, "StateType", None)
+    if st is None:
+        return set()
+    found = set()
+    for label in ("FOCUSED", "SELECTED", "SHOWING", "VISIBLE", "SENSITIVE", "ENABLED", "FOCUSABLE"):
+        token = getattr(st, label, None)
+        if token is not None and _safe(lambda t=token: sset.contains(t), False):
+            found.add(label)
+    return found
+
+
+def _collect_opener_text(node, skip: set[str], blob: list[str], budget, depth: int) -> None:
+    if node is None or budget[0] <= 0 or depth > 16:
+        return
+    role = _role_name(node)
+    name = _node_name(node)
+    if role in {"frame", "dialog", "window", "file chooser"} and _folded_title(name) in skip:
+        return
+    budget[0] -= 1
+    if name:
+        blob.append(name)
+    if role in _FILE_CHOOSER_ENTRY_ROLES or role in {"label", "static"}:
+        text = _chooser_field_text(node).strip()
+        if text:
+            blob.append(text)
+    count = _child_count(node)
+    if count < 0:
+        return
+    for index in range(min(int(count), 60)):
+        _collect_opener_text(_child_at(node, index), skip, blob, budget, depth + 1)
+
+
 # Chrome's doAction("click") on a canvas or image synthesizes a DOM click at
 # the element's top-left. offsetX/offsetY are then 0. A button, link, or
 # checkbox keeps that action. These roles need a pointer click at the center.
