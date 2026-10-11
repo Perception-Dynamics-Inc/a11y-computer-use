@@ -1761,6 +1761,181 @@ def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeyp
     assert scrolls == [5, -5]
 
 
+def test_scroll_to_find_document_bursts_until_the_row_is_named(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    While the row is absent the step stays five lines, the burst that
+    moves about a viewport. Once the document names the row above the
+    window, the next step is one line, so the search does not jump
+    another viewport past it. The returned bounds are the on-screen ones.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    def page(y: int | None) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="page", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="doc", role="AXGroup", title="document", value=None,
+                    bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+        ]
+        if y is not None:
+            els.append(Element(
+                ref="row", role="AXCell", title="ITEM-180", value=None,
+                bounds=Bounds(0, 40, y, 80, 20), snapshot_id="s", parent="doc",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        y = -30
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if len(scrolls) < 2:
+                return page(None)
+            return page(_D.y)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if dy < 0:
+                _D.y = 100
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=6)
+    assert "ITEM-180" in out
+    assert "found after 3 scroll(s)" in out
+    assert "not found" not in out
+    assert "@0:40,100" in out
+    assert ",-30" not in out
+    assert scrolls == [5, 5, -1]
+
+
+def test_scroll_to_find_document_inches_when_the_row_is_already_named(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The row is already in the tree, above the window, and the requested
+    direction is down. A viewport burst would move away from it. The
+    document steps one line toward the row. A scroll area keeps the
+    requested five-line step; this anchor is the document group.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    y = {"v": -40}
+
+    def page() -> Snapshot:
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),),
+            elements=(
+                Element(ref="win", role="AXWindow", title="page", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+                Element(ref="doc", role="AXGroup", title="document", value=None,
+                        bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+                Element(ref="row", role="AXCell", title="ITEM-180", value=None,
+                        bounds=Bounds(0, 40, y["v"], 80, 20), snapshot_id="s", parent="doc"),
+            ),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return page()
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            y["v"] += -dy * 60
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", direction="down", max_scrolls=6)
+    assert "found after 1 scroll(s)" in out
+    assert "ITEM-180" in out
+    assert scrolls == [-1]
+    assert 5 not in scrolls
+
+
+def test_scroll_to_find_document_keeps_inching_after_the_row_vanishes(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The search bursts down until the row is named above the window, then
+    steps up one line. The next read still names it and the confirming
+    read does not. That miss keeps the upward notch. It does not flip
+    back to a downward viewport.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    script = ["miss", "miss", "above", "above", "stale", "gone", "on", "on"]
+    index = {"i": 0}
+
+    def page(kind: str) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="page", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="doc", role="AXGroup", title="document", value=None,
+                    bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+        ]
+        y = {"above": -30, "stale": 120, "on": 120}.get(kind)
+        if y is not None:
+            els.append(Element(
+                ref="row", role="AXCell", title="ITEM-180", value=None,
+                bounds=Bounds(0, 40, y, 80, 20), snapshot_id="s", parent="doc",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            kind = script[min(index["i"], len(script) - 1)]
+            index["i"] += 1
+            return page(kind)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=8)
+    assert "found after 4 scroll(s)" in out
+    assert "@0:40,120" in out
+    assert scrolls == [5, 5, -1, -1]
+
+
 def test_scroll_to_find_keeps_scrolling_toward_a_row_above_the_window(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome table.
 

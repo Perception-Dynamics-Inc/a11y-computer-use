@@ -2328,13 +2328,12 @@ def test_chromium_document_scroll_waits_until_shown_names_change(
 def test_chromium_document_scroll_tops_up_a_short_head_move(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """A five-line request that only moves the head by one name sends more notches.
+    """A five-line burst that only moves the head by one name sends more notches.
 
-    Synthetic names, not a live Chrome. Notches go out one at a time. A
-    notch that moves a single row is not the whole step: more follow until
-    the head has moved by about the request. A step that sent all five
-    notches at once would jump a viewport and skip the row the search is
-    counting on.
+    Synthetic names, not a live Chrome. The requested notches go out
+    together. When that burst settles on a one-row move, more notches
+    follow until the head has moved by about the request. A burst that
+    clears the sample is the viewport step and is not topped up.
     """
     events, _display = xtest_recorder
     monkeypatch.setattr(
@@ -2350,10 +2349,11 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
     monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
     script = [tuple(f"ROW-{i:04d}" for i in range(1, 9))]
-    # Each notch advances the head by one row. Three identical reads settle it.
-    for head in range(2, 7):
-        shown = tuple(f"ROW-{i:04d}" for i in range(head, head + 8))
-        script.extend((shown, shown, shown))
+    # The burst settles on a one-row move. The first read sets the last
+    # advance; two more identical reads end the wait.
+    script.extend((tuple(f"ROW-{i:04d}" for i in range(2, 10)),) * 3)
+    for head in range(3, 7):
+        script.append(tuple(f"ROW-{i:04d}" for i in range(head, head + 8)))
     index = {"i": 0}
 
     def names(_handle, limit=6):
@@ -2364,8 +2364,51 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
     presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
-    # One notch per row, from ROW-0001 to ROW-0006.
+    # Five in the burst, then one notch per missing row until the head is ROW-0006.
+    assert len(presses) == 9, len(presses)
+
+
+def test_chromium_document_scroll_keeps_a_viewport_burst(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """A five-line burst that clears the on-screen names is not followed by more notches.
+
+    Synthetic names, not a live Chrome. The head leaving the sample is the
+    viewport step 0.4.62 took in one call. Stopping at the first notch, and
+    waiting for the tree after it, is the four-row two-second regression.
+    """
+    events, _display = xtest_recorder
+    sleeps = {"n": 0}
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers.linux._cdp_scroll_pixels", lambda *_args, **_kwargs: False,
+    )
+
+    def sleep(_seconds: float) -> None:
+        sleeps["n"] += 1
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+
+    class _Handle:
+        __gpointer__ = 1
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda _snapshot_id, _ref: _Handle())
+    monkeypatch.setattr(_atspi, "list_container", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
+    reads = {"n": 0}
+
+    def names(_handle, limit=6):
+        reads["n"] += 1
+        if reads["n"] == 1:
+            return tuple(f"ITEM-{i:03d}" for i in range(1, 7))
+        return tuple(f"ITEM-{i:03d}" for i in range(21, 27))
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
+    LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
+    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
     assert len(presses) == 5, len(presses)
+    assert reads["n"] == 2
+    assert sleeps["n"] == 0
 
 
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:

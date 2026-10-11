@@ -634,6 +634,16 @@ def _settle_shown_names(run, handle) -> None:
             return
 
 
+def _strip_shared_names(
+    before: tuple[str, ...], after: tuple[str, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Drop a shared prefix, such as the document title, from both samples."""
+    shared = 0
+    while shared < len(before) and shared < len(after) and before[shared] == after[shared]:
+        shared += 1
+    return before[shared:], after[shared:]
+
+
 def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: int) -> int:
     """How far the on-screen head moved, in names. Positive is later names.
 
@@ -643,11 +653,7 @@ def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: i
     toward the start. No shared name is a move of at least the whole
     remaining sample, in the direction ``sign`` asked for.
     """
-    shared = 0
-    while shared < len(before) and shared < len(after) and before[shared] == after[shared]:
-        shared += 1
-    before = before[shared:]
-    after = after[shared:]
+    before, after = _strip_shared_names(before, after)
     # A document title stays at the front of both samples. The rows after
     # it are the move. Nothing left on one side means the head did not move.
     if not before or not after:
@@ -657,6 +663,20 @@ def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: i
     if before[0] in after:
         return -after.index(before[0])
     return sign * len(before)
+
+
+def _names_parted(before: tuple[str, ...], after: tuple[str, ...]) -> bool:
+    """True when the new head has left the old sample.
+
+    A five-notch burst that moves about a viewport does this: the rows
+    that were on screen are gone, and the advance is at least the whole
+    sample. A burst that collapsed to one row still names that row inside
+    the old sample, so this is false and the step can be topped up.
+    """
+    before, after = _strip_shared_names(before, after)
+    if not before or not after:
+        return False
+    return after[0] not in before and before[0] not in after
 
 
 def _name_source(run, handle):
@@ -696,15 +716,21 @@ def _name_source(run, handle):
 
 
 def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> None:
-    """Wheel a document by about ``dy`` lines, then wait until the tree says so.
+    """Wheel a document by the requested notches, then wait until the tree says so.
 
     Chrome's document is a group, so this is the notch path, not the list
-    bar. One notch moves several rows, and a burst of ``|dy|`` notches
-    jumps about a viewport, so a search that lands on the target scrolls
-    past it before the next read. A burst can also collapse into one row
-    on a busy runner. Notches go out one at a time. Each one waits until
-    the on-screen head settles. The step stops when that head has moved
-    by about ``|dy|`` names, or a notch leaves the names unchanged.
+    bar. One notch moves several rows. Sending them one at a time, and
+    stopping once the head had moved by about ``|dy|`` names, made each
+    ``scroll_to_find`` step about four rows and about two seconds. The
+    step sends every requested notch together, which is about a viewport,
+    and returns as soon as the on-screen head shows that move.
+
+    A burst can collapse into one row on a busy runner. When the head
+    then settles still inside the old sample and short of ``|dy|`` names,
+    more notches go out one at a time until the head has moved by about
+    that many names, or a notch leaves the names unchanged. A head that
+    has already left the sample took the viewport step; more notches are
+    not added on top of it.
     """
     from a11y_computer_use.drivers import _atspi, _linux_input
 
@@ -734,43 +760,62 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         plain()
         return
 
+    def measure() -> tuple[tuple[str, ...], int]:
+        after = run(lambda node=source: _showing_names(node))
+        return after, _shown_name_advance(before, after, sign)
+
+    # The whole request goes out together. A tree that publishes that
+    # viewport inside this window — the same 0.9s ``_settle_shown_names``
+    # uses — is not given extra notches.
+    _linux_input.scroll(x, y, dx=dx, dy=dy)
     moved = 0
-    for notch in range(wanted * 2):
-        _linux_input.scroll(
-            x, y,
-            dx=int(dx) if notch == 0 else 0,
-            dy=sign,
-        )
+    changed = False
+    stable = 0
+    last: int | None = None
+    after = before
+    deadline = time.monotonic() + 0.9
+    while True:
+        try:
+            after, nxt = measure()
+        except Exception:
+            return
+        if abs(nxt) >= wanted or _names_parted(before, after):
+            return
+        moved = nxt
+        if after != before:
+            changed = True
+        if moved == last:
+            stable += 1
+        else:
+            stable = 0
+            last = moved
+        if stable >= 2 and changed:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    # No measurable move, or the head already left the sample. The burst
+    # is the step. A short move still inside the old sample is the
+    # collapsed burst: top it up.
+    if not (0 < abs(moved) < wanted) or _names_parted(before, after):
+        return
+    for _extra in range(wanted * 2):
+        _linux_input.scroll(x, y, dy=sign)
         saw = False
-        stable = 0
-        last: int | None = None
-        settled = moved
-        for _ in range(30):
+        for _ in range(8):
             try:
-                after = run(lambda node=source: _showing_names(node))
-                nxt = _shown_name_advance(before, after, sign)
+                after, nxt = measure()
             except Exception:
                 return
-            if after != before:
-                saw = True
-            if abs(nxt) >= wanted:
+            if abs(nxt) >= wanted or _names_parted(before, after):
                 return
-            if nxt == last:
-                stable += 1
-            else:
-                stable = 0
-                last = nxt
-            if stable >= 2 and saw:
-                settled = nxt
+            if nxt != moved:
+                moved = nxt
+                saw = True
                 break
             time.sleep(0.05)
-        else:
-            settled = last if last is not None else moved
-        # A notch that does not move the head is the end of the page, or a
-        # sample that cannot be measured. More notches would repeat it.
-        if not saw or abs(settled) <= abs(moved):
+        if not saw:
             return
-        moved = settled
 
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
@@ -1869,12 +1914,14 @@ class LinuxDriver:
         Chrome document. When the window's process was started with
         ``--remote-debugging-port``, a line step is a DOM ``scrollBy`` of
         about 40 pixels per line, kept only when ``scrollTop`` changes.
-        Otherwise the notches are sent one at a time. A burst of the
-        whole request jumps about a viewport, and on a busy runner that
-        same burst can collapse into one row. Each notch waits until the
-        on-screen head settles, and the step stops when that head has
-        moved by about the requested number of names. A notch that leaves
-        the names unchanged stops the step.
+        Otherwise the requested notches are sent together. That burst is
+        about a viewport, and the call returns as soon as the on-screen
+        head shows it. One notch at a time, stopped at about ``|dy|``
+        names, made each step about four rows and about two seconds. On a
+        busy runner the same burst can collapse into one row; notches are
+        then added one at a time until the head has moved by about the
+        requested number of names. A head that has already left the
+        sampled names is not given those extra notches.
         ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back when a bar is exposed. GTK scrolled
         windows expose the value in pixels. A missing bar tries a CDP DOM
