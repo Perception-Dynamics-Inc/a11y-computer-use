@@ -86,6 +86,114 @@ def test_resolve_launch_rewrites_labels_and_rejects_unknown_names() -> None:
     assert missing.argv is None
 
 
+def test_display_name_resolves_to_the_program_whatever_the_grant_spells() -> None:
+    """``Mousepad`` launches ``mousepad`` when the grant is ``Mousepad``, ``mousepad``, or both.
+
+    The grant is the gate. It does not choose a different program. ``Text Editor``
+    is that file's GenericName. A grant for a different app does not become the gate.
+    """
+    entries = [{
+        "id": "org.xfce.mousepad",
+        "name": "Mousepad",
+        "generic_name": "Text Editor",
+        "exec": "mousepad",
+        "wm_class": "mousepad",
+    }]
+
+    def lookup(name: str) -> str | None:
+        return "/usr/bin/mousepad" if name == "mousepad" else None
+
+    both = resolve_launch(
+        "Mousepad", granted=["mousepad", "Mousepad"], entries=entries, path_lookup=lookup,
+    )
+    display = resolve_launch(
+        "Mousepad", granted=["Mousepad"], entries=entries, path_lookup=lookup,
+    )
+    lower = resolve_launch(
+        "Mousepad", granted=["mousepad"], entries=entries, path_lookup=lookup,
+    )
+    assert both.launch_name == display.launch_name == lower.launch_name == "mousepad"
+    assert both.resolved is True and display.resolved is True and lower.resolved is True
+    assert both.gate_key == "Mousepad"
+    assert display.gate_key == "Mousepad"
+    assert lower.gate_key == "mousepad"
+    assert both.argv is None
+
+    editor = resolve_launch(
+        "Text Editor", granted=["mousepad"], entries=entries, path_lookup=lookup,
+    )
+    assert editor.launch_name == "mousepad"
+    assert editor.gate_key == "mousepad"
+    assert editor.resolved is True
+
+    titled = resolve_launch(
+        "Text Editor", granted=["Mousepad"], entries=entries, path_lookup=lookup,
+    )
+    assert titled.launch_name == "mousepad"
+    assert titled.gate_key == "Mousepad"
+
+    other = resolve_launch(
+        "Text Editor", granted=["gedit"], entries=entries, path_lookup=lookup,
+    )
+    assert other.launch_name == "mousepad"
+    assert other.gate_key == "mousepad"
+    assert other.gate_key != "gedit"
+
+    missing = resolve_launch(
+        "Not a Desktop App", granted=["gedit"], entries=entries, path_lookup=lookup,
+    )
+    assert missing.resolved is False
+    assert missing.gate_key is None
+
+    # The executable's own spelling stays, even when a desktop Name differs by case.
+    kept = resolve_launch(
+        "mousepad", granted=["Mousepad"], entries=entries, path_lookup=lambda _name: None,
+    )
+    assert kept.launch_name == "mousepad"
+    assert kept.gate_key == "Mousepad"
+
+    off_path = resolve_launch(
+        "Text Editor", granted=["Mousepad"], entries=entries, path_lookup=lambda _name: None,
+    )
+    assert off_path.launch_name == "org.xfce.mousepad"
+    assert off_path.gate_key == "Mousepad"
+
+    by_id = resolve_launch(
+        "org.xfce.mousepad", granted=["mousepad"], entries=entries, path_lookup=lookup,
+    )
+    assert by_id.launch_name == "org.xfce.mousepad"
+    assert by_id.gate_key == "mousepad"
+
+
+def test_display_name_prefers_name_over_an_earlier_generic_name() -> None:
+    """``Name=Mousepad`` wins over another file's ``GenericName=Mousepad``.
+
+    The other file's grant does not become the gate for the Name match.
+    """
+    entries = [
+        {
+            "id": "org.example.Notes",
+            "name": "Notes",
+            "generic_name": "Mousepad",
+            "exec": "notes",
+            "wm_class": "notes",
+        },
+        {
+            "id": "org.xfce.mousepad",
+            "name": "Mousepad",
+            "generic_name": "Text Editor",
+            "exec": "mousepad",
+            "wm_class": "mousepad",
+        },
+    ]
+    picked = resolve_launch(
+        "Mousepad", granted=["notes"], entries=entries, path_lookup=lambda _name: None,
+    )
+    assert picked.launch_name == "mousepad"
+    assert picked.gate_key == "mousepad"
+    assert picked.gate_key != "notes"
+
+
 def test_office_module_labels_launch_the_wrapper_or_the_flag() -> None:
     entries = [
         {"id": "libreoffice-calc", "name": "LibreOffice Calc", "exec": "libreoffice", "wm_class": "libreoffice-calc"},
