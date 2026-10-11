@@ -5324,7 +5324,15 @@ class Runtime:
         snapshot still shows that match and its center lies inside the
         window. Otherwise the search scrolls back toward the row and
         checks again. The ref and the bounds are from that confirming
-        snapshot, not from the pre-scroll one."""
+        snapshot, not from the pre-scroll one.
+
+        While the name is not in the tree, the step stays five lines. On
+        a document that is one burst of wheel notches, about a viewport.
+        Once a document names the match and the center is still outside
+        the window, the next steps are one notch, so the search does not
+        jump another viewport past the row. A list or scroll area keeps
+        the five-line correction: one line there is the track click, and
+        the walk back to an early row needs the five-line step."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -5438,6 +5446,16 @@ class Runtime:
                 f"{observe.render_matches(later, visible)}"
             )
 
+        def document_anchor(anchor: Element | None) -> bool:
+            """A body-scroll document, not a list or scroll area.
+
+            Five notches on that group are about a viewport. A list's
+            five-line step is about five rows and has to stay five: one
+            line is the track click, and the walk back to an early row
+            does not fit in the budget.
+            """
+            return anchor is not None and anchor.role in ("AXGroup", "AXWebArea")
+
         def execute() -> str:
             # Several lines per step can pass the target and stop at the end
             # of the list. On the 0.4.17 retest the search reached ITEM-193
@@ -5453,6 +5471,11 @@ class Runtime:
             turned = False
             stalls = 0
             backs = 0
+            # Set once the document has named the target. Later steps on
+            # that document stay one notch, including a pass where the
+            # name has dropped out of the tree again. A list never sets
+            # this: its correction stays five lines.
+            seen_document = False
             limit = max_scrolls
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
@@ -5471,6 +5494,44 @@ class Runtime:
                             f"found after {issued} scroll(s):\n"
                             f"{observe.render_matches(snap, shown)}"
                         )
+                    if issued == 0:
+                        # The document already names the row, off screen.
+                        # A five-notch burst here jumps about a viewport
+                        # past it. One notch moves toward the row. A list
+                        # falls through and keeps the requested five lines.
+                        anchor = (
+                            self.driver.resolve_ref(pinned[0], ref, live=snap)
+                            if pinned is not None else _scroll_anchor(snap)
+                        )
+                        if anchor is not None and document_anchor(anchor):
+                            if issued >= limit:
+                                break
+                            seen_document = True
+                            kind = place_of(snap)
+                            if kind == "above":
+                                recover = -1
+                            elif kind == "below":
+                                recover = 1
+                            else:
+                                recover = -1 if dy < 0 else 1
+                            step = recover
+                            try:
+                                self._run_gated(
+                                    Scroll(target=anchor, dy=recover), bundle,
+                                    partial(inject_scroll, anchor, recover),
+                                    recheck=partial(self._recheck_target, target=anchor),
+                                )
+                            except ComputerUseError as exc:
+                                if rows_stale(exc):
+                                    issued += 1
+                                    stalls = 0
+                                    continue
+                                if page_unchanged(exc):
+                                    break
+                                raise
+                            issued += 1
+                            stalls = 0
+                            continue
                     if issued > 0:
                         # The naming snapshot can be the tree from before this
                         # wheel. Return a ref only when a later snapshot still
@@ -5480,23 +5541,46 @@ class Runtime:
                             return verified
                         if issued >= limit:
                             break
-                        if kind == "above":
-                            recover = -abs(dy)
-                        elif kind == "below":
-                            recover = abs(dy)
-                        else:
-                            # The row left the tree. The last step went past it.
-                            backs += 1
-                            if backs > _SCROLL_VERIFY_BACKS:
-                                break
-                            recover = -step if step else -dy
-                        step = recover
                         anchor = (
                             self.driver.resolve_ref(pinned[0], ref, live=self._current)
                             if pinned is not None else _scroll_anchor(self._current)
                         )
                         if anchor is None:
                             break
+                        # A document's five-line step is about a viewport.
+                        # Once the name is in the tree, one notch walks onto
+                        # the row instead of jumping past it. A list keeps
+                        # five lines.
+                        lines = 1 if document_anchor(anchor) else abs(dy)
+                        if document_anchor(anchor):
+                            seen_document = True
+                        if kind == "above":
+                            recover = -lines
+                        elif kind == "below":
+                            recover = lines
+                        else:
+                            # The row left the tree. The last step went past it.
+                            backs += 1
+                            # One notch is a few rows. Walking back a viewport
+                            # takes more than the three coarse reversals.
+                            back_limit = (
+                                max(_SCROLL_VERIFY_BACKS, abs(dy) * 2)
+                                if lines == 1 else _SCROLL_VERIFY_BACKS
+                            )
+                            if backs > back_limit:
+                                break
+                            # The first miss reverses the search. A document
+                            # that has already stepped toward the row keeps
+                            # that one-notch direction: flipping it would
+                            # walk away from a row that was above the window.
+                            # A list still reverses each time, which is the
+                            # five-line return.
+                            already_toward = lines == 1 and abs(step) == 1 and step != dy
+                            if lines == 1 and (backs > 1 or already_toward):
+                                recover = lines if step > 0 else -lines
+                            else:
+                                recover = -lines if step > 0 else lines
+                        step = recover
                         try:
                             self._run_gated(
                                 Scroll(target=anchor, dy=recover), bundle,
@@ -5520,12 +5604,18 @@ class Runtime:
                           if pinned is not None else _scroll_anchor(snap))
                 if anchor is None:
                     break
+                # The name was on a document and then left the tree. Keep
+                # the one-notch step so the next wheel does not jump a
+                # viewport past the row again. A list stays on ``step``.
+                wheel = step
+                if seen_document and document_anchor(anchor):
+                    wheel = 1 if step > 0 else -1
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
                     self._run_gated(
-                        Scroll(target=anchor, dy=step), bundle,
-                        partial(inject_scroll, anchor, step),
+                        Scroll(target=anchor, dy=wheel), bundle,
+                        partial(inject_scroll, anchor, wheel),
                         recheck=partial(self._recheck_target, target=anchor),
                     )
                 except ComputerUseError as exc:
@@ -7651,7 +7741,11 @@ def build_server(
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll
         tree; the search scrolls back toward the row and checks again instead
-        of returning that stale ref. A wheel that does not move the page
+        of returning that stale ref. While the name is not in the tree the
+        step stays five lines: on a document that is one burst of wheel
+        notches, about a viewport. Once a document names the match and the
+        center is still outside the window, the next steps are one notch.
+        A list keeps the five-line correction. A wheel that does not move the page
         (page_unchanged) is repeated once: the tree can still be the pre-scroll
         rows. A second still page does not end the search while the other
         direction has not been tried and the target has not been shown. The
