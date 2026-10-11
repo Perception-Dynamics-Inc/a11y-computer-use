@@ -129,6 +129,13 @@ MAX_WAIT_TIMEOUT_S = 60.0
 MAX_BATCH_STEPS = 100
 MAX_BATCH_DURATION_S = 60.0
 MAX_SCROLLS = 100
+# A hit in the same turn as the wheel can still be the pre-scroll tree.
+# A later read has to show the match inside the window. The pause is the
+# gap in which Chrome replaces that tree; a row that vanishes on the
+# second read has already left the viewport. A vanished name is scrolled
+# back toward, at most this many times, before the search gives up.
+_SCROLL_VERIFY_PAUSE_S = 0.15
+_SCROLL_VERIFY_BACKS = 3
 
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
@@ -2506,6 +2513,7 @@ class Runtime:
         previous: str | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
     ) -> tuple[str, str]:
         died = self._process_died(before)
         scope = before.get("scope") if before else None
@@ -2560,6 +2568,42 @@ class Runtime:
                         readback = better
             if readback is None:
                 readable = False
+        # Chrome's contenteditable often publishes the new characters after
+        # type has already returned. One snapshot can still be the pre-type
+        # text, and the outcome is then a false suspected_noop.
+        stale_read = isinstance(before_value, str) and readback == before_value
+        if before_value is None and readback in (None, ""):
+            stale_read = True
+        if (
+            requested
+            and not died
+            and getattr(self.driver, "name", None) == "linux"
+            and stale_read
+        ):
+            for _attempt in range(8):
+                time.sleep(0.05)
+                later = self._reread(app, scope)
+                if later is None:
+                    break
+                if element is not None:
+                    fresh_anchor = self._element_like(element, later)
+                else:
+                    fresh_anchor = self._focused_editable(later)
+                if fresh_anchor is None:
+                    continue
+                fresh = "" if fresh_anchor.value is None else str(fresh_anchor.value)
+                after = later
+                readback = fresh
+                anchor = fresh_anchor
+                if fresh != before_value:
+                    break
+        type_expected = None
+        if getattr(self.driver, "name", None) == "linux":
+            found = getattr(self.driver, "_type_expected", None)
+            if isinstance(found, str):
+                type_expected = found
+            if hasattr(self.driver, "_type_expected"):
+                self.driver._type_expected = None
         self._remember_baseline(after)
         judged, evidence = outcome.judge(
             changed=changed,
@@ -2568,6 +2612,8 @@ class Runtime:
             before_value=before_value,
             process_died=died,
             readable=readable if requested is None else readback is not None or not died,
+            selection=selection,
+            expected=type_expected,
         )
         if focus_note and judged == "confirmed" and evidence == "the accessibility state changed":
             evidence = focus_note
@@ -2597,6 +2643,77 @@ class Runtime:
             return None
         return found if isinstance(found, tuple) else None
 
+    def _active_type_selection(
+        self, app: str | None, previous: str | None,
+    ) -> tuple[int, int] | None:
+        """Selection offsets in ``previous``, read before the keys replace it.
+
+        None when the caret is collapsed, or the focused text is not the
+        snapshot value the offsets were counted in. The driver still records
+        the replacement it verified, and the outcome check uses that string.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not app or not isinstance(previous, str):
+            return None
+        mapped = self._mapped_type_selection(app, previous)
+        if mapped is not None:
+            return mapped
+        found = self._key_focus_probe(app)
+        if not isinstance(found, tuple) or len(found) < 4:
+            return None
+        text, _caret, start, end = found[0], found[1], found[2], found[3]
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
+    def _mapped_type_selection(
+        self, app: str, previous: str,
+    ) -> tuple[int, int] | None:
+        """Selection in the read-back's coordinates, or None.
+
+        Raw AT-SPI offsets on a Chrome contenteditable count one object
+        character per paragraph. The word selected inside that paragraph is
+        the range typing replaces. None leaves the raw caret offsets.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.focused_type_selection(app)
+
+        try:
+            if callable(runner):
+                found = runner(read)
+            else:
+                found = read()
+        except Exception:
+            return None
+        if not isinstance(found, tuple) or len(found) != 2:
+            return None
+        text, span = found
+        if not isinstance(span, tuple) or len(span) != 2:
+            return None
+        start, end = span
+        if isinstance(start, bool) or isinstance(end, bool):
+            return None
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            return None
+        if isinstance(text, str) and outcome._type_field_text(text) != outcome._type_field_text(previous):
+            return None
+        if end > len(previous) and (
+            not isinstance(text, str) or end > len(outcome._type_field_text(text))
+        ):
+            return None
+        return (start, end)
+
     def _conclude(
         self,
         text: str,
@@ -2612,12 +2729,13 @@ class Runtime:
         verdict: tuple[str, str] | None = None,
         key_focus: bool = False,
         focus_before: tuple | None = None,
+        selection: tuple[int, int] | None = None,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
-                key_focus=key_focus, focus_before=focus_before,
+                key_focus=key_focus, focus_before=focus_before, selection=selection,
             )
         else:
             judged, evidence = verdict
@@ -4403,6 +4521,7 @@ class Runtime:
         base = before["snap"] if before else None
         focused_field = self._focused_editable(base)
         previous = None if focused_field is None or focused_field.value is None else str(focused_field.value)
+        selection = self._active_type_selection(bundle, previous)
         count = self._run_gated(action, bundle, execute)
         where = f" into {bundle}"
         if focused:
@@ -4410,6 +4529,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{where}{''.join(note)}",
             tool="type", app=bundle, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _linux_key(self, chord: str, identifier: str) -> str:
@@ -4570,6 +4690,12 @@ class Runtime:
         base = before["snap"] if before else self._current
         focused = self._focused_editable(base)
         previous = None if focused is None or focused.value is None else str(focused.value)
+        # Do not probe the frontmost app here. That probe is the focus
+        # recheck inside the gate, and an extra call consumes it.
+        current_app = getattr(getattr(self, "_current", None), "app", None)
+        selection = self._active_type_selection(
+            target[0] if target is not None else current_app, previous,
+        )
         if target is not None:
             bundle, pid = target
 
@@ -4586,6 +4712,7 @@ class Runtime:
                 f"typed {count} characters into {bundle} "
                 "(addressed to its process; nothing was activated)",
                 tool="type", app=bundle, before=before, requested=text, previous=previous,
+                selection=selection,
             )
         front = self._frontmost()
 
@@ -4601,6 +4728,7 @@ class Runtime:
         return self._conclude(
             f"typed {count} characters{''.join(note)}",
             tool="type", app=front, before=before, requested=text, previous=previous,
+            selection=selection,
         )
 
     def _validate_chord(self, chord: str) -> None:
@@ -5133,7 +5261,15 @@ class Runtime:
         in-scroll row read was still the old head (``rows_stale``) is not
         the end of the search either: the page did move, and the next
         iteration snapshots the tree again instead of aborting or turning
-        around."""
+        around.
+
+        The snapshot taken in the same turn as the wheel can still be the
+        pre-scroll tree: the row is named at its old position after the
+        page has moved past it. A hit is returned only when a later
+        snapshot still shows that match and its center lies inside the
+        window. Otherwise the search scrolls back toward the row and
+        checks again. The ref and the bounds are from that confirming
+        snapshot, not from the pre-scroll one."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -5159,6 +5295,94 @@ class Runtime:
         def rows_stale(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "rows_stale"
 
+        def viewport_box(snap: Snapshot) -> tuple[int, int, int, int] | None:
+            """Window rectangle, or the main display when the snapshot has no window."""
+            windows = [
+                el for el in snap.elements
+                if el.role in ("AXWindow", "AXSheet", "AXDialog")
+                and el.bounds.width > 40 and el.bounds.height > 40
+            ]
+            if windows:
+                box = max(windows, key=lambda el: el.bounds.width * el.bounds.height).bounds
+                return (box.x, box.y, box.x + box.width, box.y + box.height)
+            if not snap.displays:
+                return None
+            display = next((item for item in snap.displays if item.is_main), snap.displays[0])
+            return (0, 0, display.width, display.height)
+
+        def on_screen(el: Element, snap: Snapshot) -> bool:
+            """True when ``el``'s center sits inside the window.
+
+            A row the page has parked above the viewport can still carry the
+            y it had before the wheel. Overlapping the top edge is not enough:
+            the center has to be inside the window.
+            """
+            bounds = el.bounds
+            if bounds.width < 1 or bounds.height < 1:
+                return False
+            box = viewport_box(snap)
+            if box is None:
+                return True
+            left, top, right, bottom = box
+            center_x = bounds.x + bounds.width / 2
+            center_y = bounds.y + bounds.height / 2
+            return left <= center_x < right and top <= center_y < bottom
+
+        def visible_matches(snap: Snapshot) -> list[Element]:
+            return [
+                el for el in observe.find_elements(snap, text=text, role=role)
+                if on_screen(el, snap)
+            ]
+
+        def place_of(snap: Snapshot) -> str:
+            """Where the match sits relative to the window.
+
+            ``visible`` is a center inside the window. ``above`` and ``below``
+            are a match whose center is outside that window. ``missing`` is
+            no match in this snapshot. A document table keeps rows that have
+            already left the viewport, so a name in the tree is not a hit.
+            """
+            found = observe.find_elements(snap, text=text, role=role)
+            if not found:
+                return "missing"
+            if any(on_screen(el, snap) for el in found):
+                return "visible"
+            box = viewport_box(snap)
+            if box is None:
+                return "visible"
+            _left, top, _right, bottom = box
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            if center_y < top:
+                return "above"
+            if center_y >= bottom:
+                return "below"
+            return "visible"
+
+        def confirming_snapshot(scrolls_issued: int) -> tuple[str, str | None]:
+            """``(found, text)`` when a later snapshot still shows the match.
+
+            The read in the same turn as the wheel can be the pre-scroll
+            tree. A second read that drops the match, or moves its center
+            out of the window, is not a hit. ``above`` / ``below`` /
+            ``missing`` tell the caller which way to scroll.
+            """
+            fresh = self.driver.snapshot(Scope(scope), bundle)
+            self._current = fresh
+            kind = place_of(fresh)
+            if kind != "visible":
+                return kind, None
+            time.sleep(_SCROLL_VERIFY_PAUSE_S)
+            later = self.driver.snapshot(Scope(scope), bundle)
+            self._current = later
+            kind = place_of(later)
+            if kind != "visible":
+                return kind, None
+            visible = visible_matches(later)
+            return "found", (
+                f"found after {scrolls_issued} scroll(s):\n"
+                f"{observe.render_matches(later, visible)}"
+            )
+
         def execute() -> str:
             # Several lines per step can pass the target and stop at the end
             # of the list. On the 0.4.17 retest the search reached ITEM-193
@@ -5173,6 +5397,7 @@ class Runtime:
             issued = 0
             turned = False
             stalls = 0
+            backs = 0
             limit = max_scrolls
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
@@ -5185,7 +5410,55 @@ class Runtime:
                     )
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
-                    return f"found after {issued} scroll(s):\n{observe.render_matches(snap, matches)}"
+                    shown = visible_matches(snap)
+                    if shown and issued == 0:
+                        return (
+                            f"found after {issued} scroll(s):\n"
+                            f"{observe.render_matches(snap, shown)}"
+                        )
+                    if issued > 0:
+                        # The naming snapshot can be the tree from before this
+                        # wheel. Return a ref only when a later snapshot still
+                        # has the match inside the window.
+                        kind, verified = confirming_snapshot(issued)
+                        if kind == "found" and verified is not None:
+                            return verified
+                        if issued >= limit:
+                            break
+                        if kind == "above":
+                            recover = -abs(dy)
+                        elif kind == "below":
+                            recover = abs(dy)
+                        else:
+                            # The row left the tree. The last step went past it.
+                            backs += 1
+                            if backs > _SCROLL_VERIFY_BACKS:
+                                break
+                            recover = -step if step else -dy
+                        step = recover
+                        anchor = (
+                            self.driver.resolve_ref(pinned[0], ref, live=self._current)
+                            if pinned is not None else _scroll_anchor(self._current)
+                        )
+                        if anchor is None:
+                            break
+                        try:
+                            self._run_gated(
+                                Scroll(target=anchor, dy=recover), bundle,
+                                partial(inject_scroll, anchor, recover),
+                                recheck=partial(self._recheck_target, target=anchor),
+                            )
+                        except ComputerUseError as exc:
+                            if rows_stale(exc):
+                                issued += 1
+                                stalls = 0
+                                continue
+                            if page_unchanged(exc):
+                                break
+                            raise
+                        issued += 1
+                        stalls = 0
+                        continue
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
@@ -7288,7 +7561,11 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. A wheel that does not move the page
+        matching ref(s) or a not-found note. The ref is from a snapshot taken
+        after the scroll settles, and only when that match's center is inside
+        the window. A name that disappears on the re-read was the pre-scroll
+        tree; the search scrolls back toward the row and checks again instead
+        of returning that stale ref. A wheel that does not move the page
         (page_unchanged) is repeated once: the tree can still be the pre-scroll
         rows. A second still page does not end the search while the other
         direction has not been tried and the target has not been shown. The
