@@ -1007,6 +1007,22 @@ def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> li
     return out
 
 
+def folded_children(snap: Snapshot) -> tuple[tuple[str, int], ...]:
+    """``(ref, count)`` for nodes whose children ``render_text`` hides as ``… N more``.
+
+    The count is the elision recorded for this snapshot epoch. An empty tuple
+    means nothing was folded, or the epoch has already left the registry.
+    """
+    counts = _EPOCHS.get(snap.snapshot_id, {})
+    if not counts:
+        return ()
+    return tuple(
+        (element.ref, counts[element.ref])
+        for element in snap.elements
+        if counts.get(element.ref, 0)
+    )
+
+
 def estimate_tokens(snap: Snapshot, *, mode: str = "full") -> int:
     """Estimate the LLM token footprint of ``snap``'s serialized form.
 

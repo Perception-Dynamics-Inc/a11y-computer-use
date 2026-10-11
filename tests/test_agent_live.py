@@ -1013,6 +1013,91 @@ def test_agent_clicks_a_target_inside_a_chrome_canvas(tmp_path, isolated_home, p
 
 
 @requires_display
+def test_agent_clicks_a_canvas_target_behind_a_toolbar(tmp_path, isolated_home, pages) -> None:
+    """A toolbar of named buttons does not keep a canvas target as text.
+
+    The page lists Back, Reload, and Ready beside the canvas. The model asks
+    for the sketch. That node is an opaque region, so the next turn receives
+    a crop and the coordinate click lands on the red square.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    browser, site, _endpoint = pages
+    from a11y_computer_use.schema import Scope
+
+    browser.navigate(site.url("toolbar-canvas.html"))
+    snap = browser.snapshot(Scope.WINDOW, browser._target_id)
+    assert any(el.title == "Back" for el in snap.elements), render_text(snap)
+    assert any(el.role == "opaque_region" for el in snap.elements), render_text(snap)
+    _grant(browser._target_id)
+    point = _eval(
+        browser,
+        "(() => { const pad = document.getElementById('pad');"
+        " const rect = pad.getBoundingClientRect();"
+        " return {x: Math.round(rect.left + window.scrollX + 220),"
+        " y: Math.round(rect.top + window.scrollY + 120)}; })()",
+    )
+    assert isinstance(point, dict), point
+    trace = tmp_path / "trace-toolbar-canvas"
+    trace.mkdir()
+    seen: list = []
+
+    def _attached(messages) -> list:
+        found = []
+        for message in messages:
+            content = message.content
+            blocks = content if isinstance(content, list) else []
+            found.extend(
+                block for block in blocks
+                if isinstance(block, dict) and block.get("type") == "image"
+            )
+        return found
+
+    def _text(messages) -> str:
+        parts = []
+        for message in messages:
+            content = message.content
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list) and content and isinstance(content[0], dict):
+                parts.append(str(content[0].get("text") or ""))
+        return "\n".join(parts)
+
+    def script(messages):
+        seen.append(messages)
+        attached = _attached(messages)
+        text = _text(messages)
+        if len(seen) == 1:
+            assert not attached, "image attached while the toolbar still names Back"
+            assert "Back" in text
+            return ModelTurn(calls=[ToolCall("find", {"text": "sketch"})])
+        if len(seen) == 2:
+            assert attached, "expected a crop after the sketch was found inside the canvas"
+            assert "insufficient (opaque_region)" in text
+            return ModelTurn(calls=[ToolCall("click", {
+                "x": int(point["x"]),
+                "y": int(point["y"]),
+                "display_id": 0,
+            })])
+        return ModelTurn(calls=[ToolCall("done", {
+            "answer": "hit",
+            "conditions": [{"element": {"role": "AXButton", "name": "Ready"}}],
+        })])
+
+    result = _run_agent(
+        Agent,
+        _scripted(ScriptedModel, script),
+        "Click the red square drawn inside the canvas.",
+        trace,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert len(seen) >= 2
+    _assert_trace(result, trace)
+
+
+@requires_display
 def test_agent_checkout_stops_for_a_human_payment(tmp_path, isolated_home, pages) -> None:
     """A saved-card Pay now click stops. The prompt names the button, URL, and reason."""
     Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
