@@ -197,6 +197,48 @@ def test_press_opens_each_level_then_the_leaf() -> None:
     assert file_menu.pressed == ["click"]
 
 
+def test_classify_leaf_press_treats_a_timeout_as_dispatched() -> None:
+    assert _linux_menus.classify_leaf_press(True, failed=False, elapsed=0.05) == "ok"
+    assert _linux_menus.classify_leaf_press(False, failed=True, elapsed=0.40) == "dispatched"
+    assert _linux_menus.classify_leaf_press(False, failed=False, elapsed=0.40) == "dispatched"
+    assert _linux_menus.classify_leaf_press(False, failed=False, elapsed=0.05) == "refused"
+    assert _linux_menus.classify_leaf_press(False, failed=True, elapsed=0.05) == "refused"
+
+
+def test_leaf_timeout_waits_for_the_dialog_and_a_quick_refusal_still_fails() -> None:
+    """A slow leaf is not 'the app refused'. A quick false still is."""
+    app, file_menu = mousepad()
+    seen: dict[str, object] = {}
+
+    def dispatch(node):
+        seen["node"] = node.name
+        return "dispatched"
+
+    def await_dialog(root, *, dispatched: bool) -> None:
+        seen["dispatched"] = dispatched
+        seen["root"] = root
+
+    title = _linux_menus.menu_press(
+        app, "File > New", settle=lambda _s: None,
+        dispatch=dispatch, await_dialog=await_dialog,
+    )
+    assert title == "New"
+    assert seen == {"node": "New", "dispatched": True, "root": app}
+    assert file_menu.pressed == ["click"]
+    new = next(child for child in file_menu.children if child.name == "New")
+    assert new.pressed == []
+
+    def refuse(_node):
+        return "refused"
+
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "File > Open…", settle=lambda _s: None, dismiss=lambda: None, dispatch=refuse,
+        )
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "press_failed"
+
+
 def test_press_of_a_disabled_item_does_not_activate_it() -> None:
     """Escape closes the menu that was opened. A second click does not."""
     app, file_menu = mousepad()
