@@ -1150,6 +1150,206 @@ def test_chrome_list_option_click_still_selects(monkeypatch) -> None:
     assert cherry.action_log == ["click"]
 
 
+class _Relation:
+    def __init__(self, kind, targets):
+        self.kind = kind
+        self.targets = list(targets)
+
+    def get_relation_type(self):
+        return self.kind
+
+    def get_n_targets(self):
+        return len(self.targets)
+
+    def get_target(self, index):
+        return self.targets[index]
+
+
+def _aria_city(*, toolkit="Chromium", nest=False):
+    """An ARIA combobox and its listbox. ``nest`` hangs the list off the input."""
+    city = _Node(
+        "entry", "City", text="",
+        states={"EXPANDABLE", "EXPANDED", "ENABLED", "EDITABLE", "FOCUSABLE", "SENSITIVE"},
+        attrs={"xml-roles": "combobox", "tag": "input", "id": "city"},
+    )
+    berlin = _Node("list item", "Berlin", actions=["click"])
+    bern = _Node("list item", "Bern", actions=["click"])
+    box = _Node(
+        "list box", "cities", children=[berlin, bern],
+        attrs={"xml-roles": "listbox", "tag": "ul", "id": "lb"},
+    )
+    box.toolkit = toolkit
+    if nest:
+        city.children.append(box)
+        box.parent = city
+        box.get_relation_set = lambda: []
+    else:
+        box.get_relation_set = lambda: [_Relation("controlled_by", [city])]
+    return city, box, berlin, bern
+
+
+def _close_on(city, box, option, *, text=None, name=None, collapse=True, selected_attr=False):
+    """The option handler: set the input, and drop the row when the list closes."""
+
+    def click(_element, **_kwargs):
+        if text is not None:
+            city.text = text
+        if name is not None:
+            city.name = name
+        if selected_attr:
+            option.attrs["aria-selected"] = "true"
+        if collapse:
+            city.states.discard("EXPANDED")
+            option.states.add("DEFUNCT")
+            option.parent = None
+            box.children = [child for child in box.children if child is not option]
+
+    return click
+
+
+def test_aria_combobox_option_click_reports_success_when_the_list_closes(monkeypatch) -> None:
+    """The row disappears. The combobox value is the selection."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+    assert "EXPANDED" not in city.states
+    assert "SELECTED" not in bern.states
+    assert "DEFUNCT" in bern.states
+
+
+def test_aria_combobox_option_nested_under_the_input_reports_success(monkeypatch) -> None:
+    """The list is a child of the combobox, with no controls relation."""
+    city, box, _berlin, bern = _aria_city(nest=True)
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+
+
+def test_aria_combobox_option_click_confirms_from_aria_selected(monkeypatch) -> None:
+    """aria-selected is the commit when the input text does not change."""
+    city, _box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+
+    def click(_element, **_kwargs):
+        bern.attrs["aria-selected"] = "true"
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert "SELECTED" not in bern.states
+    assert city.text == ""
+    assert bern.attrs["aria-selected"] == "true"
+
+
+def test_aria_combobox_option_click_confirms_when_the_popup_collapses_onto_the_value(monkeypatch) -> None:
+    """The input already shows the option. Closing the popup is the change."""
+    city, box, _berlin, bern = _aria_city()
+    city.text = "Bern"
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, collapse=True)  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.text == "Bern"
+    assert "EXPANDED" not in city.states
+
+
+def test_aria_combobox_option_click_confirms_when_the_name_becomes_the_option(monkeypatch) -> None:
+    """Some trees publish the current item as the accessible name."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, name="Bern")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert city.name == "Bern"
+    assert city.text == ""
+
+
+def test_aria_combobox_option_click_that_changes_nothing_is_unsupported(monkeypatch) -> None:
+    """A click that leaves the value, the name, and the popup alone is a failure."""
+    city, _box, berlin, bern = _aria_city()
+    berlin.states.add("SELECTED")
+    driver = _driver(monkeypatch, bern)
+    driver.click = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == ""
+    assert city.name == "City"
+    assert "EXPANDED" in city.states
+    assert "SELECTED" not in bern.states
+    assert "SELECTED" in berlin.states
+
+
+def test_aria_combobox_option_click_that_picks_a_different_value_is_unsupported(monkeypatch) -> None:
+    """Closing the list onto another city is not a selection of this option."""
+    city, box, _berlin, bern = _aria_city()
+    driver = _driver(monkeypatch, bern)
+    driver.click = _close_on(city, box, bern, text="Berlin")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == "Berlin"
+    assert "SELECTED" not in bern.states
+
+
+def test_aria_combobox_option_action_that_closes_the_list_does_not_click_again(monkeypatch) -> None:
+    """A non-Chromium list action that commits the combobox is success.
+
+    The row never becomes SELECTED. A second pointer click is not sent.
+    """
+    city, box, _berlin, bern = _aria_city(toolkit="")
+    box.select_fails = True
+
+    def do_action(index, _node=bern):
+        _node.action_log.append(_node.actions[index])
+        city.text = "Bern"
+        city.states.discard("EXPANDED")
+        _node.states.add("DEFUNCT")
+        _node.parent = None
+        return True
+
+    bern.do_action = do_action
+    driver = _driver(monkeypatch, bern)
+    pointer: list[str] = []
+    driver.click = lambda *_args, **_kwargs: pointer.append("click")  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    assert driver.press_element(element) is True
+    assert bern.action_log == ["click"]
+    assert pointer == []
+    assert city.text == "Bern"
+    assert "SELECTED" not in bern.states
+
+
+def test_aria_combobox_option_action_that_changes_nothing_is_unsupported(monkeypatch) -> None:
+    """The same action path reports failure when the combobox stays put."""
+    city, box, _berlin, bern = _aria_city(toolkit="")
+    box.select_fails = True
+
+    def do_action(index, _node=bern):
+        _node.action_log.append(_node.actions[index])
+        return True
+
+    bern.do_action = do_action
+    driver = _driver(monkeypatch, bern)
+    driver.click = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Bern", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert city.text == ""
+    assert "EXPANDED" in city.states
+    assert "SELECTED" not in bern.states
+    assert bern.action_log == ["click"]
+
+
 def test_chrome_snapshot_reports_selected_text_pressed_and_empty_number(monkeypatch) -> None:
     monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
     country = _Node(

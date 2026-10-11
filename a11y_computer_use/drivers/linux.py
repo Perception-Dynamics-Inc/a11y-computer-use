@@ -1469,8 +1469,13 @@ class LinuxDriver:
         # row's center is what selects the row. Nothing is changed on the
         # accessibility tree before that click. If the click does not select
         # the row, the previous selection is put back.
+        # An ARIA combobox option's handler sets the input and closes the
+        # list. The row is gone, so it never becomes SELECTED. The combobox
+        # value, its name, aria-selected, or the collapsed text is the
+        # read-back. That reading is taken before the click.
         if self._run(lambda: _atspi.chromium_list_row(handle)):
             before = self._run(lambda: _atspi.selected_option_names(handle))
+            choice = self._run(lambda: _atspi.combobox_option_context(handle))
             bounds = element.bounds
             if bounds is not None and bounds.width > 0 and bounds.height > 0:
                 try:
@@ -1478,6 +1483,8 @@ class LinuxDriver:
                 except ComputerUseError:
                     pass
                 if self._run(lambda: _atspi.row_becomes_selected(handle)):
+                    return True
+                if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
                     return True
             self._run(lambda: _atspi.restore_selection(handle, before))
             raise ComputerUseError(
@@ -1488,12 +1495,16 @@ class LinuxDriver:
         # Read the toggle before the click action. Chrome publishes EXPANDED
         # a beat after doAction("click") returns, and the selection does not
         # move on a treeitem that has no aria-selected. A center click would
-        # run that handler again and collapse the node.
+        # run that handler again and collapse the node. The combobox reading
+        # is taken here too, before that action closes the list.
         before_toggle = self._run(lambda: _atspi.row_toggle_state(handle))
+        choice = self._run(lambda: _atspi.combobox_option_context(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
             return self._run(lambda: _atspi.do_press(handle))
         if selected:
+            return True
+        if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
             return True
         # Only a row whose click or toggle action already ran. A GTK expand
         # action is not that, and still falls through to the center click.
@@ -1512,8 +1523,12 @@ class LinuxDriver:
             except ComputerUseError:
                 if self._run(lambda: _atspi.row_is_selected(handle)):
                     return True
+                if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
+                    return True
                 raise
             if self._run(lambda: _atspi.row_is_selected(handle)):
+                return True
+            if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):
                 return True
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
