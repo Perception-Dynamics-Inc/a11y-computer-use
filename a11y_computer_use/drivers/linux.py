@@ -1343,11 +1343,26 @@ class LinuxDriver:
                 f"{element.ref} ({element.role}) click did not change the selection",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # Read the toggle before the click action. Chrome publishes EXPANDED
+        # a beat after doAction("click") returns, and the selection does not
+        # move on a treeitem that has no aria-selected. A center click would
+        # run that handler again and collapse the node.
+        before_toggle = self._run(lambda: _atspi.row_toggle_state(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
             return self._run(lambda: _atspi.do_press(handle))
         if selected:
             return True
+        # Only a row whose click or toggle action already ran. A GTK expand
+        # action is not that, and still falls through to the center click.
+        if self._run(lambda: _atspi.row_toggle_blocks_pointer(handle)):
+            if self._run(lambda: _atspi.row_toggle_committed(before_toggle, handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not change the selection",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         bounds = element.bounds
         if bounds is not None and bounds.width > 0 and bounds.height > 0:
             try:

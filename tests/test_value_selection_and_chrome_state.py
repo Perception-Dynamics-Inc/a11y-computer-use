@@ -100,7 +100,7 @@ class _Node:
         return True
 
     def get_selection_iface(self):
-        if self.role in {"combo box", "list box", "table", "tree table"}:
+        if self.role in {"combo box", "list box", "table", "tree table", "tree"}:
             return self
         return None
 
@@ -897,6 +897,148 @@ def test_tree_row_click_uses_the_center_when_selection_does_not(monkeypatch) -> 
     assert driver.press_element(element) is True
     assert "SELECTED" in target.states
     assert target.action_log == []
+
+
+def _treeitem(name, *, expanded=False, checked=None, actions=("click",)):
+    """An ARIA treeitem row. The tree exposes Selection. The item does not select."""
+    states = {"EXPANDABLE", "SELECTABLE", "ENABLED", "SENSITIVE", "SHOWING"}
+    if expanded:
+        states.add("EXPANDED")
+    if checked is not None:
+        states.add("CHECKABLE")
+        if checked:
+            states.add("CHECKED")
+    item = _Node("tree item", name, states=states, actions=list(actions))
+    tree = _Node("tree", "Files", children=[item])
+    tree.select_fails = True
+    return tree, item
+
+
+def test_aria_treeitem_click_waits_for_expanded_and_does_not_click_again(monkeypatch) -> None:
+    """The click action flips the node a beat later. A second click is not sent.
+
+    Chrome returns from the click action while the treeitem is still
+    collapsed, then publishes EXPANDED. The selection does not move. A
+    pointer click at the center would run the handler again and collapse it.
+    """
+    _tree, item = _treeitem("Folder A")
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.armed = True
+        return True
+
+    def sleep(_seconds, _node=item):
+        if getattr(_node, "armed", False) and "EXPANDED" not in _node.states:
+            _node.states.add("EXPANDED")
+
+    item.do_action = do_action
+    monkeypatch.setattr(_atspi.time, "sleep", sleep)
+    clicks: list[str] = []
+
+    def click(element, **_kwargs):
+        clicks.append(element.ref)
+        if "EXPANDED" in item.states:
+            item.states.discard("EXPANDED")
+        else:
+            item.states.add("EXPANDED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    assert driver.press_element(element) is True
+    assert "EXPANDED" in item.states
+    assert "SELECTED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_aria_treeitem_collapse_is_one_activation(monkeypatch) -> None:
+    """A click on an open treeitem leaves it collapsed. The pointer is not used."""
+    _tree, item = _treeitem("Folder A", expanded=True)
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.states.discard("EXPANDED")
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    assert driver.press_element(element) is True
+    assert "EXPANDED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_aria_treeitem_click_that_changes_nothing_does_not_click_again(monkeypatch) -> None:
+    """A toggle row whose click action changes nothing is not clicked twice."""
+    _tree, item = _treeitem("Folder A")
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Folder A", clickable=True)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "selection_unchanged"
+    assert item.action_log == ["click"]
+    assert clicks == []
+    assert "EXPANDED" not in item.states
+
+
+def test_checkable_row_click_toggles_once(monkeypatch) -> None:
+    """A checkable row's click sets CHECKED. A second click is not sent."""
+    states = {"CHECKABLE", "SELECTABLE", "ENABLED"}
+    item = _Node("table cell", "Agree", states=states, actions=["click"])
+    table = _Node("table", "Rows", children=[item])
+    table.select_fails = True
+    driver = _driver(monkeypatch, item)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        item.states.add("CHECKED")
+        return True
+
+    item.do_action = do_action
+    clicks: list[str] = []
+    driver.click = lambda element, **_kwargs: clicks.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e26", "AXRow", "Agree", clickable=True)
+    assert driver.press_element(element) is True
+    assert "CHECKED" in item.states
+    assert "SELECTED" not in item.states
+    assert item.action_log == ["click"]
+    assert clicks == []
+
+
+def test_expandable_gtk_cell_still_uses_the_center_when_selection_does_not(monkeypatch) -> None:
+    """A GTK cell's expand action is not a click. The center click still selects."""
+    _table_node, rows = _table()
+    _table_node.select_fails = True
+    target = rows[2]
+    target.states.add("EXPANDABLE")
+    driver = _driver(monkeypatch, target)
+    clicks: list[str] = []
+
+    def click(element, **_kwargs):
+        clicks.append(element.ref)
+        target.states.add("SELECTED")
+        rows[1].states.discard("SELECTED")
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e19", "AXGroup", "Row C", clickable=True, y=70)
+    assert driver.press_element(element) is True
+    assert "SELECTED" in target.states
+    assert target.action_log == []
+    assert clicks == ["e19"]
 
 
 def test_tree_row_click_errors_when_the_selection_stays_put(monkeypatch) -> None:

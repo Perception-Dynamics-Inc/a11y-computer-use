@@ -7629,6 +7629,111 @@ def test_linux_chrome_canvas_fallback_button_activates_and_sibling_button_works(
         _stop_group(proc)
 
 
+def test_linux_chrome_aria_treeitem_click_expands_once(tmp_path) -> None:
+    """Live Chrome. A ref click on an ARIA treeitem expands it once.
+
+    The row is an ``AXRow`` with ``aria-expanded`` and no ``aria-selected``.
+    One activation leaves the node expanded, the child row visible, and the
+    page handler at one click. A second activation would collapse it and the
+    tool would report ``selection_unchanged``.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the ARIA treeitem click test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "aria-tree.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuatree301</title>"
+        "<style>body{margin:16px;font:16px sans-serif}</style>"
+        "<ul role=tree aria-label=Files>"
+        "<li role=treeitem aria-expanded=false id=f onclick=\"event.stopPropagation();"
+        "let e=this.getAttribute('aria-expanded')=='true';"
+        "this.setAttribute('aria-expanded',!e);g.hidden=e;"
+        "window.k=(window.k||0)+1;"
+        "o.textContent='out:'+(!e)+' clicks='+window.k\">Folder A"
+        "<ul role=group id=g hidden><li role=treeitem>Child file X</li></ul></li>"
+        "</ul><p id=o>out:</p>"
+    )
+    profile = tmp_path / "chrome-aria-tree"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the tree")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            rendered = observe.render_text(shot)
+            last = rendered[:500]
+            row = next(
+                (
+                    el for el in shot.elements
+                    if el.role == "AXRow" and el.title == "Folder A" and el.clickable
+                ),
+                None,
+            )
+            if row is not None and row.expanded is False and "cuatree301" in rendered:
+                snap = shot
+                break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose the collapsed treeitem\n{last}"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        driver.activate_app("chrome")
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        runtime._current = shot
+        row = next(
+            el for el in shot.elements
+            if el.role == "AXRow" and el.title == "Folder A" and el.clickable
+        )
+        assert row.expanded is False
+        result = runtime.click(row.ref)
+        assert str(result).startswith("clicked "), result
+        assert "did not change the selection" not in str(result)
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(shot)
+            child = any(el.role == "AXRow" and el.title == "Child file X" for el in shot.elements)
+            if "out:true clicks=1" in shown and "clicks=2" not in shown and child:
+                break
+            time.sleep(0.25)
+        assert "out:true clicks=1" in shown, shown
+        assert "clicks=2" not in shown, shown
+        assert any(el.role == "AXRow" and el.title == "Child file X" for el in shot.elements), shown
+        folder = next(
+            (
+                el for el in shot.elements
+                if el.role == "AXRow" and el.title == "Folder A"
+            ),
+            None,
+        )
+        if folder is not None:
+            assert folder.expanded is True, shown
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_statictext_click_activates_the_button(tmp_path) -> None:
     """Live Chrome. A statictext ref for a button label activates that button.
 
