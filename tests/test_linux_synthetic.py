@@ -175,6 +175,46 @@ def test_browser_frame_view_is_chrome_ui_and_not_the_page() -> None:
     assert _atspi.browser_frame_view(popup, {}, role_str="document web") is True
 
 
+def test_browser_frame_view_reuses_the_object_path(monkeypatch) -> None:
+    """A second proxy with the same path does not walk parents again.
+
+    Synthetic nodes. ``get_parent`` on a live accessible returns a new
+    wrapper, so the cache is the object path, not ``id()``.
+    """
+
+    class _Node:
+        def __init__(self, role, parent=None, path=None):
+            self.role = role
+            self.parent = parent
+            self.path = path
+            self.parent_reads = 0
+
+        def get_role_name(self):
+            return self.role
+
+        def get_parent(self):
+            self.parent_reads += 1
+            return self.parent
+
+        def get_name(self):
+            return ""
+
+    def path_of(acc):
+        return getattr(acc, "path", None)
+
+    monkeypatch.setattr(_atspi, "_atspi_object_path", path_of)
+    app = _Node("application", path="/org/a11y/atspi/app")
+    frame = _Node("frame", app, path="/org/a11y/atspi/frame")
+    first = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    second = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    cache: dict[object, bool] = {}
+    assert _atspi.browser_frame_view(first, cache, role_str="panel") is True
+    assert frame.parent_reads == 1
+    assert _atspi.browser_frame_view(second, cache, role_str="panel") is True
+    assert second.parent_reads == 0
+    assert frame.parent_reads == 1
+
+
 def test_atspi_vocabulary_flows_through_shared_engine() -> None:
     """A Linux-shaped tree (window > button + entry) prunes/indexes through the
     identical engine macOS uses: AXWindow root, a clickable button, an editable

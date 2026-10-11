@@ -1874,7 +1874,7 @@ class ATSPIAccessor:
         # Whether this tree is Chromium or Firefox. None until the first read.
         # A childless browser-frame view is not a page region.
         self._browser_app: bool | None = None
-        self._browser_chrome_cache: dict[int, bool] = {}
+        self._browser_chrome_cache: dict[object, bool] = {}
 
     def _bound_instance_id(self, node: object) -> str | None:
         if not self._instance_ready:
@@ -1964,7 +1964,9 @@ class ATSPIAccessor:
             ),
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
-            browser_chrome=self._browser_frame(node, role_str),
+            # Only a group can be suppressed as browser chrome. A button,
+            # cell, or canvas does not pay for the parent walk.
+            browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -2505,9 +2507,57 @@ def document_url_for(acc) -> str | None:
     return None
 
 
+def _atspi_object_path(acc) -> str | None:
+    """The AT-SPI object path, or None for a test double.
+
+    Read from the libatspi object. This does not call D-Bus. A path that is
+    not an accessibility object is ignored.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+
+        class _GObject(ctypes.Structure):
+            _fields_ = [
+                ("g_class", ctypes.c_void_p),
+                ("ref_count", ctypes.c_uint),
+                ("pad", ctypes.c_uint),
+                ("qdata", ctypes.c_void_p),
+            ]
+
+        class _AtspiObject(ctypes.Structure):
+            _fields_ = [
+                ("parent", _GObject),
+                ("app", ctypes.c_void_p),
+                ("path", ctypes.c_char_p),
+            ]
+
+        raw = _AtspiObject.from_address(pointer).path or b""
+        if not raw.startswith(b"/org/a11y/atspi/"):
+            return None
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _frame_cache_key(acc) -> object:
+    """A stable key for one accessible across wrapper objects.
+
+    ``get_parent`` returns a new proxy each call. ``id()`` would miss, and
+    every node would walk to the application over D-Bus. The object path is
+    the same proxy to proxy. A test double has no path and uses ``id()``.
+    """
+    path = _atspi_object_path(acc)
+    if path:
+        return path
+    return id(acc)
+
+
 def browser_frame_view(
     acc,
-    cache: dict[int, bool],
+    cache: dict[object, bool],
     *,
     role_str: str | None = None,
 ) -> bool:
@@ -2516,13 +2566,13 @@ def browser_frame_view(
     The caller has already decided ``acc`` belongs to a browser. A
     ``document web`` or ``internal frame`` is page content, including when
     its URL is not published yet. An omnibox-popup URL is still browser UI.
-    ``cache`` remembers each node so a snapshot walks each parent once.
-    GTK and Qt must not call this: a walk that never meets a content
+    ``cache`` remembers each object path so a snapshot walks each parent
+    once. GTK and Qt must not call this: a walk that never meets a content
     document would mark the whole tree as browser UI.
     """
     if acc is None:
         return False
-    found = cache.get(id(acc))
+    found = cache.get(_frame_cache_key(acc))
     if found is not None:
         return found
     from a11y_computer_use.untrusted import is_browser_chrome_url
@@ -2538,7 +2588,7 @@ def browser_frame_view(
             break
         seen.add(id(current))
         if current is not acc:
-            cached = cache.get(id(current))
+            cached = cache.get(_frame_cache_key(current))
             if cached is not None:
                 result = cached
                 break
@@ -2563,7 +2613,7 @@ def browser_frame_view(
             break
         current = parent
     for item in chain:
-        cache[id(item)] = result
+        cache[_frame_cache_key(item)] = result
     return result
 
 
