@@ -483,9 +483,41 @@ def approval_public(action: object) -> dict:
     return body
 
 
+_RUN_FIELDS = {
+    "goal",
+    "model",
+    "display",
+    "limits",
+    "allow_exec",
+    "allow_payments",
+    "allowed_domains",
+    "blocked_domains",
+}
+_LIMIT_FIELDS = {"max_steps", "max_time_s", "model_timeout_s"}
+
+
+def _unknown_field_message(given: dict, allowed: set[str], *, where: str = "") -> str | None:
+    """Name keys ``given`` has that ``allowed`` does not.
+
+    The text starts with ``invalid_arguments:`` so HTTP and the agent MCP
+    server can pass it through as the typed argument error.
+    """
+    extra = sorted(str(name) for name in given if str(name) not in allowed)
+    if not extra:
+        return None
+    expected = ", ".join(sorted(allowed)) if allowed else "no fields"
+    names = ", ".join(repr(name) for name in extra)
+    label = "field" if len(extra) == 1 else "fields"
+    prefix = f"{where}: " if where else ""
+    return f"invalid_arguments: {prefix}unknown {label} {names}; expected {expected}"
+
+
 def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool, list[str] | None, list[str] | None]:
     if not isinstance(body, dict):
         raise ValueError("body must be a JSON object")
+    unknown = _unknown_field_message(body, _RUN_FIELDS)
+    if unknown:
+        raise ValueError(unknown)
     goal = body.get("goal")
     model = body.get("model")
     if not isinstance(goal, str) or not goal.strip():
@@ -498,6 +530,9 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
     limits = body.get("limits") or {}
     if not isinstance(limits, dict):
         raise ValueError("limits must be an object")
+    unknown_limits = _unknown_field_message(limits, _LIMIT_FIELDS, where="limits")
+    if unknown_limits:
+        raise ValueError(unknown_limits)
     max_steps = limits.get("max_steps", 50)
     max_time_s = limits.get("max_time_s", 900)
     model_timeout_s = limits.get("model_timeout_s", 120)

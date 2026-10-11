@@ -9,7 +9,8 @@ import time
 from types import SimpleNamespace
 
 from a11y_computer_use.agent import Agent, ReservedPermission, tool_schemas
-from a11y_computer_use.agent.core import check_conditions
+from a11y_computer_use.agent.actions import Action
+from a11y_computer_use.agent.core import check_conditions, to_runtime_call
 from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 from a11y_computer_use.observe import render_text
@@ -99,6 +100,29 @@ def run(model, elements, **kwargs):
 
 def types(events) -> list[str]:
     return [event.type for event in events]
+
+
+def test_scroll_display_id_reaches_the_runtime(tmp_path):
+    """A declared scroll display_id is forwarded, including display 0."""
+    point = to_runtime_call(
+        Action(name="scroll", args={"dx": 0, "dy": -1, "x": 10, "y": 20, "display_id": 0}),
+        None,
+    )
+    assert point == ("scroll", {"dx": 0, "dy": -1, "x": 10, "y": 20, "display_id": 0})
+    bare = to_runtime_call(Action(name="scroll", args={"dx": 1, "dy": 2}), None)
+    assert "display_id" not in bare[1]
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("scroll", {"x": 4, "y": 8, "dx": 0, "dy": 1, "display_id": 0})),
+            turn(done("scrolled", [{"element": {"role": "AXButton", "name": "Save"}}])),
+        ]),
+        elements,
+        trace_dir=tmp_path,
+    )
+    assert result.status == "success"
+    assert runtime.calls[0] == ("scroll", {"dx": 0, "dy": 1, "x": 4, "y": 8, "display_id": 0})
 
 
 def test_done_only_event_order(tmp_path):

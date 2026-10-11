@@ -2175,6 +2175,8 @@ def to_runtime_call(action: Action, app: str | None) -> tuple[str, dict]:
         if args.get("x") is not None and args.get("y") is not None:
             params["x"] = int(args["x"])
             params["y"] = int(args["y"])
+        if args.get("display_id") is not None:
+            params["display_id"] = int(args["display_id"])
         return "scroll", params
     if name == "app":
         params = {"action": args["action"]}

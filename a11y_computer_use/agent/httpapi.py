@@ -14,7 +14,7 @@ import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
-from a11y_computer_use.agent.service import DisplayBusy, RunStore
+from a11y_computer_use.agent.service import DisplayBusy, RunStore, _unknown_field_message
 
 _MAX_BODY = 1_000_000
 
@@ -112,7 +112,7 @@ def _handler_class(shared_store: RunStore, shared_token: str | None):
                 self._start(body)
                 return
             if len(parts) == 3 and parts[0] == "runs" and parts[2] == "cancel":
-                self._cancel(parts[1])
+                self._cancel(parts[1], body)
                 return
             if len(parts) == 4 and parts[0] == "runs" and parts[2] == "approvals":
                 self._approve(parts[1], parts[3], body)
@@ -173,7 +173,11 @@ def _handler_class(shared_store: RunStore, shared_token: str | None):
                 return
             self._send(200, type(self).store.view(record))
 
-        def _cancel(self, run_id: str) -> None:
+        def _cancel(self, run_id: str, body: dict) -> None:
+            message = _unknown_field_message(body, set())
+            if message:
+                self._send(400, {"error": message})
+                return
             record = type(self).store.cancel(run_id)
             if record is None:
                 self._send(404, {"error": "run not found"})
@@ -181,6 +185,10 @@ def _handler_class(shared_store: RunStore, shared_token: str | None):
             self._send(202, {"id": record.id, "cancel": True})
 
         def _approve(self, run_id: str, approval_id: str, body: dict) -> None:
+            message = _unknown_field_message(body, {"approve"})
+            if message:
+                self._send(400, {"error": message})
+                return
             if "approve" not in body or not isinstance(body.get("approve"), bool):
                 self._send(400, {"error": "approve must be a boolean"})
                 return

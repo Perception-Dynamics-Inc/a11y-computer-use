@@ -238,3 +238,23 @@ async def test_mcp_approve_shows_the_same_payment_target(tmp_path: Path) -> None
         }))
         assert answered["approve"] is False
         assert opted_runtime.calls == []
+
+
+def test_run_store_rejects_an_unknown_body_field(tmp_path: Path) -> None:
+    """The body ``run_goal`` hands to ``RunStore.start`` rejects unknown keys.
+
+    The model factory is not called and no run is stored. Unknown keys on the
+    MCP tool arguments themselves are sealed when the desktop argument check
+    lands; this is the shared service body.
+    """
+    built: list[str] = []
+    store = RunStore(
+        model_factory=lambda spec: built.append(spec) or ScriptedModel([_done()]),
+        trace_root=tmp_path / "traces",
+    )
+    with pytest.raises(ValueError, match=r"invalid_arguments: unknown field 'ref'") as caught:
+        store.start({"goal": "save", "model": "scripted:unused", "ref": "e2"})
+    assert "expected" in str(caught.value)
+    assert "goal" in str(caught.value)
+    assert built == []
+    assert store._runs == {}

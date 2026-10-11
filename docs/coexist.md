@@ -31,7 +31,9 @@ it when it is not already the active window, check that the focus held, and
 then send the input. A window that cannot be focused is `focus_changed`. An
 app with no window is `app_not_found`. The error does not say the call is
 macOS-only. An empty `app` is `invalid_arguments` on every tool that accepts
-the argument.
+the argument. `app launch` with `activate=false` is unsupported on Linux,
+Windows, and the browser driver: the app is not launched. Omit `activate`.
+macOS honours the flag with `open -g`.
 
 ## What still needs the app in front
 

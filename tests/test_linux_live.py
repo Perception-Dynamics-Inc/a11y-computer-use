@@ -2480,7 +2480,7 @@ def test_linux_second_launch_reports_the_window_the_running_instance_opened(tmp_
     runtime.APP_LAUNCH_WAIT_S = 20
     first = runtime.app("launch", str(script))
     assert "first window:" in first and "handoff=1" in first, first
-    second = runtime.app("launch", str(script), activate=False)
+    second = runtime.app("launch", str(script))
     assert "first window:" in second and "handoff=2" in second, second
     focused = runtime.app("focus", str(script))
     assert focused.startswith("focused "), focused
@@ -4918,7 +4918,7 @@ def test_linux_launch_libreoffice_calc_opens_calc_not_the_start_center(tmp_path)
         tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "localc",
     )
     try:
-        launched = runtime.app("launch", "libreoffice-calc", activate=False)
+        launched = runtime.app("launch", "libreoffice-calc")
         assert "first window:" in launched, launched
         assert "Calc" in launched, launched
         assert "first window: 'LibreOffice'" not in launched, launched
@@ -4957,7 +4957,7 @@ def test_linux_snapshot_of_libreoffice_right_after_launch(tmp_path) -> None:
     os.environ["NO_AT_BRIDGE"] = "0"
     runtime = _runtime_for(tmp_path, driver, "libreoffice", "soffice", "soffice.bin")
     try:
-        launched = runtime.app("launch", "libreoffice", activate=False)
+        launched = runtime.app("launch", "libreoffice")
         assert "first window:" in launched, launched
         text = runtime.desktop_snapshot("LibreOffice", mode="interactive")
         assert text

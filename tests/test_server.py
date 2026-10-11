@@ -2561,6 +2561,60 @@ async def test_launch_activate_flag_reaches_the_driver(bg, monkeypatch) -> None:
     assert [a for _, a in driver.launched] == [False, True]
 
 
+class _FrontDriver:
+    """A desktop driver that cannot start an app behind the current one."""
+
+    resolves_apps = False
+    name = "linux"
+    background_input = False
+
+    def __init__(self) -> None:
+        self.launched: list = []
+
+    def ensure_trusted(self):
+        return None
+
+    def frontmost_app(self):
+        return ("gedit", 1)
+
+    def main_display_id(self):
+        return 0
+
+    def launch_app(self, ident, **kwargs):
+        self.launched.append((ident, kwargs))
+        return None
+
+
+async def test_app_launch_activate_false_is_unsupported_off_background_drivers(tmp_path) -> None:
+    """Linux-style drivers reject activate=false before any launch."""
+    driver = _FrontDriver()
+    store = safety.PermissionStore(tmp_path / "p.json")
+    with server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    ) as rt:
+        with pytest.raises(ComputerUseError) as caught:
+            rt.app("launch", "demo", activate=False)
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "activate_unsupported"
+        assert "linux" in caught.value.message
+        assert "not launched" in caught.value.message
+        assert driver.launched == []
+        with pytest.raises(ComputerUseError) as omitted:
+            rt.app("launch", "demo")
+        assert omitted.value.code is ErrorCode.APP_NOT_FOUND
+        assert driver.launched == []
+        mcp = server.build_server(runtime=rt)
+        result = await call_tool(mcp, "app", {
+            "action": "launch", "name": "demo", "activate": False,
+        })
+    assert result.isError
+    text = result.content[0].text
+    assert "unsupported" in text
+    assert "activate_unsupported" in text
+    assert "not launched" in text
+    assert driver.launched == []
+
+
 async def test_type_with_app_is_unsupported_off_background_drivers(bg) -> None:
     srv, rt, driver, store = bg
     driver.background_input = False
