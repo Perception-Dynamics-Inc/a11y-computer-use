@@ -3998,6 +3998,113 @@ def _row_titles(snap) -> list[str]:
     return [el.title for el in snap.elements if el.role == "AXRow"]
 
 
+def _own(app, *nodes: _Acc) -> None:
+    for node in nodes:
+        node.get_application = lambda: app
+
+
+def _expanded_chrome_tree(*, sibling: bool = False):
+    """Chromium ARIA tree whose expanded row is as tall as the tree.
+
+    Synthetic boxes, not a live Chrome window. The expanded treeitem's box
+    is the tree's box, which is what made the visible-row walk record the
+    inner static text instead of the row.
+    """
+    app = _ChromeApp()
+    bullet = _Acc("static", name="•", width=8, height=16)
+    label = _Acc("static", name="Docs folder", width=100, height=16)
+    child = _Acc("tree item", name="Report child", width=360, height=18)
+    group = _Acc("panel", name="", width=400, height=20)
+    parent = _Acc(
+        "tree item", name="Docs folder",
+        states=("EXPANDABLE", "EXPANDED", "SHOWING"),
+        width=400, height=40,
+    )
+    _adopt(group, child)
+    _adopt(parent, bullet, label, group)
+    tree = _Acc("tree", name="Files", width=400, height=40 if not sibling else 100)
+    nodes = [tree, parent, bullet, label, group, child]
+    if sibling:
+        other = _Acc("tree item", name="Other folder", states=("EXPANDABLE", "SHOWING"), width=400, height=18)
+        _adopt(tree, parent, other)
+        nodes.append(other)
+        _place_row(parent, 40, 120, 400, 92)
+        _place_row(tree, 40, 120, 400, 100)
+        _place_row(other, 40, 200, 400, 18)
+        _place_row(group, 40, 140, 400, 40)
+        _place_row(child, 60, 140, 360, 18)
+    else:
+        other = None
+        _adopt(tree, parent)
+        _place_row(tree, 40, 120, 400, 40)
+        _place_row(parent, 40, 120, 400, 40)
+        _place_row(group, 40, 136, 400, 20)
+        _place_row(child, 60, 136, 360, 18)
+    _place_row(bullet, 40, 120, 8, 16)
+    _place_row(label, 50, 120, 100, 16)
+    document = _Acc("document web", name="cuatree331", width=1200, height=680)
+    document.component._rect.x = 0.0
+    document.component._rect.y = 90.0
+    _adopt(document, tree)
+    window = _Acc("frame", name="cuatree331", width=1280, height=800)
+    _adopt(window, document)
+    _own(app, window, document, *nodes)
+    _add_tab_strip(window)
+    return window, tree, parent, child, other
+
+
+def test_expanded_treeitem_stays_in_the_snapshot_with_its_child(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium tree, not a live Chrome window.
+
+    The expanded treeitem is as tall as the tree. The snapshot keeps that
+    row, with expanded set, and the child row under it. The inner static
+    text is not the row.
+    """
+    window, _tree, _parent, _child, _other = _expanded_chrome_tree()
+    hit = _ListHit([], [])
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    by_ref = {el.ref: el for el in snap.elements}
+    folder = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Docs folder")
+    assert folder.expanded is True
+    child = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Report child")
+    ancestor = child
+    while ancestor.parent is not None and ancestor.ref != folder.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == folder.ref
+    label = next(el for el in snap.elements if el.role == "AXStaticText" and el.title == "Docs folder")
+    assert label.parent == folder.ref
+    rendered = observe.render_text(snap, mode="interactive")
+    assert 'row "Docs folder"' in rendered
+    assert "expanded" in rendered.split('row "Docs folder"')[1].splitlines()[0]
+
+
+def test_expanded_treeitem_is_not_replaced_when_a_sibling_is_visible(fake_atspi, monkeypatch) -> None:
+    """Synthetic Chromium tree with two root rows, not a live Chrome window.
+
+    The expanded row is taller than nine tenths of the tree, so the old
+    walk opened it and listed its label and its child as the tree's rows.
+    Both root rows stay, and the child stays under the expanded row.
+    """
+    window, tree, parent, child, other = _expanded_chrome_tree(sibling=True)
+    live = _atspi._in_view_named_rows(tree)
+    assert [node.get_role_name() for node, _pos, _size in live] == ["tree item", "tree item"]
+    assert [node.get_name() for node, _pos, _size in live] == ["Docs folder", "Other folder"]
+    hit = _ListHit([], [])
+    _wire_chrome_list(monkeypatch, window, hit, stuck=True)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "chrome")
+    by_ref = {el.ref: el for el in snap.elements}
+    folder = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Docs folder")
+    assert folder.expanded is True
+    assert any(el.role == "AXRow" and el.title == "Other folder" for el in snap.elements)
+    nested = next(el for el in snap.elements if el.role == "AXRow" and el.title == "Report child")
+    ancestor = nested
+    while ancestor.parent is not None and ancestor.ref != folder.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == folder.ref
+    assert parent.name == "Docs folder" and child.name == "Report child" and other.name == "Other folder"
+
+
 def test_snapshot_lists_layout_rows_not_the_cached_children(fake_atspi, monkeypatch) -> None:
     """Synthetic Chromium hit test, not a live Chrome list.
 

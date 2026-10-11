@@ -8850,15 +8850,158 @@ def test_linux_chrome_aria_treeitem_click_expands_once(tmp_path) -> None:
         assert "out:true clicks=1" in shown, shown
         assert "clicks=2" not in shown, shown
         assert any(el.role == "AXRow" and el.title == "Child file X" for el in shot.elements), shown
-        folder = next(
-            (
-                el for el in shot.elements
-                if el.role == "AXRow" and el.title == "Folder A"
-            ),
+        folder = next(el for el in shot.elements if el.role == "AXRow" and el.title == "Folder A")
+        assert folder.expanded is True, shown
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_chrome_expanded_treeitem_stays_and_collapses(tmp_path) -> None:
+    """Live Chrome. An expanded ARIA treeitem stays a row and collapses once.
+
+    After the expand click the row is still in the snapshot, named, with
+    expanded set, and the child row under it. A second click collapses it.
+    The page handler runs once per click.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the expanded treeitem test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "aria-tree-expanded.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuatree331</title>"
+        "<style>body{margin:16px;font:16px sans-serif}</style>"
+        "<ul role=tree aria-label=Files>"
+        "<li role=treeitem aria-expanded=false id=docs onclick=\"event.stopPropagation();"
+        "var e=this.getAttribute('aria-expanded')=='true';"
+        "this.setAttribute('aria-expanded',!e);kids.hidden=e;"
+        "o2.textContent='clicks:'+(++window.c||(window.c=1))\">Docs folder"
+        "<ul role=group id=kids hidden><li role=treeitem>Report child</li></ul></li>"
+        "</ul><p id=o2>clicks:0</p>"
+    )
+    profile = tmp_path / "chrome-tree-expanded"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the tree")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            rendered = observe.render_text(shot)
+            last = rendered[:500]
+            row = next(
+                (
+                    el for el in shot.elements
+                    if el.role == "AXRow" and el.title == "Docs folder" and el.clickable
+                ),
+                None,
+            )
+            if row is not None and row.expanded is False and "clicks:0" in rendered:
+                snap = shot
+                break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose the collapsed treeitem\n{last}"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        driver.activate_app("chrome")
+
+        def _folder(shot):
+            return next(
+                (
+                    el for el in shot.elements
+                    if el.role == "AXRow" and el.title == "Docs folder" and el.clickable
+                ),
+                None,
+            )
+
+        def _under(shot, child, parent):
+            by_ref = {el.ref: el for el in shot.elements}
+            node = child
+            while node is not None and node.ref != parent.ref:
+                if node.parent is None:
+                    return False
+                node = by_ref.get(node.parent)
+            return node is not None and node.ref == parent.ref
+
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        runtime._current = shot
+        row = _folder(shot)
+        assert row is not None and row.expanded is False
+        result = runtime.click(row.ref)
+        assert str(result).startswith("clicked "), result
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(shot)
+            folder = _folder(shot)
+            child = next(
+                (el for el in shot.elements if el.role == "AXRow" and el.title == "Report child"),
+                None,
+            )
+            if (
+                folder is not None
+                and folder.expanded is True
+                and child is not None
+                and _under(shot, child, folder)
+                and "clicks:1" in shown
+                and "clicks:2" not in shown
+            ):
+                break
+            time.sleep(0.25)
+        folder = _folder(shot)
+        child = next(
+            (el for el in shot.elements if el.role == "AXRow" and el.title == "Report child"),
             None,
         )
-        if folder is not None:
-            assert folder.expanded is True, shown
+        assert folder is not None and folder.expanded is True, shown
+        assert child is not None and _under(shot, child, folder), shown
+        assert "clicks:1" in shown and "clicks:2" not in shown, shown
+        interactive = observe.render_text(shot, mode="interactive")
+        assert 'row "Docs folder"' in interactive and "expanded" in interactive, interactive
+        runtime._current = shot
+        result = runtime.click(folder.ref)
+        assert str(result).startswith("clicked "), result
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(shot)
+            folder = _folder(shot)
+            if (
+                folder is not None
+                and folder.expanded is False
+                and "clicks:2" in shown
+                and "clicks:3" not in shown
+            ):
+                break
+            time.sleep(0.25)
+        folder = _folder(shot)
+        assert folder is not None and folder.expanded is False, shown
+        assert "clicks:2" in shown and "clicks:3" not in shown, shown
+        assert not any(
+            el.role == "AXRow" and el.title == "Report child" for el in shot.elements
+        ), shown
     finally:
         _stop_group(proc)
 

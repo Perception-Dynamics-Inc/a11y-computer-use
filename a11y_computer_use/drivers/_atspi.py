@@ -10764,6 +10764,21 @@ def _settle_hit(comp, x: int, y: int, coord):
     return None
 
 
+def _expandable_tree_item(acc) -> bool:
+    """A treeitem row, including one whose box is as tall as the tree.
+
+    Chrome sizes an expanded ``role=treeitem`` to the tree once its children
+    are showing. The visible-row walk treats a box that tall as a wrapper and
+    records the inner static text instead, so the row leaves the snapshot and
+    nothing remains that can collapse it. The treeitem stays the row.
+    """
+    if acc is None or _role_name(acc) != "tree item":
+        return False
+    if _state_has(acc, "EXPANDABLE") or _state_has(acc, "EXPANDED"):
+        return True
+    return "treeitem" in _xml_roles(acc)
+
+
 def _in_view_named_rows(container) -> list[tuple]:
     """Named rows under ``container`` that are on screen in the list.
 
@@ -10826,7 +10841,8 @@ def _in_view_named_rows(container) -> list[tuple]:
         if bottom < box_y - 1 or top > box_b or left + width < box_x or left > box_r:
             return
         role = _role_name(node)
-        spans = height > full_h * 0.9
+        # An expanded treeitem fills the tree. It is still the row.
+        spans = height > full_h * 0.9 and not _expandable_tree_item(node)
         in_view = _on_screen_row(top, bottom, box_y, box_b, sliver)
         name = _node_name(node)
         if name and _is_list_marker(name):
