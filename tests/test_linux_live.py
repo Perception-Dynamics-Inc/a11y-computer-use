@@ -2828,8 +2828,11 @@ def test_linux_chrome_click_resolution_does_not_follow_the_goal(tmp_path) -> Non
 
     Archive is not clicked for "Do not click Archive". An x/y click is sent
     as that point. A ref plus x/y is invalid_arguments. A missing ref
-    resolves only to the role and name it last had. B5 and D3 are two more
-    coordinate clicks that must not move onto a button named in the goal.
+    resolves only to the role and name it last had. Snapshot refs are
+    pre-order indexes, so the page is reduced to one Save draft button
+    before that click; an in-place swap would keep the old index. B5 and
+    D3 are two more coordinate clicks that must not move onto a button
+    named in the goal.
     """
     import json
     import socket
@@ -2868,27 +2871,26 @@ document.getElementById('discard').onclick = function () { mark('DISCARDED'); };
 document.getElementById('chrome').onclick = function () { mark('CHROME'); };
 document.getElementById('save').onclick = function () { mark('SAVED'); };
 document.getElementById('b5').onclick = function () { mark('B5'); };
-window.__swapSave = function () {
-  var buttons = Array.prototype.slice.call(document.querySelectorAll('button'));
-  var saves = buttons.filter(function (btn) {
-    return (btn.getAttribute('aria-label') || '').trim() === 'Save draft';
-  });
-  if (window.__swapped && saves.length === 1) return 'ready';
-  window.__swapped = true;
-  saves.forEach(function (btn) { btn.remove(); });
+document.getElementById('ping').onclick = function () { mark('PING'); };
+window.__isolateSave = function () {
+  var body = document.body;
+  while (body.firstChild) body.removeChild(body.firstChild);
   var neu = document.createElement('button');
   neu.type = 'button';
   neu.id = 'save2';
   neu.textContent = 'Save draft';
   neu.setAttribute('aria-label', 'Save draft');
   neu.onclick = function () { mark('SAVED'); };
-  var ping = document.getElementById('ping');
-  if (ping && ping.parentNode) ping.parentNode.insertBefore(neu, ping);
-  else document.body.appendChild(neu);
-  mark('PING');
-  return 'swapped';
+  var out = document.createElement('div');
+  out.id = 'out';
+  out.setAttribute('role', 'status');
+  out.textContent = 'out:none';
+  out.setAttribute('aria-label', 'out:none');
+  body.appendChild(neu);
+  body.appendChild(out);
+  neu.focus();
+  return 'isolated';
 };
-document.getElementById('ping').onclick = function () { window.__swapSave(); };
 var pad = document.getElementById('pad');
 var ctx = pad.getContext('2d');
 ctx.fillStyle = '#ddd';
@@ -2950,10 +2952,16 @@ pad.addEventListener('click', function (event) {
         )
         sent: list[tuple[str, dict]] = []
         orig_call = runtime.call_tool
+        after_call: dict = {"fn": None}
 
         def call_tool(name, params, confirm=None):
             sent.append((name, dict(params)))
-            return orig_call(name, params, confirm=confirm)
+            try:
+                return orig_call(name, params, confirm=confirm)
+            finally:
+                hook = after_call["fn"]
+                if hook is not None:
+                    hook(name, params)
 
         runtime.call_tool = call_tool
 
@@ -3085,7 +3093,13 @@ pad.addEventListener('click', function (event) {
 
         from tests.agent_fixtures.harness import message_text, parse_snapshot
 
-        state: dict = {"save": None, "pinged": False, "waited": False}
+        state: dict = {"save": None, "pinged": False, "ping_done": False, "waited": False}
+
+        def mark_ping_done(name, _params):
+            if name == "click" and state["pinged"]:
+                state["ping_done"] = True
+
+        after_call["fn"] = mark_ping_done
 
         def script(messages):
             text = message_text(messages)
@@ -3129,10 +3143,14 @@ pad.addEventListener('click', function (event) {
 
         def desktop_snapshot(app, **kwargs):
             text = orig_snap(app, **kwargs)
-            if not state["pinged"] or state["waited"]:
+            # Snapshot refs are pre-order indexes, so replacing Save draft in
+            # place keeps the same ref and the click is not a resolution.
+            # After Ping has been activated, drop the rest of the page so that
+            # index is past the end of the tree and one new Save draft remains.
+            if not state["ping_done"] or state["waited"]:
                 return text
             try:
-                state["swap"] = cdp_eval("window.__swapSave()")
+                state["swap"] = cdp_eval("window.__isolateSave()")
             except Exception as exc:
                 state["swap"] = f"{type(exc).__name__}: {exc}"
             deadline = time.monotonic() + 15
@@ -3140,20 +3158,23 @@ pad.addEventListener('click', function (event) {
             while time.monotonic() < deadline:
                 text = orig_snap(app, **kwargs)
                 current = getattr(runtime, "_current", None)
-                elements = () if current is None else current.elements
-                old = state["save"]
+                elements = () if current is None else tuple(current.elements)
+                old = str(state["save"] or "")
                 old_el = next((el for el in elements if el.ref == old), None)
                 saves = [el for el in elements if el.title == "Save draft"]
-                seen = ", ".join(
-                    f"{el.ref}:{el.role}:{el.title}" for el in elements if el.title in {"Save draft", "Gone", "Ping"}
+                seen = (
+                    f"n={len(elements)} old="
+                    + ("absent" if old_el is None else f"{old_el.ref}:{old_el.title}")
+                    + " saves="
+                    + ",".join(f"{el.ref}:{el.title}" for el in saves)
                 )
-                if (old_el is None or old_el.title != "Save draft") and len(saves) == 1 and saves[0].ref != old:
+                if old_el is None and len(saves) == 1 and saves[0].ref != old:
                     state["waited"] = True
                     state["new_save"] = saves[0].ref
                     return text
                 time.sleep(0.3)
             state["waited"] = True
-            state["wait_error"] = f"swap={state.get('swap')!r} tree={seen}"
+            state["wait_error"] = f"swap={state.get('swap')!r} {seen}"
             return text
 
         runtime.desktop_snapshot = desktop_snapshot
