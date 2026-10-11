@@ -320,6 +320,7 @@ class Agent:
         self._messages: list[Message] = []
         self._levels: dict[tuple, int] = {}
         self._hints: dict[tuple, tuple[str, ...]] = {}
+        self._failures: dict[tuple, str] = {}
         self._stuck_token: str | None = None
         self._digests: list[str] = []
         self._replans = 0
@@ -643,9 +644,12 @@ class Agent:
 
         key = _action_key(requested)
         level = self._levels.get(key, 0)
+        prior_failure = self._failures.get(key)
         executed, forced = forced_method(
             requested, level, self._last_snap, self._hints.get(key), self._app_name(),
         )
+        if not _same_intent(requested, executed, self._last_snap):
+            executed, forced = requested, None
         # Return is the click on the focused target, which this step already
         # approved. If that is not the focused element, keep the click and
         # return its error instead of pressing a key.
@@ -658,6 +662,7 @@ class Agent:
         before = snapshot_digest(self._last_snap, self._last_observation)
         started_at = time.perf_counter()
         result, error, marker = self._invoke(executed)
+        first_error = error
         if error and self.max_retries > 0 and requested.name != "crop" and not self._stop_requested():
             hint = None if marker is None else marker.next
             retried, retry_notes = self._recover(requested, executed, hint)
@@ -669,7 +674,11 @@ class Agent:
         self._last_observation = observation
         self._last_snap = snap
         after = snapshot_digest(snap, observation)
-        verified = _verified(executed, before, after, error, marker)
+        attempt_error = error
+        verified = _verified(executed, before, after, attempt_error, marker)
+        error = _carried_error(
+            requested, executed, first_error, attempt_error, prior_failure, recovery,
+        )
         if (
             executed.name == "app"
             and str(executed.args.get("action") or "") in {"launch", "focus"}
@@ -681,9 +690,11 @@ class Agent:
         if verified:
             self._levels[key] = 0
             self._hints.pop(key, None)
+            self._failures.pop(key, None)
             self._stuck_token = None
             self._not_found_streak = 0
         else:
+            self._failures[key] = error or "not verified"
             if _not_found_failure(error) or _target_missing(requested, pre_snap):
                 self._not_found_streak += 1
             self._levels[key] = level + 1
@@ -714,7 +725,9 @@ class Agent:
             index, verified=verified, error=error, result=result,
             skipped=skipped, turn_stop=turn_stop, ran=ran,
         ))
-        feedback = _tool_feedback(executed, result, error, recovery, marker)
+        feedback = _tool_feedback(
+            executed, result, error, recovery, marker, requested=requested,
+        )
         if turn_stop:
             feedback = _with_stop_note(feedback, remaining, turn_stop)
         content: str | list[dict] = feedback
@@ -897,39 +910,27 @@ class Agent:
     def _recover(
         self, requested: Action, executed: Action, hint: tuple[str, ...] | None,
     ) -> tuple[tuple[Action, str, str | None, outcome.ActionResult | None] | None, list[str]]:
-        """Follow ``next`` after a refusal. Escape is the keyboard backtrack.
+        """Try another method only when it is the same intent.
 
-        A plain failure with no outcome keeps the previous behavior: one
-        alternate ref, then Escape. Escape does not replace the failed result.
-        Bounded by ``max_retries``.
+        Bounded by ``max_retries`` for this step, and the level counter is
+        per action and per target. A different key, a bare click in place of
+        typing, and focus in place of a menu are not tried. Escape is not
+        sent as a backtrack.
         """
         notes: list[str] = []
         attempts = 0
-        if hint is None:
-            alt = alternate_action(requested, self._last_snap)
-            if alt is not None and alt[0].args.get("ref") != executed.args.get("ref"):
-                attempts += 1
-                action, label = alt
-                result, error, marker = self._invoke(action)
-                notes.append(label)
-                if not error:
-                    return (action, result, error, marker), notes
-            if attempts < self.max_retries:
-                notes.append(self._backtrack())
-            return None, notes
-        for strategy in hint:
+        strategies = hint if hint is not None else ("ref", "coordinates", "cdp", "keyboard")
+        for strategy in strategies:
             if attempts >= self.max_retries:
                 break
-            if strategy == "keyboard":
-                attempts += 1
-                notes.append(self._backtrack())
-                continue
             built = strategy_action(
                 strategy, requested, self._last_snap, self._app_name(), recovering=True,
             )
             if built is None:
                 continue
             action, label = built
+            if not _same_intent(requested, action, self._last_snap):
+                continue
             if action.name == executed.name and _public_args(action.args) == _public_args(executed.args):
                 continue
             attempts += 1
@@ -938,13 +939,6 @@ class Agent:
             if error is None and (marker is None or marker.outcome == "confirmed"):
                 return (action, result, error, marker), notes
         return None, notes
-
-    def _backtrack(self) -> str:
-        try:
-            self.runtime.call_tool("key", {"chord": "Escape"}, confirm=self._safety_confirm)  # type: ignore[union-attr]
-        except Exception as exc:  # noqa: BLE001 - backtrack is best-effort
-            return f"backtrack failed: {type(exc).__name__}"
-        return "backtrack:Escape"
 
     def _invoke(self, action: Action) -> tuple[str, str | None, outcome.ActionResult | None]:
         from a11y_computer_use.server import ActionRefused, error_text, refusal_text
@@ -2036,14 +2030,15 @@ def forced_method(
     strategies: tuple[str, ...] | None = None,
     app: str | None = None,
 ) -> tuple[Action, str | None]:
-    """Replace a repeated no-op with the next method.
+    """Replace a repeated no-op with the next same-intent method.
 
-    Level 0 is the model's action. With no ``strategies``, the ladder is
-    alternate ref, coordinate click, then Return only when the focused
-    element is that click's target. A missing ref stays the click so the
-    model gets the error and re-observes. Return is not pressed on whatever
-    else has focus. When the last result named ``next``, that list is the
-    ladder. ``crop`` stays a crop: a failed crop is not turned into a click.
+    Level 0 is the model's action. A higher level may retry that action or
+    switch method only when the target and the payload stay the same: another
+    ref with the same role and name, a coordinate click on that element, or
+    Return when the focused element is that click. Typing is retyped. A key
+    is never a different chord. A type is never a bare click. A menu is never
+    focus. A missing ref stays the click. ``crop`` stays a crop. When no
+    same-intent method remains, the model's action is returned unchanged.
     """
     if action.name == "crop":
         return action, None
@@ -2053,23 +2048,21 @@ def forced_method(
     if strategies is not None:
         for name in strategies:
             built = strategy_action(name, action, snap, app, recovering=False)
-            if built is not None:
+            if built is not None and _same_intent(action, built[0], snap):
                 options.append(built)
-        if not options:
-            return action, None
     else:
-        alternate = alternate_action(action, snap)
-        if alternate is not None:
-            options.append(alternate)
-        coordinate = coordinate_action(action, snap)
-        if coordinate is not None:
-            options.append(coordinate)
-        keyboard = keyboard_action(action, snap)
-        if keyboard is not None:
-            options.append(keyboard)
-        if not options:
-            return action, None
+        for built in (
+            alternate_action(action, snap),
+            coordinate_action(action, snap),
+            keyboard_action(action, snap),
+        ):
+            if built is not None and _same_intent(action, built[0], snap):
+                options.append(built)
+    if not options:
+        return action, None
     chosen, label = options[min(level, len(options)) - 1]
+    if not _same_intent(action, chosen, snap):
+        return action, None
     return chosen, label
 
 
@@ -2081,7 +2074,13 @@ def strategy_action(
     *,
     recovering: bool,
 ) -> tuple[Action, str] | None:
-    """One escalation step. ``keyboard`` during recovery is Escape."""
+    """One same-intent escalation step.
+
+    ``keyboard`` is retype, or Return on the focused click target. It is not
+    Escape, including during recovery. ``foreground`` is not used: focusing
+    the app is not the action the model requested.
+    """
+    del recovering, app
     if strategy == "ref":
         return alternate_action(action, snap)
     if strategy == "coordinates":
@@ -2098,14 +2097,7 @@ def strategy_action(
             f"cdp:set_value:{element.ref}",
         )
     if strategy == "keyboard":
-        if recovering:
-            return Action("key", {"chord": "Escape"}, action.id), "backtrack:Escape"
         return keyboard_action(action, snap)
-    if strategy == "foreground":
-        name = app or (None if snap is None else snap.app)
-        if not name or name == "unknown":
-            return None
-        return Action("app", {"action": "focus", "name": str(name)}, action.id), f"foreground:{name}"
     return None
 
 
@@ -2134,6 +2126,9 @@ def alternate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str
 
 
 def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str] | None:
+    """A click at the same element's center. Not a substitute for type or menu."""
+    if action.name != "click":
+        return None
     element = _element_for(action, snap)
     if element is None or element.bounds is None:
         return None
@@ -2179,6 +2174,90 @@ def keyboard_action(action: Action, snap: Snapshot | None = None) -> tuple[Actio
         Action("key", {"chord": "Return", "_source_ref": element.ref}, action.id),
         "keyboard:Return",
     )
+
+
+def _same_intent(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    """True when ``executed`` is ``requested`` or the same target and payload.
+
+    A click may move to another ref with the same role and name, to that
+    element's center, or to Return when that element is focused. Typing may
+    be retyped or set on the same ref. A key keeps its chord. A menu keeps
+    its path. Focus, a different key, and a bare click are not the same intent.
+    """
+    if (
+        executed.name == requested.name
+        and _public_args(executed.args) == _public_args(requested.args)
+    ):
+        return True
+    if requested.name == "click" and executed.name == "click":
+        return _same_click_target(requested, executed, snap)
+    if requested.name == "click" and executed.name == "key":
+        return _return_matches_focused_click(requested, executed, snap)
+    if requested.name in {"type", "set_value", "select"} and executed.name in {"type", "set_value"}:
+        if _payload_text(requested) != _payload_text(executed):
+            return False
+        return _same_named_target(requested, executed, snap)
+    if requested.name == "key" and executed.name == "key":
+        return str(requested.args.get("chord") or "") == str(executed.args.get("chord") or "")
+    if requested.name == "menu" and executed.name == "menu":
+        return (
+            str(requested.args.get("path") or "") == str(executed.args.get("path") or "")
+            and str(requested.args.get("action") or "press") == str(executed.args.get("action") or "press")
+        )
+    return False
+
+
+def _payload_text(action: Action) -> str:
+    value = action.args.get("text", action.args.get("value", ""))
+    return "" if value is None else str(value)
+
+
+def _same_click_target(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    wanted = str(requested.args.get("ref") or requested.args.get("_source_ref") or "")
+    source = str(executed.args.get("_source_ref") or executed.args.get("ref") or "")
+    if wanted and source and wanted == source:
+        return True
+    return _same_named_target(requested, executed, snap)
+
+
+def _same_named_target(requested: Action, executed: Action, snap: Snapshot | None) -> bool:
+    left_ref = requested.args.get("ref") or requested.args.get("_source_ref")
+    right_ref = executed.args.get("ref") or executed.args.get("_source_ref")
+    if left_ref and right_ref and str(left_ref) == str(right_ref):
+        return True
+    left = _element_for(requested, snap)
+    right = _element_for(executed, snap)
+    if left is None or right is None:
+        return False
+    if not left.title or left.title.casefold() != right.title.casefold():
+        return False
+    return left.role == right.role
+
+
+def _carried_error(
+    requested: Action,
+    executed: Action,
+    first_error: str | None,
+    attempt_error: str | None,
+    prior_failure: str | None,
+    recovery: list[str],
+) -> str | None:
+    """Keep the original failure beside an escalation outcome.
+
+    A step that ran the requested action and did not recover returns that
+    attempt's error. An escalated step names the earlier failure even when
+    the later method itself reported none.
+    """
+    same = (
+        executed.name == requested.name
+        and _public_args(executed.args) == _public_args(requested.args)
+    )
+    if same and not recovery:
+        return attempt_error
+    original = prior_failure or first_error
+    if original and attempt_error and attempt_error != original:
+        return f"{original} | {attempt_error}"
+    return original or attempt_error
 
 
 def _return_matches_focused_click(
@@ -2695,9 +2774,26 @@ def _user_content(
 
 
 def _action_key(action: Action) -> tuple:
+    """Retry identity: the action, its target, and the chord or text.
+
+    A no-op Escape does not raise the level of ``ctrl+a``. A failed type of
+    one string does not escalate a type of another. A menu path does not
+    share a budget with a different path.
+    """
     args = action.args
-    target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or args.get("text") or ""
-    return (action.name, str(target))
+    name = action.name
+    if name == "key":
+        return ("key", str(args.get("chord") or ""), str(args.get("app") or args.get("ref") or ""))
+    if name in {"type", "set_value", "select"}:
+        text = args.get("text", args.get("value", ""))
+        target = args.get("ref") or args.get("name") or ""
+        return (name, str(target), "" if text is None else str(text))
+    if name == "menu":
+        return ("menu", str(args.get("path") or ""), str(args.get("action") or "press"))
+    target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or ""
+    if name == "click" and not target and args.get("x") is not None and args.get("y") is not None:
+        target = f"{args.get('x')},{args.get('y')},{args.get('display_id', '')}"
+    return (name, str(target), "")
 
 
 def _action_label(action: Action, snap: Snapshot | None) -> str | None:
@@ -2786,17 +2882,31 @@ def _with_stop_note(text: str, remaining: list[dict], reason: str) -> str:
     return f"{text}\nStopped this turn ({reason}). Did not run: {names}."
 
 
+def _describe_action(action: Action) -> str:
+    payload = _public_args(action.args)
+    body = ", ".join(f"{key}={payload[key]!r}" for key in sorted(payload))
+    return f"{action.name}({body})"
+
+
 def _tool_feedback(
     action: Action,
     result: str,
     error: str | None,
     recovery: list[str],
     marker: outcome.ActionResult | None = None,
+    requested: Action | None = None,
 ) -> str:
-    if error:
+    if error and result:
+        text = f"{action.name} failed: {error}\noutcome: {result}"
+    elif error:
         text = f"{action.name} failed: {error}"
     else:
         text = result or f"{action.name} ok"
+    if requested is not None and (
+        requested.name != action.name
+        or _public_args(requested.args) != _public_args(action.args)
+    ):
+        text += f"\nrequested {_describe_action(requested)}\nexecuted {_describe_action(action)}"
     if marker is not None:
         text += f"\noutcome: {marker.outcome}"
         if marker.evidence:
