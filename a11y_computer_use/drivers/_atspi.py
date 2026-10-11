@@ -7503,6 +7503,58 @@ def _close_combo_popup(acc) -> None:
         time.sleep(0.04)
 
 
+def _chrome_select_owner(acc):
+    """The Chromium ``<select>`` that owns this menu item, or None.
+
+    The option is a menu item under that combo box. An application menu
+    item, a Firefox select, and a GTK combo are not this control, so a
+    later Escape cannot land on them.
+    """
+    if acc is None:
+        return None
+    if _role_name(acc) not in {"menu item", "check menu item", "radio menu item"}:
+        return None
+    if not _chromium_control(acc):
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        role = _role_name(parent)
+        if role == "combo box":
+            return parent
+        if role in {
+            "application", "frame", "window", "dialog",
+            "document web", "document frame", "menu bar",
+        }:
+            return None
+        node = parent
+    return None
+
+
+def finish_chrome_select_option_click(acc) -> None:
+    """Close the select popup after its option action succeeded.
+
+    ``set_value`` closes with the combo's collapse action, then Escape
+    while that popup is still open. The same close runs here, and only on
+    the select that owns this option. A popup that is already collapsed is
+    left alone, so Escape is not sent. A popup that stays expanded is
+    ``popup_open``.
+    """
+    combo = _chrome_select_owner(acc)
+    if combo is None:
+        return
+    _close_combo_popup(combo)
+    if _state_has(combo, "EXPANDED"):
+        label = _option_label(acc) or "the option"
+        raise _text_mismatch(
+            "popup_open",
+            f"the combo popup is still open after clicking {label!r}",
+            expected=label,
+        )
+
+
 def _combo_active_label(acc) -> str | None:
     """The combo's active item, not a popup row that is only highlighted.
 

@@ -1501,7 +1501,13 @@ class LinuxDriver:
         choice = self._run(lambda: _atspi.combobox_option_context(handle))
         selected = self._run(lambda: _atspi.select_contained_row(handle))
         if selected is None:
-            return self._run(lambda: _atspi.do_press(handle))
+            pressed = self._run(lambda: _atspi.do_press(handle))
+            # A Chrome <select> option's click action changes the value and
+            # leaves the native popup open. Close it the way set_value does,
+            # and only when this item belongs to that select.
+            if pressed:
+                self._run(lambda: _atspi.finish_chrome_select_option_click(handle))
+            return pressed
         if selected:
             return True
         if self._run(lambda: _atspi.combobox_option_committed(choice, handle)):

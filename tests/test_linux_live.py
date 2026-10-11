@@ -1828,6 +1828,96 @@ def test_linux_chrome_aria_combobox_option_click_reports_the_selection(tmp_path)
         _stop_group(proc)
 
 
+def test_linux_chrome_optgroup_select_click_closes_the_popup(tmp_path) -> None:
+    """Live Chrome: a ref click on an optgroup option closes the popup.
+
+    The change event fires, the combobox value is the option, and the
+    snapshot reports collapsed. The optgroup labels are group lines. The
+    next control on the page receives the following click. Skips when no
+    Chrome binary is on PATH.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = (
+        "<!doctype html><meta charset=utf-8><title>cuopt326</title>"
+        "<label for=s>Fruit</label>"
+        "<select id=s>"
+        "<optgroup label=Red><option>Apple</option><option>Cherry</option></optgroup>"
+        "<optgroup label=Yellow><option>Banana</option><option>Lemon</option></optgroup>"
+        "</select>"
+        "<button id=next type=button>Next action</button>"
+        "<p id=o>out:none</p><p id=n>next:none</p>"
+        "<script>"
+        "s.onchange=function(){o.textContent='out:'+s.value;};"
+        "document.getElementById('next').onclick=function(){n.textContent='next:ok';};"
+        "</script>"
+    )
+    proc, profile = _launch_chrome(tmp_path, page, "cuopt326")
+    try:
+        snap = _wait_chrome(driver, "Fruit")
+        snap = _wait_chrome(driver, "Lemon")
+        rendered = observe.render_text(snap)
+        assert 'group "Red"' in rendered, rendered
+        assert 'group "Yellow"' in rendered, rendered
+        assert 'menuitem "Lemon"' in rendered, rendered
+        combo = next(el for el in snap.elements if el.title == "Fruit" and el.role == "AXComboBox")
+        assert combo.expanded is not True, rendered
+        runtime = _chrome_runtime(tmp_path, driver)
+        runtime._current = snap
+        runtime.click(combo.ref)
+        deadline = time.monotonic() + 4
+        opened = snap
+        while time.monotonic() < deadline:
+            opened = driver.snapshot(Scope.WINDOW, "chrome")
+            combo = next(el for el in opened.elements if el.title == "Fruit" and el.role == "AXComboBox")
+            if combo.expanded is True:
+                break
+            time.sleep(0.25)
+        assert combo.expanded is True, observe.render_text(opened)
+        runtime._current = opened
+        lemon = next(
+            el for el in opened.elements
+            if el.title == "Lemon" and el.role == "AXMenuItem" and el.clickable
+        )
+        result = runtime.click(lemon.ref)
+        assert str(result).startswith("clicked "), result
+        deadline = time.monotonic() + 4
+        shown = ""
+        last = opened
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(last)
+            combo = next(el for el in last.elements if el.title == "Fruit" and el.role == "AXComboBox")
+            if combo.value == "Lemon" and combo.expanded is not True and "out:Lemon" in shown:
+                break
+            time.sleep(0.25)
+        assert combo.value == "Lemon", shown
+        assert combo.expanded is not True, shown
+        assert "out:Lemon" in shown, shown
+        assert 'group "Red"' in shown and 'group "Yellow"' in shown, shown
+        button = next(el for el in last.elements if el.title == "Next action" and el.clickable)
+        runtime._current = last
+        runtime.click(button.ref)
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(last)
+            if "next:ok" in shown:
+                break
+            time.sleep(0.25)
+        assert "next:ok" in shown, shown
+        combo = next(el for el in last.elements if el.title == "Fruit" and el.role == "AXComboBox")
+        assert combo.value == "Lemon" and combo.expanded is not True, shown
+    finally:
+        _stop_chrome(proc)
+        import shutil
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
     """Live Chrome. A page script steals focus during set_value.
 
