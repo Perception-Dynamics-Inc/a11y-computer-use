@@ -6028,8 +6028,26 @@ def _scan_sheet_grid(app: str, origin: str, grid: list[list[str]]):
     return ("match", None)
 
 
-_SHEET_GRID_POLLS = 12
+_SHEET_GRID_POLLS = 16
 _SHEET_GRID_PAUSE_S = 0.05
+_SHEET_GRID_COMMIT_PAUSE_S = 0.25
+
+
+def _commit_open_sheet_editor(app: str) -> bool:
+    """Return once when a cell editor is open. True when that key was sent.
+
+    LibreOffice leaves the text interface of every other cell empty while
+    the editor is open, and F2 would read this editor instead of the cell
+    it was aimed at. Return commits the editor. The caret then moves the
+    way Enter does in Calc. A grid that already ended on Enter has no
+    editor, so nothing is sent.
+    """
+    if not sheet_editor_text(app):
+        return False
+    from a11y_computer_use.drivers import _linux_input
+
+    _linux_input.press_chord("return")
+    return True
 
 
 def sheet_grid_check(app: str, origin: str, text: str):
@@ -6038,8 +6056,9 @@ def sheet_grid_check(app: str, origin: str, text: str):
     The rectangle starts at ``origin``, the cell that was active before the
     keys. Comparison is per cell: formula text, or Calc's numeric display.
     A formula is not accepted as the number it computes, and a Formula
-    attribute cut at ``:`` is not a prefix match. F2 runs once, after the
-    poll, and only for those cut formulas.
+    attribute cut at ``:`` is not a prefix match. An editor left open on the
+    last cell is committed once, with Return, before those reads. F2 runs
+    once, after the poll, and only for formulas the attribute cut at ``:``.
     """
     grid = sheet_type_grid(text)
     if grid is None or not origin:
@@ -6047,11 +6066,19 @@ def sheet_grid_check(app: str, origin: str, text: str):
     editors: list = []
     waiting = None
     pending = None
+    committed = False
     for attempt in range(_SHEET_GRID_POLLS):
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
+        # A blank cell, or a formula that still needs F2, is not final while
+        # the editor from the type is open. One Return publishes the others.
+        if not committed and kind in {"waiting", "editor"} and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
+            continue
+        committed = True
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)

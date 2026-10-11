@@ -7390,12 +7390,14 @@ def build_server(
         a ref: the focused editable is looked up and inserted with the same
         helper. A CRLF is one newline; the reported count is the number of
         characters the field read back, and a mismatch is an error rather
-        than success. LibreOffice Calc is confirmed from the open cell
+        than success.         LibreOffice Calc is confirmed from the open cell
         editor or the selected cell's text. A tab or newline grid is read
         back from every cell it touched, starting at the cell that was
-        active before typing, and the first cell that differs is the
-        mismatch. That editor is not a password field. A sheet that does
-        not show the characters is a mismatch.
+        active before typing. An editor left open on the last cell is
+        committed with Return so the other cells publish, and the caret
+        moves the way Enter does in Calc. The first cell that differs is
+        the mismatch. That editor is not a password field. A sheet that
+        does not show the characters is a mismatch.
         Chrome's address bar is polled until the URL is visible or the bar
         settles on its own string; a settled rewrite is not a mismatch. The
         find bar already showing exactly that query is a match. An empty

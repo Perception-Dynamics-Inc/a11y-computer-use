@@ -6428,6 +6428,50 @@ def test_sheet_grid_names_the_first_differing_cell(fake_atspi, monkeypatch) -> N
     assert scanned[3] == "C5"
 
 
+def test_sheet_grid_commits_an_open_editor_before_the_cell_read(fake_atspi, monkeypatch) -> None:
+    """Sibling cells stay blank while Calc's editor is open.
+
+    One Return commits that editor. The scan after it is what confirms.
+    A grid that already shows every cell does not send the key. No live
+    LibreOffice.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    state = {"editor": "=SUM(C2:C4)", "item": ""}
+    chords: list[str] = []
+
+    def cell_for(_app, address):
+        if address == "A1":
+            node = _Acc("table cell", name="A1")
+            node.text = state["item"]
+            node.get_attributes = lambda: {}
+            return node
+        if address == "B1":
+            node = _Acc("table cell", name="B1")
+            node.text = "Q1"
+            node.get_attributes = lambda: {}
+            return node
+        return None
+
+    def press(chord: str) -> None:
+        chords.append(chord)
+        state["editor"] = None
+        state["item"] = "Item"
+
+    monkeypatch.setattr(_atspi, "_cell_for_address", cell_for)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: state["editor"])
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert chords == ["return"]
+
+    chords.clear()
+    state["editor"] = None
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert chords == []
+
+
 def test_cut_range_formula_outcome_reads_the_editor(fake_atspi, monkeypatch) -> None:
     """Synthetic cell. The cut Formula attribute is not the comparison.
 
