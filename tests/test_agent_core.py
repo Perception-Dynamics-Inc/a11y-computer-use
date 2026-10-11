@@ -1802,6 +1802,192 @@ def test_named_control_beside_an_opaque_region_waits_for_two_misses(tmp_path):
     assert ("click", {"x": 220, "y": 120, "display_id": 0}) in runtime.calls
 
 
+def _message_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and isinstance(content[0], dict):
+        return str(content[0].get("text") or "")
+    return ""
+
+
+def _all_text(messages) -> str:
+    return "\n".join(_message_text(message.content) for message in messages)
+
+
+def test_toolbar_does_not_block_a_target_inside_an_opaque_region(tmp_path):
+    """A toolbar button stays named. The canvas target still gets a picture.
+
+    The model asked for the sketch by name. That node is an opaque region, so
+    the next look attaches the crop even though Back is in the tree.
+    """
+    mixed = window(
+        el("e2", "AXButton", "Back", parent="e1", clickable=True),
+        el("e3", "AXToolbar", "Navigation", parent="e1"),
+        el("e4", "opaque_region", "sketch", parent="e1", bounds=Bounds(0, 0, 80, 400, 300)),
+    )
+    seen: list = []
+
+    def script(messages):
+        seen.append(list(messages))
+        text = _all_text(messages)
+        attached = _image_blocks(messages[-1].content)
+        if len(seen) == 1:
+            assert attached == []
+            assert "Back" in text
+            return turn(ToolCall("find", {"text": "sketch"}))
+        if len(seen) == 2:
+            assert attached, attached
+            assert "insufficient (opaque_region)" in text
+            return turn(ToolCall("click", {"x": 220, "y": 120, "display_id": 0}))
+        return turn(done("hit", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script), mixed, trace_dir=tmp_path, max_steps=6,
+    )
+    assert result.status == "success", result
+    assert ("find", {"app": "demo", "text": "sketch"}) in runtime.calls
+    assert ("click", {"x": 220, "y": 120, "display_id": 0}) in runtime.calls
+
+
+def test_missing_target_falls_back_after_two_looks_despite_a_toolbar(tmp_path):
+    """Two looks for Elevation attach a picture. A verified Back click does not clear them."""
+    mixed = window(
+        el("e2", "AXButton", "Back", parent="e1", clickable=True),
+        el("e3", "AXToolbar", "Navigation", parent="e1"),
+        el("e4", "opaque_region", "", parent="e1", bounds=Bounds(0, 0, 80, 400, 300)),
+    )
+    runtime = FakeRuntime(mixed)
+
+    def on_call(name, params, runtime):
+        if name == "click" and params.get("ref") == "e2":
+            replace_ref(runtime, "e2", focused=True)
+
+    runtime.on_call = on_call
+    seen: list = []
+
+    def script(messages):
+        seen.append(list(messages))
+        text = _all_text(messages)
+        attached = []
+        for message in messages:
+            attached.extend(_image_blocks(message.content))
+        finds = [params for name, params in runtime.calls if name in {"find", "scroll_to_find"}]
+        backed = any(name == "click" and params.get("ref") == "e2" for name, params in runtime.calls)
+        aimed = any(params.get("x") is not None for _name, params in runtime.calls)
+        if len(finds) < 1:
+            assert attached == []
+            assert "Back" in text
+            return turn(ToolCall("find", {"text": "Elevation", "role": "statictext"}))
+        if not backed:
+            assert attached == []
+            return turn(ToolCall("click", {"ref": "e2"}))
+        if len(finds) < 2:
+            assert attached == []
+            return turn(ToolCall("scroll_to_find", {"text": "Elevation", "role": "statictext"}))
+        if not aimed:
+            assert attached
+            assert "insufficient (not_found)" in text
+            return turn(ToolCall("click", {"x": 40, "y": 50, "display_id": 0}))
+        return turn(done("missed", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        mixed,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert len(seen) >= 4
+    assert ("scroll_to_find", {"app": "demo", "text": "Elevation", "role": "statictext"}) in runtime.calls
+    assert ("click", {"x": 40, "y": 50, "display_id": 0}) in runtime.calls
+
+
+def test_found_named_control_does_not_attach_a_picture(tmp_path):
+    """Back is the target and Back is in the tree. The canvas beside it stays text."""
+    mixed = window(
+        el("e2", "AXButton", "Back", parent="e1", clickable=True),
+        el("e3", "opaque_region", "sketch", parent="e1", bounds=Bounds(0, 0, 80, 400, 300)),
+    )
+    seen: list = []
+
+    def script(messages):
+        seen.append(messages[-1].content)
+        if len(seen) == 1:
+            return turn(ToolCall("find", {"text": "Back", "role": "button"}))
+        return turn(done("found", [{"element": {"role": "AXButton", "name": "Back"}}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script), mixed, trace_dir=tmp_path, max_steps=4,
+    )
+    assert result.status == "success", result
+    assert all(_image_blocks(content) == [] for content in seen)
+    assert ("find", {"app": "demo", "text": "Back", "role": "button"}) in runtime.calls
+
+
+def test_expand_runs_before_pixels_for_collapsed_content(tmp_path):
+    """Two missing refs beside a collapsed section do not attach a picture.
+
+    The observation names expand. After expand reveals the row, the run
+    finishes from the tree.
+    """
+    mixed = window(
+        el("e2", "AXButton", "Back", parent="e1", clickable=True),
+        el("e3", "AXGroup", "Infobox", parent="e1", expanded=False),
+    )
+    runtime = FakeRuntime(mixed)
+    runtime.fail["e99991"] = ComputerUseError(ErrorCode.STALE_REF, "ref e99991 is gone")
+    runtime.fail["e99992"] = ComputerUseError(ErrorCode.STALE_REF, "ref e99992 is gone")
+
+    def on_call(name, params, runtime):
+        if name == "click" and params.get("ref") == "e3":
+            replace_ref(runtime, "e3", expanded=True)
+            runtime.elements.append(el("e4", "AXStaticText", "Elevation 622 m", parent="e3"))
+
+    runtime.on_call = on_call
+    seen: list = []
+
+    def script(messages):
+        seen.append(list(messages))
+        text = _all_text(messages)
+        attached = []
+        for message in messages:
+            attached.extend(_image_blocks(message.content))
+        assert attached == [], attached
+        misses = [
+            params.get("ref") for name, params in runtime.calls
+            if name == "click" and str(params.get("ref", "")).startswith("e9999")
+        ]
+        opened = any(name == "click" and params.get("ref") == "e3" for name, params in runtime.calls)
+        if len(misses) < 2:
+            assert "e3 is collapsed; use expand(e3)" in text
+            ref = "e99991" if len(misses) == 0 else "e99992"
+            return turn(ToolCall("click", {"ref": ref}))
+        if not opened:
+            assert "e3 is collapsed; use expand(e3)" in text
+            return turn(ToolCall("expand", {"ref": "e3"}))
+        assert "Elevation 622 m" in text
+        return turn(done("read", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        mixed,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+        max_steps=8,
+    )
+    assert result.status == "success", result
+    assert result.step_log[2].action == "expand"
+    assert ("click", {"ref": "e3"}) in runtime.calls
+    assert all(
+        _image_blocks(message.content) == []
+        for messages in seen
+        for message in messages
+    )
+
+
 def test_coordinate_click_on_pay_still_stops_for_a_human(tmp_path):
     """A point inside Pay now uses the payment gate, not a raw click."""
     pay = el(

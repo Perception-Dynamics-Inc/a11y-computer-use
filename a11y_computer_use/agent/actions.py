@@ -31,6 +31,9 @@ ACTION_NAMES = frozenset({
     "menu",
     "wait",
     "crop",
+    "find",
+    "expand",
+    "scroll_to_find",
     "done",
     "ask_human",
 })
@@ -211,6 +214,14 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "click requires ref or x and y"
     if action.name == "crop" and not args.get("ref"):
         return "crop requires ref"
+    if action.name == "find" and not _find_filter(args):
+        return "find requires text, role, editable, or clickable"
+    if action.name == "expand" and not args.get("ref"):
+        return "expand requires ref"
+    if action.name == "scroll_to_find" and not (args.get("text") or args.get("role")):
+        return "scroll_to_find requires text or role"
+    if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up"):
+        return "scroll_to_find direction must be down or up"
     return None
 
 
@@ -341,14 +352,14 @@ def risk_reason(
     if action.name == "window" and verb == "close":
         return "closing a window"
     text = (label or "").casefold()
-    if action.name in {"click", "menu"} and not is_toggle_control(role):
+    if action.name in {"click", "menu", "expand"} and not is_toggle_control(role):
         named = bool(label) and _PAYMENT_LABEL.search(label) is not None and _is_button_or_link(role)
         on_form = payment_form and _is_button_or_link(role)
         if named or on_form:
             return f"paying {label or 'payment'}"
-    if action.name in {"click", "menu"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
+    if action.name in {"click", "menu", "expand"} and not is_toggle_control(role) and any(word in text for word in _SEND_WORDS):
         return f"sending {label}"
-    if action.name in {"click", "menu"} and any(word in text for word in _DELETE_WORDS):
+    if action.name in {"click", "menu", "expand"} and any(word in text for word in _DELETE_WORDS):
         return f"deleting {label}"
     if action.name == "menu" and any(word in text for word in ("quit", "exit", "close window", "log out", "sign out")):
         return f"menu {label}"
@@ -388,6 +399,13 @@ def _done_error(args: dict) -> str | None:
     if not all(isinstance(item, dict) for item in conditions):
         return "done conditions must be objects"
     return None
+
+
+def _find_filter(args: dict) -> bool:
+    """True when find names at least one filter the runtime accepts."""
+    if args.get("text") or args.get("role"):
+        return True
+    return args.get("editable") is not None or args.get("clickable") is not None
 
 
 def _declared_fields(name: str) -> set[str] | None:
@@ -514,6 +532,43 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "screen pixels, fenced as untrusted. A missing engine says no text was read.",
         {"ref": _STR, "padding": _INT, "scale": _NUM},
         ["ref"],
+    ),
+    (
+        "find",
+        "Search the tracked app by name and/or role. text is a case-insensitive "
+        "substring of the title or value. role is a substring of the accessibility "
+        "role. Use this before a pixel click when the target may be folded or "
+        "scrolled out of view.",
+        {
+            "text": _STR,
+            "role": _STR,
+            "editable": {"type": "boolean"},
+            "clickable": {"type": "boolean"},
+            "scope": _STR,
+        },
+        [],
+    ),
+    (
+        "expand",
+        "Open a collapsed menu, tree, or section and list that subtree. Use "
+        "expand(ref) when the observation says the node is collapsed or has "
+        "more children. Prefer this over a coordinate click.",
+        {"ref": _STR},
+        ["ref"],
+    ),
+    (
+        "scroll_to_find",
+        "Scroll until an element matching text and/or role is on screen, then "
+        "return its ref. Use this when the target is below the fold, before "
+        "falling back to pixels. direction is down or up.",
+        {
+            "text": _STR,
+            "role": _STR,
+            "direction": _STR,
+            "max_scrolls": _INT,
+            "ref": _STR,
+        },
+        [],
     ),
     (
         "done",

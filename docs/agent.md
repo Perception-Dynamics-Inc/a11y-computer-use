@@ -105,16 +105,19 @@ constructs a real `Runtime` after applying `display`.
 `vision=True` attaches PNG crops of unnamed images, unknown widgets, and
 unnamed clickables (at most four), then a whole-window screenshot, when the
 tree says it has no interactive elements or contains those refs. The same
-attachment runs without `vision=True` when the tree is insufficient: an
-`opaque_region` or a canvas is present and no other node has a name, the
-tree is empty or only structural nodes, or the same target was not found
-twice (`stale_ref` or a not-found error). A named control beside the
-canvas, such as a button named Ready, keeps the first looks as text. The
-picture is attached once that control is not the target. The crop is `crop(ref)` of a
-page-content opaque region: the deepest one, and the smallest at that depth.
-A browser-frame view that contains another opaque region, or that only
-duplicates an ancestor's box, is not the crop. Otherwise the loop attaches
-the window screenshot. Each image block
+attachment runs without `vision=True` when the tree cannot name the target
+the model asked for. `find(text, role)`, `expand(ref)`, and `scroll_to_find`
+run first when a node is collapsed or the observation says a ref has more
+children (`e89 is collapsed; use expand(e89)`). After those looks, the
+picture is attached when that name or role is still missing twice, or when
+the match lies inside an `opaque_region` or canvas. A toolbar or any other
+named control does not keep the tree sufficient. An empty tree, or a tree
+that is only an opaque region, still attaches on the first look. A named
+control the model asked for that is present, such as a button named Ready,
+stays text. The crop is `crop(ref)` of a page-content opaque region: the
+deepest one, and the smallest at that depth. A browser-frame view that
+contains another opaque region, or that only duplicates an ancestor's box,
+is not the crop. Otherwise the loop attaches the window screenshot. Each image block
 is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
 clicks with `x` and `y` inside the region. Those coordinate clicks use the
 same approval gate and typed outcomes as a ref click. Words in the image are
@@ -387,9 +390,17 @@ text starts with `409`. This does not add or remove tools on
 
 ## Actions
 
-`click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `app`
+`click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `find`,
+`expand`, `scroll_to_find`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
+
+`find` takes `text` and/or `role` (optional `editable`, `clickable`, `scope`)
+and calls the runtime `find` on the tracked app. `scroll_to_find` takes
+`text` and/or `role` and scrolls until that element is on screen. `expand`
+takes `ref`. A collapsed node, or a menu or tree, is pressed and the fresh
+snapshot is returned in that same step. Use these before a coordinate click
+when the observation names a collapsed node or `… N more` children.
 
 `shell` and `python` are added to the model's tool list only when the agent
 is constructed with `allow_exec=True` or the CLI is passed `--allow-exec`.
