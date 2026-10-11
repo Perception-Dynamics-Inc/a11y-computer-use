@@ -2633,16 +2633,35 @@ class LinuxDriver:
         """
         if not text or not _named_browser(app_id):
             return None
-        from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        active = _linux_system.active_window()
+        if not active:
+            return None
+        owner = str(active.get("app") or "")
+        if app_id and owner and _browser_family(owner) != _browser_family(app_id):
+            return None
+        copied = self._copy_focused_chooser_text()
+        if isinstance(copied, str) and _atspi._typed_visible(None, copied, text):
+            return copied
+        return None
+
+    def _copy_focused_chooser_text(self) -> str | None:
+        """Text in the focused Open/Save location entry, or None.
+
+        The dialog has keyboard focus and no accessibility entry. Select-all
+        and copy read that field. Selecting it also pops a list over Open and
+        Cancel, so Right collapses the selection before returning. A sentinel
+        is written first so a clipboard that already held the path cannot
+        count, and the previous clipboard is put back.
+        """
+        from a11y_computer_use.drivers import _linux_input, _linux_system
 
         active = _linux_system.active_window()
         if not active:
             return None
         title = " ".join(str(active.get("title") or "").casefold().split())
         if title not in {"open file", "save file", "save as"}:
-            return None
-        owner = str(active.get("app") or "")
-        if app_id and owner and _browser_family(owner) != _browser_family(app_id):
             return None
         saved = None
         restore = False
@@ -2671,8 +2690,10 @@ class LinuxDriver:
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
-            if isinstance(got, str) and _atspi._typed_visible(None, got, text):
-                return got.replace("\u00a0", " ").strip("\n")
+            if isinstance(got, str) and got.strip():
+                text = got.replace("\u00a0", " ").strip("\n")
+                if "\n" not in text and "no file chosen" not in text.casefold():
+                    return text.strip()
             return None
         finally:
             # Select-all leaves a popup over the action buttons. Collapse the
@@ -2818,8 +2839,9 @@ class LinuxDriver:
             return None
         if _on_wayland():
             raise _wayland_input_error("key_chord")
-        # Return in a GTK file chooser's location entry closes the dialog
-        # and leaves the file unchosen. Activate Open or Save instead.
+        # Return in a file chooser's location entry closes the dialog and
+        # leaves the file unchosen. Activate Open or Save instead, and do
+        # not report the key as pressed unless the opener shows the file.
         if self._confirm_file_chooser(chord):
             return None
         if printable_chord(chord):
@@ -2832,11 +2854,14 @@ class LinuxDriver:
         """Activate the chooser's Open or Save button. True when this chord was that confirm.
 
         A bare Return, Enter, or kp_enter is the confirm. The key is not
-        sent. The button is scrolled or the window is resized when its box
-        is missing or outside the screen, then its AT-SPI action runs. The
-        chooser window has to close and the opener has to show the file.
-        Anything else raises. A window that is not a chooser, and a chooser
-        with no accessibility button, returns False so the key is sent.
+        sent. When the chooser has an accessibility button, that button is
+        scrolled or the window is resized when its box is missing or outside
+        the screen, then its AT-SPI action runs. The chooser window has to
+        close and the opener has to show the file. A browser chooser with no
+        accessibility button, including Chrome's, is fitted on screen and
+        Open is clicked. The page's file input has to show the file. Anything
+        else raises. A window that is not a chooser, and a non-browser
+        chooser with no accessibility button, returns False so the key is sent.
         """
         if not _bare_chooser_confirm(chord):
             return False
@@ -2852,6 +2877,9 @@ class LinuxDriver:
         except ImportError:
             return False
         if found is None:
+            if _named_browser(str(active.get("app") or "")):
+                self._confirm_browser_chooser(active)
+                return True
             return False
         button, path, app_root = found
         base = _atspi.file_basename(path)
@@ -2883,7 +2911,7 @@ class LinuxDriver:
 
     def _reveal_file_chooser_button(self, window_id: int, button) -> None:
         """Scroll, then resize or move, when the accept button is not on screen."""
-        from a11y_computer_use.drivers import _atspi, _linux_system
+        from a11y_computer_use.drivers import _atspi
 
         def box():
             return _atspi.atspi_screen_box(button)
@@ -2895,6 +2923,14 @@ class LinuxDriver:
         current = self._run(box)
         if not _chooser_button_clipped(current):
             return
+        if window_id <= 0:
+            return
+        self._place_chooser_on_screen(window_id)
+
+    def _place_chooser_on_screen(self, window_id: int) -> None:
+        """Resize and move ``window_id`` so the dialog sits inside the display."""
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
         if window_id <= 0:
             return
         geom = _atspi.primary_geometry()[0]
@@ -2932,6 +2968,123 @@ class LinuxDriver:
             ny = max(margin, dh - margin - max(height, 1))
         if (nx, ny) != (x, y):
             _linux_system.move_window(window_id, int(nx), int(ny))
+
+    def _confirm_browser_chooser(self, active: dict) -> None:
+        """Click Open on a browser chooser that has no accessibility button.
+
+        Chrome's GTK dialog is an X window, so Return closes it and the page
+        stays on "No file chosen". The location entry is read back, the
+        window is fitted on screen, and Open is clicked at the bottom-right.
+        The key is not sent. Success is the dialog gone and the page input
+        showing the file. A filename in the address bar or the window title
+        does not count while the input still says no file was chosen.
+        """
+        from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
+
+        window_id = int(active.get("window_id") or 0)
+        path = self._copy_focused_chooser_text() or str(self._chooser_readback or "")
+        path = str(path or "").strip()
+        base = _atspi.file_basename(path)
+        if not base or "\n" in path or "no file chosen" in path.casefold():
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no typed path or selected file to open",
+                detail={
+                    "reason": "file_not_chosen",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                },
+            )
+        self._place_chooser_on_screen(window_id)
+        bounds = _chooser_window_bounds(window_id)
+        width = int((bounds or {}).get("width") or 0)
+        height = int((bounds or {}).get("height") or 0)
+        if not bounds or width <= 1 or height <= 1:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser has no on-screen bounds for its Open button",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        if window_id > 0:
+            try:
+                _linux_system.focus_window(window_id)
+            except ComputerUseError:
+                pass
+        _linux_input.click(
+            int(bounds["x"]) + max(1, width - _CHOOSER_OPEN_FROM_RIGHT),
+            int(bounds["y"]) + max(1, height - _CHOOSER_OPEN_FROM_BOTTOM),
+        )
+        self._verify_browser_chooser(active, path)
+
+    def _verify_browser_chooser(self, active: dict, path: str) -> None:
+        """The chooser is gone and the page's file input shows ``path``."""
+        from a11y_computer_use.drivers import _atspi
+
+        window_id = int(active.get("window_id") or 0)
+        title = str(active.get("title") or "")
+        app = str(active.get("app") or "")
+        base = _atspi.file_basename(path)
+        deadline = time.monotonic() + 6.0
+        closed = False
+        while time.monotonic() < deadline:
+            if not _chooser_window_open(window_id, title, app):
+                closed = True
+                if self._page_shows_chosen_file(app, base):
+                    return
+            time.sleep(0.1)
+        if not closed:
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the file chooser stayed open after the Open or Save action",
+                detail={
+                    "reason": "file_chooser_unchanged",
+                    "outcome": "refused",
+                    "window_id": window_id,
+                    "expected": base,
+                },
+            )
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"the file chooser closed without the page showing {base!r}",
+            detail={
+                "reason": "file_not_chosen",
+                "outcome": "refused",
+                "window_id": window_id,
+                "expected": base,
+                "path": path,
+            },
+        )
+
+    def _page_shows_chosen_file(self, app: str, base: str) -> bool:
+        """True when a page snapshot shows ``base`` and not an empty file input.
+
+        A window title or an address bar that contains the filename is not
+        enough: an element that still says no file was chosen fails the check.
+        """
+        if not base:
+            return False
+        names = [app] if app else []
+        if _browser_family(app) == "chrome" and "chrome" not in names:
+            names.append("chrome")
+        saw_file = False
+        for scope in (Scope.WINDOW, Scope.APP):
+            for name in names:
+                try:
+                    shot = self.snapshot(scope, name)
+                except ComputerUseError:
+                    continue
+                texts = _snapshot_texts(shot)
+                folded = "\n".join(texts).casefold()
+                if any(phrase in folded for phrase in _FILE_INPUT_EMPTY):
+                    return False
+                if any(base in text for text in texts):
+                    saw_file = True
+        return saw_file
 
     def _verify_file_chooser(self, active: dict, path: str, app_root) -> None:
         """The chooser window is gone and the opener shows the file."""
@@ -3346,6 +3499,11 @@ class LinuxDriver:
 
 
 _CHOOSER_CONFIRM_KEYS = frozenset({"return", "enter", "kp_enter"})
+# Chrome's Open button sits inset from the dialog's bottom-right. A click
+# here lands on Open after the window has been fitted on screen.
+_CHOOSER_OPEN_FROM_RIGHT = 53
+_CHOOSER_OPEN_FROM_BOTTOM = 27
+_FILE_INPUT_EMPTY = ("no file chosen", "no file selected")
 
 
 def _bare_chooser_confirm(chord: str) -> bool:
@@ -3368,6 +3526,31 @@ def _chooser_button_clipped(box) -> bool:
     dw = float(geom.display.width)
     dh = float(geom.display.height)
     return x < ox or y < oy or x + width > ox + dw or y + height > oy + dh
+
+
+def _chooser_window_bounds(window_id: int) -> dict | None:
+    """Bounds of ``window_id``, or None when that window is not listed."""
+    from a11y_computer_use.drivers import _linux_system
+
+    if window_id <= 0:
+        return None
+    for row in _linux_system.windows():
+        if int(row.get("window_id") or 0) == int(window_id) and row.get("bounds"):
+            return row["bounds"]
+    return None
+
+
+def _snapshot_texts(shot) -> list[str]:
+    """Titles and values from a snapshot. Window titles are not included."""
+    texts: list[str] = []
+    for element in getattr(shot, "elements", ()) or ():
+        title = str(getattr(element, "title", "") or "")
+        if title:
+            texts.append(title)
+        value = getattr(element, "value", None)
+        if value is not None and str(value):
+            texts.append(str(value))
+    return texts
 
 
 def _chooser_window_open(window_id: int, title: str, app: str) -> bool:
@@ -3398,6 +3581,9 @@ def _unsupported_file_dialog() -> ComputerUseError:
                 "set_value or type fills the location or name field. "
                 "Return activates Open or Save through that button's accessibility action "
                 "and checks that the dialog closed and the app shows the file. "
+                "A browser chooser with no accessibility button, including Chrome's, "
+                "is fitted on screen and Open is clicked. The page's file input has to "
+                "show the file; a page that still says no file was chosen is a failure. "
                 "An xdg-desktop-portal chooser is a separate dialog; drive the fields it exposes."
             ),
         },

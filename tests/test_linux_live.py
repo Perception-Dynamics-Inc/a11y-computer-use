@@ -6942,6 +6942,111 @@ def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
         httpd.shutdown()
 
 
+def test_linux_chrome_upload_return_selects_the_typed_file(tmp_path) -> None:
+    """Return in Chrome's GTK upload chooser selects the typed file.
+
+    The dialog is an X window with no accessibility button. The product fits
+    it on screen and clicks Open. The call succeeds only when the page's file
+    input shows the file and no longer says "No file chosen". The test does
+    not click Open itself and does not skip when the dialog is up.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    assert binary, "Chrome/Chromium is required for the upload-picker test"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    target = tmp_path / "picked.txt"
+    target.write_text("picked")
+    httpd = _serve_html(
+        "<!doctype html><meta charset=utf-8><title>cuaupload</title>"
+        "<style>body{margin:48px;font:18px sans-serif}"
+        "input[type=file]{font-size:18px}</style>"
+        "<h1>Upload a file</h1>"
+        "<input id=file type=file aria-label=Upload>"
+    )
+    port = httpd.server_address[1]
+    profile = tmp_path / "chrome-upload-return-profile"
+    profile.mkdir()
+    env = os.environ.copy()
+    env["GTK_USE_PORTAL"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--disable-features=UseXdgDesktopPortal,XdgFileChooserPortal",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            f"http://127.0.0.1:{port}/",
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the file input")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any(
+                    el.role == "AXButton" and (el.title or "").startswith("Upload")
+                    for el in shot.elements
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, [
+            (el.role, el.title) for el in (shot.elements if shot else ())
+        ]
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = snap
+        upload = next(
+            el for el in snap.elements
+            if el.role == "AXButton" and (el.title or "").startswith("Upload") and el.clickable
+        )
+        runtime.click(upload.ref)
+        dialog = None
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            dialog = next(
+                (
+                    row for row in driver.windows()
+                    if row.get("title") == "Open File" and row.get("bounds")
+                ),
+                None,
+            )
+            if dialog is not None:
+                break
+            time.sleep(0.15)
+        assert dialog is not None, [row.get("title") for row in driver.windows()]
+        driver.focus_window(dialog["window_id"])
+        time.sleep(0.15)
+        runtime.key("ctrl+l")
+        time.sleep(0.15)
+        typed = runtime.type_text(str(target))
+        assert str(typed).startswith("typed "), typed
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert str(target) in typed.evidence
+        pressed = runtime.key("Return")
+        assert "pressed" in str(pressed).casefold(), pressed
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        shown = " ".join(
+            " ".join(part for part in (el.title, "" if el.value is None else str(el.value)) if part)
+            for el in shot.elements
+        )
+        assert "picked.txt" in shown, shown
+        assert "no file chosen" not in shown.casefold(), shown
+        assert "Open File" not in {row.get("title") for row in driver.windows()}
+    finally:
+        _stop(proc)
+        httpd.shutdown()
+
+
 _QT_TABLE_APP = "cuqttable"
 
 _QT_TABLE_FIXTURE = textwrap.dedent(
