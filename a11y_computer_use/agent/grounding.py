@@ -8,21 +8,50 @@ the caller opts in.
 card at https://huggingface.co/Hcompany/Holo-3.1-0.8B says
 ``license: apache-2.0`` and "License: Apache 2.0 License". Apache 2.0
 permits commercial use. This package does not vendor the weights, does not
-download them at import, and does not call a hosted API. Float32 weights
-for an 0.8B model are about 3.2 GB, plus the vision tower and runtime,
-which fits a 15 GB machine with no GPU. The adapter never moves the model
-to a CUDA device.
+download them at import, and does not call a hosted API. Install the
+optional ``[holo]`` extra. The adapter stays on CPU: it loads bfloat16 when
+that dtype runs, otherwise float16, otherwise float32, and it caps torch at
+4 threads. The reply is ``{"x", "y"}`` on a 0..1000 grid, scaled onto the
+image. The adapter never moves the model to a CUDA device.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 HOLO_MODEL_ID = "Hcompany/Holo-3.1-0.8B"
+
+#: Torch is capped here. More threads oversubscribed the eval machine.
+HOLO_MAX_THREADS = 4
+
+#: The reply is about ten tokens. Fourteen leaves room for the JSON and stops.
+HOLO_MAX_NEW_TOKENS = 14
+
+#: H Company's element-localization schema. Coordinates are integers in 0..1000.
+_HOLO_SCHEMA = {
+    "properties": {
+        "x": {
+            "description": "X coordinate as integer in [0, 1000]",
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer",
+        },
+        "y": {
+            "description": "Y coordinate as integer in [0, 1000]",
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer",
+        },
+    },
+    "required": ["x", "y"],
+    "title": "VisualLocalizerOutput",
+    "type": "object",
+}
 
 _POINT = re.compile(
     r'"point"\s*:\s*\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]'
@@ -32,6 +61,12 @@ _BOX = re.compile(
     r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]'
 )
 _SPACE = re.compile(r'"space"\s*:\s*"(image|norm1000)"')
+_XY = re.compile(
+    r'"x"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"y"\s*:\s*(-?\d+(?:\.\d+)?)'
+)
+_YX = re.compile(
+    r'"y"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"x"\s*:\s*(-?\d+(?:\.\d+)?)'
+)
 
 
 class GroundingUnavailable(RuntimeError):
@@ -82,6 +117,11 @@ def parse_grounding_text(text: str, width: int, height: int) -> GroundingHit | N
     omitted, values that all sit in 0..1000 on an image larger than 1000
     on that axis are treated as the normalized grid. Anything else is
     image pixels.
+
+    A Holo reply is ``{"x": ..., "y": ...}`` with no ``point`` key. Those
+    two numbers are always the 0..1000 grid, including when the image is
+    1000 pixels or smaller on both axes, and they are scaled onto
+    ``width`` and ``height``.
     """
     if not text:
         return None
@@ -90,7 +130,7 @@ def parse_grounding_text(text: str, width: int, height: int) -> GroundingHit | N
     box_match = _BOX.search(text)
     point_match = _POINT.search(text)
     if box_match is None and point_match is None:
-        return None
+        return _parse_holo_xy(text, width, height)
     if box_match is not None:
         raw = tuple(float(box_match.group(index)) for index in range(1, 5))
         left, top, wide, tall = _scale_box(raw, named, width, height)
@@ -104,6 +144,86 @@ def parse_grounding_text(text: str, width: int, height: int) -> GroundingHit | N
         height,
     )
     return GroundingHit(x=px, y=py)
+
+
+def _parse_holo_xy(text: str, width: int, height: int) -> GroundingHit | None:
+    """Scale Holo's ``x``/``y`` pair from the 0..1000 grid into pixels."""
+    match = _XY.search(text)
+    if match is not None:
+        raw = (float(match.group(1)), float(match.group(2)))
+    else:
+        swapped = _YX.search(text)
+        if swapped is None:
+            return None
+        raw = (float(swapped.group(2)), float(swapped.group(1)))
+    px, py = _scale_point(raw, "norm1000", width, height)
+    return GroundingHit(x=px, y=py)
+
+
+def _holo_prompt(target: str, extra: str = "") -> str:
+    """H Company's element-localization prompt. ``extra`` is unused by ``ground``."""
+    return (
+        "Localize an element on the GUI image according to the provided target "
+        "and output a click position.\n"
+        " * You must output a valid JSON following the format: "
+        f"{json.dumps(_HOLO_SCHEMA)}\n"
+        f"{extra} Your target is:\n{target}"
+    )
+
+
+def _cap_torch_threads(threads: int) -> int:
+    """A torch thread count from 1 through ``HOLO_MAX_THREADS``."""
+    try:
+        count = int(threads)
+    except (TypeError, ValueError):
+        return HOLO_MAX_THREADS
+    if count < 1:
+        return 1
+    if count > HOLO_MAX_THREADS:
+        return HOLO_MAX_THREADS
+    return count
+
+
+def _dtype_ops_work(torch, dtype: object) -> bool:
+    zeros = getattr(torch, "zeros", None)
+    if not callable(zeros):
+        return False
+    try:
+        probe = zeros(1, dtype=dtype)
+        probe + probe
+    except Exception:  # noqa: BLE001 - an unsupported dtype is a fallback, not a failure
+        return False
+    return True
+
+
+def _select_weight_dtype(torch, preference: str = "auto"):
+    """bfloat16, else float16, else float32. An explicit name is tried first.
+
+    ``float32`` is the last resort. It is not probed: every torch build
+    this adapter targets can allocate it.
+    """
+    order = {
+        "auto": ("bfloat16", "float16", "float32"),
+        "bfloat16": ("bfloat16", "float16", "float32"),
+        "bf16": ("bfloat16", "float16", "float32"),
+        "float16": ("float16", "bfloat16", "float32"),
+        "fp16": ("float16", "bfloat16", "float32"),
+        "float32": ("float32",),
+        "fp32": ("float32",),
+    }.get(str(preference).lower(), ("bfloat16", "float16", "float32"))
+    chosen = None
+    for name in order:
+        dtype = getattr(torch, name, None)
+        if dtype is None:
+            continue
+        if name == "float32" or _dtype_ops_work(torch, dtype):
+            chosen = dtype
+            break
+    if chosen is None:
+        chosen = getattr(torch, "float32", None)
+    if chosen is None:
+        raise GroundingUnavailable("torch has no usable floating dtype")
+    return chosen
 
 
 def _scale_point(
@@ -149,72 +269,144 @@ class HoloLocalGrounding:
     Constructing this class does not import torch and does not download
     weights. ``ground`` does both, and raises `GroundingUnavailable` when
     the local stack or the weights are missing. No other model id is
-    accepted.
+    accepted. ``threads`` is capped at 4. ``dtype`` ``auto`` (the default)
+    uses bfloat16 when that dtype runs, otherwise float16, otherwise
+    float32.
     """
 
-    def __init__(self, model_id: str = HOLO_MODEL_ID) -> None:
+    def __init__(
+        self,
+        model_id: str = HOLO_MODEL_ID,
+        *,
+        threads: int = HOLO_MAX_THREADS,
+        dtype: str = "auto",
+    ) -> None:
         if model_id != HOLO_MODEL_ID:
             raise ValueError(
                 "the local grounding adapter only loads Hcompany/Holo-3.1-0.8B"
             )
         self.model_id = model_id
+        self.threads = _cap_torch_threads(threads)
+        self.dtype = dtype
         self._bundle: tuple[object, object] | None = None
 
     def ground(self, png: bytes, instruction: str) -> GroundingHit:
-        text = self._generate(png, instruction)
-        width, height = _png_size(png)
+        text, width, height = self._generate(png, instruction)
         hit = parse_grounding_text(text, width, height)
         if hit is None:
             raise GroundingUnavailable("the local model did not return a point or a box")
         return hit
 
-    def _generate(self, png: bytes, instruction: str) -> str:
+    def _generate(self, png: bytes, instruction: str) -> tuple[str, int, int]:
         torch, model_cls, processor_cls = _torch_stack()
+        self._cap_runtime_threads(torch)
         if self._bundle is None:
-            try:
-                model = model_cls.from_pretrained(self.model_id, torch_dtype=torch.float32)
-                processor = processor_cls.from_pretrained(self.model_id)
-                model.to("cpu")
-                model.eval()
-            except Exception as exc:  # noqa: BLE001 - a missing weight download stays local
-                raise GroundingUnavailable(
-                    f"could not load {self.model_id} on CPU: {type(exc).__name__}: {exc}"
-                ) from exc
-            self._bundle = (model, processor)
+            self._bundle = self._load(torch, model_cls, processor_cls)
         model, processor = self._bundle
+        image = _open_rgb(png)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": _holo_prompt(instruction)},
+                ],
+            }
+        ]
         try:
-            from PIL import Image
-        except ImportError as exc:
-            raise GroundingUnavailable("pillow is required to read the screenshot") from exc
-        try:
-            image = Image.open(io.BytesIO(png)).convert("RGB")
-        except Exception as exc:  # noqa: BLE001 - PIL's decoder errors are not one class
-            raise GroundingUnavailable("not a decodable image") from exc
-        prompt = (
-            "Locate the target in the image. Reply with JSON only: "
-            '{"point": [x, y], "space": "image"} with x and y in pixels '
-            "from the top-left. Instruction: "
-            + instruction
-        )
-        try:
-            inputs = processor(text=prompt, images=image, return_tensors="pt")
-            if hasattr(inputs, "to"):
-                inputs = inputs.to("cpu")
-            else:
-                inputs = {
-                    key: value.to("cpu") if hasattr(value, "to") else value
-                    for key, value in inputs.items()
-                }
-            with torch.no_grad():
-                output = model.generate(**inputs, max_new_tokens=128)
-            decoded = processor.batch_decode(output, skip_special_tokens=True)
+            templated = processor.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+                enable_thinking=False,
+            )
+            inputs = processor(text=[templated], images=[image], return_tensors="pt")
+            inputs = _inputs_on_cpu(inputs)
+            tokenizer = getattr(processor, "tokenizer", None)
+            generate_kwargs: dict[str, object] = {
+                "max_new_tokens": HOLO_MAX_NEW_TOKENS,
+                "do_sample": False,
+                "stop_strings": ["}"],
+            }
+            if tokenizer is not None:
+                generate_kwargs["tokenizer"] = tokenizer
+                eos = getattr(tokenizer, "eos_token_id", None)
+                if eos is not None:
+                    generate_kwargs["eos_token_id"] = eos
+            with _inference_mode(torch):
+                output = model.generate(**inputs, **generate_kwargs)
+            decoded = processor.batch_decode(
+                _new_token_ids(inputs, output),
+                skip_special_tokens=True,
+            )
+        except GroundingUnavailable:
+            raise
         except Exception as exc:  # noqa: BLE001 - a local generate failure is not fatal upstream
             raise GroundingUnavailable(
                 f"local grounding failed: {type(exc).__name__}: {exc}"
             ) from exc
         if not decoded:
             raise GroundingUnavailable("the local model returned no text")
-        return str(decoded[0])
+        return str(decoded[0]), int(image.size[0]), int(image.size[1])
+
+    def _cap_runtime_threads(self, torch) -> None:
+        setter = getattr(torch, "set_num_threads", None)
+        if not callable(setter):
+            raise GroundingUnavailable(
+                "torch.set_num_threads is missing; cannot cap torch threads at 4"
+            )
+        setter(_cap_torch_threads(self.threads))
+
+    def _load(self, torch, model_cls, processor_cls) -> tuple[object, object]:
+        try:
+            dtype = _select_weight_dtype(torch, self.dtype)
+            model = model_cls.from_pretrained(self.model_id, dtype=dtype)
+            processor = processor_cls.from_pretrained(self.model_id)
+            if hasattr(model, "to"):
+                model = model.to("cpu")
+            if hasattr(model, "eval"):
+                model.eval()
+        except GroundingUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a missing weight download stays local
+            raise GroundingUnavailable(
+                f"could not load {self.model_id} on CPU: {type(exc).__name__}: {exc}"
+            ) from exc
+        return model, processor
+
+
+def _inference_mode(torch):
+    method = getattr(torch, "inference_mode", None)
+    if callable(method):
+        return method()
+    return torch.no_grad()
+
+
+def _inputs_on_cpu(inputs):
+    if hasattr(inputs, "to"):
+        return inputs.to("cpu")
+    return {
+        key: value.to("cpu") if hasattr(value, "to") else value
+        for key, value in inputs.items()
+    }
+
+
+def _new_token_ids(inputs, output):
+    """Token ids the model generated, excluding the prompt."""
+    input_ids = inputs["input_ids"]
+    prompt_len = int(input_ids.shape[1])
+    return output[:, prompt_len:]
+
+
+def _open_rgb(png: bytes):
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise GroundingUnavailable("pillow is required to read the screenshot") from exc
+    try:
+        return Image.open(io.BytesIO(png)).convert("RGB")
+    except Exception as exc:  # noqa: BLE001 - PIL's decoder errors are not one class
+        raise GroundingUnavailable("not a decodable image") from exc
 
 
 def _torch_stack():
@@ -223,24 +415,15 @@ def _torch_stack():
         from transformers import AutoModelForImageTextToText, AutoProcessor
     except ImportError as exc:
         raise GroundingUnavailable(
-            "local grounding needs torch and transformers, which are not installed"
+            "local grounding needs torch and transformers, which are not installed "
+            "(pip install 'a11y-computer-use[holo]')"
         ) from exc
     return torch, AutoModelForImageTextToText, AutoProcessor
 
 
-def _png_size(png: bytes) -> tuple[int, int]:
-    try:
-        from PIL import Image
-    except ImportError:
-        return 0, 0
-    try:
-        with Image.open(io.BytesIO(png)) as image:
-            return int(image.size[0]), int(image.size[1])
-    except Exception:  # noqa: BLE001 - a stub PNG has no size; parsing still runs
-        return 0, 0
-
-
 __all__ = [
+    "HOLO_MAX_NEW_TOKENS",
+    "HOLO_MAX_THREADS",
     "HOLO_MODEL_ID",
     "GroundingHit",
     "GroundingModel",

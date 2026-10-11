@@ -129,8 +129,14 @@ word boxes first. A missing engine (`unsupported`, reason `missing_dependency`) 
 skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
-is `HoloLocalGrounding` for `Hcompany/Holo-3.1-0.8B` on CPU. The loop does
-not construct it and does not call a hosted model. A model with
+is `HoloLocalGrounding` for `Hcompany/Holo-3.1-0.8B` on CPU, from the
+optional `[holo]` extra (`torch` and `transformers>=5.6,<5.20`). The loop
+does not construct it, does not download weights at import, and does not
+call a hosted model. The adapter puts the screenshot in the chat template
+as an image part, asks for `{"x","y"}` on a 0..1000 grid, and scales that
+point onto the image. It loads bfloat16 when that dtype runs, otherwise
+float16, stops generation on `}` with `max_new_tokens` 14 and the
+tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored. A model with
 `supports_images` false stops as `needs_human` with `kind` `unsupported`
 instead of continuing without the picture. A runtime with no `crop` method
 still receives the window screenshot.
@@ -489,6 +495,10 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
 - `vision=True` attaching element crops and then a window screenshot, and
   `display` setting `$DISPLAY`
+- the Holo parser scaling a 0..1000 `{"x","y"}` reply onto image pixels,
+  the chat template and the processor both receiving the image, and torch
+  threads staying at most 4 (`tests/test_grounding.py`). Those tests mock
+  the stack. They do not download weights.
 - `crop` returning an image block on the tool message, and a failed crop
   staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the
@@ -559,7 +569,8 @@ Not in this change:
   Words in an attached image, OCR lines, and a grounding suggestion are
   fenced as untrusted screen data. Opaque-region markers drawn on the crop
   are not implemented. No hosted grounding API is called.
-  `HoloLocalGrounding` loads only when the caller constructs it.
+  `HoloLocalGrounding` loads only when the caller constructs it. The
+  `[holo]` extra is not installed by the test run.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
