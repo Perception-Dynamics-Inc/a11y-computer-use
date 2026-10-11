@@ -659,17 +659,52 @@ def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: i
     return sign * len(before)
 
 
+def _name_source(run, handle):
+    """A node whose on-screen names still describe the document after a wheel.
+
+    The anchor is often one cell. That cell leaves the tree as soon as the
+    page moves, so its names cannot say whether the step was one row or a
+    whole viewport. An ancestor that lists several rows stays.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    source = handle
+    try:
+        before = run(lambda: _showing_names(handle))
+    except Exception:
+        return handle, ()
+    if len(before) >= 4:
+        return handle, before
+    current = handle
+    for _ in range(8):
+        try:
+            parent = run(lambda node=current: _atspi._parent_of(node))
+        except Exception:
+            break
+        if parent is None:
+            break
+        current = parent
+        try:
+            names = run(lambda node=current: _showing_names(node))
+        except Exception:
+            break
+        if len(names) > len(before):
+            source, before = current, names
+        if len(before) >= 4:
+            break
+    return source, before
+
+
 def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> None:
     """Wheel a document by about ``dy`` lines, then wait until the tree says so.
 
     Chrome's document is a group, so this is the notch path, not the list
-    bar. A burst of XTEST notches collapses into one wheel on a busy
-    runner, and the accessibility tree can still name the old rows when
-    the call returns. A search that counts each call as five rows then
-    spends its whole budget short of the target. The requested burst is
-    sent first. When the on-screen head then settles on a shorter move,
-    more notches go out one at a time until the head has moved by about
-    ``|dy|`` names, or a notch leaves the names unchanged.
+    bar. One notch moves several rows, and a burst of ``|dy|`` notches
+    jumps about a viewport, so a search that lands on the target scrolls
+    past it before the next read. A burst can also collapse into one row
+    on a busy runner. Notches go out one at a time. Each one waits until
+    the on-screen head settles. The step stops when that head has moved
+    by about ``|dy|`` names, or a notch leaves the names unchanged.
     """
     from a11y_computer_use.drivers import _atspi, _linux_input
 
@@ -691,60 +726,51 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         if not run(lambda: _atspi._chromium_app(handle)):
             plain()
             return
-        before = run(lambda: _showing_names(handle))
     except Exception:
         plain()
         return
-    _linux_input.scroll(x, y, dx=dx, dy=dy)
+    source, before = _name_source(run, handle)
     if len(before) < 2:
-        _settle_shown_names(run, handle)
+        plain()
         return
 
     moved = 0
-    changed = False
-    stable = 0
-    last: int | None = None
-    # 1.5s of 0.05s polls. A tree that publishes the whole step inside
-    # this window is not given extra notches.
-    for _ in range(30):
-        try:
-            after = run(lambda: _showing_names(handle))
-            moved = _shown_name_advance(before, after, sign)
-        except Exception:
-            return
-        if after != before:
-            changed = True
-        if abs(moved) >= wanted:
-            return
-        if moved == last:
-            stable += 1
-        else:
-            stable = 0
-            last = moved
-        if stable >= 2 and changed:
-            break
-        time.sleep(0.05)
-    if not (0 < abs(moved) < wanted):
-        return
-    for _extra in range(wanted * 2):
-        _linux_input.scroll(x, y, dy=sign)
-        time.sleep(0.03)
+    for notch in range(wanted * 2):
+        _linux_input.scroll(
+            x, y,
+            dx=int(dx) if notch == 0 else 0,
+            dy=sign,
+        )
         saw = False
-        for _ in range(8):
+        stable = 0
+        last: int | None = None
+        settled = moved
+        for _ in range(30):
             try:
-                after = run(lambda: _showing_names(handle))
+                after = run(lambda node=source: _showing_names(node))
                 nxt = _shown_name_advance(before, after, sign)
             except Exception:
                 return
-            if nxt != moved:
-                moved = nxt
+            if after != before:
                 saw = True
-                if abs(moved) >= wanted:
-                    return
+            if abs(nxt) >= wanted:
+                return
+            if nxt == last:
+                stable += 1
+            else:
+                stable = 0
+                last = nxt
+            if stable >= 2 and saw:
+                settled = nxt
                 break
             time.sleep(0.05)
-        if not saw:
+        else:
+            settled = last if last is not None else moved
+        # A notch that does not move the head is the end of the page, or a
+        # sample that cannot be measured. More notches would repeat it.
+        if not saw or abs(settled) <= abs(moved):
             return
+        moved = settled
 
 
 _BUTTON_NAME = {MouseButton.LEFT: "left", MouseButton.RIGHT: "right", MouseButton.MIDDLE: "middle"}
@@ -1797,11 +1823,12 @@ class LinuxDriver:
         Chrome document. When the window's process was started with
         ``--remote-debugging-port``, a line step is a DOM ``scrollBy`` of
         about 40 pixels per line, kept only when ``scrollTop`` changes.
-        Otherwise the notches are sent. A burst of those notches can
-        collapse into one wheel on a busy runner, so when the on-screen
-        head settles short of the requested lines, more notches are sent
-        until that head has moved by about that many names. A notch that
-        leaves the names unchanged stops the extra wheels.
+        Otherwise the notches are sent one at a time. A burst of the
+        whole request jumps about a viewport, and on a busy runner that
+        same burst can collapse into one row. Each notch waits until the
+        on-screen head settles, and the step stops when that head has
+        moved by about the requested number of names. A notch that leaves
+        the names unchanged stops the step.
         ``unit=pixels`` writes the AT-SPI scroll-bar value
         by that delta and reads it back when a bar is exposed. GTK scrolled
         windows expose the value in pixels. A missing bar tries a CDP DOM
