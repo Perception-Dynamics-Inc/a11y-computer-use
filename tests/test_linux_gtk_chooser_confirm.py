@@ -13,7 +13,15 @@ import pytest
 from a11y_computer_use.drivers import _atspi, _linux_input, _linux_system
 from a11y_computer_use.drivers.linux import LinuxDriver
 from a11y_computer_use.observe import DisplayGeometry
-from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
+from a11y_computer_use.schema import (
+    Bounds,
+    ComputerUseError,
+    Display,
+    Element,
+    ErrorCode,
+    Scope,
+    Snapshot,
+)
 
 
 class _Node:
@@ -218,10 +226,142 @@ def test_ctrl_return_is_still_a_key(monkeypatch) -> None:
     assert keys == ["ctrl+Return"]
 
 
-def test_a_chooser_without_an_accessibility_button_still_sends_the_key(monkeypatch) -> None:
+def _page(title: str, *extra: Element) -> Snapshot:
+    button = Element(
+        ref="e2", role="AXButton", title=title, value=None,
+        bounds=Bounds(0, 40, 80, 180, 28), snapshot_id="s",
+    )
+    return Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="chrome", pid=8, created_at=0.0,
+        displays=(Display(0, 1280, 800, 1.0, True),),
+        elements=(button, *extra),
+    )
+
+
+def _browser_chooser(monkeypatch, *, path="/tmp/docs/picked.txt", close=True, show=True, address=False):
+    """Chrome's Open File dialog: an X window and no accessibility button."""
+    _screen(monkeypatch)
+    _clock(monkeypatch)
+    state = {"open": True, "x": 20, "y": 0, "w": 900, "h": 1400, "title": "Upload: No file chosen"}
     keys = []
+    clicks = []
+    resized = []
+    moved = []
+    focused = []
+    board = {"value": "keep-me"}
+
+    def windows():
+        if not state["open"]:
+            return [{
+                "window_id": 3,
+                "app": "chrome",
+                "title": "picked.txt - Google Chrome",
+                "bounds": {"x": 40, "y": 40, "width": 1000, "height": 700},
+            }]
+        return [{
+            "window_id": 9,
+            "app": "chrome",
+            "title": "Open File",
+            "bounds": {"x": state["x"], "y": state["y"], "width": state["w"], "height": state["h"]},
+        }]
+
+    def press(chord: str) -> None:
+        keys.append(chord)
+        if chord == "ctrl+c":
+            board["value"] = path
+
+    def click(x: int, y: int, **_kwargs) -> None:
+        clicks.append((int(x), int(y)))
+        if close:
+            state["open"] = False
+        if show:
+            state["title"] = "Upload: picked.txt"
+
+    def snapshot(_scope, _app):
+        extras = ()
+        if address:
+            extras = (
+                Element(
+                    ref="e3", role="AXTextField", title=path, value=path,
+                    bounds=Bounds(0, 80, 8, 600, 24), snapshot_id="s",
+                ),
+            )
+        return _page(state["title"], *extras)
+
     monkeypatch.setattr(_linux_system, "active_window", lambda: {
         "window_id": 9, "app": "chrome", "pid": 8, "title": "Open File",
+    })
+    monkeypatch.setattr(_linux_system, "windows", windows)
+    monkeypatch.setattr(_linux_system, "resize_window", lambda _wid, width, height: resized.append((int(width), int(height))) or state.update(w=int(width), h=int(height)) or True)
+    monkeypatch.setattr(_linux_system, "move_window", lambda _wid, x, y: moved.append((int(x), int(y))) or state.update(x=int(x), y=int(y)) or True)
+    monkeypatch.setattr(_linux_system, "focus_window", lambda window_id: focused.append(window_id) or True)
+    monkeypatch.setattr(_linux_system, "write_clipboard", lambda text: board.update(value=text))
+    monkeypatch.setattr(_linux_system, "read_clipboard", lambda: board["value"])
+    monkeypatch.setattr(_atspi, "file_chooser_controls", lambda *_args: None)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    monkeypatch.setattr(_linux_input, "click", click)
+    driver = LinuxDriver()
+    driver.snapshot = snapshot
+    return {
+        "driver": driver,
+        "keys": keys,
+        "clicks": clicks,
+        "resized": resized,
+        "moved": moved,
+        "focused": focused,
+        "board": board,
+        "state": state,
+    }
+
+
+def test_chrome_return_clicks_open_and_the_page_shows_the_file(monkeypatch) -> None:
+    found = _browser_chooser(monkeypatch)
+    found["driver"].key_chord("Return")
+    assert "return" not in {key.casefold() for key in found["keys"]}
+    assert found["keys"] == ["ctrl+a", "ctrl+c", "right"]
+    assert found["resized"] == [(900, 736)]
+    assert found["moved"] == [(32, 32)]
+    assert found["clicks"] == [(32 + 900 - 53, 32 + 736 - 27)]
+    assert found["state"]["open"] is False
+    assert found["board"]["value"] == "keep-me"
+    assert found["focused"] == [9]
+
+
+def test_chrome_return_fails_when_the_page_still_says_no_file_chosen(monkeypatch) -> None:
+    found = _browser_chooser(monkeypatch, close=True, show=False, address=True)
+    with pytest.raises(ComputerUseError) as exc:
+        found["driver"].key_chord("Return")
+    assert "return" not in {key.casefold() for key in found["keys"]}
+    assert found["clicks"]
+    assert found["state"]["open"] is False
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "file_not_chosen"
+    assert exc.value.detail["expected"] == "picked.txt"
+
+
+def test_chrome_return_fails_when_the_dialog_stays_open(monkeypatch) -> None:
+    found = _browser_chooser(monkeypatch, close=False, show=False)
+    with pytest.raises(ComputerUseError) as exc:
+        found["driver"].key_chord("Return")
+    assert "return" not in {key.casefold() for key in found["keys"]}
+    assert found["clicks"]
+    assert exc.value.detail["reason"] == "file_chooser_unchanged"
+
+
+def test_chrome_return_with_an_empty_location_does_not_click(monkeypatch) -> None:
+    found = _browser_chooser(monkeypatch, path="")
+    with pytest.raises(ComputerUseError) as exc:
+        found["driver"].key_chord("Return")
+    assert found["clicks"] == []
+    assert found["resized"] == []
+    assert "return" not in {key.casefold() for key in found["keys"]}
+    assert exc.value.detail["reason"] == "file_not_chosen"
+
+
+def test_a_non_browser_chooser_without_a_button_still_sends_the_key(monkeypatch) -> None:
+    keys = []
+    monkeypatch.setattr(_linux_system, "active_window", lambda: {
+        "window_id": 9, "app": "python3", "pid": 8, "title": "Open File",
     })
     monkeypatch.setattr(_atspi, "file_chooser_controls", lambda *_args: None)
     monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))

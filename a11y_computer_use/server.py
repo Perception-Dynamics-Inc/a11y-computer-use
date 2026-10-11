@@ -7806,7 +7806,9 @@ def build_server(
         location bar in a GTK 3 chooser). Return then activates that
         chooser's Open or Save button through its accessibility action,
         after scrolling or resizing the button on screen, and checks that
-        the dialog closed and the app shows the file. Windows and the
+        the dialog closed and the app shows the file. Chrome's chooser has
+        no accessibility button: Return fits the window and clicks Open, and
+        the page's file input has to show the file. Windows and the
         browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
 
