@@ -7951,6 +7951,399 @@ def _row_selected(node) -> bool:
     return _state_has(node, "SELECTED")
 
 
+def _xml_roles(acc) -> set[str]:
+    """``xml-roles`` tokens. Empty when the node has no attributes."""
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return set()
+    return {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+
+
+def _choice_text(value: str | None) -> str:
+    """Option text with NBSP folded to space and the edges stripped."""
+    if value is None:
+        return ""
+    return (_norm_nbsp(str(value)) or "").strip()
+
+
+def _is_combobox_node(acc) -> bool:
+    """True for a combo box, including an input whose ARIA role is combobox."""
+    if acc is None:
+        return False
+    try:
+        if accessible_gone(acc):
+            return False
+    except Exception:
+        return False
+    if _role_name(acc) in {"combo box", "combo-box"}:
+        return True
+    return "combobox" in _xml_roles(acc)
+
+
+def _listbox_option(acc) -> bool:
+    """True for an option in a list or list box, not a menu item.
+
+    A GTK tree cell is not one. A menu item inside a combo popup is not one
+    either: that click is an activation, and this check is only for the row
+    selection read-back.
+    """
+    role = _role_name(acc)
+    xml = _xml_roles(acc)
+    if role not in {"list item", "list box item"} and "option" not in xml:
+        return False
+    parent, _index, _target = _selection_parent(acc)
+    if parent is not None:
+        parent_role = _role_name(parent)
+        return parent_role in {"list", "list box"} or "listbox" in _xml_roles(parent)
+    if role in {"menu item", "check menu item", "radio menu item"}:
+        return False
+    node = acc
+    for _ in range(6):
+        node = _parent_of(node)
+        if node is None:
+            return False
+        parent_role = _role_name(node)
+        if parent_role in {"menu", "popup menu", "menu bar"}:
+            return False
+        if parent_role in {"list", "list box"} or "listbox" in _xml_roles(node):
+            return True
+    return False
+
+
+def _relation_combobox(acc):
+    """A combobox related to ``acc``, or None.
+
+    ``aria-controls`` is CONTROLLED_BY on the listbox and CONTROLLER_FOR on
+    the combobox. ``aria-owns`` is the node-parent pair. Either direction
+    counts.
+    """
+    if acc is None:
+        return None
+    for kind in (
+        "controlled_by", "controller_for", "node_child_of", "node_parent_of",
+        "embedded_by", "embeds",
+    ):
+        try:
+            targets = _relation_targets(acc, kind)
+        except Exception:
+            continue
+        for target in targets:
+            if _is_combobox_node(target):
+                return target
+    return None
+
+
+def _combobox_under(node, depth: int):
+    """A combobox at ``node`` or within ``depth`` levels of children."""
+    if node is None or depth < 0:
+        return None
+    if _is_combobox_node(node):
+        return node
+    if depth == 0:
+        return None
+    count = min(_child_count(node), 8)
+    for index in range(count):
+        found = _combobox_under(_child_at(node, index), depth - 1)
+        if found is not None:
+            return found
+    return None
+
+
+def _nearby_combobox(listbox):
+    """A combobox that shares ``listbox``'s parent, preferring an open one.
+
+    The input and the list are often siblings, or the input sits one or two
+    groups under that parent (a label around the input). Several comboboxes
+    on the page resolve to the expanded one.
+    """
+    if listbox is None:
+        return None
+    parent = _parent_of(listbox)
+    if parent is None:
+        return None
+    linked = _relation_combobox(parent)
+    if linked is not None:
+        return linked
+    candidates = []
+    count = min(_child_count(parent), 24)
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None:
+            continue
+        found = _combobox_under(child, 3)
+        if found is not None and all(found is not item for item in candidates):
+            candidates.append(found)
+    expanded = [item for item in candidates if _popup_open(item)]
+    if len(expanded) == 1:
+        return expanded[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if expanded:
+        return expanded[0]
+    return None
+
+
+def _focused_combobox(acc):
+    """The focused combobox in ``acc``'s application, when Collection can say.
+
+    A listbox option click often leaves focus on the input. None when the
+    application has no Collection interface, which is also the hermetic fake.
+    """
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return None
+    try:
+        Atspi = _atspi()
+        focused_state = getattr(getattr(Atspi, "StateType", None), "FOCUSED", None)
+    except Exception:
+        return None
+    if focused_state is None:
+        return None
+    try:
+        found, node = _focused_via_collection(app, Atspi, focused_state)
+    except Exception:
+        return None
+    if not found or node is None:
+        return None
+    if _is_combobox_node(node):
+        return node
+    current = node
+    for _ in range(6):
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            break
+        if _is_combobox_node(parent):
+            return parent
+        current = parent
+    return None
+
+
+def _combobox_owner(acc):
+    """The combobox this option belongs to, or None.
+
+    An ancestor combo, a controls/owns relation, a sibling input, then the
+    focused combobox. A plain listbox has none of these.
+    """
+    node = acc
+    seen: set[int] = set()
+    listbox = None
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if node is not acc and _is_combobox_node(node):
+            return node
+        linked = _relation_combobox(node)
+        if linked is not None:
+            return linked
+        role = _role_name(node)
+        if (
+            listbox is None
+            and node is not acc
+            and (role in {"list", "list box"} or "listbox" in _xml_roles(node))
+        ):
+            listbox = node
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    nearby = _nearby_combobox(listbox)
+    if nearby is not None:
+        return nearby
+    return _focused_combobox(acc)
+
+
+def _combobox_text(acc) -> str | None:
+    """The value a snapshot shows for this combobox.
+
+    The input's own text wins, and an empty input is ``""``, not a missing
+    read. U+FFFC is Chromium's placeholder for each option, so a string that
+    is only those characters falls through to the entry or the selected
+    option. None means the read failed.
+    """
+    if acc is None:
+        return None
+    try:
+        if accessible_gone(acc):
+            return None
+    except Exception:
+        return None
+    text = _full_text(acc)
+    if isinstance(text, str) and _OBJECT_REPLACEMENT not in text:
+        return _choice_text(text)
+    if isinstance(text, str):
+        cleaned = _choice_text(_strip_objects(text))
+        if cleaned:
+            return cleaned
+    entry = _combo_entry(acc)
+    if entry is not None and entry is not acc:
+        entry_text = _full_text(entry)
+        if isinstance(entry_text, str) and _OBJECT_REPLACEMENT not in entry_text:
+            return _choice_text(entry_text)
+        if isinstance(entry_text, str):
+            cleaned = _choice_text(_strip_objects(entry_text))
+            if cleaned:
+                return cleaned
+    selected = _selected_option_text(acc)
+    if selected:
+        return _choice_text(selected)
+    return None
+
+
+def _option_marked_selected(acc) -> bool:
+    """True when the option is SELECTED or ``aria-selected`` is true.
+
+    A destroyed option is not selected. The attribute covers a tree that
+    publishes aria-selected without the AT-SPI state.
+    """
+    if acc is None:
+        return False
+    try:
+        if accessible_gone(acc):
+            return False
+    except Exception:
+        return False
+    if _row_selected(acc):
+        return True
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        return False
+    for key in ("aria-selected", "selected"):
+        if str(attrs.get(key) or "").strip().lower() == "true":
+            return True
+    return False
+
+
+def _aria_list_option(acc) -> bool:
+    """A web listbox option, not a GTK list row.
+
+    Chromium and Firefox list items count. So does an option whose list
+    publishes ``xml-roles`` of listbox or option. A GTK tree or list does
+    not, so a row click there still has to move SELECTED.
+    """
+    if acc is None or not _listbox_option(acc):
+        return False
+    if "option" in _xml_roles(acc):
+        return True
+    node = acc
+    for _ in range(6):
+        try:
+            if _chromium_app(node) or _gecko_app(node):
+                return True
+        except Exception:
+            pass
+        roles = _xml_roles(node)
+        if "listbox" in roles or "combobox" in roles or "option" in roles:
+            return True
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return False
+        if _role_name(parent) in {"frame", "window", "application", "menu", "popup menu", "menu bar"}:
+            return False
+        node = parent
+    return False
+
+
+def combobox_option_context(acc) -> dict | None:
+    """Before-click reading of the combobox that owns this option, or None.
+
+    None when this is not a web listbox option or no combobox owns it. The
+    reading is taken before the click. An ARIA option's row disappears when
+    the list closes, and the comparison still has the old value.
+    """
+    try:
+        if not _aria_list_option(acc):
+            return None
+        combo = _combobox_owner(acc)
+        if combo is None:
+            return None
+        _call_first(combo, ("clear_cache", "clearCache"))
+        return {
+            "combo": combo,
+            "label": _choice_text(_option_label(acc)),
+            "text": _combobox_text(combo),
+            "name": _choice_text(_node_name(combo)),
+            "expanded": bool(_popup_open(combo)),
+            "selected": _choice_text(_selected_option_text(combo)),
+            "marked": _option_marked_selected(acc),
+        }
+    except Exception:
+        return None
+
+
+def _combobox_commit_signals(ctx: dict, option) -> bool:
+    """True when the combobox now shows this option, or the option became selected.
+
+    A value or name that changed to the option counts. So does aria-selected
+    arriving on the option. A popup that was open and is now closed counts
+    when the collapsed combobox's text or name is the option, including when
+    that text was already the option and the click only closed the list.
+    """
+    label = _choice_text(ctx.get("label"))
+    if not label:
+        return False
+    if option is not None and _option_marked_selected(option) and not ctx.get("marked"):
+        return True
+    combo = ctx.get("combo")
+    if combo is None:
+        return False
+    try:
+        if accessible_gone(combo):
+            return False
+    except Exception:
+        return False
+    _call_first(combo, ("clear_cache", "clearCache"))
+    shown = _combobox_text(combo)
+    name = _choice_text(_node_name(combo))
+    before_text = _choice_text(ctx.get("text"))
+    before_name = _choice_text(ctx.get("name"))
+    before_selected = _choice_text(ctx.get("selected"))
+    if shown is not None and _choice_text(shown) == label and before_text != label:
+        return True
+    if name == label and before_name != label:
+        return True
+    selected = _choice_text(_selected_option_text(combo))
+    if selected == label and before_selected != label:
+        return True
+    if ctx.get("expanded") and not _popup_open(combo) and (
+        _choice_text(shown) == label or name == label
+    ):
+        return True
+    return False
+
+
+def combobox_option_committed(ctx, option) -> bool:
+    """True when the click committed this option and the reading stays put.
+
+    A one-read flicker is not a commit. A combobox that still shows its old
+    value, with the popup still open and the option not selected, is not a
+    commit. None ``ctx`` is not a listbox option and is not a commit.
+    """
+    if not ctx or not _choice_text(ctx.get("label")):
+        return False
+    for attempt in range(8):
+        try:
+            landed = _combobox_commit_signals(ctx, option)
+        except Exception:
+            landed = False
+        if landed:
+            time.sleep(0.04)
+            try:
+                if _combobox_commit_signals(ctx, option):
+                    return True
+            except Exception:
+                pass
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def chromium_list_row(acc) -> bool:
     """True when ``acc`` is an option in a Chromium list or list box.
 
@@ -8249,25 +8642,32 @@ def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 
     None means this node is not such a row, so the caller uses ``do_press``.
-    True means the row is selected and stayed selected. False means it is a
+    True means the row is selected and stayed selected, or an ARIA combobox
+    option committed its value and the list closed. False means it is a
     selection row and it is still not selected: the caller clicks the
     on-screen center, then checks again. A GTK cell's expand/edit/activate
     action is not used. A Chrome option's click is, and the selection is
     checked afterwards. A click action that returns without leaving the row
-    selected is not success.
+    selected is not success, unless the combobox that owns the option now
+    shows it.
     """
     parent, index, target = _selection_parent(acc)
     if parent is None or target is None:
         return None
+    choice = combobox_option_context(acc)
     action = _first_press_action(acc)
     if action in _SELECTING_ACTION_NAMES:
         do_press(acc)
         if _row_settled(target):
             return True
+        if combobox_option_committed(choice, target):
+            return True
     iface = _selection_iface(parent)
     if iface is not None and index is not None:
         _call_first(iface, ("select_child", "selectChild"), index, default=False)
         if _row_settled(target):
+            return True
+        if combobox_option_committed(choice, target):
             return True
     return False
 

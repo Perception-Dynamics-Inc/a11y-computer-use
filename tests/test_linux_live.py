@@ -1690,6 +1690,144 @@ def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
             proc.kill()
 
 
+def test_linux_chrome_aria_combobox_option_click_reports_the_selection(tmp_path) -> None:
+    """A ref click on an ARIA combobox option reports success when the list closes.
+
+    The option handler writes the input, hides the listbox, and records
+    ``out:picked``. The row is gone, so SELECTED never sticks. The combobox
+    value is the proof. An option that does not change the value or the
+    popup is ``selection_unchanged`` even though its handler ran.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the ARIA combobox click test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "aria-combobox.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuacombo298</title>"
+        "<style>body{margin:16px;font:16px sans-serif}li{padding:8px 16px}</style>"
+        "<input id=city role=combobox aria-autocomplete=list aria-expanded=true "
+        "aria-controls=lb aria-label=City>"
+        "<ul id=lb role=listbox>"
+        "<li role=option id=berlin>Berlin</li>"
+        "<li role=option id=bern>Bern</li>"
+        "<li role=option id=inert>Inert</li>"
+        "</ul>"
+        "<div id=out role=status aria-live=polite aria-label='out:none'>out:none</div>"
+        "<script>"
+        "var input = document.getElementById('city');"
+        "var list = document.getElementById('lb');"
+        "var out = document.getElementById('out');"
+        "var picks = 0;"
+        "function publish(text) {"
+        " out.textContent = text;"
+        " out.setAttribute('aria-label', text);"
+        "}"
+        "document.getElementById('inert').addEventListener('click', function () {"
+        " this.removeAttribute('aria-selected');"
+        " publish('out:noop');"
+        "});"
+        "['berlin', 'bern'].forEach(function (id) {"
+        " document.getElementById(id).addEventListener('click', function () {"
+        "  picks += 1;"
+        "  input.value = this.textContent;"
+        "  input.setAttribute('aria-expanded', 'false');"
+        "  list.hidden = true;"
+        "  publish('out:picked=' + this.textContent + '#' + picks);"
+        " });"
+        "});"
+        "</script>"
+    )
+    profile = tmp_path / "chrome-aria-combobox"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,800", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode} before the combobox")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            rendered = observe.render_text(shot)
+            last = rendered[:500]
+            rows = {el.title for el in shot.elements if el.role == "AXRow" and el.clickable}
+            city = next((el for el in shot.elements if el.title == "City"), None)
+            if {"Berlin", "Bern", "Inert"} <= rows and city is not None:
+                snap = shot
+                break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose the combobox options\n{last}"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome", "chromium")
+        driver.activate_app("chrome")
+
+        def _row(shot, title):
+            return next(
+                el for el in shot.elements
+                if el.role == "AXRow" and el.title == title and el.clickable
+            )
+
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        runtime._current = shot
+        inert = _row(shot, "Inert")
+        with pytest.raises(ComputerUseError) as exc:
+            runtime.click(inert.ref)
+        assert exc.value.code is ErrorCode.UNSUPPORTED
+        assert exc.value.detail["reason"] == "selection_unchanged"
+        assert "did not change the selection" in exc.value.message
+        missed = driver.snapshot(Scope.WINDOW, "chrome")
+        missed_text = observe.render_text(missed)
+        assert "out:noop" in missed_text, missed_text
+        assert "out:picked" not in missed_text, missed_text
+        city = next(el for el in missed.elements if el.title == "City")
+        assert not city.value or "Inert" not in str(city.value), missed_text
+        assert _row(missed, "Bern").clickable
+
+        shot = driver.snapshot(Scope.WINDOW, "chrome")
+        runtime._current = shot
+        bern = _row(shot, "Bern")
+        result = runtime.click(bern.ref)
+        assert str(result).startswith("clicked "), result
+        assert "did not change the selection" not in str(result)
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = observe.render_text(shot)
+            city = next((el for el in shot.elements if el.title == "City"), None)
+            value = "" if city is None or city.value is None else str(city.value)
+            collapsed = city is None or city.expanded is not True
+            if value == "Bern" and "out:picked=Bern#1" in shown and collapsed:
+                break
+            time.sleep(0.25)
+        assert "out:picked=Bern#1" in shown, shown
+        assert "out:picked=Bern#2" not in shown, shown
+        city = next(el for el in shot.elements if el.title == "City")
+        assert city.value == "Bern", shown
+        assert city.expanded is not True, shown
+        assert not any(el.role == "AXRow" and el.title == "Bern" for el in shot.elements), shown
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
     """Live Chrome. A page script steals focus during set_value.
 
