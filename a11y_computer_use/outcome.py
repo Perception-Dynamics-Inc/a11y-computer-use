@@ -535,6 +535,34 @@ def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
     return normalize_paragraph_breaks(got) == normalize_paragraph_breaks(wanted)
 
 
+# Typed read-back. ``\r\n`` is one break. U+2028 and U+2029 are the same
+# break as ``\n``. A paragraph or block boundary is that break too: the
+# reader inserts ``\n`` between those nodes. Breaks are not removed.
+_TYPED_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029]")
+
+
+def normalize_typed_breaks(text: str) -> str:
+    """Map newline, CRLF, U+2028, U+2029, and a paragraph or block boundary onto ``\\n``.
+
+    A boundary between paragraphs or blocks is ``\\n`` in the read-back.
+    NBSP is a space. Characters around a break stay, so ``ab`` is not
+    ``a\\nb`` and ``a\\n\\nb`` is not ``a\\nb``.
+    """
+    return _TYPED_BREAK.sub("\n", str(text).replace("\u00a0", " "))
+
+
+def typed_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which line or paragraph break was used.
+
+    Newline, CRLF, U+2028, U+2029, and a paragraph or block boundary are the
+    same break. Missing or extra text is not the same string. ``a b`` is not
+    ``a\\nb``. ``ab`` is not ``a\\nb``. ``a\\n\\nb`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+    return normalize_typed_breaks(got) == normalize_typed_breaks(wanted)
+
+
 def _type_field_text(value: str) -> str:
     """Field text compared after a type.
 

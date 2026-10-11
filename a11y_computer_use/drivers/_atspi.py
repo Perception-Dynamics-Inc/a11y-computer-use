@@ -1253,13 +1253,55 @@ def _div_inline_sentence(acc, role_str: str, attrs: dict) -> str | None:
     return raw.strip() or None
 
 
+_BLOCK_TAGS = frozenset({
+    "p", "div", "li", "pre", "blockquote", "address",
+    "h1", "h2", "h3", "h4", "h5", "h6",
+})
+
+
+def _block_boundary(obj) -> bool:
+    """True when ``obj`` is a paragraph or block, not an inline embed.
+
+    A bold word and a link are inline. A contenteditable paragraph, heading,
+    or block tag is the boundary a newline asked for.
+    """
+    if obj is None:
+        return False
+    try:
+        role = _role_name(obj)
+    except Exception:
+        return False
+    if role in {"paragraph", "heading"}:
+        return True
+    try:
+        tag = str(_get_attributes(obj).get("tag") or "").lower()
+    except Exception:
+        return False
+    return tag in _BLOCK_TAGS
+
+
+def _with_block_boundary(preceding: str, obj, piece: str) -> str:
+    """``piece`` with a newline in front when ``obj`` starts another block.
+
+    The first block has no leading break. A piece that already starts with a
+    break is left as it is. An empty block still contributes the break, so
+    two boundaries stay two.
+    """
+    if not preceding or not _block_boundary(obj):
+        return piece
+    if piece.startswith(("\n", "\r", "\u2028", "\u2029")):
+        return piece
+    return "\n" + piece
+
+
 def _expand_embedded(acc, text: str, depth: int = 0) -> str:
     """Replace each U+FFFC with the embedded child's text.
 
     ``"The \\ufffc fox jumps over the \\ufffc dog."`` with a link "quick brown"
     and an emphasis "lazy" becomes "The quick brown fox jumps over the lazy
     dog." A leftover object character with no child is dropped, which is what
-    a label around a select already did.
+    a label around a select already did. A paragraph or block boundary is a
+    newline between those children, not a character that is dropped.
     """
     if not isinstance(text, str):
         return ""
@@ -1274,7 +1316,8 @@ def _expand_embedded(acc, text: str, depth: int = 0) -> str:
         if index >= len(parts) - 1:
             break
         obj = targets[index] if index < len(targets) else None
-        out.append(_object_text(obj, depth + 1, surrounding))
+        piece = _object_text(obj, depth + 1, surrounding)
+        out.append(_with_block_boundary("".join(out), obj, piece))
     return "".join(out).strip()
 
 
@@ -3481,10 +3524,12 @@ def _expansion_starts(acc, raw: str) -> tuple[str, list[int]]:
             built += 1
         if part_index >= len(parts) - 1:
             break
-        starts.append(built)
         obj = targets[obj_i] if obj_i < len(targets) else None
         obj_i += 1
-        piece = _object_text(obj, 1, surrounding).replace("\u00a0", " ")
+        piece = _with_block_boundary(
+            "".join(out), obj, _object_text(obj, 1, surrounding).replace("\u00a0", " "),
+        )
+        starts.append(built)
         out.append(piece)
         built += len(piece)
     starts.append(built)
@@ -3708,13 +3753,15 @@ def _selection_replaced(
 
     if end <= start or end > len(before_n):
         return False
+    from a11y_computer_use.outcome import typed_breaks_match
+
     for needle in needles:
         if not needle:
             continue
         expected = replaced_text(before_n, needle, start, end)
         if expected is None:
             continue
-        if _field_text_for_type(expected, typed) == after_n:
+        if typed_breaks_match(_field_text_for_type(expected, typed), after_n):
             return True
     return False
 
@@ -3741,12 +3788,13 @@ def _matched_replacement(
     start, end = selection
     if not _selection_replaced(before_n, after_n, _type_needles(text, chrome=chrome), start, end, text):
         return None
-    from a11y_computer_use.outcome import replaced_text
+    from a11y_computer_use.outcome import replaced_text, typed_breaks_match
 
     for needle in _type_needles(text, chrome=chrome):
         expected = replaced_text(before_n, needle, start, end)
-        if expected is not None and _field_text_for_type(expected, text) == after_n:
-            return _field_text_for_type(expected, text)
+        shown = _field_text_for_type(expected, text) if expected is not None else None
+        if shown is not None and typed_breaks_match(shown, after_n):
+            return shown
     return None
 
 
@@ -3765,17 +3813,24 @@ def _typed_visible(
     expected result is the previous text with that range replaced, and the
     final text has to be that string. A suffix or an insertion is the check
     when the caret is collapsed. NBSP compares as a space, and one trailing
-    contenteditable newline is not part of the value. ``chrome`` also
-    accepts the typed text with its trailing spaces removed, which is the
-    string Chrome keeps. A field that settled without the characters is not
-    a match. A field whose whole text is already exactly the typed string
-    is a match: Chrome's find bar reopens with that query selected, and
-    typing it again does not change the string.
+    contenteditable newline is not part of the value. A newline, CRLF,
+    U+2028, U+2029, and a paragraph or block boundary are the same break.
+    A missing or extra character is not. ``chrome`` also accepts the typed
+    text with its trailing spaces removed, which is the string Chrome keeps.
+    A field that settled without the characters is not a match. A field
+    whose whole text is already exactly the typed string is a match:
+    Chrome's find bar reopens with that query selected, and typing it again
+    does not change the string.
     """
+    from a11y_computer_use.outcome import normalize_typed_breaks
+
     before_n = _field_text_for_type(before, text)
     after_n = _field_text_for_type(after, text)
     needles = _type_needles(text, chrome=chrome)
-    if after_n is None or not any(needle and needle in after_n for needle in needles):
+    after_b = None if after_n is None else normalize_typed_breaks(after_n)
+    before_b = None if before_n is None else normalize_typed_breaks(before_n)
+    needles_b = tuple(normalize_typed_breaks(needle) for needle in needles)
+    if after_b is None or not any(needle and needle in after_b for needle in needles_b):
         return False
     if (
         selection is not None
@@ -3789,16 +3844,16 @@ def _typed_visible(
         )
     if before_n is None:
         return True
-    if after_n == before_n:
+    if after_b == before_b:
         # The field already showed exactly the typed text. Chrome's find bar
         # reopens with that query selected, and typing it again leaves the
         # same string. That is the text landing. A longer field that did not
         # change still does not count: the needle is only a piece of it.
-        return any(needle and after_n == needle for needle in needles)
-    for needle in needles:
-        if needle and (after_n.endswith(needle) or after_n == (before_n + needle)):
+        return any(needle and after_b == needle for needle in needles_b)
+    for needle in needles_b:
+        if needle and (after_b.endswith(needle) or after_b == ((before_b or "") + needle)):
             return True
-    return before_n in after_n or len(after_n) > len(before_n)
+    return (before_b or "") in after_b or len(after_b) > len(before_b or "")
 
 
 # Chrome publishes a contenteditable's new characters a beat after the keys.
@@ -5686,9 +5741,16 @@ def _type_lines_match(shown: list[str], wanted: list[str]) -> bool:
     lines, does not hide a match. A line break inside one paragraph does
     not count as those paragraphs.
     """
-    if shown == wanted:
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    def same(left: list[str], right: list[str]) -> bool:
+        return len(left) == len(right) and all(
+            typed_breaks_match(got, wanted_line) for got, wanted_line in zip(left, right)
+        )
+
+    if same(shown, wanted):
         return True
-    if wanted and (shown == [""] + wanted or shown == wanted + [""]):
+    if wanted and (same(shown, [""] + wanted) or same(shown, wanted + [""])):
         return True
     return False
 
@@ -6024,9 +6086,9 @@ def _writer_typed_visible(before: str | None, shown: str | None, text: str) -> b
     """
     if shown is None:
         return False
-    from a11y_computer_use.outcome import normalize_paragraph_breaks
+    from a11y_computer_use.outcome import normalize_paragraph_breaks, typed_breaks_match
 
-    if paragraph_breaks_match(shown, text):
+    if typed_breaks_match(shown, text) or paragraph_breaks_match(shown, text):
         return True
     norm_shown = normalize_paragraph_breaks(shown)
     norm_text = normalize_paragraph_breaks(text or "")
@@ -6606,10 +6668,13 @@ def sheet_cell_matches(acc, value: str) -> bool:
     ``1.50`` and ``1.5`` are the same number. A formula request is not
     compared to the number the cell computes. A range formula whose
     attribute was cut at ``:`` is not a match here; the editor read is
-    separate.
+    separate. Newline, CRLF, U+2028, U+2029, and a paragraph boundary
+    compare as the same break. A missing or extra character does not.
     """
+    from a11y_computer_use.outcome import typed_breaks_match
+
     shown = _full_text(acc)
-    if shown == value:
+    if typed_breaks_match(shown, value):
         return True
     formula = _sheet_formula(acc)
     if formula and formulas_match(formula, value):

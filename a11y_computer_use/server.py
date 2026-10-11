@@ -7477,8 +7477,10 @@ def build_server(
         field — secrets are typed by the human, never by this tool. The
         text is unchanged. In a LibreOffice Writer document a newline is
         Return, a new paragraph; U+2028 stays a line break. Line breaks
-        where paragraphs were requested are not confirmed. Structured
-        content adds outcome, next, and evidence."""
+        where paragraphs were requested are not confirmed. In a Chrome
+        contenteditable a newline matches a paragraph or block boundary in
+        the read-back. Missing or extra characters are still a mismatch.
+        Structured content adds outcome, next, and evidence."""
         return _publish(await run(
             runtime.type_text, text, app, ref, _outcome=True, _tool="type",
         ))

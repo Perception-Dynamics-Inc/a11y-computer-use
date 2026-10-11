@@ -7932,6 +7932,101 @@ def test_linux_chrome_type_replaces_a_selected_word(tmp_path) -> None:
         _stop(proc)
 
 
+def test_linux_chrome_contenteditable_newline_type_confirms(tmp_path) -> None:
+    """Live Chrome. A newline typed into a contenteditable confirms.
+
+    The read-back keeps the paragraph boundary. `` gamma\\nline2`` after
+    ``Alpha beta`` is success, including CRLF, U+2028, and U+2029. The
+    letters with the break removed, a different word, and an extra word
+    still mismatch. A missing Chrome binary fails the test.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    binary = _chrome_binary()
+    assert binary, "Chrome is not installed"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "cenewline.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>CENEWLINE</title>"
+        "<div id=ed contenteditable=true aria-label=Notes "
+        "style=\"border:1px solid;min-height:80px;width:500px\">Hello <b>world</b></div>"
+    )
+    profile = tmp_path / "chrome-newline"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--disable-component-update", f"--user-data-dir={profile}",
+            "--window-size=900,700", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                if any(el.title == "Notes" and el.editable for el in shot.elements):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, last
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = snap
+        notes = next(el for el in snap.elements if el.title == "Notes" and el.editable)
+        assert runtime.set_value(notes.ref, "Alpha beta").startswith("set ")
+        deadline = time.monotonic() + 8
+        shown = ""
+        while time.monotonic() < deadline:
+            snap = driver.snapshot(Scope.WINDOW, "chrome")
+            current = next((el for el in snap.elements if el.title == "Notes" and el.editable), None)
+            shown = "" if current is None or current.value is None else str(current.value)
+            if "Alpha beta" in shown.replace("\u00a0", " "):
+                notes = current
+                break
+            time.sleep(0.25)
+        assert notes is not None and "Alpha beta" in shown.replace("\u00a0", " "), shown
+        runtime._current = snap
+        typed = runtime.type_text(" gamma\nline2", ref=notes.ref)
+        assert str(typed).startswith("typed "), typed
+        assert typed.outcome == "confirmed", (typed.outcome, getattr(typed, "evidence", None))
+        readable = ""
+        deadline = time.monotonic() + 6
+        while time.monotonic() < deadline:
+            snap = driver.snapshot(Scope.WINDOW, "chrome")
+            current = next((el for el in snap.elements if el.title == "Notes" and el.editable), None)
+            handle = None if current is None else observe.ax_handle_for(current.snapshot_id, current.ref)
+            readable = "" if handle is None else (_atspi._readable_text(handle) or "")
+            if typed_breaks_match(readable, "Alpha beta gamma\nline2"):
+                break
+            time.sleep(0.25)
+        assert typed_breaks_match(readable, "Alpha beta gamma\nline2"), readable
+        assert typed_breaks_match(readable, "Alpha beta gamma\r\nline2") is True
+        assert typed_breaks_match(readable, "Alpha beta gamma\u2028line2") is True
+        assert typed_breaks_match(readable, "Alpha beta gamma\u2029line2") is True
+        assert typed_breaks_match(readable, "Alpha beta gammaline2") is False
+        assert typed_breaks_match(readable, "Alpha beta gamma\nline3") is False
+        assert typed_breaks_match(readable, "Alpha beta gamma\nline2 extra") is False
+        assert _atspi._typed_visible(
+            "Alpha beta", readable, " gamma\nline3", chrome=True,
+        ) is False
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None:
     """Live Chrome. The four retest gaps that show up in Chrome.
 
