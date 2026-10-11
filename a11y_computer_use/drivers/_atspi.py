@@ -5958,15 +5958,18 @@ def writer_document_outcome_text(requested: str, acc) -> str | None:
     """
     if not requested or acc is None:
         return None
-    shown = _type_shown_paragraphs(acc)
+    document = acc if is_writer_document(acc) else _writer_document_type_target(acc)
+    if document is None:
+        return None
+    shown = _type_shown_paragraphs(document)
     if shown is None:
         return None
     wanted = _type_wanted_paragraphs(requested)
     if _type_lines_match(shown, wanted):
         return requested
     if _writer_conflict_lines(shown, wanted):
-        return writer_type_readback(acc)
-    if not writer_document_matches(acc, requested):
+        return writer_type_readback(document)
+    if not writer_document_matches(document, requested):
         return None
     return requested
 

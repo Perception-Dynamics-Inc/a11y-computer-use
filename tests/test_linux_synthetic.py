@@ -6775,6 +6775,7 @@ def test_writer_type_newline_is_return_and_line_breaks_do_not_confirm(fake_atspi
     assert all("\n" not in piece for piece in inserted)
     assert [child.text for child in doc.children] == value.split("\n")
     assert _atspi.writer_document_outcome_text(value, doc) == value
+    assert _atspi.writer_document_outcome_text(value, first) == value
 
     broken = _Acc("paragraph", name="")
     broken.text = value.replace("\n", "\u2028")
