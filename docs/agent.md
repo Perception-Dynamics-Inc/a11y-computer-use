@@ -39,14 +39,19 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    error is `verified` false. A no-op or a tool error stops the rest of the
    turn. `shell` and `python` are verified by exit code 0, not by the
    snapshot.
-7. Recover. A tool error retries once with another element of the same role
-   and name, then sends Escape. A repeated no-op of the same action and
-   target is forced onto the next method: alternate ref, then a coordinate
-   click at the element's center, then Return only when the focused element
-   is that click's target. A missing or stale ref stays a click error and
-   is not turned into a key on whatever has focus. That Return is the click
-   the approval gate already judged for the focused target. Typing actions
-   fall back to `type`.
+7. Recover. Escalation retries the same action, or switches method only
+   when the intent is the same target and payload. A click by ref may become
+   another element with the same role and name, a coordinate click on that
+   element, or Return when that element is focused. That Return is the click
+   the approval gate already judged. A `type` or `set_value` may be retyped
+   as the same text. A key is never replaced with a different key. A `type`
+   is never turned into a bare click. A `menu` is never turned into focus.
+   Escape is not sent as a backtrack. A missing or stale ref stays that
+   click and its error. The retry level is per action and per target: it
+   includes the chord, the typed text, and the menu path, so one no-op key
+   does not escalate a different key. The step result keeps the original
+   error next to any escalation outcome. If no same-intent method remains,
+   the loop stops escalating and reports that error.
 8. Stuck. If the same snapshot digest appears three times in the recent
    window, the loop emits a `stuck` event and tells the model to change
    strategy. After `max_replans` of those prompts (default 2) the run fails
@@ -475,9 +480,12 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - needs_human for a password field, an OTP field, a card field, a captcha
   iframe, and `ask_human`
 - evidence-checked done, including a rejected condition and `file_exists`
-- stuck method changes (alternate ref, coordinate click, keyboard) and
-  failure with `reason` `stuck` after repeated screens
-- stale-ref recovery that sends Escape and then completes
+- stuck method changes stay on the same intent (alternate ref, coordinate
+  click of that element, Return only for a focused click) and failure with
+  `reason` `stuck` after repeated screens
+- a missing ref stays a click error and does not send Escape or Return
+- a no-op key does not turn the next chord into Return, a failed `type` does
+  not become a click, and a failed `menu` does not become focus
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
 - `vision=True` attaching element crops and then a window screenshot, and
   `display` setting `$DISPLAY`

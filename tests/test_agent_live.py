@@ -1783,3 +1783,142 @@ def test_agent_server_streams_a_gtk_save(tmp_path, isolated_home) -> None:
         stop_process(proc)
         dest.unlink(missing_ok=True)
 
+
+@requires_display
+def test_agent_escape_in_gtk_file_chooser_does_not_press_open(
+    tmp_path, isolated_home, monkeypatch,
+) -> None:
+    """Live GTK file chooser. Escape must not become Return, which presses Open.
+
+    A no-op chord runs first. On the old ladder every key shared one retry
+    level, so the next Escape was sent as Return and the default Open button
+    accepted the selected file. The chooser records ``open`` only for OK.
+    """
+    import pwd
+    import signal
+    import textwrap
+
+    assert isolated_home.is_dir()
+    # isolated_home replaces $HOME before this process talks to X. Xlib then
+    # looks for $HOME/.Xauthority, Gtk cannot open DISPLAY, and AT-SPI aborts
+    # the test. Set the session cookie before importing the driver.
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth) and not os.environ.get("XAUTHORITY"):
+        monkeypatch.setenv("XAUTHORITY", auth)
+
+    from a11y_computer_use.agent.core import Agent
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    marker = tmp_path / "chooser-result.txt"
+    script = tmp_path / "cuafileesc.py"
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafileesc")
+        target = {str(target)!r}
+        marker = {str(marker)!r}
+        win = Gtk.Window(title="FileHost")
+        win.set_default_size(200, 80)
+        win.show_all()
+        dialog = Gtk.FileChooserDialog(
+            title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Open", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.set_current_folder({str(folder)!r})
+        dialog.select_filename(target)
+        dialog.set_default_size(720, 480)
+
+        def _fit(widget):
+            widget.resize(720, 480)
+            widget.move(40, 40)
+        dialog.connect("map", _fit)
+
+        def finish():
+            response = dialog.run()
+            open(marker, "w", encoding="utf-8").write(
+                "open" if response == Gtk.ResponseType.OK else "cancel"
+            )
+            dialog.destroy()
+            Gtk.main_quit()
+        GLib.idle_add(finish)
+        win.connect("destroy", Gtk.main_quit)
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    # isolated_home replaces $HOME, and this session keeps the X cookie in the
+    # real home. Without it Gtk cannot open DISPLAY and AT-SPI aborts.
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth):
+        env["XAUTHORITY"] = auth
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], env=env, start_new_session=True,
+    )
+    try:
+        driver = LinuxDriver()
+        driver.ensure_trusted()
+        deadline = time.monotonic() + 15
+        appeared = False
+        while time.monotonic() < deadline:
+            try:
+                rows = driver.windows()
+            except Exception:
+                rows = []
+            if any(str(row.get("title") or "") == "Open File" for row in rows):
+                appeared = True
+                break
+            time.sleep(0.2)
+        assert appeared, "the GTK file chooser did not open"
+        subprocess.run(
+            ["xdotool", "search", "--name", "Open File", "windowactivate"],
+            check=False, timeout=3,
+        )
+        _grant_linux_desktop("cuafileesc", "python3", "python")
+        turns = {"n": 0}
+
+        def model(_messages):
+            turns["n"] += 1
+            if turns["n"] == 1:
+                return ModelTurn(calls=[ToolCall("key", {"chord": "F15"})])
+            if turns["n"] == 2:
+                return ModelTurn(calls=[ToolCall("key", {"chord": "Escape"})])
+            return ModelTurn(calls=[ToolCall("done", {
+                "answer": "left the chooser",
+                "conditions": [{"window_title_contains": "File"}],
+            })])
+
+        result = _run_agent(
+            Agent, ScriptedModel(model), "close the file chooser without opening the file",
+            tmp_path / "trace", max_steps=4, max_time_s=60,
+        )
+        chords = [
+            str(step.args.get("chord") or "")
+            for step in result.step_log
+            if _step_action(step) == "key"
+        ]
+        assert "Return" not in chords, (chords, result.step_log)
+        assert "Escape" in chords, chords
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not marker.is_file():
+            time.sleep(0.2)
+        assert marker.is_file(), "the chooser did not answer Escape or Return"
+        assert marker.read_text() == "cancel", marker.read_text()
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stop_process(proc)
+
