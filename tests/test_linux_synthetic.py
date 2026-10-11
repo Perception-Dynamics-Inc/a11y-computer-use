@@ -124,6 +124,95 @@ def test_canvas_drawing_area_and_canvas_tag_read_as_a_canvas(monkeypatch) -> Non
     assert read("panel", {"xml-roles": "graphics-document"}).role == "AXCanvas"
     assert read("image").role == "AXImage"
     assert read("push button", {"tag": "button"}).role == "AXButton"
+    assert read("panel").browser_chrome is False
+
+
+def test_browser_frame_view_is_chrome_ui_and_not_the_page() -> None:
+    """Synthetic Chrome tree. No live browser.
+
+    A childless panel beside the document is browser UI. A canvas inside
+    the document web is page content, even when the frame above it was
+    already marked as browser UI. The omnibox popup document is browser UI.
+    """
+
+    class _Node:
+        def __init__(self, role, parent=None, url=None):
+            self.role = role
+            self.parent = parent
+            self.url = url
+
+        def get_role_name(self):
+            return self.role
+
+        def get_parent(self):
+            return self.parent
+
+        def get_name(self):
+            return ""
+
+        def get_description(self):
+            return ""
+
+        def get_hyperlink(self):
+            return self if self.url else None
+
+        def get_uri(self, _index):
+            return self.url
+
+    app = _Node("application")
+    frame = _Node("frame", app)
+    toolbar = _Node("panel", frame)
+    doc = _Node("document web", frame, url="http://example.test/f117")
+    section = _Node("section", doc)
+    canvas = _Node("canvas", section)
+    cache: dict[int, bool] = {}
+    assert _atspi.browser_frame_view(canvas, cache, role_str="canvas") is False
+    assert _atspi.browser_frame_view(section, cache) is False
+    assert _atspi.browser_frame_view(doc, cache) is False
+    assert _atspi.browser_frame_view(toolbar, cache, role_str="panel") is True
+    assert _atspi.browser_frame_view(frame, cache) is True
+    popup = _Node("document web", frame, url="chrome://omnibox-popup.top-chrome/omnibox")
+    assert _atspi.browser_frame_view(popup, {}, role_str="document web") is True
+
+
+def test_browser_frame_view_reuses_the_object_path(monkeypatch) -> None:
+    """A second proxy with the same path does not walk parents again.
+
+    Synthetic nodes. ``get_parent`` on a live accessible returns a new
+    wrapper, so the cache is the object path, not ``id()``.
+    """
+
+    class _Node:
+        def __init__(self, role, parent=None, path=None):
+            self.role = role
+            self.parent = parent
+            self.path = path
+            self.parent_reads = 0
+
+        def get_role_name(self):
+            return self.role
+
+        def get_parent(self):
+            self.parent_reads += 1
+            return self.parent
+
+        def get_name(self):
+            return ""
+
+    def path_of(acc):
+        return getattr(acc, "path", None)
+
+    monkeypatch.setattr(_atspi, "_atspi_object_path", path_of)
+    app = _Node("application", path="/org/a11y/atspi/app")
+    frame = _Node("frame", app, path="/org/a11y/atspi/frame")
+    first = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    second = _Node("panel", frame, path="/org/a11y/atspi/panel")
+    cache: dict[object, bool] = {}
+    assert _atspi.browser_frame_view(first, cache, role_str="panel") is True
+    assert frame.parent_reads == 1
+    assert _atspi.browser_frame_view(second, cache, role_str="panel") is True
+    assert second.parent_reads == 0
+    assert frame.parent_reads == 1
 
 
 def test_atspi_vocabulary_flows_through_shared_engine() -> None:
@@ -6660,6 +6749,180 @@ def test_writer_document_without_editable_text_types_and_waits(fake_atspi, monke
     assert _atspi.set_text(bare, value) is False
     assert deleted["n"] == 0
     assert typed["n"] == 1
+
+
+def _writer_memo() -> str:
+    return (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+
+
+def _writer_doc():
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(
+        "document text",
+        name="Untitled 1 - LibreOffice Document",
+        states=("FOCUSED", "EDITABLE"),
+    )
+    doc.text = ""
+    doc.get_application = lambda: app
+    blank = _Acc("paragraph", name="")
+    blank.text = ""
+    _adopt(doc, blank)
+    return doc
+
+
+def _install_writer_lines(doc, text: str) -> None:
+    lines = []
+    for line in text.split("\n"):
+        child = _Acc("paragraph", name="")
+        child.text = line
+        lines.append(child)
+    _adopt(doc, *lines)
+
+
+def test_writer_insert_text_confirms_from_paragraphs_not_the_empty_node(fake_atspi, monkeypatch) -> None:
+    """Synthetic Writer document. The textarea node stays empty.
+
+    EditableText inserts the lines as paragraphs. The document text
+    interface stays ``""``. That is a confirm, not a text_mismatch. An
+    insert that does not change the paragraphs returns None so the caller
+    can send keys, and does not report success.
+    """
+    memo = _writer_memo()
+    doc = _writer_doc()
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+
+    def insert_text(_pos, text, _length):
+        _install_writer_lines(doc, text)
+        return True
+
+    doc.get_editable_text_iface = lambda: doc
+    doc.insert_text = insert_text
+    assert _atspi.insert_text(doc, memo) == len(memo)
+    assert doc.text == ""
+    assert _atspi.writer_document_text(doc) == memo
+    assert _atspi._writer_typed_visible("", memo.replace("\n", "\u2029"), memo) is True
+    assert _atspi._writer_typed_visible("other", "other", memo) is False
+
+    empty = _writer_doc()
+
+    def insert_nothing(_pos, _text, _length):
+        return False
+
+    empty.get_editable_text_iface = lambda: empty
+    empty.insert_text = insert_nothing
+    assert _atspi.insert_text(empty, memo) is None
+    assert _atspi.writer_document_text(empty) == ""
+
+
+def test_type_into_writer_multiline_confirms_when_paragraphs_land(fake_atspi, monkeypatch) -> None:
+    """Synthetic type with a ref. No live LibreOffice.
+
+    The document has no EditableText. Keys create three paragraphs and the
+    document node still reads ``""``. The type confirms. A document whose
+    paragraphs are a different line is text_mismatch, and the actual text
+    is that line.
+    """
+    from a11y_computer_use import observe
+
+    memo = _writer_memo()
+    doc = _writer_doc()
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 2)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.4)
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi, "grab_focus", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "peer_field_texts", lambda _acc: {})
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: doc)
+
+    def type_into(_acc, text):
+        _install_writer_lines(doc, text)
+
+    monkeypatch.setattr(_atspi, "_type_into_target", type_into)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    element = Element(
+        "e20", "AXTextArea", "Untitled 1 - LibreOffice Document", "",
+        Bounds(0, 10, 40, 400, 300), "snap-1", editable=True,
+    )
+    assert driver.type_into(element, memo) == len(memo)
+    assert doc.text == ""
+    assert _atspi.writer_document_text(doc) == memo
+
+    missed = _writer_doc()
+
+    def type_wrong(_acc, _text):
+        _install_writer_lines(missed, "Not the memo")
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: missed)
+    monkeypatch.setattr(_atspi, "_type_into_target", type_wrong)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_into(element, memo)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "Not the memo"
+    assert repr(memo) in exc.value.message
+
+
+def test_type_text_writer_multiline_waits_for_later_paragraphs(fake_atspi, monkeypatch) -> None:
+    """Synthetic type with no ref. The first paragraph reads are partial.
+
+    Focus text stays empty. Later paragraphs arrive on the third document
+    read. The type confirms only once every line is there. A document that
+    stays empty is text_mismatch with an empty actual, not a success.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    memo = _writer_memo()
+    doc = _writer_doc()
+    lines = memo.split("\n")
+    children = []
+    for line in lines:
+        child = _Acc("paragraph", name="")
+        child.text = line
+        children.append(child)
+    reads = {"n": 0}
+
+    def get_child_count():
+        reads["n"] += 1
+        visible = children[:1] if reads["n"] < 3 else children
+        doc.children = list(visible)
+        for child in doc.children:
+            child.parent = doc
+        return len(doc.children)
+
+    doc.get_child_count = get_child_count
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 2)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_STABLE_S", 0)
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 1.0)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: False)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (doc, False))
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text(memo) == len(memo)
+    assert reads["n"] >= 3
+    assert _atspi.writer_document_text(doc) == memo
+
+    empty = _writer_doc()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (empty, False))
+    monkeypatch.setattr(_atspi, "_WRITER_DOCUMENT_DEADLINE_S", 0.2)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text(memo)
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == ""
 
 
 def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:

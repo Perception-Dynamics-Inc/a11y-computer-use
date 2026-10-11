@@ -1707,13 +1707,55 @@ def format_zoom(region: Bounds) -> str:
     )
 
 
-def format_crop(ref: str, region: Bounds, padding: int, scale: float, image_w: int, image_h: int) -> str:
-    """The text that accompanies a ref crop. It names the rectangle and the PNG."""
-    return (
+def format_crop(
+    ref: str,
+    region: Bounds,
+    padding: int,
+    scale: float,
+    image_w: int,
+    image_h: int,
+    *,
+    ocr_text: str | None = None,
+) -> str:
+    """The text that accompanies a ref crop. It names the rectangle and the PNG.
+
+    ``ocr_text`` is fenced OCR lines with screen bounds, from
+    `ocr.format_ocr_lines`. When it is missing, the sentence says no text
+    was read. That is also the result when no OCR engine is installed.
+    """
+    head = (
         f"crop of {ref} on display {region.display_id} at ({region.x}, {region.y}) "
         f"{region.width}x{region.height} (padding {padding}, scale {scale:g}); "
-        f"image {image_w}x{image_h} PNG. No text was read from these pixels."
+        f"image {image_w}x{image_h} PNG."
     )
+    if ocr_text:
+        return (
+            head
+            + "\nOCR text from the image, already fenced as untrusted:\n"
+            + ocr_text
+        )
+    return head + " No text was read from these pixels."
+
+
+def _crop_ocr_text(png: bytes, region: Bounds) -> str | None:
+    """Fenced OCR lines for a crop, or None when no engine can read it.
+
+    A missing ``[ocr]`` extra, a missing ``tesseract`` binary, and an engine
+    that fails all leave the crop image in place. The crop itself is not an
+    error. Linux OCR is RapidOCR from the optional extra, then the system
+    ``tesseract`` binary. No hosted service is called.
+    """
+    try:
+        from a11y_computer_use.ocr import format_ocr_lines, ocr
+    except ImportError:
+        return None
+    try:
+        spans = ocr((png, region))
+    except Exception:
+        # ComputerUseError (no engine), a bad PNG, or an engine that cannot
+        # load its models. The pixels are still returned.
+        return None
+    return format_ocr_lines(spans)
 
 
 def _crop_padding(padding: object) -> int:
@@ -3747,8 +3789,10 @@ class Runtime:
         """PNG of ``ref``'s on-screen bounds, plus those bounds.
 
         ``padding`` grows the rect on every side before it is clipped to the
-        display. ``scale`` sizes the PNG (1 keeps the cropped pixels). The
-        pixels are not read. An element that misses the display, or whose
+        display. ``scale`` sizes the PNG (1 keeps the cropped pixels). When
+        an OCR engine is installed, the text includes each word and its
+        screen bounds. A missing engine says no text was read. An element
+        that misses the display, or whose
         center belongs to another window, raises ``not_visible``. A ref the
         page has scrolled off screen is the same outcome (reason
         ``off_screen``): the node is still valid, and the error names
@@ -3809,7 +3853,10 @@ class Runtime:
             png=png, width=width, height=height,
             source_width=region.width, source_height=region.height,
         )
-        return format_crop(ref, region, padding, scale, width, height), scaled
+        return format_crop(
+            ref, region, padding, scale, width, height,
+            ocr_text=_crop_ocr_text(png, region),
+        ), scaled
 
     def _display_for_bounds(self, bounds: Bounds):
         found = self._known_displays()
@@ -6847,8 +6894,10 @@ _INSTRUCTIONS = (
     "actionable elements (custom-drawn apps such as Telegram or After Effects), "
     "call screen_text: on-device OCR returns text lines as refs o1..oN and "
     "click(ref='o7') lands on that text, so you never guess coordinates. "
-    "crop(ref='e14') returns a PNG of that element's on-screen bounds and does "
-    "not read the pixels; padding and scale are optional, and an off-screen or "
+    "crop(ref='e14') returns a PNG of that element's on-screen bounds. When an "
+    "OCR engine is installed the text lists each word with [x, y, width, height] "
+    "in screen pixels, fenced as untrusted; otherwise it says no text was read. "
+    "padding and scale are optional, and an off-screen or "
     "covered ref is not_visible. Actions are "
     "gated by per-app permission tiers (read/click/full, keyed by bundle id); "
     "needs_permission/deny results must be resolved by the human user. For "
@@ -7246,8 +7295,11 @@ def build_server(
         """Return a PNG of one element's on-screen bounds from the latest
         desktop_snapshot, plus the text naming that rectangle. padding grows
         the rect on every side (0..512) before clipping it to the display.
-        scale sizes the PNG (1 keeps the cropped pixels; at most 8). The
-        library does not OCR or recognize the pixels. Works for AT-SPI and CDP
+        scale sizes the PNG (1 keeps the cropped pixels; at most 8). When an
+        OCR engine is installed (the optional [ocr] extra's RapidOCR, else
+        the system tesseract binary), the text includes each word, fenced,
+        with [x, y, width, height] in screen pixels. A missing engine says
+        no text was read and is not an error. Works for AT-SPI and CDP
         refs, including a control inside a cross-origin iframe whose box is in
         the top document. An element that misses the display, or whose center
         is covered by another window, is not_visible and no image is returned.

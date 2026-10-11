@@ -1871,6 +1871,10 @@ class ATSPIAccessor:
         # One process identity for the whole walk. The root is read first.
         self._instance_id: str | None = None
         self._instance_ready = False
+        # Whether this tree is Chromium or Firefox. None until the first read.
+        # A childless browser-frame view is not a page region.
+        self._browser_app: bool | None = None
+        self._browser_chrome_cache: dict[object, bool] = {}
 
     def _bound_instance_id(self, node: object) -> str | None:
         if not self._instance_ready:
@@ -1960,7 +1964,28 @@ class ATSPIAccessor:
             ),
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
+            # Only a group can be suppressed as browser chrome. A button,
+            # cell, or canvas does not pay for the parent walk.
+            browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
         )
+
+    def _browser_frame(self, node: object, role_str: str) -> bool:
+        """True when ``node`` is browser UI outside a content document.
+
+        GTK and Qt are false after one toolkit check. Page content under a
+        document web is false. The cache is per snapshot.
+        """
+        if self._browser_app is None:
+            try:
+                self._browser_app = bool(_chromium_app(node) or _gecko_app(node))
+            except Exception:
+                self._browser_app = False
+        if not self._browser_app:
+            return False
+        try:
+            return browser_frame_view(node, self._browser_chrome_cache, role_str=role_str)
+        except Exception:
+            return False
 
     def children(self, node: object) -> Sequence[object]:
         # The pruner's list object is not the wrapper ``refresh_visible``
@@ -2480,6 +2505,116 @@ def document_url_for(acc) -> str | None:
             return None
         node = parent
     return None
+
+
+def _atspi_object_path(acc) -> str | None:
+    """The AT-SPI object path, or None for a test double.
+
+    Read from the libatspi object. This does not call D-Bus. A path that is
+    not an accessibility object is ignored.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+
+        class _GObject(ctypes.Structure):
+            _fields_ = [
+                ("g_class", ctypes.c_void_p),
+                ("ref_count", ctypes.c_uint),
+                ("pad", ctypes.c_uint),
+                ("qdata", ctypes.c_void_p),
+            ]
+
+        class _AtspiObject(ctypes.Structure):
+            _fields_ = [
+                ("parent", _GObject),
+                ("app", ctypes.c_void_p),
+                ("path", ctypes.c_char_p),
+            ]
+
+        raw = _AtspiObject.from_address(pointer).path or b""
+        if not raw.startswith(b"/org/a11y/atspi/"):
+            return None
+        return raw.decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _frame_cache_key(acc) -> object:
+    """A stable key for one accessible across wrapper objects.
+
+    ``get_parent`` returns a new proxy each call. ``id()`` would miss, and
+    every node would walk to the application over D-Bus. The object path is
+    the same proxy to proxy. A test double has no path and uses ``id()``.
+    """
+    path = _atspi_object_path(acc)
+    if path:
+        return path
+    return id(acc)
+
+
+def browser_frame_view(
+    acc,
+    cache: dict[object, bool],
+    *,
+    role_str: str | None = None,
+) -> bool:
+    """True when ``acc`` is Chromium or Firefox UI outside a content document.
+
+    The caller has already decided ``acc`` belongs to a browser. A
+    ``document web`` or ``internal frame`` is page content, including when
+    its URL is not published yet. An omnibox-popup URL is still browser UI.
+    ``cache`` remembers each object path so a snapshot walks each parent
+    once. GTK and Qt must not call this: a walk that never meets a content
+    document would mark the whole tree as browser UI.
+    """
+    if acc is None:
+        return False
+    found = cache.get(_frame_cache_key(acc))
+    if found is not None:
+        return found
+    from a11y_computer_use.untrusted import is_browser_chrome_url
+
+    chain: list = []
+    current = acc
+    current_role = role_str
+    seen: set[int] = set()
+    result = True
+    for _ in range(32):
+        if current is None or id(current) in seen:
+            result = True
+            break
+        seen.add(id(current))
+        if current is not acc:
+            cached = cache.get(_frame_cache_key(current))
+            if cached is not None:
+                result = cached
+                break
+        chain.append(current)
+        role = current_role if current_role is not None else _role_name(current)
+        current_role = None
+        if role in {"document web", "internal frame"}:
+            url = _doc_url(current)
+            result = bool(url and is_browser_chrome_url(url))
+            break
+        if "document" in role:
+            url = _doc_url(current)
+            if url:
+                result = bool(is_browser_chrome_url(url))
+                break
+        if role == "application":
+            result = True
+            break
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            result = True
+            break
+        current = parent
+    for item in chain:
+        cache[_frame_cache_key(item)] = result
+    return result
 
 
 def in_browser_chrome(acc) -> bool:
@@ -4466,6 +4601,13 @@ def insert_text(acc, text: str) -> int | None:
     if eti is None:
         return None
     typed = text.replace("\r\n", "\n")
+    # A Writer document's own text stays empty. The paragraphs are the
+    # read-back, captured before the insert so a later poll can see them
+    # arrive. An entry is not this document and does not walk.
+    writer_doc = writer_document_for(acc)
+    writer_before = None
+    if writer_doc is not None:
+        writer_before = writer_document_text(writer_doc) or ""
     current = _full_text(acc)
     # Read the words, not the U+FFFC placeholders, before the insert. A
     # contenteditable's parent text can stay ``\ufffc`` while the child gains
@@ -4523,6 +4665,28 @@ def insert_text(acc, text: str) -> int | None:
     ) and _qt_text_count_matches(acc, expected):
         return len(typed)
     actual = _full_text(acc)
+    if writer_doc is not None:
+        # The document node reads "" while the paragraphs hold the lines.
+        # Poll only when the insert reported a write or the node text
+        # changed; otherwise one read decides. Unchanged paragraphs mean
+        # the caller may send keys. A different paragraph text is a miss,
+        # and keys are not sent on top of it.
+        if wrote or actual != current:
+            shown = poll_writer_document(writer_doc, writer_before, typed)
+        else:
+            shown = writer_document_text(writer_doc)
+        if _writer_typed_visible(writer_before, shown, typed):
+            return len(typed)
+        if (shown or "") == (writer_before or ""):
+            return None
+        raise _text_mismatch(
+            "text_mismatch",
+            "the field text after type does not match what was inserted",
+            expected=_excerpt(typed),
+            actual=_excerpt(shown),
+            inserted_chars=len(typed),
+            unchanged=False,
+        )
     if actual == current and not wrote:
         return None
     # ``unchanged`` is the words, not the raw object-replacement string.
@@ -5457,6 +5621,138 @@ def writer_document_outcome_text(requested: str, acc) -> str | None:
     if not writer_document_matches(acc, requested):
         return None
     return requested
+
+
+_WRITER_WALK_ROLES = frozenset({"document text", "paragraph", "heading"})
+
+
+def writer_document_for(acc):
+    """The Writer document ``acc`` is, or the one that contains it.
+
+    None for a GTK field, a Calc cell, and a Mousepad buffer. The walk
+    starts only from a document, paragraph, or heading, so typing into an
+    entry does not climb the tree.
+    """
+    if acc is None:
+        return None
+    try:
+        if _role_name(acc) not in _WRITER_WALK_ROLES:
+            return None
+    except Exception:
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _ in range(16):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        try:
+            if is_writer_document(node):
+                return node
+        except Exception:
+            return None
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        node = parent
+    return None
+
+
+def _writer_typed_visible(before: str | None, shown: str | None, text: str) -> bool:
+    """True when a Writer document's paragraphs show ``text``.
+
+    Paragraph and line separators compare as one break. An empty document
+    that now holds the typed lines matches. A longer document that did not
+    change does not, unless the paragraphs are exactly the request.
+    """
+    if shown is None:
+        return False
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    if paragraph_breaks_match(shown, text):
+        return True
+    norm_shown = normalize_paragraph_breaks(shown)
+    norm_text = normalize_paragraph_breaks(text or "")
+    norm_before = None if before is None else normalize_paragraph_breaks(before)
+    return _typed_visible(norm_before, norm_shown, norm_text)
+
+
+def poll_writer_document(doc, before: str | None, text: str) -> str | None:
+    """Poll a Writer document until its paragraphs show ``text`` or settle.
+
+    The first reads are empty or only the first line. A partial publish is
+    not a miss. A stable read that already has every requested break and
+    still does not show ``text`` is returned without waiting out the
+    deadline. The return is the paragraph text, which may still lack
+    ``text``. This does not clear the document.
+    """
+    if doc is None:
+        return None
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    wanted_breaks = normalize_paragraph_breaks(text or "").count("\n")
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last = object()
+    stable_since = None
+    shown = None
+    while True:
+        shown = writer_document_text(doc)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        if held and _writer_typed_visible(before, shown, text):
+            return shown
+        shown_breaks = normalize_paragraph_breaks(shown or "").count("\n")
+        if (
+            held
+            and shown
+            and shown_breaks >= wanted_breaks
+            and not _writer_typed_visible(before, shown, text)
+        ):
+            return shown
+        if now >= deadline and not _writer_typed_visible(before, shown, text):
+            return shown
+        if now >= deadline + _WRITER_DOCUMENT_STABLE_S:
+            return shown
+        time.sleep(0.05)
+
+
+def writer_type_before(app: str) -> str | None:
+    """Paragraph text of the focused Writer document, before a type.
+
+    ``""`` is an empty Writer document. None means focus is not in one, so
+    the caller keeps the ordinary read-back.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    doc = writer_document_for(acc)
+    if doc is None:
+        return None
+    text = writer_document_text(doc)
+    return "" if text is None else text
+
+
+def poll_focused_writer_type(app: str, before: str | None, text: str) -> str | None:
+    """Settled paragraph text of the focused Writer document, or None."""
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    doc = writer_document_for(acc)
+    if doc is None:
+        return None
+    return poll_writer_document(doc, before, text)
 
 
 def writer_cell_outcome_text(requested: str, cell) -> str | None:

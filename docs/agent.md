@@ -39,11 +39,19 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    error is `verified` false. A no-op or a tool error stops the rest of the
    turn. `shell` and `python` are verified by exit code 0, not by the
    snapshot.
-7. Recover. A tool error retries once with another element of the same role
-   and name, then sends Escape. A repeated no-op of the same action and
-   target is forced onto the next method: alternate ref, then a coordinate
-   click at the element's center, then the keyboard (Return, or `type` when
-   the action was entering text).
+7. Recover. Escalation retries the same action, or switches method only
+   when the intent is the same target and payload. A click by ref may become
+   another element with the same role and name, a coordinate click on that
+   element, or Return when that element is focused. That Return is the click
+   the approval gate already judged. A `type` or `set_value` may be retyped
+   as the same text. A key is never replaced with a different key. A `type`
+   is never turned into a bare click. A `menu` is never turned into focus.
+   Escape is not sent as a backtrack. A missing or stale ref stays that
+   click and its error. The retry level is per action and per target: it
+   includes the chord, the typed text, and the menu path, so one no-op key
+   does not escalate a different key. The step result keeps the original
+   error next to any escalation outcome. If no same-intent method remains,
+   the loop stops escalating and reports that error.
 8. Stuck. If the same snapshot digest appears three times in the recent
    window, the loop emits a `stuck` event and tells the model to change
    strategy. After `max_replans` of those prompts (default 2) the run fails
@@ -102,16 +110,22 @@ attachment runs without `vision=True` when the tree is insufficient: an
 tree is empty or only structural nodes, or the same target was not found
 twice (`stale_ref` or a not-found error). A named control beside the
 canvas, such as a button named Ready, keeps the first looks as text. The
-picture is attached once that control is not the target. The crop is `crop(ref)` of the opaque region when that ref
-exists; otherwise the loop attaches the window screenshot. Each image block
+picture is attached once that control is not the target. The crop is `crop(ref)` of a
+page-content opaque region: the deepest one, and the smallest at that depth.
+A browser-frame view that contains another opaque region, or that only
+duplicates an ancestor's box, is not the crop. Otherwise the loop attaches
+the window screenshot. Each image block
 is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
 clicks with `x` and `y` inside the region. Those coordinate clicks use the
 same approval gate and typed outcomes as a ref click. Words in the image are
 wrapped in an `<untrusted>` fence and are not instructions. The loop calls
 `a11y_computer_use.ocr.ocr` on the crop or the window screenshot and fences
-that text the same way. `ocr` reads a window screenshot, a `crop` result, or
+that text the same way, with `[x, y, width, height]` in screen pixels beside
+each line. `crop` itself includes those lines when an engine is installed.
+`ocr` reads a window screenshot, a `crop` result, or
 `(image, bounds)` and returns fenced `{text, bounds, confidence}` in screen
-pixels. A missing engine (`unsupported`, reason `missing_dependency`) is
+pixels. Adjacent words are one item; RapidOCR detector lines are split into
+word boxes first. A missing engine (`unsupported`, reason `missing_dependency`) is
 skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
@@ -466,9 +480,12 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - needs_human for a password field, an OTP field, a card field, a captcha
   iframe, and `ask_human`
 - evidence-checked done, including a rejected condition and `file_exists`
-- stuck method changes (alternate ref, coordinate click, keyboard) and
-  failure with `reason` `stuck` after repeated screens
-- stale-ref recovery that sends Escape and then completes
+- stuck method changes stay on the same intent (alternate ref, coordinate
+  click of that element, Return only for a focused click) and failure with
+  `reason` `stuck` after repeated screens
+- a missing ref stays a click error and does not send Escape or Return
+- a no-op key does not turn the next chord into Return, a failed `type` does
+  not become a click, and a failed `menu` does not become focus
 - trajectory redaction, screenshots, and the `--json` schema and exit codes
 - `vision=True` attaching element crops and then a window screenshot, and
   `display` setting `$DISPLAY`
