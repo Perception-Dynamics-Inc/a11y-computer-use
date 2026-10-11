@@ -1379,9 +1379,25 @@ def test_linux_chrome_type_ref_lands_only_in_the_named_field(tmp_path) -> None:
         assert "from-none" not in shown_a, shown_a
         assert "from-none" in shown_b, shown_b
 
-        fields = _fields()
-        set_a = runtime.set_value(fields["FieldA"].ref, "in-a")
-        assert str(set_a).startswith("set "), set_a
+        # Chrome's AT-SPI replace can miss once immediately after the type
+        # into FieldB. Retry until FieldA holds in-a. The following type
+        # still has to leave that string in FieldA and add from-a only in FieldB.
+        set_a = None
+        last_error = ""
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            fields = _fields()
+            try:
+                set_a = runtime.set_value(fields["FieldA"].ref, "in-a")
+            except ComputerUseError as exc:
+                last_error = exc.message
+                time.sleep(0.25)
+                continue
+            if str(set_a).startswith("set "):
+                break
+            last_error = str(set_a)
+            time.sleep(0.25)
+        assert set_a is not None and str(set_a).startswith("set "), last_error
         fields = _fields()
         again = runtime.type_text("from-a", ref=fields["FieldB"].ref)
         assert again.outcome == "confirmed", (again.outcome, again.evidence)
