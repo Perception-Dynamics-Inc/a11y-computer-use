@@ -117,6 +117,18 @@ name:
 pip install 'a11y-computer-use[agent,linux]'
 ```
 
+That command compiles PyGObject and pycairo in an isolated venv. PyGObject is sdist-only and pycairo has no Linux wheel, so the build needs `pkg-config` plus the cairo and girepository headers. Without those headers, pip fails while compiling one of the two.
+
+The install that does not compile them uses the distro GI packages and a venv that can import those modules (`--system-site-packages`):
+
+```bash
+sudo apt install python3-gi python3-gi-cairo gir1.2-atspi-2.0
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install 'a11y-computer-use[agent,linux]'
+```
+
+`python3-gi` is PyGObject, `python3-gi-cairo` is the cairo override those bindings import, and `gir1.2-atspi-2.0` is the AT-SPI2 typelib. An isolated venv still works when the build dependencies later in this section are installed first.
+
 `a11y-agent` refuses to start when `gi` or `Xlib` cannot be imported. The
 process exits 3 with status `failed` and an install message. It does not hand
 that ImportError to the model as a permission observation.
@@ -127,7 +139,7 @@ From a clone, the same extra is an editable install:
 pip install -e '.[linux]'
 ```
 
-**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so a Linux install of the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
+**python-xlib** is a core dependency on Linux (`sys_platform == 'linux'`), so `pip install a11y-computer-use` can list X11 windows. If that import still fails, `app list`, `window list`, `key` with `app`, and an app-scoped `find` return `unsupported` with `reason` `missing_dependency` and the hint `pip install python-xlib`. They do not return an empty list as `confirmed`, and they do not wait 15s and report LibreOffice's gtk3 bridge as missing. The `[linux]` extra pulls **PyGObject** (the `gi.repository.Atspi` client, for observe) and repeats **python-xlib**, both gated `sys_platform == 'linux'`; **pillow** (capture) is already a core dependency. The package's own 0.4.4 artifacts on PyPI are a pure-Python wheel (`py3-none-any`) and an sdist, so installing `a11y-computer-use` itself does not compile anything. PyGObject 3.58.0 is sdist-only on PyPI. pycairo, which that sdist builds against, publishes Windows wheels and an sdist and no Linux wheel (1.29.1, checked on PyPI 2026-10-02), so an isolated venv that installs the extra compiles both. This repository does not publish Linux wheels for PyGObject or pycairo.
 
 Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibility bus:
 
@@ -135,7 +147,7 @@ Runtime packages on Debian and Ubuntu are the AT-SPI2 typelib and the accessibil
 sudo apt install gir1.2-atspi-2.0 at-spi2-core
 ```
 
-A source build, when those wheels are absent, also needs headers and pkg-config. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
+A source build into an isolated venv, when those wheels are absent, also needs headers and pkg-config. This is the alternative to the `--system-site-packages` install above. Issue #14 reports that on a fresh Debian 13 / Python 3.13 venv, `pip install 'a11y-computer-use[linux]'` exited 1 while building pycairo until the packages below were installed (missing pkg-config and cairo headers, then "Python dependency not found"). `python3.13-dev` matches that interpreter; another Python needs its own `python3.X-dev` as well as `python3-dev`. `libgirepository-2.0-dev` is the Debian 13 name, and the name in [PyGObject's current Debian/Ubuntu pip instructions](https://pygobject.readthedocs.io/en/latest/getting_started.html). The runtime packages above stay required either way. This list is the one from that report; a fresh Debian image was not rebuilt for the doc edit.
 
 ```bash
 sudo apt install pkg-config libcairo2-dev python3-dev python3.13-dev \
