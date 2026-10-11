@@ -603,3 +603,77 @@ def test_scripted_file_spec_without_a_factory(tmp_path: Path) -> None:
         assert _plain(result["answer"]) == "saved"
     finally:
         httpd.shutdown()
+
+
+def test_unknown_http_fields_are_rejected_before_a_run(tmp_path: Path) -> None:
+    """POST /runs, approve, and cancel name unknown keys and do no work."""
+    built: list[str] = []
+    runtime = FakeRuntime(_elements())
+
+    def factory(spec: str):
+        built.append(spec)
+        return ScriptedModel([_done_turn()])
+
+    store = RunStore(
+        runtime_factory=lambda: runtime,
+        model_factory=factory,
+        trace_root=tmp_path / "traces",
+    )
+    httpd, port = _serve(store)
+    try:
+        status, body = _request(port, "POST", "/runs", {
+            "goal": "save the form",
+            "model": "scripted:unused",
+            "ref": "e2",
+            "poll": 1,
+        })
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown fields" in body["error"]
+        assert "'poll'" in body["error"] and "'ref'" in body["error"]
+        assert "goal" in body["error"] and "model" in body["error"]
+        assert built == []
+        assert store._runs == {}
+        assert runtime.calls == []
+
+        status, body = _request(port, "POST", "/runs", {
+            "goal": "save the form",
+            "model": "scripted:unused",
+            "limits": {"max_steps": 2, "poll_s": 1},
+        })
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments: limits:")
+        assert "unknown field 'poll_s'" in body["error"]
+        assert "max_steps" in body["error"]
+        assert "model_timeout_s" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        status, body = _request(
+            port, "POST", "/runs/missing/approvals/a1", {"approve": True, "note": "x"},
+        )
+        assert status == 400
+        assert "invalid_arguments:" in body["error"]
+        assert "unknown field 'note'" in body["error"]
+        assert "approve" in body["error"]
+
+        status, body = _request(port, "POST", "/runs/missing/approvals/a1", {"note": "x"})
+        assert status == 400
+        assert "unknown field 'note'" in body["error"]
+
+        status, body = _request(port, "POST", "/runs/missing/cancel", {"force": True})
+        assert status == 400
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown field 'force'" in body["error"]
+        assert "no fields" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        missing_approve, _payload = _request(
+            port, "POST", "/runs/missing/approvals/a1", {"approve": False},
+        )
+        assert missing_approve == 404
+        missing_cancel, _payload = _request(port, "POST", "/runs/missing/cancel", {})
+        assert missing_cancel == 404
+    finally:
+        httpd.shutdown()

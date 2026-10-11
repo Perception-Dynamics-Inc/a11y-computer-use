@@ -1702,6 +1702,78 @@ def test_agent_number_min_only_accepts_a_value(tmp_path, isolated_home) -> None:
 
 
 @requires_display
+def test_agent_server_rejects_unknown_http_fields(tmp_path) -> None:
+    """Live socket. An unknown POST /runs field is 400 and builds no model.
+
+    Approve and cancel bodies with extra keys are the same error. Nothing
+    here opens GTK, Chrome, or AT-SPI.
+    """
+    from a11y_computer_use.agent.httpapi import bind_server
+    from a11y_computer_use.agent.service import RunStore
+
+    built: list[str] = []
+
+    def factory(spec: str):
+        built.append(spec)
+        raise AssertionError("model factory must not run")
+
+    store = RunStore(model_factory=factory, trace_root=tmp_path / "traces")
+    httpd = bind_server(host="127.0.0.1", port=0, store=store)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    port = httpd.server_address[1]
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        raw = json.dumps(payload).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", path, body=raw, headers={
+            "Content-Type": "application/json",
+            "Content-Length": str(len(raw)),
+        })
+        response = conn.getresponse()
+        parsed = json.loads(response.read().decode())
+        status = response.status
+        conn.close()
+        return status, parsed
+
+    try:
+        status, body = post("/runs", {
+            "goal": "save the form",
+            "model": "scripted:live",
+            "ref": "e2",
+        })
+        assert status == 400, body
+        assert body["error"].startswith("invalid_arguments:")
+        assert "unknown field 'ref'" in body["error"]
+        assert built == []
+        assert store._runs == {}
+
+        status, body = post("/runs", {
+            "goal": "save the form",
+            "model": "scripted:live",
+            "limits": {"max_steps": 2, "poll_s": 1},
+        })
+        assert status == 400, body
+        assert "invalid_arguments: limits:" in body["error"]
+        assert "poll_s" in body["error"]
+        assert built == []
+
+        status, body = post("/runs/missing/approvals/a1", {"approve": True, "note": "x"})
+        assert status == 400, body
+        assert "unknown field 'note'" in body["error"]
+
+        status, body = post("/runs/missing/cancel", {"force": True})
+        assert status == 400, body
+        assert "unknown field 'force'" in body["error"]
+        assert "no fields" in body["error"]
+        assert built == []
+        assert store._runs == {}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+@requires_display
 def test_agent_server_streams_a_gtk_save(tmp_path, isolated_home) -> None:
     """Start ``a11y-agent``'s HTTP server and save the GTK note through it.
 
