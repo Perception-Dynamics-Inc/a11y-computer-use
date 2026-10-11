@@ -1861,6 +1861,21 @@ def _same_app(owner: str, app: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _descendant_titles(snap: Snapshot, ref: str) -> set[str]:
+    """Titles of ``ref``'s descendants, not ``ref`` itself."""
+    children: dict[str | None, list] = {}
+    for element in snap.elements:
+        children.setdefault(element.parent, []).append(element)
+    titles: set[str] = set()
+    stack = list(children.get(ref, ()))
+    while stack:
+        element = stack.pop()
+        if element.title:
+            titles.add(element.title)
+        stack.extend(children.get(element.ref, ()))
+    return titles
+
+
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
 
@@ -3692,9 +3707,10 @@ class Runtime:
         Takes a fresh snapshot (so the returned refs are live and actionable, and
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
-        `desktop_snapshot`. On Linux, a GTK table row whose name matches
-        ``text`` is scrolled into that snapshot when it is not already on
-        screen, and the ref is that on-screen cell."""
+        `desktop_snapshot`. On Linux, a GTK or Chromium table row whose name
+        matches ``text`` is scrolled into that snapshot when the folded
+        window does not already list it, and the ref is that on-screen cell.
+        The search is the table, not only the rows the child cap kept."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -3728,6 +3744,140 @@ class Runtime:
             return observe.render_matches(snap, matches)
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
+
+    def expanded_children(self, app: str, ref: str) -> str:
+        """The next page of ``ref``'s children past the ones the snapshot kept.
+
+        A folded table lists the on-screen band and a ``… N more`` marker.
+        This scrolls the following page of that node (or of the table under
+        it, when the ref itself is the document) into a fresh snapshot and
+        returns that subtree. Another call continues. The page is not the
+        same truncated window. Drivers without an expand page return a full
+        snapshot, which is the previous listing.
+        """
+        app = _required_app_arg(app, "expanded_children")
+        snap = self._current
+        if snap is None or not any(el.ref == ref for el in snap.elements):
+            raise ValueError(f"not found: ref {ref} is not in the latest snapshot")
+        driver = self.driver
+        if not hasattr(driver, "_expand_page"):
+            return self.desktop_snapshot(app, mode="full")
+        armed = self._arm_expand_page(snap, ref)
+        if armed is None:
+            return observe.render_subtree(snap, ref) + "\nno further children"
+        key, start, limit = armed
+        try:
+            self.desktop_snapshot(app, mode="full")
+        finally:
+            driver._expand_page = None
+        fresh = self._current
+        if fresh is None:
+            return "expand failed: no snapshot"
+        cursors = getattr(driver, "_expand_cursors", None)
+        if isinstance(cursors, dict):
+            cursors[key] = start + limit
+        found = self._ref_for_expand_key(fresh, key)
+        if found is None:
+            return observe.render_text(fresh)
+        return observe.render_subtree(fresh, found)
+
+    def _arm_expand_page(self, snap: Snapshot, ref: str) -> tuple | None:
+        """Point the next Linux snapshot at the next page of ``ref``.
+
+        None when that node has no child past the ones already listed.
+        """
+        target = self._expand_target(snap, ref)
+        if target is None:
+            return None
+        element, handle = target
+        titles = _descendant_titles(snap, element.ref)
+        cursors = getattr(self.driver, "_expand_cursors", {})
+        from a11y_computer_use.drivers import _atspi
+
+        def read() -> tuple:
+            names = _atspi.child_labels(handle)
+            key = _atspi._frame_cache_key(handle)
+            count = _atspi._child_count(handle)
+            total = int(count) if isinstance(count, int) and not isinstance(count, bool) else len(names)
+            cursor = int(cursors.get(key, 0)) if isinstance(cursors, dict) else 0
+            start = observe.expand_start_index(names, titles, cursor)
+            return key, start, total
+
+        key, start, total = self.driver._run(read)
+        if start >= total:
+            return None
+        limit = observe.MAX_CHILDREN
+        self.driver._expand_page = (key, start, limit)
+        return (key, start, limit)
+
+    def _expand_target(self, snap: Snapshot, ref: str) -> tuple | None:
+        """``(element, handle)`` for ``ref``, or the folded table under it.
+
+        The ref wins when it is the node the snapshot folded. Otherwise the
+        descendant with the largest ``… N more`` count is the table the
+        document was folded around.
+        """
+        element = next(el for el in snap.elements if el.ref == ref)
+        children: dict[str | None, list] = {}
+        for item in snap.elements:
+            children.setdefault(item.parent, []).append(item)
+        descendants: list = []
+        stack = list(children.get(ref, ()))
+        while stack:
+            item = stack.pop()
+            descendants.append(item)
+            stack.extend(children.get(item.ref, ()))
+        folded = dict(observe.folded_children(snap))
+
+        def paired(item):
+            handle = observe.ax_handle_for(snap.snapshot_id, item.ref)
+            if handle is None:
+                return None
+            return item, handle
+
+        if folded.get(ref, 0) > 0:
+            found = paired(element)
+            if found is not None:
+                return found
+        best: tuple[int, object, object] | None = None
+        for item in descendants:
+            count = folded.get(item.ref, 0)
+            if count <= 0:
+                continue
+            found = paired(item)
+            if found is None:
+                continue
+            if best is None or count > best[0]:
+                best = (count, found[0], found[1])
+        if best is not None:
+            return best[1], best[2]
+        own = paired(element)
+        if own is not None:
+            return own
+        return None
+
+    def _ref_for_expand_key(self, snap: Snapshot, key: object) -> str | None:
+        """The ref in ``snap`` whose live node is ``key``."""
+        from a11y_computer_use.drivers import _atspi
+
+        handles = [
+            (el.ref, observe.ax_handle_for(snap.snapshot_id, el.ref))
+            for el in snap.elements
+        ]
+        handles = [(ref, handle) for ref, handle in handles if handle is not None]
+        if not handles:
+            return None
+
+        def match() -> str | None:
+            for ref, handle in handles:
+                if _atspi._frame_cache_key(handle) == key:
+                    return ref
+            return None
+
+        runner = getattr(self.driver, "_run", None)
+        if runner is None:
+            return match()
+        return runner(match)
 
     @_serialized
     def screenshot(

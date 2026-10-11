@@ -1008,6 +1008,61 @@ def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> li
     return out
 
 
+def expand_start_index(names: Sequence[str], shown: set[str], cursor: int = 0) -> int:
+    """Child index just past the run ``shown`` already lists.
+
+    ``names`` is document order. A name that is in ``shown`` extends the run,
+    including a run that does not start at child 0. Empty names do not end
+    the run. ``cursor`` is the index a previous expand already passed; the
+    result is never earlier than that.
+    """
+    shown_folded = {item.casefold() for item in shown if item}
+    last = -1
+    gap = 0
+    for index, name in enumerate(names):
+        text = (name or "").strip()
+        if text and text.casefold() in shown_folded:
+            last = index
+            gap = 0
+            continue
+        if last < 0:
+            continue
+        gap += 1
+        # A few unnamed wrappers can sit between titled rows. A longer gap
+        # is the tail past the listed run.
+        if gap > 8:
+            break
+    start = last + 1
+    if cursor > start:
+        return int(cursor)
+    return start
+
+
+def render_subtree(snap: Snapshot, ref: str) -> str:
+    """``ref`` and the descendants this snapshot kept, plus ``… N more``.
+
+    The lines use the same shape as ``render_text``. The header names the
+    ref so a caller can tell this page from a whole-window listing.
+    """
+    children = _children_map(snap)
+    root = next((el for el in snap.elements if el.ref == ref), None)
+    if root is None:
+        return f"[{snap.snapshot_id}] {ref} is not in this snapshot"
+    elisions = _EPOCHS.get(snap.snapshot_id, {})
+    lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {ref}"]
+
+    def emit(el: Element, depth: int) -> None:
+        lines.append("  " * depth + _render_line(el))
+        for child in children.get(el.ref, ()):
+            emit(child, depth + 1)
+        hidden = elisions.get(el.ref, 0)
+        if hidden:
+            lines.append("  " * (depth + 1) + f"… {hidden} more")
+
+    emit(root, 0)
+    return "\n".join(lines)
+
+
 def folded_children(snap: Snapshot) -> tuple[tuple[str, int], ...]:
     """``(ref, count)`` for nodes whose children ``render_text`` hides as ``… N more``.
 
@@ -1479,6 +1534,17 @@ def _prune_inner(
         if len(kept) > cap:
             kept, dropped = _cap_children(kept, cap)
             elided += dropped
+
+    # A table can publish only the on-screen band. The rest are still its
+    # children; the count is what ``… N more`` and expand(ref) page from.
+    take_unlisted = getattr(accessor, "take_unlisted", None)
+    if take_unlisted is not None:
+        try:
+            extra = int(take_unlisted(node) or 0)
+        except (TypeError, ValueError):
+            extra = 0
+        if extra > 0:
+            elided += extra
 
     if hollow:
         if not kept:

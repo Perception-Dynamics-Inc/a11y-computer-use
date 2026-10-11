@@ -1081,8 +1081,10 @@ class Agent:
         """Open a collapsed menu, tree, or section, then list the fresh tree.
 
         A node with ``expanded is False``, or a menu or tree role, is pressed
-        so its children enter the next snapshot. An already-open node is listed
-        without a click. The returned text is one agent step, not a second action.
+        so its children enter the next snapshot. An already-open node is not
+        clicked. The listing is the next page of that node's children past
+        the ones the last snapshot kept, not the same truncated window.
+        The returned text is one agent step, not a second action.
         """
         ref = str(action.args.get("ref") or "")
         element = _by_ref(self._last_snap, ref)
@@ -1103,7 +1105,11 @@ class Agent:
             opened = True
         app = self._app_name()
         try:
-            listed = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
+            expand = getattr(self.runtime, "expanded_children", None)
+            if expand is not None:
+                listed = expand(app, ref)
+            else:
+                listed = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
         except Exception as exc:  # noqa: BLE001 - the listing is data for the model
             listed = f"error: {type(exc).__name__}: {exc}"
         verb = "expanded" if opened else "listed"

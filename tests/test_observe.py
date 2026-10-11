@@ -1663,3 +1663,43 @@ def test_optgroup_labels_render_as_group_lines() -> None:
     assert any(el.title == "Lemon" and el.parent == next(
         group.ref for group in snap.elements if group.title == "Yellow"
     ) for el in snap.elements)
+
+
+def test_expand_start_index_passes_the_listed_run() -> None:
+    """The next page starts after the rows the snapshot already shows."""
+    names = [f"Row {index:03d}" for index in range(1, 301)]
+    names[199] = "Elevation"
+    shown = set(names[:33])
+    assert observe.expand_start_index(names, shown, 0) == 33
+    assert observe.expand_start_index(names, set(names[33:57]), 33) == 57
+    assert observe.expand_start_index(names, shown, 40) == 40
+    assert observe.expand_start_index(names, set(names[100:130]), 0) == 130
+
+
+def test_unlisted_children_are_folded_on_the_parent() -> None:
+    """A table that only publishes its visible rows still records the rest."""
+
+    class Unlisted(DictAccessor):
+        def take_unlisted(self, node: object) -> int:
+            assert isinstance(node, dict)
+            if node.get("title") == "Rows":
+                return 93
+            return 0
+
+    rows = [
+        ax("AXStaticText", title=f"Row {index:03d}", at=(10.0, 40.0 + index), size=(80.0, 1.0))
+        for index in range(1, 11)
+    ]
+    tree = ax(
+        "AXWindow", title="Doc", at=(0.0, 0.0), size=(400.0, 500.0),
+        children=[
+            ax("AXTable", title="Rows", at=(0.0, 30.0), size=(200.0, 400.0), children=rows),
+        ],
+    )
+    snap = build_snapshot(
+        tree, Unlisted(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    folded = observe.folded_children(snap)
+    assert folded == ((by_title(snap, "Rows").ref, 93),)
+    assert "… 93 more" in render_text(snap)
+    assert "Row 001" in observe.render_subtree(snap, by_title(snap, "Rows").ref)

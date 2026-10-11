@@ -431,11 +431,17 @@ text starts with `409`. This does not add or remove tools on
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
 
 `find` takes `text` and/or `role` (optional `editable`, `clickable`, `scope`)
-and calls the runtime `find` on the tracked app. `scroll_to_find` takes
-`text` and/or `role` and scrolls until that element is on screen. `expand`
-takes `ref`. A collapsed node, or a menu or tree, is pressed and the fresh
-snapshot is returned in that same step. Use these before a coordinate click
-when the observation names a collapsed node or `… N more` children.
+and calls the runtime `find` on the tracked app. It searches past the folded
+snapshot budget: on Linux a table row whose name matches `text` is scrolled
+into the snapshot when that row is not already listed, and the ref is that
+on-screen cell. `scroll_to_find` takes `text` and/or `role` and scrolls until
+that element is on screen. `expand` takes `ref`. A collapsed node, or a menu
+or tree, is pressed first. The result is the next page of that node's
+children past the ones the last snapshot kept (the table under the ref, when
+the ref is the document that was folded). A later `expand` of that node
+continues the page. It does not repeat the same truncated window. Use these
+before a coordinate click when the observation names a collapsed node or
+`… N more` children.
 
 `shell` and `python` are added to the model's tool list only when the agent
 is constructed with `allow_exec=True` or the CLI is passed `--allow-exec`.
