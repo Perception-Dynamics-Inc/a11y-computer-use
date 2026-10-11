@@ -1172,6 +1172,40 @@ def test_done_accepts_a_calc_cell_display_and_rejects_a_different_value():
     assert text[0]["ok"] is False
 
 
+def test_done_accepts_writer_paragraph_breaks_and_rejects_a_different_text():
+    """The done gate treats Writer's separators as the same break.
+
+    A missing line, an extra break, and a space stay different.
+    """
+    text = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    area = el("e2", "AXTextArea", "Untitled 1 - LibreOffice Document", value=text, parent="e1")
+    runtime = FakeRuntime(window(area))
+    runtime.desktop_snapshot("demo")
+    snap = runtime._current
+    crlf = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\r\n")}}], snap)
+    assert crlf[0]["ok"] is True
+    sep = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u2029")}}], snap)
+    assert sep[0]["ok"] is True
+    nel = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u0085")}}], snap)
+    assert nel[0]["ok"] is True
+    missing = check_conditions([{"value": {"ref": "e2", "equals": "Quarterly Update"}}], snap)
+    assert missing[0]["ok"] is False
+    collapsed = check_conditions(
+        [{"value": {"ref": "e2", "equals": text.replace("\n", "", 1)}}],
+        snap,
+    )
+    assert collapsed[0]["ok"] is False
+    spaced = check_conditions(
+        [{"value": {"ref": "e2", "equals": text.replace("\n", " ")}}],
+        snap,
+    )
+    assert spaced[0]["ok"] is False
+
+
 def test_stuck_alternate_ref_then_coordinate_then_keyboard():
     save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
     other = el("e9", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 200, 30, 80, 24))

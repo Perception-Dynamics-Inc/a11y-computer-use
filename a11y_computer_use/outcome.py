@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -509,6 +510,29 @@ def _parse_display_number(value: str) -> float:
 
 def _numbers_close(got: float, wanted: float) -> bool:
     return abs(float(got) - float(wanted)) <= 1e-6 * max(1.0, abs(wanted))
+
+
+# Line and paragraph separators. ``\r\n`` is one break. A repeated break
+# stays repeated, and a space is not a break. U+000B VT, U+000C FF,
+# U+0085 NEL, U+2028, U+2029, and U+FFFC are the same break as ``\n``.
+_PARAGRAPH_BREAK = re.compile(r"\r\n|[\n\r\u000b\u000c\u0085\u2028\u2029\ufffc]")
+
+
+def normalize_paragraph_breaks(text: str) -> str:
+    """Map every paragraph or line separator onto ``\\n``, one break each."""
+    return _PARAGRAPH_BREAK.sub("\n", str(text).replace("\u00a0", " "))
+
+
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    Newline, CR, CRLF, VT, FF, NEL, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    ``a b`` is not ``a\\nb``, and ``ab`` is not ``a\\nb``.
+    """
+    if got is None or wanted is None:
+        return False
+    return normalize_paragraph_breaks(got) == normalize_paragraph_breaks(wanted)
 
 
 def judge(

@@ -2510,6 +2510,8 @@ class Runtime:
                     better = _atspi.sheet_outcome_text(app or "", requested, handle)
                     if better is None and handle is not None:
                         better = _atspi.writer_cell_outcome_text(requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.writer_document_outcome_text(requested, handle)
                     if better is not None:
                         readback = better
             if readback is None:

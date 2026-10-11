@@ -1123,6 +1123,19 @@ def _texts_match(got: str | None, wanted: str | None) -> bool:
     return _norm_nbsp(got) == _norm_nbsp(wanted)
 
 
+def paragraph_breaks_match(got: str | None, wanted: str | None) -> bool:
+    """True when the only difference is which paragraph separator was used.
+
+    Newline, CR, CRLF, VT, FF, NEL, U+2028, U+2029, and U+FFFC are the same
+    break. ``\\r\\n`` is one break, not two. ``a\\n\\nb`` is not ``a\\nb``,
+    ``a b`` is not ``a\\nb``, and ``ab`` is not ``a\\nb``. A trailing break
+    is kept.
+    """
+    from a11y_computer_use.outcome import paragraph_breaks_match as same_breaks
+
+    return same_breaks(got, wanted)
+
+
 def _text_is_blank(text: str | None) -> bool:
     """True when the snapshot read is empty, unreadable, or only whitespace.
 
@@ -1588,6 +1601,15 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
             return None
     if role_name in _RANGE_ROLE_NAMES:
         return _range_value(acc)
+    if role_name == "document text":
+        # The document node's own text is empty. Paragraphs hold the lines.
+        # The Value interface on that node is an uninitialized double
+        # (about 4e-323), which is not the document.
+        document = writer_document_text(acc)
+        if document:
+            return document
+        if document == "":
+            return None
     # A Qt label, check, row, or empty line edit has a Value interface whose
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
@@ -4266,7 +4288,7 @@ def _confirm_text(acc, text: str) -> bool:
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -4553,6 +4575,172 @@ def writer_cell_text(acc) -> str:
         if text:
             parts.append(text)
     return "\n".join(parts)
+
+
+def is_writer_document(acc) -> bool:
+    """A LibreOffice Writer document. Its text lives in paragraph children.
+
+    A GTK text view and a Mousepad buffer are not this node. Their own text
+    interface is the value.
+    """
+    try:
+        if _role_name(acc) != "document text":
+            return False
+    except Exception:
+        return False
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def _document_paragraphs(acc) -> list:
+    """Paragraph and heading children of a Writer document, in order.
+
+    Empty paragraphs stay, so two breaks are not read back as one. Bounded
+    so a document is not walked without a limit.
+    """
+    found = []
+    count = _child_count(acc)
+    if count < 0:
+        count = 0
+    for index in range(min(count, 256)):
+        child = _child_at(acc, index)
+        if child is not None and _role_name(child) in {"paragraph", "heading"}:
+            found.append(child)
+    return found
+
+
+def _paragraph_line(text: str) -> str:
+    """One paragraph's text, without the end mark the paragraph itself is.
+
+    The join between paragraphs is the break. A separator at the end of the
+    paragraph text is that same break, so it is not a second one. A break
+    before that end mark stays.
+    """
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    body = normalize_paragraph_breaks(text or "")
+    if body.endswith("\n"):
+        return body[:-1]
+    return body
+
+
+def writer_document_text(acc) -> str | None:
+    """Paragraph text of a Writer document, one line per paragraph.
+
+    None when ``acc`` is not that document. An empty document is ``""``,
+    not the node's Value interface. The snapshot uses this string, so a
+    done check can see the lines. A separator inside a paragraph is kept.
+    """
+    if not is_writer_document(acc):
+        return None
+    # libatspi answers get_child_at_index from its cache. The first read
+    # after a write can be the empty document or only the first paragraph,
+    # and a later poll would keep that list until the cache is dropped.
+    _call_first(acc, ("clear_cache", "clearCache"))
+    paragraphs = _document_paragraphs(acc)
+    if not paragraphs:
+        return ""
+    return "\n".join(_paragraph_line(_full_text(child) or "") for child in paragraphs)
+
+
+def writer_document_matches(acc, text: str) -> bool:
+    """True when the Writer paragraphs are ``text``, whatever the separator."""
+    shown = writer_document_text(acc)
+    if shown is None:
+        return False
+    return paragraph_breaks_match(shown, text)
+
+
+# How long a Writer document may take to publish every paragraph. A 1.5s
+# poll expired on a slow runner while later paragraphs were still absent.
+# The first reads are empty or only the first line. A sample that is still
+# changing is not the read-back.
+_WRITER_DOCUMENT_DEADLINE_S = 6.0
+_WRITER_DOCUMENT_STABLE_S = 0.25
+
+
+def _writer_document_landed(acc, text: str) -> bool:
+    """Poll until the paragraph text is stable, or the deadline passes.
+
+    A Writer document publishes paragraphs one at a time. The first reads
+    are empty or only the first line, and that partial text is not a miss.
+    Success is a read that matches, after separator normalisation, and has
+    then stayed unchanged. A match that arrives at the deadline still has
+    to stay unchanged for the stable window. A stable read that already has
+    every requested break and still differs is a miss. This does not clear
+    the document: selecting it deletes a write whose later paragraphs are
+    not up yet.
+    """
+    if not is_writer_document(acc):
+        return False
+    from a11y_computer_use.outcome import normalize_paragraph_breaks
+
+    wanted_breaks = normalize_paragraph_breaks(text).count("\n")
+    deadline = time.monotonic() + _WRITER_DOCUMENT_DEADLINE_S
+    last = object()
+    stable_since = None
+    while True:
+        shown = writer_document_text(acc)
+        now = time.monotonic()
+        if shown != last:
+            last = shown
+            stable_since = now
+        held = (
+            stable_since is not None
+            and (now - stable_since) >= _WRITER_DOCUMENT_STABLE_S
+        )
+        matches = shown is not None and paragraph_breaks_match(shown, text)
+        if held and matches:
+            return True
+        shown_breaks = normalize_paragraph_breaks(shown or "").count("\n")
+        # Fewer breaks than requested means a later paragraph is not
+        # published yet. Keep waiting. A full, stable, different value is
+        # the read-back.
+        if held and shown and shown_breaks >= wanted_breaks and not matches:
+            return False
+        # A partial read waits out the deadline. A match that is still
+        # settling may cross it, for one stable window only.
+        if now >= deadline and not matches:
+            return False
+        if now >= deadline + _WRITER_DOCUMENT_STABLE_S:
+            return False
+        time.sleep(0.05)
+
+
+def _set_writer_document_text(acc, text: str) -> bool:
+    """Write a Writer document, then wait until its paragraphs are stable.
+
+    The document node often has no EditableText, and its text interface can
+    be missing for a moment. The generic key replace treats that as a miss
+    and deletes the field after a few hundredths of a second, which removes
+    paragraphs that are not published yet. A newline is Return. A miss here
+    does not select the document.
+    """
+    eti = _editable_iface(acc)
+    if eti is not None:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        return _writer_document_landed(acc, text)
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    _type_into_target(acc, text)
+    return _writer_document_landed(acc, text)
+
+
+def writer_document_outcome_text(requested: str, acc) -> str | None:
+    """The requested string when a Writer document's paragraphs now hold it.
+
+    None for any other node, and when a paragraph break is actually missing
+    or extra. The snapshot value is the same paragraph text.
+    """
+    if not requested or acc is None:
+        return None
+    if not writer_document_matches(acc, requested):
+        return None
+    return requested
 
 
 def writer_cell_outcome_text(requested: str, cell) -> str | None:
@@ -6828,6 +7016,8 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return False
     if force:
         return _replace_editable_text(acc, text)
+    if is_writer_document(acc):
+        return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
