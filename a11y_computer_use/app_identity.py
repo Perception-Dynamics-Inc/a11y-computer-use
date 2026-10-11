@@ -8,6 +8,11 @@ start ``localc``, ``lowriter``, or ``loimpress`` when that program is on
 PATH, and otherwise ``soffice`` or ``libreoffice`` with the module flag.
 Alias matches are exact tokens. They are not substrings, so ``Files`` does
 not match an unrelated name that merely contains those letters.
+
+On Linux a display name is the desktop file's ``Name`` or ``GenericName``
+(``Mousepad``, ``Text Editor``). The program is that file's executable when
+it is on PATH, otherwise the desktop id. The grant only decides whether the
+launch is allowed. It does not pick a different program.
 """
 
 from __future__ import annotations
@@ -154,10 +159,12 @@ def matching_stored_key(name: str, stored: Sequence[str]) -> str | None:
 
 
 def load_desktop_entries() -> list[dict[str, str]]:
-    """Installed desktop files as ``id``, ``name``, ``exec``, and ``wm_class``.
+    """Installed desktop files.
 
-    This reads files only. It does not open a display. A missing applications
-    directory is an empty list.
+    Each entry has ``id``, ``name``, ``generic_name``, ``exec``, and
+    ``wm_class``. ``generic_name`` is the desktop file's ``GenericName``
+    (``Text Editor`` for Mousepad). This reads files only. It does not open
+    a display. A missing applications directory is an empty list.
     """
     try:
         from a11y_computer_use.drivers._linux_system import _application_dirs
@@ -190,6 +197,7 @@ def _read_desktop_entry(path: str, filename: str) -> dict[str, str] | None:
     except OSError:
         return None
     name = ""
+    generic = ""
     program = ""
     wm_class = ""
     in_entry = False
@@ -203,14 +211,22 @@ def _read_desktop_entry(path: str, filename: str) -> dict[str, str] | None:
         key, value = stripped.split("=", 1)
         if key == "Name" and not name:
             name = value.strip()
+        elif key == "GenericName" and not generic:
+            generic = value.strip()
         elif key == "StartupWMClass" and not wm_class:
             wm_class = value.strip()
         elif key == "Exec" and not program:
             program = _exec_basename(value.strip())
     stem = filename[: -len(".desktop")]
-    if not any((stem, name, program, wm_class)):
+    if not any((stem, name, generic, program, wm_class)):
         return None
-    return {"id": stem, "name": name, "exec": program, "wm_class": wm_class}
+    return {
+        "id": stem,
+        "name": name,
+        "generic_name": generic,
+        "exec": program,
+        "wm_class": wm_class,
+    }
 
 
 def _exec_basename(exec_line: str) -> str:
@@ -246,6 +262,115 @@ class LaunchResolution:
         self.gate_key = gate_key
         self.resolved = resolved
         self.argv = argv
+
+
+def _exact_grant(name: str, granted: Sequence[str]) -> str | None:
+    """A grant whose spelling is ``name``, ignoring case and a ``.desktop`` suffix.
+
+    This does not walk alias groups. ``Text Editor`` does not match a grant
+    for a different editor, and ``Files`` does not match ``thunar`` here.
+    """
+    folded = normalize(name)
+    if not folded:
+        return None
+    stems = {folded}
+    if folded.endswith(".desktop"):
+        stems.add(folded[: -len(".desktop")])
+    else:
+        stems.add(folded + ".desktop")
+    for key in granted:
+        if normalize(key) in stems:
+            return key
+    return None
+
+
+def _path_spelling(name: str, lookup: Callable[[str], str | None]) -> str | None:
+    """The PATH spelling of ``name``, or None when it is not an executable.
+
+    ``Mousepad`` is ``mousepad`` when only the lower-case program is installed.
+    A lookup that raises ``OSError`` is a miss. The caller's own spelling is
+    kept when that exact string is on PATH.
+    """
+    if not name or os.sep in name or name.endswith(".desktop"):
+        return None
+    if os.altsep and os.altsep in name:
+        return None
+    if _lookup_program(lookup, name):
+        return name
+    folded = name.casefold()
+    if folded != name and _lookup_program(lookup, folded):
+        return folded
+    return None
+
+
+def _display_entry(name: str, catalog: Sequence[dict]) -> dict | None:
+    """The desktop entry whose ``Name`` or ``GenericName`` is ``name``.
+
+    ``Name`` wins over ``GenericName``. The first entry in ``catalog`` wins
+    within each. Matching ignores case and repeated spaces. It is not an
+    alias-group match, so one ``Text Editor`` does not select every editor.
+    """
+    folded = normalize(name)
+    if not folded:
+        return None
+    generic: dict | None = None
+    for entry in catalog:
+        title = str(entry.get("name") or "")
+        if title and normalize(title) == folded:
+            return entry
+        if generic is None:
+            label = str(entry.get("generic_name") or "")
+            if label and normalize(label) == folded:
+                generic = entry
+    return generic
+
+
+def _desktop_id_spelling(name: str, catalog: Sequence[dict]) -> str | None:
+    """The catalog id that is ``name``, ignoring case, or None."""
+    folded = normalize(name)
+    if not folded:
+        return None
+    for entry in catalog:
+        ident = str(entry.get("id") or "")
+        if ident and normalize(ident) == folded:
+            return ident
+    return None
+
+
+def _linux_launch_program(
+    name: str,
+    catalog: Sequence[dict],
+    lookup: Callable[[str], str | None],
+    display: dict | None,
+) -> str | None:
+    """Program to start for ``name``, or None to keep ``name``.
+
+    An executable on PATH wins, then a desktop id, then a ``Name`` or
+    ``GenericName``. A request that is already that executable or id keeps
+    the caller's spelling. ``Mousepad`` becomes ``mousepad``. ``Text Editor``
+    becomes the executable when it is on PATH, otherwise the desktop id.
+    """
+    spelling = _path_spelling(name, lookup)
+    if spelling:
+        return None if spelling == name else spelling
+    ident = _desktop_id_spelling(name, catalog)
+    if ident:
+        return None if ident == name else ident
+    if display is None:
+        return None
+    exe = str(display.get("exec") or "")
+    desktop_id = str(display.get("id") or "")
+    folded = normalize(name)
+    if exe and normalize(exe) == folded:
+        return None if exe == name else exe
+    if desktop_id and normalize(desktop_id) == folded:
+        return None if desktop_id == name else desktop_id
+    exe_spelling = _path_spelling(exe, lookup) if exe else None
+    if exe_spelling:
+        return exe_spelling
+    if desktop_id:
+        return desktop_id
+    return exe or None
 
 
 def _lookup_program(lookup: Callable[[str], str | None], name: str) -> str | None:
@@ -316,6 +441,10 @@ def resolve_launch(
     bundle, no running comm, and no grant names this app. The caller reports
     that as ``app_not_found`` and lists ``granted``, instead of asking for a
     permission grant of the raw string.
+
+    A Linux display name is resolved the same way whatever the grant list
+    spells. PATH (case-insensitive) wins, then the desktop id, then ``Name``
+    or ``GenericName``. The grant is only the gate.
     """
     import shutil
 
@@ -327,11 +456,10 @@ def resolve_launch(
         candidates.append(running)
 
     on_path = False
+    path_spelling: str | None = None
     if name and os.sep not in name and not name.endswith(".desktop"):
-        try:
-            on_path = bool(lookup(name))
-        except OSError:
-            on_path = False
+        path_spelling = _path_spelling(name, lookup)
+        on_path = path_spelling is not None
     elif name and os.sep in name:
         try:
             on_path = bool(lookup(name)) or os.path.isfile(name)
@@ -353,10 +481,21 @@ def resolve_launch(
             matched.append(entry)
             candidates.extend(field for field in fields if field)
 
+    # Name= / GenericName= is exact, not an alias group, so the chosen file's
+    # fields are not mixed with every other editor's grant.
+    display = _display_entry(name, catalog)
+    if display is not None and display not in matched:
+        matched.append(display)
+
     hit = matching_stored_key(name, granted)
     if hit is None:
         for candidate in candidates:
             hit = matching_stored_key(candidate, granted)
+            if hit is not None:
+                break
+    if hit is None and display is not None:
+        for field in ("exec", "id", "name", "wm_class", "generic_name"):
+            hit = _exact_grant(str(display.get(field) or ""), granted)
             if hit is not None:
                 break
 
@@ -378,8 +517,21 @@ def resolve_launch(
             concrete = str(matched[0].get("exec") or matched[0].get("id") or "")
         if concrete:
             launch_name = concrete
-    elif hit and normalize(hit) == normalize(name) and hit != name and not on_path:
-        launch_name = hit
+    else:
+        program = _linux_launch_program(name, catalog, lookup, display)
+        if program:
+            launch_name = program
+        elif (
+            hit
+            and normalize(hit) == normalize(name)
+            and hit != name
+            and not on_path
+            and _path_spelling(hit, lookup)
+        ):
+            # The grant's own spelling is an executable and the request is
+            # not. A display-name grant that is not on PATH does not replace
+            # the program name.
+            launch_name = hit
 
     resolved = bool(on_path or matched or installed_bundle or running or hit)
     gate_key = hit or (launch_name if resolved else None)

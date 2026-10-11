@@ -1110,6 +1110,115 @@ def _desktop_entry(identifier: str) -> tuple[str, str] | None:
             path = os.path.join(root, rel)
             if os.path.isfile(path):
                 return entry, path
+    return _desktop_entry_scan(identifier)
+
+
+def _desktop_launch_id(root: str, path: str) -> str:
+    """gtk-launch id for a desktop file under an applications directory.
+
+    ``applications/foo/bar.desktop`` is ``foo-bar.desktop``.
+    """
+    rel = os.path.relpath(path, root)
+    if rel.endswith(".desktop"):
+        rel = rel[: -len(".desktop")]
+    return rel.replace(os.sep, "-") + ".desktop"
+
+
+def _desktop_keys(path: str) -> dict[str, str] | None:
+    """Selected ``[Desktop Entry]`` keys, or None when the file cannot be read."""
+    try:
+        if os.path.getsize(path) > 262144:
+            return None
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    in_entry = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_entry = stripped == "[Desktop Entry]"
+            continue
+        if not in_entry or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key in {"Name", "GenericName", "Type", "Hidden", "NoDisplay"} and key not in fields:
+            fields[key] = value.strip()
+    return fields
+
+
+def _desktop_visible(fields: dict[str, str]) -> bool:
+    """False for a hidden, ``NoDisplay``, or non-application entry.
+
+    An exact desktop id still launches those files. A display-name lookup
+    does not.
+    """
+    if fields.get("Type") not in {None, "", "Application"}:
+        return False
+    if fields.get("Hidden", "").casefold() == "true":
+        return False
+    if fields.get("NoDisplay", "").casefold() == "true":
+        return False
+    return True
+
+
+def _desktop_entry_scan(identifier: str) -> tuple[str, str] | None:
+    """Desktop file for ``identifier`` by case-insensitive id, then display name.
+
+    The id is compared case-insensitively after the exact path lookup misses.
+    ``Name`` wins over ``GenericName``. The first installed file in XDG order
+    wins within each. A hidden or ``NoDisplay`` file is skipped here. An exact
+    id still launches that file.
+    """
+    from a11y_computer_use.app_identity import normalize
+
+    want_id = identifier.casefold()
+    if want_id.endswith(".desktop"):
+        want_id = want_id[: -len(".desktop")]
+    want_name = normalize(identifier)
+    generic_hit: tuple[str, str] | None = None
+    for root in _application_dirs():
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                if not filename.endswith(".desktop"):
+                    continue
+                path = os.path.join(dirpath, filename)
+                launch_id = _desktop_launch_id(root, path)
+                stem = launch_id[: -len(".desktop")]
+                fields = _desktop_keys(path)
+                if fields is None or not _desktop_visible(fields):
+                    continue
+                if want_id and stem.casefold() == want_id:
+                    return launch_id, path
+                if not want_name:
+                    continue
+                title = fields.get("Name") or ""
+                if title and normalize(title) == want_name:
+                    return launch_id, path
+                generic = fields.get("GenericName") or ""
+                if generic_hit is None and generic and normalize(generic) == want_name:
+                    generic_hit = (launch_id, path)
+    return generic_hit
+
+
+def _which_program(name: str) -> str | None:
+    """Absolute executable for ``name``.
+
+    The lower-case spelling is tried when the caller's case is not on PATH,
+    so ``Mousepad`` finds ``mousepad``.
+    """
+    if not name:
+        return None
+    found = shutil.which(name)
+    if found:
+        return found
+    folded = name.casefold()
+    if folded != name:
+        found = shutil.which(folded)
+        if found:
+            return found
     return None
 
 
@@ -1145,7 +1254,7 @@ def _desktop_exec(path: str) -> list[str] | None:
     argv = [part for part in parts if not _DESKTOP_FIELD_CODE.match(part)]
     if not argv:
         return None
-    program = shutil.which(argv[0])
+    program = _which_program(argv[0])
     if not program:
         return None
     return [program, *argv[1:]]
@@ -1236,9 +1345,11 @@ _OFFICE_FLAGS = frozenset({"--calc", "--writer", "--impress"})
 def launch_app(identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
     """Launch ``identifier`` or raise `ErrorCode.APP_NOT_FOUND` immediately.
 
-    An executable on PATH is started directly. Otherwise a matching desktop
-    file is started with ``gtk-launch``, or with its ``Exec`` line when
-    ``gtk-launch`` is not installed. A name that is neither is not handed to
+    An executable on PATH is started directly. The lookup is case-insensitive,
+    so ``Mousepad`` starts ``mousepad``. Otherwise a desktop file is started
+    with ``gtk-launch``, or with its ``Exec`` line when ``gtk-launch`` is not
+    installed: first by id, then by ``Name``, then by ``GenericName``
+    (``Text Editor``). A name that is none of these is not handed to
     ``xdg-open`` and does not wait for a window.
 
     ``argv`` starts that program and its arguments instead of ``identifier``.
@@ -1271,7 +1382,7 @@ def launch_app(identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
             proc, identifier, names, is_launcher=base in _LAUNCHER_BASENAMES,
         )
 
-    executable = shutil.which(identifier) if identifier else None
+    executable = _which_program(identifier) if identifier else None
     if executable:
         base = os.path.basename(executable)
         proc = _spawn([executable], identifier)
