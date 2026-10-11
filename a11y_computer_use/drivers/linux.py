@@ -2268,6 +2268,7 @@ class LinuxDriver:
             return None
         self._chooser_readback = None
         self._type_expected = None
+        self._sheet_type_origin = None
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -2296,6 +2297,16 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if (
+            handle is not None
+            and ("\t" in text or "\n" in text)
+            and self._run(
+                lambda: _atspi.is_sheet_cell(handle) and not _atspi.writer_text_cell(handle)
+            )
+        ):
+            # Tab and Return leave the cell. insertText would keep the grid
+            # in this cell, and the read-back would only see that cell.
+            handle = None
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))
@@ -2409,12 +2420,39 @@ class LinuxDriver:
             selection, editor_before, editor_selection = self._run(_spans)
         # Chrome's omnibox drops the tail of a URL at the default key pace.
         # A contenteditable and a Calc cell keep that pace.
+        if (
+            app_id
+            and location is None
+            and bar_before is None
+            and ("\t" in text or "\n" in text)
+            and _atspi.libreoffice_app(app_id)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            origin = self._run(
+                lambda: _atspi.selected_sheet_address(app_id) or _atspi._focused_sheet_address(app_id)
+            )
+            if isinstance(origin, str) and origin:
+                self._sheet_type_origin = origin
         if location is not None or bar_before is not None:
             _linux_input.type_string(text, delay=0.05)
         else:
             _linux_input.type_string(text)
         if location is not None:
             return self._location_read_back(location, before, text, app_id)
+        if self._sheet_type_origin:
+            origin = self._sheet_type_origin
+            mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
+            if mismatch is None:
+                return len(text)
+            self._sheet_type_origin = None
+            address, wanted, actual = mismatch
+            raise _atspi._text_mismatch(
+                "text_mismatch",
+                f"the text read back from {address} does not match {wanted!r}",
+                expected=wanted,
+                actual=actual,
+                cell=address,
+            )
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
