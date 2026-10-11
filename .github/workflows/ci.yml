@@ -275,6 +275,38 @@ jobs:
         # reaped as orphans by the runner. `timeout` (as the block's last command)
         # sets the exit code.
         run: |
+          # Quoted heredoc at this block's indent. YAML strips that indent, so
+          # the delimiter is column 0 for the shell. It stays outside the
+          # single-quoted bash -c below; single-quoted echoes there are a
+          # syntax error (exit 2) before pytest.
+          cat > /tmp/wait_wm.py << 'PY'
+          import time
+          from Xlib import display
+          deadline = time.monotonic() + 20
+          last = "no _NET_SUPPORTING_WM_CHECK"
+          while time.monotonic() < deadline:
+              d = None
+              try:
+                  d = display.Display()
+                  root = d.screen().root
+                  atom = d.intern_atom("_NET_SUPPORTING_WM_CHECK")
+                  prop = root.get_full_property(atom, 0)
+                  if prop is not None:
+                      raise SystemExit(0)
+              except SystemExit:
+                  raise
+              except Exception as exc:
+                  last = str(exc)
+              finally:
+                  if d is not None:
+                      try:
+                          d.close()
+                      except Exception:
+                          pass
+              time.sleep(0.25)
+          print(last)
+          raise SystemExit(1)
+          PY
           xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- bash -c '
             ( /usr/libexec/at-spi-bus-launcher --launch-immediately >/dev/null 2>&1 & )
             # 1800s. CI runs 38047628453 (this branch) and 38060125035
@@ -294,36 +326,6 @@ jobs:
             .venv/bin/pip install -e ".[ocr]" &&
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
-            # Echo, not a heredoc: a column-0 line ends this YAML block and
-            # GitHub starts none of the jobs.
-            {
-              echo 'import time'
-              echo 'from Xlib import display'
-              echo 'deadline = time.monotonic() + 20'
-              echo 'last = "no _NET_SUPPORTING_WM_CHECK"'
-              echo 'while time.monotonic() < deadline:'
-              echo '    d = None'
-              echo '    try:'
-              echo '        d = display.Display()'
-              echo '        root = d.screen().root'
-              echo '        atom = d.intern_atom("_NET_SUPPORTING_WM_CHECK")'
-              echo '        prop = root.get_full_property(atom, 0)'
-              echo '        if prop is not None:'
-              echo '            raise SystemExit(0)'
-              echo '    except SystemExit:'
-              echo '        raise'
-              echo '    except Exception as exc:'
-              echo '        last = str(exc)'
-              echo '    finally:'
-              echo '        if d is not None:'
-              echo '            try:'
-              echo '                d.close()'
-              echo '            except Exception:'
-              echo '                pass'
-              echo '    time.sleep(0.25)'
-              echo 'print(last)'
-              echo 'raise SystemExit(1)'
-            } > /tmp/wait_wm.py
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
             A11Y_OCR_LIVE=1 timeout -k 5 1800 .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py -q -rs -p no:cacheprovider
           '
