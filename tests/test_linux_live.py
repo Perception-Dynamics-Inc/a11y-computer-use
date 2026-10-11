@@ -6986,6 +6986,98 @@ def _chrome_text(shot) -> str:
     return "\n".join(parts)
 
 
+def test_linux_chrome_aria_spinbutton_shows_role_and_value_after_arrow_up(tmp_path) -> None:
+    """Live Chrome: a custom role=spinbutton is not a valueless text field.
+
+    The native number input stays a text field whose value is its text.
+    The custom control's role is spinbutton and its value is the aria
+    value, including min and max, before and after ArrowUp. Skips when
+    no Chrome binary is on PATH.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = (
+        "<!doctype html><meta charset=utf-8><title>cuspinbtn</title>"
+        "<label>Quantity <input id=qty type=number min=0 max=10 value=3 aria-label=Quantity></label>"
+        "<label id=gl>Guests</label>"
+        "<div id=guests role=spinbutton tabindex=0 aria-labelledby=gl"
+        " aria-valuemin=0 aria-valuemax=10 aria-valuenow=3 aria-valuetext=3>3</div>"
+        "<script>"
+        "var g=document.getElementById('guests');"
+        "g.addEventListener('keydown',function(e){"
+        "if(e.key!=='ArrowUp'&&e.key!=='ArrowDown')return;"
+        "e.preventDefault();"
+        "var n=Number(g.getAttribute('aria-valuenow'));"
+        "n+=e.key==='ArrowUp'?1:-1;"
+        "n=Math.max(0,Math.min(10,n));"
+        "g.setAttribute('aria-valuenow',String(n));"
+        "g.setAttribute('aria-valuetext',String(n));"
+        "g.textContent=String(n);"
+        "});"
+        "</script>"
+    )
+    proc, profile = _launch_chrome(tmp_path, page, "cuspinbtn")
+    try:
+        snap = _wait_chrome(driver, "Quantity")
+        snap = _wait_chrome(driver, "Guests")
+
+        def quantity(shot):
+            found = next(
+                (el for el in shot.elements if el.title == "Quantity" and el.role == "AXTextField"),
+                None,
+            )
+            assert found is not None, observe.render_text(shot)
+            return found
+
+        def guests(shot):
+            found = next(
+                (el for el in shot.elements if el.title == "Guests" and el.role == "AXSpinButton"),
+                None,
+            )
+            assert found is not None, observe.render_text(shot)
+            return found
+
+        native = quantity(snap)
+        assert native.value == "3", observe.render_text(snap)
+        assert "min" not in str(native.value)
+        control = guests(snap)
+        assert str(control.value).startswith("3 ")
+        assert "min 0" in str(control.value) and "max 10" in str(control.value)
+        rendered = observe._render_line(control)
+        assert rendered.startswith(f'{control.ref} spinbutton "Guests"')
+        assert "(edit)" not in rendered
+        assert not any(
+            el.title == "Guests" and el.role == "AXTextField" for el in snap.elements
+        )
+
+        runtime = _chrome_runtime(tmp_path, driver)
+        runtime._current = snap
+        runtime.click(control.ref)
+        runtime.key("Up")
+        deadline = time.monotonic() + 4
+        shown = str(control.value)
+        last = snap
+        while time.monotonic() < deadline:
+            last = driver.snapshot(Scope.WINDOW, "chrome")
+            control = guests(last)
+            shown = str(control.value)
+            if shown.startswith("4 "):
+                break
+            time.sleep(0.25)
+        assert shown.startswith("4 "), observe.render_text(last)
+        assert "min 0" in shown and "max 10" in shown
+        assert "(edit)" not in observe._render_line(control)
+        native = quantity(last)
+        assert native.role == "AXTextField" and native.value == "3"
+    finally:
+        _stop_chrome(proc)
+        import shutil
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def _wait_chrome(driver, needle: str, timeout: float = 45):
     deadline = time.monotonic() + timeout
     last = ""

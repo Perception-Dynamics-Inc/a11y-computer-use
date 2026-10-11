@@ -1409,3 +1409,58 @@ def test_chrome_date_segment_uses_valuetext_not_the_value_float(monkeypatch) -> 
     gtk.toolkit = "GTK"
     assert _atspi.control_kind(gtk) == "value"
     assert ATSPIAccessor().read(gtk).value == "5"
+    assert ATSPIAccessor().read(gtk).role == "AXTextField"
+
+
+def test_chrome_aria_spinbutton_reports_role_and_value_not_an_edit_field(monkeypatch) -> None:
+    """A custom role=spinbutton is a spinbutton with its value, not a text field.
+
+    valuetext wins over the Value float. Minimum and maximum are part of the
+    value when the range is real. An ``<input type=number>`` stays a text
+    field whose value is the text, with no range suffix. set_value still
+    refuses: the Value interface does not move a widget the page owns.
+    """
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    guests = _Node(
+        "spin button", "Guests", text="", value=3.0, minimum=0.0, maximum=10.0,
+        states=("FOCUSABLE", "ENABLED", "SENSITIVE"),
+        attrs={"tag": "div", "xml-roles": "spinbutton", "valuetext": "3 guests"},
+    )
+    guests.toolkit = "Chromium"
+    guests.hold_value = True
+    raw = ATSPIAccessor().read(guests)
+    assert raw.role == "AXSpinButton"
+    assert raw.value == "3 guests (min 0, max 10)"
+    assert raw.editable is False
+    _clickable, editable, _secure = observe._flags(raw)
+    assert editable is False
+    line = observe._render_line(Element(
+        "e30", raw.role, "Guests", str(raw.value), Bounds(0, 10, 10, 40, 24), "snap",
+        editable=editable,
+    ), bounds=False)
+    assert line == 'e30 spinbutton "Guests" ="3 guests (min 0, max 10)"'
+    assert "(edit)" not in line
+    assert "AXSpinButton" in observe._INTERACTIVE_ROLES
+
+    plain = _Node(
+        "spin button", "Plain", text="", value=6.0, minimum=1.0, maximum=9.0,
+        attrs={"tag": "div", "xml-roles": "spinbutton"},
+    )
+    plain.toolkit = "Chromium"
+    assert ATSPIAccessor().read(plain).value == "6 (min 1, max 9)"
+
+    number = _Node(
+        "spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0,
+        states=("EDITABLE", "FOCUSABLE", "ENABLED", "SENSITIVE"),
+        attrs={"tag": "input", "text-input-type": "number", "valuetext": "3"},
+    )
+    number.toolkit = "Chromium"
+    native = ATSPIAccessor().read(number)
+    assert native.role == "AXTextField"
+    assert native.value == "3"
+    assert observe._flags(native)[1] is True
+
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(guests, "9")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert guests.value == 3.0

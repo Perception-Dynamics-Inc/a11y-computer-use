@@ -1519,6 +1519,56 @@ def _combo_display_name(acc, name: str) -> str:
     return name
 
 
+def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
+    """True for a Chromium custom ``role=spinbutton``, not a native number input.
+
+    Chrome exposes both as AT-SPI ``spin button``. The custom control's
+    ``xml-roles`` is ``spinbutton`` and its tag is not an ``<input
+    type=number>``. A date, time, or month segment also carries
+    ``xml-roles=spinbutton``; that segment stays on the valuetext path.
+    A GTK spin button is not Chromium.
+    """
+    role = role_name if role_name is not None else _role_name(acc)
+    if role != "spin button" or not _chromium_app(acc):
+        return False
+    if _number_input(acc) or _chrome_date_segment(acc):
+        return False
+    if attrs is None:
+        attrs = _get_attributes(acc)
+    xml = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    return "spinbutton" in xml
+
+
+def _aria_spin_value(acc) -> str | None:
+    """The spin button's displayed value, then its minimum and maximum.
+
+    ``valuetext`` is Chrome's ``GetValueForControl``: ``aria-valuetext`` when
+    that attribute is set, otherwise the numeric value. A blank attribute
+    falls back to the Value interface (``aria-valuenow``). Minimum and
+    maximum are included only when that interface reports a real range, the
+    same range a slider's value comes from.
+    """
+    raw = _get_attributes(acc).get("valuetext")
+    shown = raw.strip() if isinstance(raw, str) else ""
+    if not shown:
+        cur = _safe(lambda: _atspi().Value.get_current_value(acc))
+        if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+            return None
+        number = float(cur)
+        if not math.isfinite(number):
+            return None
+        shown = _format_bound(number)
+    span = _value_range(acc)
+    if span is None or not _sane_range(*span):
+        return shown
+    low, high = span
+    return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -1537,7 +1587,11 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     delete: a paragraph then reads as the sentence, and a paragraph whose only
     content is a control is not an empty text leaf. An empty number field
     exposes Value 0.0 with no text; that default is not shown. A slider has no
-    text interface and still reports its Value.
+    text interface and still reports its Value. A custom ARIA spin button's
+    text interface is empty too; its value is ``valuetext`` when Chrome set
+    one, otherwise ``aria-valuenow``, with the minimum and maximum when the
+    Value interface has a real range. An ``<input type=number>`` and a date
+    segment are not that control.
 
     Qt publishes a Value interface on labels, checks, rows, and empty text
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
@@ -1553,6 +1607,8 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     Atspi = _atspi()
     if role_name is None:
         role_name = _role_name(acc)
+    if role_name == "spin button" and _aria_spinbutton(acc):
+        return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
@@ -1913,6 +1969,13 @@ class ATSPIAccessor:
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
         role = _refine_web_role(role, attrs)
         role = _opaque_surface_role(role, role_str, attrs)
+        # A custom role=spinbutton is an AT-SPI spin button, which this map
+        # sends to AXTextField. That renders as textfield (edit) and hides
+        # the number. AXSpinButton is the slider treatment: the role is the
+        # control, and it is not an editable text field. A native number
+        # input and a date segment stay on the text-field mapping.
+        if _aria_spinbutton(node, role_str, attrs):
+            role = "AXSpinButton"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
