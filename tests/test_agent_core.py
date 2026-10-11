@@ -2935,11 +2935,11 @@ def test_look_again_refines_a_point_with_the_main_model(tmp_path, monkeypatch):
     )
     assert result.status == "success", result
     assert verifies["n"] == 1
-    assert runtime.calls[0] == ("click", {"x": 110, "y": 100, "display_id": 0})
+    assert runtime.calls[0] == ("click", {"x": 105, "y": 100, "display_id": 0})
     note = _look_rows(tmp_path)[0]
     assert note["decision"] == "refine"
     assert note["verifier"] == "model"
-    assert note["refined"] == {"x": 110, "y": 100}
+    assert note["refined"] == {"x": 105, "y": 100}
     assert note["snap"]["type"] == "none"
 
 
@@ -2990,7 +2990,7 @@ def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypa
 
     def shift(_png, instruction):
         mx, my = _proposed_pixel(instruction)
-        return GroundingHit(mx + 10, my)
+        return GroundingHit(mx + 20, my)
 
     pay_stub = ScriptedGrounding(shift)
     stopped, _events, pay_runtime, _agent = run(
@@ -3108,3 +3108,224 @@ def test_look_again_skips_when_the_model_cannot_see_images(tmp_path, monkeypatch
     note = _look_rows(tmp_path)[0]
     assert note["decision"] == "skipped"
     assert note["skipped"] == "no_image_support"
+
+
+def test_look_again_crop_is_640_by_400_at_two_times(tmp_path, monkeypatch):
+    """An unclipped screenshot crop is 640×400 screen pixels, shown at 2×."""
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    runtime.png = _solid_png(1600, 1000)
+    stub = ScriptedGrounding(lambda _png, instruction: GroundingHit(*_proposed_pixel(instruction)))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 800, "y": 500, "display_id": 0})),
+            turn(done("centred", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert len(stub.seen) == 1
+    png, instruction = stub.seen[0]
+    with Image.open(io.BytesIO(png)) as image:
+        assert image.size == (1280, 800)
+    assert "Crop screen size 640x400" in instruction
+    note = _look_rows(tmp_path)[0]
+    assert note["geometry"] == {
+        "x": 480,
+        "y": 300,
+        "width": 640,
+        "height": 400,
+        "png_w": 1280,
+        "png_h": 800,
+        "zoom": 2,
+        "full_screen": False,
+    }
+    assert note["geometry"]["png_w"] / note["geometry"]["width"] == 2
+    assert runtime.calls[0] == ("click", {"x": 800, "y": 500, "display_id": 0})
+
+
+def test_look_again_zoom_requests_a_640_by_400_native_crop(tmp_path, monkeypatch):
+    """``zoom`` is asked for 640×400 centred on the point, then the PNG is scaled 2×."""
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.schema import Bounds
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    zoom_calls = []
+
+    def zoom(display_id, x, y, width, height):
+        zoom_calls.append((display_id, x, y, width, height))
+        return _solid_png(width, height), Bounds(display_id, x, y, width, height)
+
+    runtime.zoom = zoom
+    stub = ScriptedGrounding(lambda _png, instruction: GroundingHit(*_proposed_pixel(instruction)))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 800, "y": 500, "display_id": 0})),
+            turn(done("zoomed", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert zoom_calls == [(0, 480, 300, 640, 400)]
+    png, instruction = stub.seen[0]
+    with Image.open(io.BytesIO(png)) as image:
+        assert image.size == (1280, 800)
+    assert "Crop screen size 640x400" in instruction
+    note = _look_rows(tmp_path)[0]
+    assert note["geometry"]["width"] == 640
+    assert note["geometry"]["height"] == 400
+    assert note["geometry"]["png_w"] / note["geometry"]["width"] == 2
+    assert runtime.calls[0] == ("click", {"x": 800, "y": 500, "display_id": 0})
+
+
+def test_look_again_disagreement_over_40px_uses_the_full_screen(tmp_path, monkeypatch):
+    """A crop point more than 40 screen pixels away is not clicked.
+
+    The second verifier sees the full screenshot. Its point is the click.
+    """
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    runtime.png = _solid_png(1600, 1000)
+    sizes = []
+
+    def ground(png, instruction):
+        with Image.open(io.BytesIO(png)) as image:
+            sizes.append(image.size)
+        mx, my = _proposed_pixel(instruction)
+        if image_is_crop(sizes[-1]):
+            return GroundingHit(mx + 100, my)
+        return GroundingHit(mx, my)
+
+    def image_is_crop(size):
+        return size == (1280, 800)
+
+    stub = ScriptedGrounding(ground)
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 800, "y": 500, "display_id": 0})),
+            turn(done("kept", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert sizes == [(1280, 800), (1600, 1000)]
+    assert "Crop screen size 640x400" in stub.seen[0][1]
+    assert "Crop screen size 1600x1000" in stub.seen[1][1]
+    assert runtime.calls[0] == ("click", {"x": 800, "y": 500, "display_id": 0})
+    assert runtime.calls[0][1]["x"] != 850
+    notes = _look_rows(tmp_path)
+    assert [note["decision"] for note in notes] == ["disagree", "accept"]
+    assert notes[0]["distance"] == 50
+    assert notes[0]["refined"] == {"x": 850, "y": 500}
+    assert notes[0]["snap"]["type"] == "none"
+    assert notes[0]["geometry"]["full_screen"] is False
+    assert notes[1]["geometry"]["full_screen"] is True
+    assert notes[1]["geometry"]["png_w"] == 1600
+    assert notes[1]["geometry"]["zoom"] == 1
+    step = next(
+        json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        if json.loads(line).get("action") == "click"
+    )
+    assert step["look_again"]["decision"] == "accept"
+
+
+def test_look_again_forty_screen_pixels_does_not_open_a_second_look(tmp_path, monkeypatch):
+    """Exactly 40 screen pixels is still the crop point, not a full-screen retry."""
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    runtime.png = _solid_png(1600, 1000)
+
+    def ground(_png, instruction):
+        mx, my = _proposed_pixel(instruction)
+        return GroundingHit(mx + 80, my)
+
+    stub = ScriptedGrounding(ground)
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 800, "y": 500, "display_id": 0})),
+            turn(done("edge", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert len(stub.seen) == 1
+    assert runtime.calls[0] == ("click", {"x": 840, "y": 500, "display_id": 0})
+    notes = _look_rows(tmp_path)
+    assert len(notes) == 1
+    assert notes[0]["decision"] == "refine"
+    assert notes[0]["distance"] == 40
+    assert notes[0]["geometry"]["full_screen"] is False
+
+
+def test_look_again_snaps_a_word_inside_a_line_not_the_line_center(tmp_path, monkeypatch):
+    """A wide OCR line is split into words. The click is the word, not the line."""
+    import a11y_computer_use.ocr as ocr_mod
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    def fake_ocr(_image, **_kwargs):
+        return [{
+            "text": "LEFT RIGHT",
+            "bounds": {"display_id": 0, "x": 80, "y": 90, "width": 200, "height": 20},
+            "confidence": 0.9,
+        }]
+
+    monkeypatch.setattr(ocr_mod, "ocr", fake_ocr, raising=False)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+    stub = ScriptedGrounding(lambda _png, instruction: GroundingHit(*_proposed_pixel(instruction)))
+    result, _events, runtime, _agent = run(
+        ScriptedModel([
+            turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0})),
+            turn(done("word", [{"window_title_contains": "Demo"}])),
+        ]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+    )
+    assert result.status == "success", result
+    assert runtime.calls[0] == ("click", {"x": 120, "y": 100, "display_id": 0})
+    note = _look_rows(tmp_path)[0]
+    assert note["snap"]["type"] == "ocr"
+    assert note["snap"]["x"] == 120
+    assert note["snap"]["text"] == "LEFT"
