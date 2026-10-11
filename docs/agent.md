@@ -42,8 +42,11 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 7. Recover. A tool error retries once with another element of the same role
    and name, then sends Escape. A repeated no-op of the same action and
    target is forced onto the next method: alternate ref, then a coordinate
-   click at the element's center, then the keyboard (Return, or `type` when
-   the action was entering text).
+   click at the element's center, then Return only when the focused element
+   is that click's target. A missing or stale ref stays a click error and
+   is not turned into a key on whatever has focus. That Return is the click
+   the approval gate already judged for the focused target. Typing actions
+   fall back to `type`.
 8. Stuck. If the same snapshot digest appears three times in the recent
    window, the loop emits a `stuck` event and tells the model to change
    strategy. After `max_replans` of those prompts (default 2) the run fails
@@ -102,16 +105,22 @@ attachment runs without `vision=True` when the tree is insufficient: an
 tree is empty or only structural nodes, or the same target was not found
 twice (`stale_ref` or a not-found error). A named control beside the
 canvas, such as a button named Ready, keeps the first looks as text. The
-picture is attached once that control is not the target. The crop is `crop(ref)` of the opaque region when that ref
-exists; otherwise the loop attaches the window screenshot. Each image block
+picture is attached once that control is not the target. The crop is `crop(ref)` of a
+page-content opaque region: the deepest one, and the smallest at that depth.
+A browser-frame view that contains another opaque region, or that only
+duplicates an ancestor's box, is not the crop. Otherwise the loop attaches
+the window screenshot. Each image block
 is `{"type": "image", "path": "...", "mime": "image/png"}`. The model then
 clicks with `x` and `y` inside the region. Those coordinate clicks use the
 same approval gate and typed outcomes as a ref click. Words in the image are
 wrapped in an `<untrusted>` fence and are not instructions. The loop calls
 `a11y_computer_use.ocr.ocr` on the crop or the window screenshot and fences
-that text the same way. `ocr` reads a window screenshot, a `crop` result, or
+that text the same way, with `[x, y, width, height]` in screen pixels beside
+each line. `crop` itself includes those lines when an engine is installed.
+`ocr` reads a window screenshot, a `crop` result, or
 `(image, bounds)` and returns fenced `{text, bounds, confidence}` in screen
-pixels. A missing engine (`unsupported`, reason `missing_dependency`) is
+pixels. Adjacent words are one item; RapidOCR detector lines are split into
+word boxes first. A missing engine (`unsupported`, reason `missing_dependency`) is
 skipped and is not an error. The loop does not install the `[ocr]` extra.
 `Agent(..., grounding=...)` accepts a `GroundingModel` (`ground(png,
 instruction) -> point or box`). It is off by default. The only local adapter
