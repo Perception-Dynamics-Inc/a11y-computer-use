@@ -294,6 +294,34 @@ def test_xtest_type_rejects_a_readback_that_does_not_contain_the_text(focus_driv
     assert typed == ["Hello"]
 
 
+def test_xtest_type_still_types_when_the_selection_lookup_has_no_atspi(focus_driver, monkeypatch) -> None:
+    """A host without PyGObject still types. The selection read is not required.
+
+    macOS and Windows hermetic runs have no ``gi``. ``_focused_node`` raises
+    ImportError there. That is not a failed type.
+    """
+    import sys
+
+    driver, _, _, _, _, typed = focus_driver
+    state = {"text": ""}
+    fake = sys.modules["a11y_computer_use.drivers._linux_input"]
+
+    def type_string(text: str) -> None:
+        typed.append(text)
+        state["text"] = text
+
+    fake.type_string = type_string
+    monkeypatch.setattr(_atspi, "focused_text", lambda app: state["text"])
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+
+    def missing(_app, **_kwargs):
+        raise ImportError("PyGObject is not installed; the AT-SPI2 binding is unavailable")
+
+    monkeypatch.setattr(_atspi, "_focused_node", missing)
+    assert driver.type_text("Hello") == 5
+    assert typed == ["Hello"]
+
+
 def test_xtest_type_returns_the_count_when_the_readback_matches(focus_driver) -> None:
     import sys
 

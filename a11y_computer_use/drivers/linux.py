@@ -2087,16 +2087,21 @@ class LinuxDriver:
         editor_selection = None
         if location is None and bar_before is None and app_id and not _atspi.libreoffice_app(app_id):
             def _spans():
-                acc, truncated = _atspi._focused_node(app_id)
-                focused_span = None
-                if not truncated and acc is not None:
-                    focused_span = _atspi._selection_span(acc, before)
-                editor = _atspi._focused_contenteditable(app_id)
-                editor_text = _atspi._readable_text(editor) if editor is not None else None
-                editor_span = (
-                    _atspi._selection_span(editor, editor_text) if editor is not None else None
-                )
-                return focused_span, editor_text, editor_span
+                # No AT-SPI binding (macOS and Windows hermetic runs) is not a
+                # selection. The key path still types. A missing bus is the same.
+                try:
+                    acc, truncated = _atspi._focused_node(app_id)
+                    focused_span = None
+                    if not truncated and acc is not None:
+                        focused_span = _atspi._selection_span(acc, before)
+                    editor = _atspi._focused_contenteditable(app_id)
+                    editor_text = _atspi._readable_text(editor) if editor is not None else None
+                    editor_span = (
+                        _atspi._selection_span(editor, editor_text) if editor is not None else None
+                    )
+                    return focused_span, editor_text, editor_span
+                except Exception:
+                    return None, None, None
 
             selection, editor_before, editor_selection = self._run(_spans)
         # Chrome's omnibox drops the tail of a URL at the default key pace.
