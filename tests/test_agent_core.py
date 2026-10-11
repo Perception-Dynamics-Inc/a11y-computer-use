@@ -954,6 +954,162 @@ def test_file_exists_contains_reads_office_document_text(tmp_path, monkeypatch):
     assert phrase in result.conditions[0]["detail"]
 
 
+def test_contains_normalizes_breaks_and_flags_a_plain_text_bom(tmp_path, monkeypatch):
+    """Hermetic. contains matches across breaks, and a BOM is evidence.
+
+    A missing sentence still fails. A goal that forbids a byte-order mark
+    rejects the file. Not a LibreOffice process.
+    """
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    memo = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    plain = tmp_path / "memo.txt"
+    plain.write_text(memo.replace("\n", "\r\n"), encoding="utf-8")
+    crlf = check_conditions([{"file_exists": str(plain), "contains": memo}], None)
+    assert crlf[0]["ok"] is True, crlf[0]
+    assert "bom_present" not in crlf[0]["detail"]
+    for sep in ("\r", "\u2028", "\u2029", "\ufffc"):
+        path = tmp_path / f"break-{ord(sep):x}.txt"
+        path.write_text(memo.replace("\n", sep), encoding="utf-8")
+        checked = check_conditions([{"file_exists": str(path), "contains": memo}], None)
+        assert checked[0]["ok"] is True, (ascii(sep), checked[0])
+    missing = check_conditions(
+        [{"file_exists": str(plain), "contains": "We will hire three engineers"}],
+        None,
+    )
+    assert missing[0]["ok"] is False
+    assert "does not contain" in missing[0]["detail"]
+    assert "bom_present" not in missing[0]["detail"]
+    collapsed = check_conditions(
+        [{"file_exists": str(plain), "contains": memo.replace("\n", "", 1)}],
+        None,
+    )
+    assert collapsed[0]["ok"] is False
+    spaced = check_conditions(
+        [{"file_exists": str(plain), "contains": memo.replace("\n", " ")}],
+        None,
+    )
+    assert spaced[0]["ok"] is False
+
+    odt_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+        "<office:body><office:text>"
+        "<text:h>Quarterly Update</text:h>"
+        "<text:p>Revenue grew 12% compared with the previous quarter.</text:p>"
+        "<text:p>We will hire two engineers in November.</text:p>"
+        "<text:p>Revenue<text:line-break/>grew</text:p>"
+        "</office:text></office:body></office:document-content>"
+    )
+    odt = tmp_path / "memo.odt"
+    _deflated_zip(odt, {"content.xml": odt_xml, "mimetype": "application/vnd.oasis.opendocument.text"})
+    whole = check_conditions([{"file_exists": str(odt), "contains": memo}], None)
+    assert whole[0]["ok"] is True, whole[0]
+    assert "bom_present" not in whole[0]["detail"]
+    broken = check_conditions(
+        [{"file_exists": str(odt), "contains": "Revenue\ngrew"}],
+        None,
+    )
+    assert broken[0]["ok"] is True, broken[0]
+    absent = check_conditions(
+        [{"file_exists": str(odt), "contains": "We will hire three engineers"}],
+        None,
+    )
+    assert absent[0]["ok"] is False
+    assert "does not contain" in absent[0]["detail"]
+    docx_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>Revenue</w:t></w:r>"
+        "<w:r><w:br/></w:r><w:r><w:t>grew</w:t></w:r></w:p></w:body></w:document>"
+    )
+    docx = tmp_path / "memo.docx"
+    _deflated_zip(docx, {"word/document.xml": docx_xml})
+    word = check_conditions([{"file_exists": str(docx), "contains": "Revenue\ngrew"}], None)
+    assert word[0]["ok"] is True, word[0]
+
+    answer = tmp_path / "answer.txt"
+    answer.write_bytes("\ufeff68.3755\n".encode("utf-8"))
+    flagged = check_conditions(
+        [{"file_exists": str(answer), "contains": "68.3755"}],
+        None,
+        goal="Save the average to answer.txt",
+    )
+    assert flagged[0]["ok"] is True, flagged[0]
+    assert "bom_present: true" in flagged[0]["detail"]
+    forbidden = check_conditions(
+        [{"file_exists": str(answer), "contains": "68.3755"}],
+        None,
+        goal="Save the average to answer.txt without a UTF-8 BOM",
+    )
+    assert forbidden[0]["ok"] is False, forbidden[0]
+    assert "byte-order mark" in forbidden[0]["detail"]
+    assert "bom_present: true" in forbidden[0]["detail"]
+    no_mark = check_conditions(
+        [{"file_exists": str(answer), "contains": "68.3755"}],
+        None,
+        goal="Save the average to answer.txt with no byte-order mark",
+    )
+    assert no_mark[0]["ok"] is False
+    miss_bom = check_conditions(
+        [{"file_exists": str(answer), "contains": "99.0000"}],
+        None,
+        goal="Save the average to answer.txt without a BOM",
+    )
+    assert miss_bom[0]["ok"] is False
+    assert "does not contain" in miss_bom[0]["detail"]
+    csv = tmp_path / "answer.csv"
+    csv.write_bytes("\ufeff68.3755\n".encode("utf-8"))
+    csv_check = check_conditions([{"file_exists": str(csv), "contains": "68.3755"}], None)
+    assert csv_check[0]["ok"] is True
+    assert "bom_present: true" in csv_check[0]["detail"]
+    marked = tmp_path / "marked.odt"
+    marked_xml = odt_xml.replace(
+        "<text:h>Quarterly Update</text:h>",
+        "<text:h>\ufeff68.3755</text:h>",
+    )
+    _deflated_zip(marked, {"content.xml": marked_xml})
+    office_bom = check_conditions(
+        [{"file_exists": str(marked), "contains": "68.3755"}],
+        None,
+    )
+    assert office_bom[0]["ok"] is True, office_bom[0]
+    assert "bom_present" not in office_bom[0]["detail"]
+
+
+def test_txt_goal_prompt_names_a_plain_text_editor(tmp_path, monkeypatch):
+    """Hermetic. A .txt save goal gets the text-editor hint. An .ods goal does not."""
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    path = tmp_path / "answer.txt"
+    path.write_text("68.3755\n", encoding="utf-8")
+    hint = (
+        "For plain .txt/.csv output, write with a plain text editor "
+        "(for example Mousepad, gedit or a terminal editor when available). "
+        'Do not use LibreOffice Writer\'s "Text (.txt)" export, which adds a BOM '
+        "and can change line endings."
+    )
+    model = ScriptedModel([
+        turn(done("saved", [{"file_exists": str(path), "contains": "68.3755"}])),
+    ])
+    agent = Agent(model, runtime=FakeRuntime(window()), trace_dir=tmp_path / "txt-trace")
+    result = agent.run("Save the average to answer.txt")
+    assert result.status == "success", result
+    assert hint in model.seen[0][0].content
+
+    sheet = tmp_path / "grid.ods"
+    sheet.write_bytes(b"not-a-zip")
+    other = ScriptedModel([
+        turn(done("saved", [{"file_exists": str(path), "contains": "68.3755"}])),
+    ])
+    ods_agent = Agent(other, runtime=FakeRuntime(window()), trace_dir=tmp_path / "ods-trace")
+    ods_agent.run("Save the grid to grid.ods")
+    assert hint not in other.seen[0][0].content
+
+
 def test_file_goal_rejects_a_window_title_and_requires_contains(tmp_path, monkeypatch):
     """A saved-file goal is not proven by the window title. Not a named task."""
     from a11y_computer_use.agent.core import file_evidence_error, goal_writes_a_file, known_file_text
