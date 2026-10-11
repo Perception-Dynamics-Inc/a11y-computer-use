@@ -4,6 +4,7 @@ a missing engine. No RapidOCR model and no ``tesseract`` process."""
 from __future__ import annotations
 
 import io
+import os
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -206,3 +207,51 @@ def test_base_install_does_not_depend_on_ocr_and_the_repo_has_no_weights() -> No
         if ".venv" not in path.parts and "site-packages" not in path.parts
     ]
     assert weights == []
+
+
+def test_rapidocr_params_cap_threads_at_four() -> None:
+    params = ocr._rapidocr_params()
+    assert params["EngineConfig.onnxruntime.intra_op_num_threads"] == 4
+    assert params["EngineConfig.onnxruntime.inter_op_num_threads"] == 4
+    assert params["Global.return_word_box"] is True
+
+
+def test_ocr_thread_env_is_capped_at_four(monkeypatch) -> None:
+    monkeypatch.setenv("OMP_NUM_THREADS", "16")
+    monkeypatch.setenv("MKL_NUM_THREADS", "2")
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    ocr._cap_ocr_threads()
+    assert os.environ["OMP_NUM_THREADS"] == "4"
+    assert os.environ["MKL_NUM_THREADS"] == "2"
+    assert os.environ["OPENBLAS_NUM_THREADS"] == "4"
+
+
+def test_word_boxes_from_rapid_ignore_line_boxes() -> None:
+    line = [[[0, 0], [200, 0], [200, 20], [0, 20]]]
+    words = [[
+        ("hello", 0.9, [[0, 0], [40, 0], [40, 20], [0, 20]]),
+        ("world", 0.8, [[50, 0], [100, 0], [100, 20], [50, 20]]),
+    ]]
+    result = SimpleNamespace(boxes=line, txts=["hello world"], scores=[0.9], word_results=words)
+    boxes = ocr._word_boxes_from_rapid(result)
+    assert [box.text for box in boxes] == ["hello", "world"]
+    assert (boxes[0].x, boxes[0].w) == (0, 40)
+    assert (boxes[1].x, boxes[1].w) == (50, 50)
+    empty = SimpleNamespace(boxes=line, txts=["hello world"], scores=[0.9], word_results=[])
+    assert ocr._word_boxes_from_rapid(empty) == []
+    missing = SimpleNamespace(boxes=line, txts=["hello world"], scores=[0.9], word_results=None)
+    assert ocr._word_boxes_from_rapid(missing) == []
+
+
+def test_ocr_words_splits_a_line_into_word_boxes() -> None:
+    spans = ocr.ocr(
+        _png(400, 40),
+        engine=ocr.FakeOcr([_box("LEFT RIGHT", 80, 10, 200, 20)]),
+        words=True,
+    )
+    assert len(spans) == 2
+    assert unwrap(str(spans[0]["text"])) == "LEFT"
+    assert spans[0]["bounds"]["x"] == 80
+    assert spans[0]["bounds"]["width"] == 80
+    assert unwrap(str(spans[1]["text"])) == "RIGHT"
+    assert spans[1]["bounds"]["x"] == 180

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import difflib
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -295,7 +296,7 @@ class RapidOcr:
     def __init__(self) -> None:
         self._engine = None
 
-    def recognize(self, png: bytes) -> list[TextBox]:
+    def recognize(self, png: bytes, *, words: bool = False) -> list[TextBox]:
         engine = self._load()
         import numpy as np
         from PIL import Image
@@ -308,6 +309,8 @@ class RapidOcr:
             result = _call_rapid(engine, np.asarray(image))
         except ImportError as exc:
             raise _missing_engine("rapidocr", _RAPID_HINT) from exc
+        if words:
+            return _word_boxes_from_rapid(result)
         return _boxes_from_rapid(result)
 
     def _load(self):
@@ -319,20 +322,23 @@ class RapidOcr:
             raise _missing_engine("rapidocr", _RAPID_HINT) from exc
         # Chinese PP-OCRv5 mobile also reads Latin. Detection and recognition
         # stay on ONNX Runtime's default CPU provider; no CUDA provider is set.
-        self._engine = RapidOCR(
-            params={
-                "Det.engine_type": EngineType.ONNXRUNTIME,
-                "Det.lang_type": LangDet.CH,
-                "Det.model_type": ModelType.MOBILE,
-                "Det.ocr_version": OCRVersion.PPOCRV5,
-                "Rec.engine_type": EngineType.ONNXRUNTIME,
-                "Rec.lang_type": LangRec.CH,
-                "Rec.model_type": ModelType.MOBILE,
-                "Rec.ocr_version": OCRVersion.PPOCRV5,
-                "Cls.engine_type": EngineType.ONNXRUNTIME,
-                "Cls.model_type": ModelType.MOBILE,
-            }
-        )
+        # Thread pools are capped at 4. Word boxes stay on so a click can snap
+        # to a word; line boxes are still what the default ``ocr`` call returns.
+        _cap_ocr_threads()
+        params = _rapidocr_params()
+        params.update({
+            "Det.engine_type": EngineType.ONNXRUNTIME,
+            "Det.lang_type": LangDet.CH,
+            "Det.model_type": ModelType.MOBILE,
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Rec.engine_type": EngineType.ONNXRUNTIME,
+            "Rec.lang_type": LangRec.CH,
+            "Rec.model_type": ModelType.MOBILE,
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+            "Cls.engine_type": EngineType.ONNXRUNTIME,
+            "Cls.model_type": ModelType.MOBILE,
+        })
+        self._engine = RapidOCR(params=params)
         return self._engine
 
 
@@ -349,6 +355,35 @@ def _call_rapid(engine: object, image: object) -> object:
         return call(image, return_word_box=True)
     except TypeError:
         return call(image)
+
+
+_OCR_THREADS = 4
+_OCR_THREAD_ENV = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def _rapidocr_params() -> dict[str, object]:
+    """ONNX thread caps and word boxes. Callable without importing rapidocr."""
+    return {
+        "EngineConfig.onnxruntime.intra_op_num_threads": _OCR_THREADS,
+        "EngineConfig.onnxruntime.inter_op_num_threads": _OCR_THREADS,
+        "Global.return_word_box": True,
+    }
+
+
+def _cap_ocr_threads(limit: int = _OCR_THREADS) -> None:
+    """Cap BLAS and OpenMP pools. A lower setting stays. Unset becomes ``limit``."""
+    for name in _OCR_THREAD_ENV:
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            os.environ[name] = str(limit)
+            continue
+        try:
+            current = int(str(raw).strip())
+        except ValueError:
+            os.environ[name] = str(limit)
+            continue
+        if current < 1 or current > limit:
+            os.environ[name] = str(limit)
 
 
 def _boxes_from_rapid(result: object) -> list[TextBox]:
@@ -391,6 +426,11 @@ def _boxes_from_rapid_lines(result: object) -> list[TextBox]:
             )
         )
     return found
+
+
+def _word_boxes_from_rapid(result: object) -> list[TextBox]:
+    """Word boxes only. An empty ``word_results`` is no boxes, not the lines."""
+    return _boxes_from_rapid_words(getattr(result, "word_results", None))
 
 
 def _boxes_from_rapid_words(word_results: object) -> list[TextBox]:
@@ -492,6 +532,39 @@ def _as_float(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def split_text_box(
+    text: str, x: int, y: int, w: int, h: int,
+) -> list[tuple[str, int, int, int, int]]:
+    """Split ``text`` into word boxes. Spaces take width and are not boxes.
+
+    A single word is the original rectangle. Width is shared by character
+    count, including the spaces, so a line is never returned as one target.
+    """
+    raw = text.strip()
+    if not raw or w <= 0 or h <= 0:
+        return []
+    if not any(ch.isspace() for ch in raw):
+        return [(raw, x, y, max(1, w), max(1, h))]
+    parts = re.findall(r"\S+|\s+", raw)
+    units = sum(len(part) for part in parts) or 1
+    cursor = x
+    end = x + max(1, w)
+    words: list[tuple[str, int, int, int, int]] = []
+    for index, part in enumerate(parts):
+        if index == len(parts) - 1:
+            span = end - cursor
+        else:
+            span = int(round(max(1, w) * len(part) / units))
+            span = max(0, min(span, end - cursor))
+        if part.strip():
+            width = span if span > 0 else 1
+            words.append((part, cursor, y, max(1, width), max(1, h)))
+        cursor += span
+    return words
+
+
 
 
 class TesseractOcr:
@@ -618,6 +691,7 @@ def ocr(
     *,
     engine: str | OcrEngine | None = None,
     min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+    words: bool = False,
 ) -> list[dict[str, object]]:
     """Read text from a screenshot, a crop, or an ``(image, bounds)`` pair.
 
@@ -637,7 +711,10 @@ def ocr(
     RapidOCR's detector line is split into word boxes before that grouping,
     so a line that spans several controls is not one box. A line with no
     word boxes stays one item. ``words`` is one plain-text box per input
-    box, so a click can use a word without using the line's union. Items
+    box, so a click can use a word without using the line's union.
+    ``words=True`` returns one item per word instead: RapidOCR uses
+    ``word_results`` and never its line boxes, and a box whose text
+    contains whitespace is split by character count. Items
     under ``min_confidence`` are omitted.
 
     ``engine`` is ``"rapidocr"``, ``"tesseract"``, ``"vision"``, None, or
@@ -665,8 +742,21 @@ def ocr(
             image_w, image_h = image.size
     except Exception as exc:  # noqa: BLE001 - PIL's decoder errors are not one class
         raise ValueError("not a decodable image") from exc
-    boxes = reader.recognize(png)
-    return _spans(boxes, bounds, image_w, image_h, float(min_confidence))
+    if words and isinstance(reader, RapidOcr):
+        boxes = reader.recognize(png, words=True)
+    else:
+        boxes = reader.recognize(png)
+    if words:
+        boxes = _expand_word_boxes(boxes)
+    return _spans(boxes, bounds, image_w, image_h, float(min_confidence), group=not words)
+
+
+def _expand_word_boxes(boxes: Sequence[TextBox]) -> list[TextBox]:
+    found: list[TextBox] = []
+    for box in boxes:
+        for text, x, y, w, h in split_text_box(box.text, box.x, box.y, box.w, box.h):
+            found.append(TextBox(text, x, y, w, h, box.confidence))
+    return found
 
 
 def _spans(
@@ -675,12 +765,15 @@ def _spans(
     image_w: int,
     image_h: int,
     min_confidence: float,
+    *,
+    group: bool = True,
 ) -> list[dict[str, object]]:
     sx = bounds.width / max(1, image_w)
     sy = bounds.height / max(1, image_h)
     kept = [box for box in boxes if box.confidence >= min_confidence and box.text.strip()]
     spans: list[dict[str, object]] = []
-    for group in group_lines(kept):
+    groups = group_lines(kept) if group else [[box] for box in kept]
+    for group in groups:
         left = min(box.x for box in group)
         top = min(box.y for box in group)
         right = max(box.x + box.w for box in group)

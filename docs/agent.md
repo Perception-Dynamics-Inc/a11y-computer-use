@@ -174,6 +174,41 @@ is not part of this loop. A model with
 instead of continuing without the picture. A runtime with no `crop` method
 still receives the window screenshot.
 
+Before a coordinate click is sent, the loop looks again. It crops a 640 by
+400 screen-pixel rectangle centred on the proposed point, clipped to the
+image, and shows that crop at 2× (an unclipped crop is a 1280 by 800 PNG
+whose screen bounds stay 640 by 400). A magenta crosshair marks the point.
+The verifier accepts it or returns a better point in the crop. A reply that
+is not a point counts as accept, and the original point stays. When the
+verifier's point is more than 40 screen pixels from the proposed point, the
+loop does not click that point. It looks again once at the full screenshot,
+at 1×, and the click is that second point. A distance of 40 does not open
+the full-screen look. If the full-screen verifier is unavailable, the
+original point is clicked. When `grounding` is set, that local model is the
+verifier (`HoloLocalGrounding` or a test `ScriptedGrounding`). Otherwise the
+verifier is one short image turn on the main model, with no tools. The check
+does not call a hosted or paid grounding service. `Agent(..., look_again=False)`, or
+`A11Y_COMPUTER_USE_LOOK_AGAIN=0` when the argument is omitted, skips it.
+A model with `supports_images` false and no grounding model skips it too,
+and the trajectory records `skipped` `no_image_support`. A screenshot that
+cannot be decoded is the same kind of skip (`no_screenshot`); the original
+click still goes through the approval gate. After the verifier answers, a
+point inside an accessibility-tree element that is not a window, group, or
+canvas is clicked by that ref. A point inside a word-level OCR box from
+`a11y_computer_use.ocr` (`words=True`) is clicked at that word's center.
+RapidOCR line boxes are not snap targets: only `word_results` is used, and
+a span that still contains whitespace is split by character count. A missing
+OCR engine does not fail the click. RapidOCR's ONNX intra-op and inter-op
+thread counts are 4, and `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and
+`OPENBLAS_NUM_THREADS` are capped at 4. The marked crop, the decision
+(`accept`, `refine`, `unavailable`, `skipped`, or `disagree`), the distance,
+and the snap are lines in `trajectory.jsonl` (`kind` `look_again`) and on
+the step. A disagreement records the crop, then a second line for the
+full-screen look; the step keeps the last one. The click that is actually
+sent, including a snapped ref, still uses the approval gate, the payment
+stop, and typed outcomes. One crop check per coordinate click, plus the
+full-screen look only when that check disagrees by more than 40 pixels.
+
 ## CLI
 
 ```bash
@@ -621,9 +656,9 @@ Not in this change:
   are not implemented. No hosted grounding API is called.
   `HoloLocalGrounding` loads only when the caller constructs it. The
   `[holo]` extra is not installed by the test run.
-  Look-again (a second crop around a Holo point) is not implemented here.
-  The click order returns a ref or a coordinate click so that check can
-  run later on the coordinate.
+  Look-again is the later check described above: a 640 by 400 crop at 2×
+  before a coordinate click is sent. The click order returns a ref or a
+  coordinate click so that check can run on the coordinate.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.
