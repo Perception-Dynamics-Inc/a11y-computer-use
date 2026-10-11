@@ -7462,11 +7462,16 @@ def build_server(
         than success.         LibreOffice Calc is confirmed from the open cell
         editor or the selected cell's text. A tab or newline grid is read
         back from every cell it touched, starting at the cell that was
-        active before typing. An editor left open on the last cell is
-        committed with Return so the other cells publish, and the caret
-        moves the way Enter does in Calc. The first cell that differs is
-        the mismatch. That editor is not a password field. A sheet that
-        does not show the characters is a mismatch.
+        active before typing. The read waits until those cells publish
+        their committed values; a cell that is still missing is not a
+        mismatch yet. An editor left open on the last cell is committed
+        with Return so the other cells publish. The caret is then left on
+        the cell Enter moves to: the column where the grid started, on
+        the row after the last typed row. It is not left on the last cell
+        the read-back opened, so the next type does not replace that cell.
+        The first cell that differs is the mismatch. A missing or extra
+        character is still a mismatch. That editor is not a password
+        field. A sheet that does not show the characters is a mismatch.
         Chrome's address bar is polled until the URL is visible or the bar
         settles on its own string; a settled rewrite is not a mismatch. The
         find bar already showing exactly that query is a match. An empty

@@ -4542,9 +4542,11 @@ def test_linux_calc_type_and_formula_set_value_are_confirmed(tmp_path) -> None:
 def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
     """Live Calc. A tab and newline grid is confirmed from every cell.
 
-    The cursor ends on the last formula. That cell is not the whole
-    read-back. Each address is compared on its own, including the SUM
-    formulas. A missing soffice fails the test.
+    The read waits for the committed values. The caret ends on A6, the
+    cell Enter moves to after this five-row grid, not on C5. A following
+    ``x`` lands in A6 and leaves the SUM in C5. Each address is compared
+    on its own, including the SUM formulas. A missing soffice fails the
+    test.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers import _atspi
@@ -4617,6 +4619,31 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
         assert typed.outcome == "confirmed", (typed, typed.evidence)
         assert "text_mismatch" not in str(typed)
         assert "Item" in typed.evidence
+        app = driver.frontmost_app()[0] or "soffice.bin"
+        caret = None
+        caret_deadline = time.monotonic() + 2
+        while time.monotonic() < caret_deadline:
+            caret = driver._run(lambda: _atspi._focused_sheet_address(app))
+            if caret == "A6":
+                break
+            time.sleep(0.05)
+        assert caret == "A6", caret
+        follow = runtime.type_text("x")
+        assert follow.outcome == "confirmed", (follow, follow.evidence)
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.press_chord("return")
+        time.sleep(0.4)
+        a6 = driver._run(lambda: _atspi._cell_for_address(app, "A6"))
+        assert a6 is not None
+        assert _atspi._full_text(a6) == "x"
+        c5 = driver._run(lambda: _atspi._cell_for_address(app, "C5"))
+        kind, actual = _atspi._classify_sheet_cell(c5, "=SUM(C2:C4)")
+        if kind == "editor":
+            opened = _atspi.committed_sheet_formula(c5, app)
+            assert _atspi.formulas_match(opened, "=SUM(C2:C4)"), (opened, actual)
+        else:
+            assert kind == "match", (kind, actual)
         runtime.desktop_snapshot("soffice")
         current = runtime._current
         assert current is not None

@@ -6748,6 +6748,124 @@ def test_sheet_grid_commits_an_open_editor_before_the_cell_read(fake_atspi, monk
     assert chords == []
 
 
+def test_sheet_grid_waits_for_a_cell_the_table_has_not_published(fake_atspi, monkeypatch) -> None:
+    """A missing cell is not a mismatch while the edit is still committing.
+
+    The first reads have no accessible for A1. Return commits the editor,
+    and the cell that appears after that is the comparison. No live
+    LibreOffice. Extra text is still a mismatch, and it is not held for
+    the wait.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    state = {"editor": "Q1", "reads": 0}
+    chords: list[str] = []
+
+    def cell_for(_app, address):
+        if address == "A1":
+            state["reads"] += 1
+            if state["reads"] < 3:
+                return None
+            node = _Acc("table cell", name="A1")
+            node.text = "Item"
+            node.get_attributes = lambda: {}
+            return node
+        if address == "B1":
+            node = _Acc("table cell", name="B1")
+            node.text = "Q1"
+            node.get_attributes = lambda: {}
+            return node
+        return None
+
+    def press(chord: str) -> None:
+        chords.append(chord)
+        state["editor"] = None
+
+    monkeypatch.setattr(_atspi, "_cell_for_address", cell_for)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: state["editor"])
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "press_chord", press)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") is None
+    assert state["reads"] >= 3
+    assert chords == ["return"]
+
+    wrong = _Acc("table cell", name="A1")
+    wrong.text = "ItemX"
+    wrong.get_attributes = lambda: {}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: wrong if address == "A1" else None)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    slept: list[float] = []
+    monkeypatch.setattr(_atspi.time, "sleep", lambda seconds: slept.append(seconds))
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") == ("A1", "Item", "ItemX")
+    assert slept == []
+
+    blank = _Acc("table cell", name="A1")
+    blank.text = ""
+    blank.get_attributes = lambda: {}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: blank if address == "A1" else None)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_WAIT_S", 0)
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1") == ("A1", "Item", "")
+
+
+def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkeypatch) -> None:
+    """F2 leaves the caret on the formula. It is put back on the next cell.
+
+    Enter from a one-row grid at A1 selects A2. A caret that LibreOffice
+    has already moved off the last typed cell is kept, including when that
+    move is straight down. No live LibreOffice. The formula text still has
+    to match.
+    """
+    placed: list[str | None] = []
+    caret = {"address": "B1"}
+
+    def cell(text, formula=""):
+        node = _Acc("table cell", name="X")
+        node.text = text
+        captured = formula
+        node.get_attributes = lambda captured=captured: {"formula": captured} if captured else {}
+        return node
+
+    nodes = {"A1": cell("Item"), "B1": cell("1", "SUM(B2\\")}
+    monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_sheet_caret_address", lambda _app: caret["address"])
+    monkeypatch.setattr(_atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": "=SUM(B2:B4)")
+    monkeypatch.setattr(
+        _atspi, "_place_sheet_caret", lambda _app, address: placed.append(address) or True,
+    )
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_SHEET_GRID_COMMIT_PAUSE_S", 0)
+    assert _atspi.sheet_grid_landing("A1", 5) == "A6"
+    assert _atspi.sheet_grid_landing("C3", 2) == "C5"
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\t=SUM(B2:B4)") is None
+    assert placed == ["A2"]
+
+    placed.clear()
+    caret["address"] = "A2"
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\t=SUM(B2:B4)") is None
+    assert placed == ["A2"]
+
+    placed.clear()
+    caret["address"] = "C6"
+    nodes = {
+        "A1": cell("Item"),
+        "B1": cell("Q1"),
+        "C1": cell("1", "SUM(C2\\"),
+    }
+    assert _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1\t=SUM(C2:C4)") is None
+    assert placed == ["C6"]
+
+    placed.clear()
+    monkeypatch.setattr(
+        _atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": "=SUM(B2:B9)",
+    )
+    mismatch = _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1\t=SUM(C2:C4)")
+    assert mismatch[0] == "C1"
+    assert mismatch[1] == "=SUM(C2:C4)"
+    assert placed == ["C6"]
+
+
 def test_cut_range_formula_outcome_reads_the_editor(fake_atspi, monkeypatch) -> None:
     """Synthetic cell. The cut Formula attribute is not the comparison.
 

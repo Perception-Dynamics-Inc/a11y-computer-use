@@ -6982,10 +6982,12 @@ def _classify_sheet_cell(cell, wanted: str) -> tuple[str, str | None]:
     the whole request, and F2 is the caller's job, outside any poll. A
     formula request is not the number the cell displays. An empty cell
     that should hold text is ``waiting``, because the value can still be
-    on its way.
+    on its way. A missing cell is the same wait: LibreOffice omits it
+    until the edit commits. A cell that already shows different text is
+    ``differ``. Missing or extra characters are not a match.
     """
     if cell is None:
-        return "differ", None
+        return "waiting", None
     shown = _full_text(cell) or ""
     formula = _sheet_formula(cell)
     if wanted == "":
@@ -7061,7 +7063,7 @@ def _scan_sheet_grid(app: str, origin: str, grid: list[list[str]]):
     return ("match", None)
 
 
-_SHEET_GRID_POLLS = 16
+_SHEET_GRID_WAIT_S = 3.0
 _SHEET_GRID_PAUSE_S = 0.05
 _SHEET_GRID_COMMIT_PAUSE_S = 0.25
 
@@ -7083,15 +7085,95 @@ def _commit_open_sheet_editor(app: str) -> bool:
     return True
 
 
+def sheet_grid_landing(origin: str, rows: int) -> str | None:
+    """The cell Enter selects after ``rows`` rows of a grid from ``origin``.
+
+    Tab moves right. Enter commits the cell and returns to the column where
+    that row of the grid started, one row down. After the last typed row,
+    that is the cell after the last typed cell in the grid's flow. A 5-row
+    grid from A1 lands on A6. A 2-row grid from C3 lands on C5.
+    """
+    if rows < 0:
+        return None
+    return shift_sheet_address(origin, 0, rows)
+
+
+def _last_typed_sheet_address(origin: str, grid: list[list[str]]) -> str | None:
+    if not grid or not grid[-1]:
+        return None
+    return shift_sheet_address(origin, len(grid[-1]) - 1, len(grid) - 1)
+
+
+def _sheet_caret_address(app: str) -> str | None:
+    """The active Calc cell, from focus, then from the selection."""
+    focused = None
+    try:
+        focused = _focused_sheet_address(app)
+    except Exception:
+        focused = None
+    if sheet_address(focused):
+        return focused
+    try:
+        selected = selected_sheet_address(app)
+    except Exception:
+        selected = None
+    return sheet_address(selected)
+
+
+def _grid_caret_landing(app: str, origin: str, grid: list[list[str]]) -> str | None:
+    """Where the caret goes after the grid is verified.
+
+    LibreOffice's Enter move wins when it has already left the last typed
+    cell. Otherwise the landing is the origin column on the next row. The
+    formula read focuses the cell it opens; the caller puts the caret back
+    here so the next type does not replace that cell.
+    """
+    computed = sheet_grid_landing(origin, len(grid))
+    last = _last_typed_sheet_address(origin, grid)
+    try:
+        seen = _sheet_caret_address(app)
+    except Exception:
+        seen = None
+    if seen and seen != last:
+        return seen
+    return computed
+
+
+def _place_sheet_caret(app: str, address: str | None) -> bool:
+    """Select ``address`` without opening its editor.
+
+    False when ``address`` is missing. Already sitting on that cell is
+    success and does not grab focus again. This is not a write.
+    """
+    if not address:
+        return False
+    try:
+        current = _sheet_caret_address(app)
+    except Exception:
+        current = None
+    if current == address:
+        return True
+    cell = _cell_for_address(app, address)
+    if cell is None:
+        return False
+    return grab_focus(cell)
+
+
 def sheet_grid_check(app: str, origin: str, text: str):
     """None when every typed cell matches. Otherwise ``(address, wanted, actual)``.
 
     The rectangle starts at ``origin``, the cell that was active before the
     keys. Comparison is per cell: formula text, or Calc's numeric display.
     A formula is not accepted as the number it computes, and a Formula
-    attribute cut at ``:`` is not a prefix match. An editor left open on the
-    last cell is committed once, with Return, before those reads. F2 runs
-    once, after the poll, and only for formulas the attribute cut at ``:``.
+    attribute cut at ``:`` is not a prefix match. A missing cell, or a cell
+    that is still empty, is read again until the committed value is
+    published or the wait ends. A cell that shows different text is a
+    mismatch. Missing or extra characters are not ignored. An editor left
+    open on the last cell is committed once, with Return, before those
+    reads. F2 runs once, after that wait, and only for formulas the
+    attribute cut at ``:``. After that read the caret is put back on the
+    cell Enter moves to: the cell after the last typed cell in the grid's
+    flow. The next type does not replace a cell the grid just filled.
     """
     grid = sheet_type_grid(text)
     if grid is None or not origin:
@@ -7100,18 +7182,19 @@ def sheet_grid_check(app: str, origin: str, text: str):
     waiting = None
     pending = None
     committed = False
-    for attempt in range(_SHEET_GRID_POLLS):
+    deadline = time.monotonic() + _SHEET_GRID_WAIT_S
+    while True:
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
-        # A blank cell, or a formula that still needs F2, is not final while
-        # the editor from the type is open. One Return publishes the others.
-        if not committed and kind in {"waiting", "editor"} and _commit_open_sheet_editor(app):
+        # A blank or missing cell is not final while the editor from the
+        # type is open. One Return publishes the others and moves the caret
+        # the way Enter does. A disagreement is judged after that commit.
+        if not committed and _commit_open_sheet_editor(app):
             committed = True
             time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
             continue
-        committed = True
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)
@@ -7136,18 +7219,24 @@ def sheet_grid_check(app: str, origin: str, text: str):
             waiting = (address, wanted, actual)
             editors = []
             pending = None
-        if attempt + 1 < _SHEET_GRID_POLLS:
-            time.sleep(_SHEET_GRID_PAUSE_S)
-    for address, wanted, cell in editors:
-        opened = committed_sheet_formula(cell, app) if cell is not None else None
-        if opened and formulas_match(opened, wanted):
-            continue
-        return (address, wanted, opened)
-    if pending is not None:
-        return pending
-    if waiting is not None:
-        return waiting
-    return None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_SHEET_GRID_PAUSE_S)
+    landing = _grid_caret_landing(app, origin, grid)
+    try:
+        for address, wanted, cell in editors:
+            opened = committed_sheet_formula(cell, app) if cell is not None else None
+            if opened and formulas_match(opened, wanted):
+                continue
+            return (address, wanted, opened)
+        if pending is not None:
+            return pending
+        if waiting is not None:
+            return waiting
+        return None
+    finally:
+        if editors:
+            _place_sheet_caret(app, landing)
 
 
 def sheet_address(title: str | None) -> str | None:

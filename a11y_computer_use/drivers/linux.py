@@ -2467,6 +2467,8 @@ class LinuxDriver:
             return self._location_read_back(location, before, text, app_id)
         if self._sheet_type_origin:
             origin = self._sheet_type_origin
+            # Wait for the committed cells. Then leave the caret on the
+            # cell Enter moves to, not on the last cell the read opened.
             mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
             if mismatch is None:
                 return len(text)
