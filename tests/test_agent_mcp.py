@@ -80,6 +80,19 @@ def _error_text(result) -> str:
     return " ".join(getattr(block, "text", "") for block in result.content)
 
 
+@pytest.mark.parametrize("name", sorted(AGENT_TOOLS))
+async def test_agent_mcp_rejects_unknown_arguments(tmp_path: Path, name: str) -> None:
+    server = build_agent_mcp(_store(tmp_path, ScriptedModel([_done()])))
+    async with client_session(server) as client:
+        listed = (await client.list_tools()).tools
+        schema = next(tool.inputSchema for tool in listed if tool.name == name)
+        assert schema.get("additionalProperties") is False
+        result = await client.call_tool(name, {"not_a_real_argument": "x"})
+    text = _error_text(result)
+    assert f"invalid_arguments: {name}:" in text
+    assert "unknown field 'not_a_real_argument'" in text
+
+
 async def test_agent_mcp_tools_are_separate_from_the_desktop_server(tmp_path: Path) -> None:
     server = build_agent_mcp(_store(tmp_path, ScriptedModel([_done()])))
     options = server._mcp_server.create_initialization_options()

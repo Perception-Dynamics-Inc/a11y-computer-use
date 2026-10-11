@@ -110,6 +110,7 @@ from a11y_computer_use.schema import (
     clip_region_to_display,
     point_outside_display,
     unknown_display_message,
+    unknown_fields_message,
 )
 
 if TYPE_CHECKING:
@@ -490,6 +491,34 @@ def _linux_button_uses_pointer(driver, element: Element) -> bool:
     if bounds.x <= -2_000_000_000 or bounds.y <= -2_000_000_000:
         return False
     return True
+
+
+def _canvas_fallback_error(element: Element, *, unconfirmed: bool = False) -> ComputerUseError:
+    """A canvas-fallback click that must not be reported as a pointer success."""
+    title = f" {element.title!r}" if element.title else ""
+    if unconfirmed:
+        message = (
+            f"{element.ref} ({element.role}{title}) is inside a canvas "
+            "and the activation was not confirmed; no pointer click was sent"
+        )
+    else:
+        message = (
+            f"{element.ref} ({element.role}{title}) is inside a canvas "
+            "and was not activated; no pointer click was sent"
+        )
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        message,
+        detail={
+            "ref": element.ref,
+            "role": element.role,
+            "reason": "canvas_fallback",
+            "hint": (
+                "this control is fallback content inside a canvas and is not painted; "
+                "a coordinate click would land on the canvas"
+            ),
+        },
+    )
 
 
 _TEXT_CLICK_ROLES = frozenset({"AXStaticText", "AXHeading"})
@@ -2516,6 +2545,8 @@ class Runtime:
                     better = _atspi.sheet_outcome_text(app or "", requested, handle)
                     if better is None and handle is not None:
                         better = _atspi.writer_cell_outcome_text(requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.writer_document_outcome_text(requested, handle)
                     if better is not None:
                         readback = better
             if readback is None:
@@ -3868,6 +3899,8 @@ class Runtime:
         # A non-clickable text ref that stands for a button or link. The
         # click lands on that control. Empty when the ref is the control.
         activated: list[Element] = []
+        # Fallback content inside a canvas. A pointer click lands on the canvas.
+        canvas_fallback: list[Element] = []
 
         def execute() -> None:
             self._refuse_disabled(target, verb="click")
@@ -3883,6 +3916,18 @@ class Runtime:
             if self._resolves_apps():  # a bound browser tab: the tab switch guard covers every path
                 self._recheck_target(app, act)
             menu_note.append(self._dismiss_open_menu(app))
+            # Content nested in a <canvas> is not painted. A Linux button with
+            # a box would otherwise take the pointer path and hit the canvas.
+            # Activate the node. A right-click, double-click, or modifier
+            # would still be a pointer hit, so those are refused.
+            in_canvas = isinstance(act, Element) and self._canvas_fallback_target(act)
+            if in_canvas and isinstance(act, Element):
+                canvas_fallback.append(act)
+                if parsed_button is not MouseButton.LEFT or count != 1 or mods:
+                    raise _canvas_fallback_error(act)
+                if self.driver.press_element(act):
+                    return
+                raise _canvas_fallback_error(act)
             # AX activation (no cursor movement) is only meaningful for a plain
             # left single-click on a resolved element; anything with a button,
             # count, or modifier semantics goes through synthesized mouse events.
@@ -3955,6 +4000,10 @@ class Runtime:
                     "control": control.ref,
                 },
             )
+        # The action ran and the tree did not change. Reporting "clicked"
+        # would hide a handler that never ran. No pointer was sent.
+        if canvas_fallback and result.outcome == "suspected_noop":
+            raise _canvas_fallback_error(canvas_fallback[0], unconfirmed=True)
         return result
 
     def _sheet_address_for_click(self, target: Target, x: int | None, y: int | None) -> str | None:
@@ -4031,6 +4080,33 @@ class Runtime:
             return read()
         except Exception:
             return None
+
+    def _canvas_fallback_target(self, element: Element) -> bool:
+        """True when ``element`` is Chromium content nested inside a canvas.
+
+        The canvas element itself is false, so a click on it stays a center
+        pointer click. GTK drawing areas are false. A missing handle is false
+        so a stale ref stays a stale ref.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return False
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return False
+        runner = getattr(self.driver, "_run", None)
+
+        def read() -> bool:
+            return bool(_atspi.canvas_fallback_content(handle))
+
+        try:
+            if callable(runner):
+                return bool(runner(read))
+            return read()
+        except Exception:
+            return False
 
     def _opaque_click_verdict(self, element: Element) -> tuple[str, str] | None:
         """Unverifiable for a canvas or an unnamed image. None for every other target.
@@ -6267,8 +6343,10 @@ class Runtime:
         (``(PNG bytes, clipped Bounds)``).
         ``confirm`` is the human-confirmation callback threaded into ``click``
         and ``act``; without one, plausibly irreversible actions fail safe.
-        Unknown names raise ``ValueError``; the tools themselves raise
-        `ComputerUseError` / `ActionRefused` exactly as under the MCP server.
+        Unknown names raise ``ValueError``. An argument the tool does not
+        declare raises ``ValueError`` naming that field before the tool runs,
+        so no input is sent. The tools themselves raise `ComputerUseError` /
+        `ActionRefused` exactly as under the MCP server.
         """
         methods: dict[str, Callable] = {
             "desktop_snapshot": self.desktop_snapshot,
@@ -6301,7 +6379,13 @@ class Runtime:
         }
         if tool not in methods:
             raise ValueError(f"unknown tool {tool!r}; expected one of {sorted(methods)}")
-        return methods[tool](**params)  # type: ignore[arg-type]
+        method = methods[tool]
+        allowed = accepted_keywords(method)
+        if allowed is not None:
+            message = unknown_fields_message(params, allowed)
+            if message is not None:
+                raise ValueError(message)
+        return method(**params)  # type: ignore[arg-type]
 
     @_serialized
     def dispatch(self, tool: str, params: dict[str, object]) -> str:
@@ -6319,6 +6403,86 @@ class Runtime:
                 f"unknown tool {tool!r}; expected one of {sorted(self.RUN_ONCE_TOOLS)}"
             )
         return self.call_tool(tool, params)
+
+
+def accepted_keywords(fn: Callable) -> set[str] | None:
+    """Names ``fn(**params)`` accepts.
+
+    ``None`` means the callable takes ``**kwargs`` (or its signature cannot
+    be read), so there is no closed set to check. Keywords already bound on
+    a ``partial``, such as ``confirm``, are not accepted again. ``self`` is
+    not a tool argument.
+    """
+    import inspect
+
+    bound: set[str] = set()
+    seen: object = fn
+    while isinstance(seen, partial):
+        bound.update(seen.keywords or {})
+        seen = seen.func
+    try:
+        signature = inspect.signature(seen)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    names: set[str] = set()
+    for name, param in signature.parameters.items():
+        if name == "self" or name in bound:
+            continue
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return None
+        if param.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        names.add(name)
+    return names
+
+
+def seal_mcp_tools(server: object) -> None:
+    """Reject unknown tool arguments and publish a closed input schema.
+
+    FastMCP's argument model ignores extra keys, so ``type`` with ``ref``
+    used to type into whatever had focus and report success. Each tool's
+    model forbids extras, its published schema sets ``additionalProperties``
+    to false, and validation raises ``invalid_arguments`` naming the unknown
+    keys before the tool function runs. ``Tool.run`` wraps that exception, so
+    the message includes the ``invalid_arguments`` prefix the client matches.
+    """
+    from pydantic import ConfigDict
+
+    manager = getattr(server, "_tool_manager", None)
+    if manager is None:
+        return
+    for tool in manager.list_tools():
+        model = tool.fn_metadata.arg_model
+        model.model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+        model.model_rebuild(force=True)
+        parameters = dict(tool.parameters)
+        parameters["additionalProperties"] = False
+        tool.parameters = parameters
+        allowed = {
+            field.alias or field_name
+            for field_name, field in model.model_fields.items()
+        }
+        original = tool.fn_metadata.call_fn_with_arg_validation
+        tool_name = tool.name
+
+        async def _reject_unknown(
+            fn,
+            fn_is_async,
+            arguments_to_validate,
+            arguments_to_pass_directly,
+            *,
+            _original=original,
+            _name=tool_name,
+            _allowed=frozenset(allowed),
+        ):
+            message = unknown_fields_message(arguments_to_validate, _allowed)
+            if message is not None:
+                raise ValueError(f"invalid_arguments: {_name}: {message}")
+            return await _original(
+                fn, fn_is_async, arguments_to_validate, arguments_to_pass_directly,
+            )
+
+        object.__setattr__(tool.fn_metadata, "call_fn_with_arg_validation", _reject_unknown)
 
 
 # ---------------------------------------------------------------------------
@@ -6812,10 +6976,14 @@ def build_server(
         reported as success. A click on a LibreOffice text paragraph is
         confirmed only when the caret is in that paragraph. A click aimed at
         a Calc cell is confirmed only when the selected cell address, the
-        Name Box, is that cell. A different cell is partial. A click on a
+        Name Box, is that cell. A different cell is partial.         A click on a
         canvas or an unnamed image is unverifiable: accessibility cannot
         see those pixels, so a tree change is not confirmation. The evidence
-        says to verify with crop or a screenshot."""
+        says to verify with crop or a screenshot. A control nested inside a
+        canvas is fallback content and is not painted: it is activated by
+        its accessible action or a DOM click on that node, not by a pointer
+        click, which would land on the canvas. When that activation cannot
+        be done or confirmed, the result is an error."""
         # get_context() (not an annotated param) keeps the mcp import lazy: an
         # annotated `ctx: Context` would force eval_str resolution of Context
         # against module globals, which this file's lazy import can't satisfy.
@@ -6846,9 +7014,11 @@ def build_server(
     @server.tool(name="type")
     async def type_text(text: str, app: str | None = None) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). With app=<bundle id or name> on macOS the keystrokes
-        are addressed to that app's process: it need not be frontmost, nothing
-        is activated, and the user's screen stays where it is. On Linux, app=
+        for long text). An undeclared argument, including ref, is
+        invalid_arguments and no text is sent. With app=<bundle id or name> on
+        macOS the keystrokes are addressed to that app's process: it need not
+        be frontmost, nothing is activated, and the user's screen stays where
+        it is. On Linux, app=
         resolves that app's window from the EWMH list and the AT-SPI
         application, focuses it when it is not already active, checks that it
         became the active window, and then types. A window that cannot be
@@ -7380,6 +7550,7 @@ def build_server(
             return await run(runtime.webmcp, app, action, name, arguments,
                              confirm=_confirmer_for(server.get_context()))
 
+    seal_mcp_tools(server)
     return server
 
 

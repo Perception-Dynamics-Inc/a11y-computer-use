@@ -109,6 +109,29 @@ def unknown_display_message(display_id: int, displays: Sequence[Display]) -> str
     return f"unknown display_id {display_id}; valid ids: {ids}"
 
 
+def unknown_fields_message(given: object, allowed: object) -> str | None:
+    """Name keys in ``given`` that ``allowed`` does not declare.
+
+    None when every key is declared, or when ``given`` is not a mapping.
+    The wording matches an act step's unknown field: ``unknown field
+    'ref'; expected app, text``. Several keys use ``fields``. An empty
+    allowed set says ``expected no fields``.
+    """
+    if not isinstance(given, dict):
+        return None
+    try:
+        allowed_names = {str(name) for name in allowed}
+    except TypeError:
+        return None
+    extra = sorted((str(name) for name in given if str(name) not in allowed_names), key=str)
+    if not extra:
+        return None
+    expected = ", ".join(sorted(allowed_names)) if allowed_names else "no fields"
+    names = ", ".join(repr(name) for name in extra)
+    label = "field" if len(extra) == 1 else "fields"
+    return f"unknown {label} {names}; expected {expected}"
+
+
 def point_outside_display(x: object, y: object, display: Display, *, where: str = "point") -> str | None:
     """None when ``(x, y)`` is a pixel of ``display``.
 

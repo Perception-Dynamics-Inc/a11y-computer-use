@@ -1902,6 +1902,11 @@ def _one_condition(
         # number. A text field stays exact, and a formula is not its result.
         if element.role == "AXCell" and outcome.display_numbers_match(actual, wanted):
             return True, f"{element.ref} value is {actual!r}, same number as {wanted!r}"
+        # Writer reads a paragraph break back as CR, VT, FF, NEL, U+2029,
+        # U+2028, or U+FFFC. Those are the same break. A missing line, an
+        # extra break, or a space is still a miss.
+        if outcome.paragraph_breaks_match(actual, wanted):
+            return True, f"{element.ref} value is {actual!r}, same text as {wanted!r}"
         return False, f"{element.ref} value is {actual!r}, wanted {wanted!r}"
     if key == "window_title_contains":
         needle = str(condition["window_title_contains"])

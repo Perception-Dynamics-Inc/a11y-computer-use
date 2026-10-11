@@ -1172,6 +1172,40 @@ def test_done_accepts_a_calc_cell_display_and_rejects_a_different_value():
     assert text[0]["ok"] is False
 
 
+def test_done_accepts_writer_paragraph_breaks_and_rejects_a_different_text():
+    """The done gate treats Writer's separators as the same break.
+
+    A missing line, an extra break, and a space stay different.
+    """
+    text = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    area = el("e2", "AXTextArea", "Untitled 1 - LibreOffice Document", value=text, parent="e1")
+    runtime = FakeRuntime(window(area))
+    runtime.desktop_snapshot("demo")
+    snap = runtime._current
+    crlf = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\r\n")}}], snap)
+    assert crlf[0]["ok"] is True
+    sep = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u2029")}}], snap)
+    assert sep[0]["ok"] is True
+    nel = check_conditions([{"value": {"ref": "e2", "equals": text.replace("\n", "\u0085")}}], snap)
+    assert nel[0]["ok"] is True
+    missing = check_conditions([{"value": {"ref": "e2", "equals": "Quarterly Update"}}], snap)
+    assert missing[0]["ok"] is False
+    collapsed = check_conditions(
+        [{"value": {"ref": "e2", "equals": text.replace("\n", "", 1)}}],
+        snap,
+    )
+    assert collapsed[0]["ok"] is False
+    spaced = check_conditions(
+        [{"value": {"ref": "e2", "equals": text.replace("\n", " ")}}],
+        snap,
+    )
+    assert spaced[0]["ok"] is False
+
+
 def test_stuck_alternate_ref_then_coordinate_then_keyboard():
     save = el("e2", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 20, 30, 80, 24))
     other = el("e9", "AXButton", "Save", parent="e1", clickable=True, bounds=Bounds(0, 200, 30, 80, 24))
@@ -1782,7 +1816,32 @@ def test_scripted_spec_and_schemas(tmp_path):
     assert "python" not in names
     done_schema = next(item for item in tool_schemas() if item["name"] == "done")
     assert "conditions" in done_schema["parameters"]["properties"]
+    assert done_schema["parameters"]["additionalProperties"] is False
     assert ReservedPermission.EXEC == "exec"
+
+
+def test_validate_action_rejects_unknown_fields() -> None:
+    from a11y_computer_use.agent.actions import ACTION_NAMES, EXEC_ACTION_NAMES, Action, validate_action
+
+    for name in sorted(ACTION_NAMES):
+        problem = validate_action(Action(name, {"not_a_real_argument": "x"}))
+        assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
+        assert "unknown field 'not_a_real_argument'" in problem
+    for name in sorted(EXEC_ACTION_NAMES):
+        assert validate_action(Action(name, {"not_a_real_argument": "x"})) == "exec is not allowed"
+        problem = validate_action(
+            Action(name, {"not_a_real_argument": "x"}), allow_exec=True,
+        )
+        assert problem is not None and problem.startswith(f"invalid_arguments: {name}:"), problem
+    refused = validate_action(Action("type", {"text": "hi", "ref": "e1"}))
+    assert refused == "invalid_arguments: type: unknown field 'ref'; expected app, text"
+    assert validate_action(Action("type", {"text": "hi"})) is None
+    assert validate_action(Action("click", {"x": 1, "y": 2, "_source_ref": "e2"})) == (
+        "invalid_arguments: click: unknown field '_source_ref'; "
+        "expected button, count, display_id, ref, x, y"
+    )
+    for schema in tool_schemas(allow_exec=True):
+        assert schema["parameters"]["additionalProperties"] is False
 
 
 def test_injection_text_is_fenced_and_not_followed(tmp_path):

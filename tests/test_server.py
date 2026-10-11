@@ -513,6 +513,84 @@ def test_linux_onscreen_button_click_uses_the_pointer() -> None:
     assert calls["press"] == ["e9", "e3"]
 
 
+def test_linux_canvas_fallback_button_is_not_a_pointer_click(monkeypatch) -> None:
+    """A button inside a canvas is activated, not clicked at its box.
+
+    The box sits on the painted canvas. A pointer click reports success and
+    runs the canvas handler. Right-click and double-click are refused the
+    same way: a pointer event would land on the canvas. An activation that
+    does not change the tree is an error, not ``clicked``.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.schema import Bounds, Element
+
+    button = Element(
+        ref="e28", role="AXButton", title="FallbackBtn", value=None,
+        bounds=Bounds(0, 59, 140, 395, 11), snapshot_id="s", clickable=True,
+    )
+    snap = type("S", (), {"app": "chrome", "pid": 0, "elements": (button,), "snapshot_id": ""})()
+    calls = {"press": [], "click": []}
+
+    class _D:
+        name = "linux"
+        resolves_apps = False
+
+        def press_element(self, element):
+            calls["press"].append(element.ref)
+            return True
+
+        def click(self, target, **_kwargs):
+            calls["click"].append(getattr(target, "ref", None))
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(_atspi, "canvas_fallback_content", lambda _acc: True)
+    rt = server.Runtime.__new__(server.Runtime)
+    rt._operation_lock = __import__("threading").Lock()
+    rt._closed = False
+    rt._screen_text = None
+    rt.driver = _D()
+    rt._current = snap
+    rt._resolve = lambda ref, kind: (snap, button)
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._dismiss_open_menu = lambda app: ""
+    rt._recheck_target = lambda *args, **kwargs: None
+    rt._guard_user = lambda *args, **kwargs: None
+    rt._effect_after = lambda pre: ""
+
+    assert "clicked" in rt.click("e28")
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    for kwargs in ({"button": "right"}, {"count": 2}, {"modifiers": ["ctrl"]}):
+        with pytest.raises(ComputerUseError) as caught:
+            rt.click("e28", **kwargs)
+        assert caught.value.code is ErrorCode.UNSUPPORTED
+        assert caught.value.detail["reason"] == "canvas_fallback"
+        assert "no pointer click was sent" in caught.value.message
+    assert calls["press"] == ["e28"]
+    assert calls["click"] == []
+
+    same = Snapshot(
+        snapshot_id="", scope=Scope.WINDOW, app="chrome", pid=0,
+        created_at=0.0, displays=(), elements=(button,),
+    )
+
+    class _Still(_D):
+        def snapshot(self, scope, app):
+            return same
+
+    rt.driver = _Still()
+    rt._current = same
+    rt._resolve = lambda ref, kind: (same, button)
+    with pytest.raises(ComputerUseError) as unconfirmed:
+        rt.click("e28")
+    assert unconfirmed.value.code is ErrorCode.UNSUPPORTED
+    assert unconfirmed.value.detail["reason"] == "canvas_fallback"
+    assert "not confirmed" in unconfirmed.value.message
+    assert calls["click"] == []
+
+
 def test_linux_recheck_treats_prgname_and_comm_as_one_process(monkeypatch) -> None:
     """A pointer click gated on the AT-SPI name still lands on that process.
 
@@ -2413,6 +2491,43 @@ async def test_request_permission_is_a_no_op_off_macos(mcp_server, monkeypatch) 
     monkeypatch.setattr(onboarding.sys, "platform", "linux")
     result = await call_tool(mcp_server, "request_permission", {"kind": "accessibility"})
     assert json.loads(result.content[0].text)["needed"] is False
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_TOOLS))
+async def test_unknown_tool_argument_is_rejected_before_input(
+    mcp_server, mocked_driver, audit_dir, name: str,
+) -> None:
+    """An undeclared key is invalid_arguments and the tool function does not run."""
+    async with client_session(mcp_server) as client:
+        listed = (await client.list_tools()).tools
+        schema = next(tool.inputSchema for tool in listed if tool.name == name)
+        assert schema.get("additionalProperties") is False
+        result = await client.call_tool(name, {"not_a_real_argument": "x"})
+    assert result.isError
+    text = result.content[0].text
+    assert f"invalid_arguments: {name}:" in text
+    assert "unknown field 'not_a_real_argument'" in text
+    assert mocked_driver == {"click": [], "type": [], "key": [], "scroll": [], "drag": []}
+    assert audit_entries(audit_dir) == []
+
+
+async def test_runtime_rejects_unknown_type_argument_before_input(tmp_path, monkeypatch) -> None:
+    """call_tool and dispatch name ref and do not type."""
+    typed: list[str] = []
+    monkeypatch.setattr(act, "type_text", lambda text, **_kw: typed.append(text) or [])
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    with server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit")) as runtime:
+        runtime.driver.type_text = lambda text, **_kw: typed.append(text) or 0  # type: ignore[method-assign]
+        for entry in (runtime.call_tool, runtime.dispatch):
+            with pytest.raises(ValueError) as exc:
+                entry("type", {"text": "TYPED", "ref": "e1"})
+            message = str(exc.value)
+            assert "unknown field 'ref'" in message
+            assert "text" in message and "app" in message
+            assert "invalid_arguments" not in message
+        with pytest.raises(ValueError, match="unknown fields 'ref', 'zoom'"):
+            runtime.call_tool("type", {"text": "TYPED", "ref": "e1", "zoom": 2})
+    assert typed == []
 
 
 async def test_unknown_key_chord_is_invalid_arguments_not_an_internal_error(mcp_server, audit_dir) -> None:
