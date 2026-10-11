@@ -3294,13 +3294,93 @@ def test_selection_span_uses_the_word_inside_the_paragraph(fake_atspi) -> None:
     parent.text = "\ufffc\ufffc"
     parent.links = [para, second]
     parent.selection = (0, 1)
-    readable = "Hello world startSecond line"
+    readable = _atspi._readable_text(parent)
+    assert readable == "Hello world start\nSecond line"
     assert _atspi._selection_span(parent, readable) == (6, 11)
     para.selection = None
     assert _atspi._selection_span(parent, readable) == (6, 11)
     para.selection = (0, len(para.text))
     word.selection = (0, 5)
     assert _atspi._selection_span(parent, readable) == (0, len(para.text))
+
+
+def test_typed_breaks_match_equates_boundaries_and_keeps_other_text() -> None:
+    """Newline, CRLF, U+2028, U+2029, and a block boundary are one break.
+
+    A missing break, an extra break, and any other extra or missing
+    character are not a match. The same helper is what Chrome type, Writer
+    paragraph lines, and a Calc cell use.
+    """
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    assert typed_breaks_match("a\nb", "a\nb") is True
+    assert typed_breaks_match("a\r\nb", "a\nb") is True
+    assert typed_breaks_match("a\u2028b", "a\nb") is True
+    assert typed_breaks_match("a\u2029b", "a\nb") is True
+    assert typed_breaks_match("a\u00a0\nb", "a \nb") is True
+    assert typed_breaks_match("ab", "a\nb") is False
+    assert typed_breaks_match("a b", "a\nb") is False
+    assert typed_breaks_match("a\n\nb", "a\nb") is False
+    assert typed_breaks_match("a\nbX", "a\nb") is False
+    assert typed_breaks_match("a\n", "a\nb") is False
+    assert typed_breaks_match(None, "a\nb") is False
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gamma\u2028line2", " gamma\nline2", chrome=True,
+    ) is True
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gammaline2", " gamma\nline2", chrome=True,
+    ) is False
+    assert _atspi._typed_visible(
+        "Alpha beta", "Alpha beta gamma\nline3", " gamma\nline2", chrome=True,
+    ) is False
+
+
+def test_chrome_contenteditable_type_confirms_a_newline_between_paragraphs(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Fake Chrome contenteditable. A newline becomes the next paragraph.
+
+    Not a browser. The parent text stays one object character per paragraph.
+    The read-back keeps the boundary, so the typed newline confirms. The
+    same call is a mismatch when the paragraphs are different text, and when
+    the boundary was dropped.
+    """
+    field = _chrome_contenteditable(_KeyClearedWebField("Alpha beta"))
+    field.get_editable_text_iface = None
+
+    def type_string(text: str) -> None:
+        assert text == " gamma\nline2"
+        first = _Acc("paragraph")
+        first.text = "Alpha beta gamma"
+        second = _Acc("paragraph")
+        second.text = "line2"
+        field.text = "\ufffc\ufffc"
+        field.links = [first, second]
+
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.chromium_contenteditable_type(field, " gamma\nline2") is True
+    assert _atspi._readable_text(field) == "Alpha beta gamma\nline2"
+
+    flat = _chrome_contenteditable(_KeyClearedWebField("Alpha beta gammaline2"))
+    flat.get_editable_text_iface = None
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    assert _atspi.chromium_contenteditable_type(flat, " gamma\nline2") is False
+
+    wrong = _chrome_contenteditable(_KeyClearedWebField("Alpha beta"))
+    wrong.get_editable_text_iface = None
+
+    def type_wrong(text: str) -> None:
+        first = _Acc("paragraph")
+        first.text = "Alpha beta gamma"
+        second = _Acc("paragraph")
+        second.text = "LINE2"
+        wrong.text = "\ufffc\ufffc"
+        wrong.links = [first, second]
+
+    monkeypatch.setattr(_linux_input, "type_string", type_wrong)
+    assert _atspi.chromium_contenteditable_type(wrong, " gamma\nline2") is False
 
 
 def test_omnibox_poll_accepts_the_url_after_a_truncated_read() -> None:
