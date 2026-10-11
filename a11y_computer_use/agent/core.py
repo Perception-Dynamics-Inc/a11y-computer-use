@@ -125,9 +125,13 @@ saves or creates a file, one condition must be file_exists for that path,
 and it must include contains for the text the file should hold. When the
 goal says to replace or remove text, contains is the new text, not the
 text being replaced or removed; a file that still has the old text is
-rejected. contains on .odt, .ods, .docx, and .xlsx reads the document
-text inside the zip, not the raw bytes. A window title is not evidence
-that the file was written.
+rejected. contains treats a newline, CR, CRLF, U+2028, U+2029, and U+FFFC
+as the same break, and ignores one leading UTF-8 BOM. A plain-text file
+that starts with that mark still passes, and the evidence includes
+bom_present: true, unless the goal forbids a byte-order mark. contains
+on .odt, .ods, .docx, and .xlsx reads the document text inside the zip,
+not the raw bytes, and a paragraph end or a line break in that text is a
+newline. A window title is not evidence that the file was written.
 
 Each action result includes outcome (confirmed, suspected_noop, unverifiable,
 partial, or refused), evidence, and next. Follow next when outcome is not
@@ -142,6 +146,15 @@ need approval before they run. shell takes command. python takes code. Both
 accept cwd and timeout_s. Their output is truncated. Do not use them to read
 or type a password, one-time code, or card number.
 """
+
+# The issue's wording for a goal that writes a .txt file. A .csv mention
+# stays in that sentence; the hint is added only when the goal writes .txt.
+_TXT_EDITOR_HINT = (
+    "\nFor plain .txt/.csv output, write with a plain text editor "
+    "(for example Mousepad, gedit or a terminal editor when available). "
+    'Do not use LibreOffice Writer\'s "Text (.txt)" export, which adds a BOM '
+    "and can change line endings.\n"
+)
 
 _HUMAN_KINDS = ("captcha", "payment", "2fa", "login")
 _FIELD_ROLES = ("textfield", "textarea", "securetextfield", "passwordfield", "combobox", "text", "password", "secure")
@@ -412,6 +425,8 @@ class Agent:
         self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         self.trace = Trace(self._trace_dir)
         prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
+        if _txt_output_goal(self._goal):
+            prompt += _TXT_EDITOR_HINT
         if self.fence_untrusted:
             prompt += _UNTRUSTED_RULE
         self._messages = [
@@ -1868,6 +1883,34 @@ _SEARCH = re.compile(
 )
 
 
+def _txt_output_goal(goal: str | None) -> bool:
+    """True when the goal saves or creates a ``.txt`` file."""
+    if not goal or not goal_writes_a_file(goal):
+        return False
+    return bool(re.search(r"\.txt\b", goal, re.IGNORECASE))
+
+
+_BOM_FORBIDDEN = re.compile(
+    r"(?:"
+    r"\bwithout\s+(?:a\s+|an\s+)?(?:utf-?8\s+)?(?:bom|byte[- ]order mark)\b"
+    r"|"
+    r"\bno\s+(?:utf-?8\s+)?(?:bom|byte[- ]order mark)\b"
+    r"|"
+    r"\b(?:do\s+not|don't|must\s+not|should\s+not|forbid(?:s|den)?)\b"
+    r"(?:\s+\w+){0,6}\s+(?:a\s+|an\s+|the\s+)?(?:utf-?8\s+)?"
+    r"(?:bom|byte[- ]order mark)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _goal_forbids_bom(goal: str | None) -> bool:
+    """True when the goal says the saved file must not start with a BOM."""
+    if not goal:
+        return False
+    return _BOM_FORBIDDEN.search(goal) is not None
+
+
 def goal_writes_a_file(goal: str) -> bool:
     """True when the goal is to save, create, download, or export a file.
 
@@ -1984,9 +2027,11 @@ def _standalone_text(needle: str, body: str) -> bool:
 
 
 def _old_text_remains(old: str, body: str, mode: str) -> bool:
+    old_text = _normalize_contains_text(old)
+    haystack = _normalize_contains_text(body)
     if mode == "token":
-        return _standalone_text(old, body)
-    return old in body
+        return _standalone_text(old_text, haystack)
+    return old_text in haystack
 
 
 def known_file_text(goal: str) -> list[str]:
@@ -2040,9 +2085,10 @@ def check_conditions(
     ``file_exists`` condition fails while that text is still in the file.
     """
     absent = _file_text_expectations(goal)[1] if goal and goal_writes_a_file(goal) else []
+    forbid_bom = _goal_forbids_bom(goal)
     checked: list[dict] = []
     for condition in conditions_arg:
-        ok, detail = _one_condition(condition, snap, absent)
+        ok, detail = _one_condition(condition, snap, absent, forbid_bom=forbid_bom)
         checked.append({"condition": condition, "ok": ok, "detail": detail})
     return checked
 
@@ -2051,6 +2097,8 @@ def _one_condition(
     condition: object,
     snap: Snapshot | None,
     absent: list[tuple[str, str]] | None = None,
+    *,
+    forbid_bom: bool = False,
 ) -> tuple[bool, str]:
     if not isinstance(condition, dict) or not condition:
         return False, "a condition must be one object with one key"
@@ -2059,7 +2107,7 @@ def _one_condition(
         extra = set(condition) - {"file_exists", "contains", "min_bytes"}
         if extra:
             return False, "a condition must be one object with one key"
-        return _file_condition(condition, absent or [])
+        return _file_condition(condition, absent or [], forbid_bom=forbid_bom)
     if len(condition) != 1:
         return False, "a condition must be one object with one key"
     key = next(iter(condition))
@@ -2106,7 +2154,10 @@ def _one_condition(
 
 
 def _file_condition(
-    condition: dict, absent: list[tuple[str, str]] | None = None,
+    condition: dict,
+    absent: list[tuple[str, str]] | None = None,
+    *,
+    forbid_bom: bool = False,
 ) -> tuple[bool, str]:
     raw = condition["file_exists"]
     probe_condition = {"file_exists": raw}
@@ -2129,37 +2180,86 @@ def _file_condition(
     if not path:
         return False, "file exists but its path was not reported"
     try:
-        body = _file_text(path)
+        raw_body = _file_text(path)
     except OSError as exc:
         return False, f"file exists but could not be read: {exc}"
-    if contains is not None and str(contains) not in body:
+    bom = _plain_text_has_bom(path, raw_body)
+    body = _normalize_contains_text(raw_body)
+    if contains is not None and _normalize_contains_text(str(contains)) not in body:
         return False, f"file {path} does not contain {contains!r}"
     for old, mode in pending:
         if _old_text_remains(old, body, mode):
             return False, f"file {path} still contains {old!r}"
+    if bom and forbid_bom:
+        return False, (
+            f"file {path} starts with a UTF-8 byte-order mark; "
+            "rewrite it without one; bom_present: true"
+        )
     if contains is None:
-        return True, str(matched)
-    return True, f"{matched}; contains {contains!r}"
+        detail = str(matched)
+    else:
+        detail = f"{matched}; contains {contains!r}"
+    if bom:
+        detail = f"{detail}; bom_present: true"
+    return True, detail
 
 
 _OFFICE_SUFFIXES = {".odt", ".ods", ".docx", ".xlsx"}
+_PLAIN_TEXT_SUFFIXES = {".txt", ".csv", ".md", ".json"}
+_ODF_TEXT = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+_WML = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_PARAGRAPH_TAGS = {
+    f"{{{_ODF_TEXT}}}p",
+    f"{{{_ODF_TEXT}}}h",
+    f"{{{_WML}}}p",
+}
+_LINE_BREAK_TAGS = {
+    f"{{{_ODF_TEXT}}}line-break",
+    f"{{{_WML}}}br",
+}
+# ``\r\n`` is one break. A repeated break stays repeated. U+2028, U+2029,
+# and U+FFFC are the same break as ``\n``.
+_CONTAINS_BREAK = re.compile(r"\r\n|[\n\r\u2028\u2029\ufffc]")
+
+
+def _normalize_contains_text(text: str) -> str:
+    """Breaks and one leading BOM, for a ``contains`` comparison.
+
+    Newline, CR, CRLF, U+2028, U+2029, and U+FFFC become ``\\n``. One
+    leading U+FEFF is dropped. A later mark stays. A missing line, an extra
+    break, and a space stay different.
+    """
+    body = str(text)
+    if body.startswith("\ufeff"):
+        body = body[1:]
+    return _CONTAINS_BREAK.sub("\n", body)
+
+
+def _plain_text_has_bom(path: str, body: str) -> bool:
+    """True when a plain-text file's decoded text starts with U+FEFF."""
+    if Path(path).suffix.lower() not in _PLAIN_TEXT_SUFFIXES:
+        return False
+    return str(body).startswith("\ufeff")
 
 
 def _file_text(path: str) -> str:
     """Text ``contains`` searches.
 
-    Plain files are the raw bytes decoded as UTF-8. ``.odt`` and ``.ods``
-    contribute ``content.xml``. ``.docx`` contributes ``word/document.xml``.
-    ``.xlsx`` contributes ``xl/sharedStrings.xml`` and the sheet XML. A file
-    with one of those suffixes that is not that zip is read as plain text.
+    Plain files are the raw bytes decoded as UTF-8, including one leading
+    BOM when the file has one. The read does not translate newlines, so a
+    CRLF file still contains ``\\r\\n`` until the contains normalizer folds
+    it. ``.odt`` and ``.ods`` contribute ``content.xml``. ``.docx``
+    contributes ``word/document.xml``. ``.xlsx`` contributes
+    ``xl/sharedStrings.xml`` and the sheet XML. A paragraph end or a line
+    break in that XML is a newline. A file with one of those suffixes that
+    is not that zip is read as plain text.
     """
     suffix = Path(path).suffix.lower()
     if suffix in _OFFICE_SUFFIXES:
         extracted = _office_document_text(path, suffix)
         if extracted is not None:
             return extracted
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read()
+    return Path(path).read_bytes().decode("utf-8", errors="replace")
 
 
 def _office_document_text(path: str, suffix: str) -> str | None:
@@ -2199,11 +2299,40 @@ def _office_xml_parts(names: set[str], suffix: str) -> list[str]:
     return []
 
 
+def _append_break(parts: list[str]) -> None:
+    """One newline, unless the text already ends on a break."""
+    if parts and parts[-1].endswith("\n"):
+        return
+    parts.append("\n")
+
+
+def _append_xml(node, parts: list[str]) -> None:
+    """Walk ``node``. Paragraph ends and line breaks become newlines."""
+    tag = node.tag if isinstance(node.tag, str) else ""
+    if tag in _LINE_BREAK_TAGS:
+        _append_break(parts)
+        return
+    if node.text:
+        parts.append(node.text)
+    for child in list(node):
+        _append_xml(child, parts)
+        if child.tail:
+            parts.append(child.tail)
+    if tag in _PARAGRAPH_TAGS:
+        _append_break(parts)
+
+
 def _xml_text(data: bytes) -> str:
-    """Character data of an XML document, in order, with the tags removed."""
+    """Character data of an XML document, in order, with the tags removed.
+
+    An ODF ``text:p`` or ``text:h``, and a Word ``w:p``, end with a newline.
+    ``text:line-break`` and ``w:br`` are a newline inside the paragraph.
+    """
     import xml.etree.ElementTree as ET
 
-    return "".join(ET.fromstring(data).itertext())
+    parts: list[str] = []
+    _append_xml(ET.fromstring(data), parts)
+    return "".join(parts)
 
 
 def forced_method(

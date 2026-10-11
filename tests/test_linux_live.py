@@ -5386,6 +5386,99 @@ def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> Non
         _stop_group(proc)
         _kill_libreoffice()
 
+
+def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, monkeypatch) -> None:
+    """Live Writer. A Text export's breaks satisfy contains, and a BOM is flagged.
+
+    ``soffice`` converts an ``.odt`` with a heading and two paragraphs to
+    ``.txt``. The done check accepts the same text written with newlines.
+    LibreOffice's Text filter writes a leading UTF-8 BOM. The evidence
+    says ``bom_present: true`` and the check still passes. A missing
+    sentence still fails. ``soffice`` has to be installed; this does not
+    skip when it is missing.
+    """
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("no DISPLAY/WAYLAND_DISPLAY: Writer cannot export a window")
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ALLOW_ANY_PATH", "1")
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-writer is not installed"
+    memo = (
+        "Quarterly Update\n"
+        "Revenue grew 12% compared with the previous quarter.\n"
+        "We will hire two engineers in November."
+    )
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+        'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+        "<office:body><office:text>"
+        "<text:h>Quarterly Update</text:h>"
+        "<text:p>Revenue grew 12% compared with the previous quarter.</text:p>"
+        "<text:p>We will hire two engineers in November.</text:p>"
+        "<text:p>68.3755</text:p>"
+        "</office:text></office:body></office:document-content>"
+    )
+    manifest = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">'
+        '<manifest:file-entry manifest:media-type="application/vnd.oasis.opendocument.text" '
+        'manifest:full-path="/"/>'
+        '<manifest:file-entry manifest:media-type="text/xml" manifest:full-path="content.xml"/>'
+        "</manifest:manifest>"
+    )
+    odt = tmp_path / "memo.odt"
+    import zipfile
+    with zipfile.ZipFile(odt, "w") as archive:
+        stored = zipfile.ZipInfo("mimetype")
+        stored.compress_type = zipfile.ZIP_STORED
+        archive.writestr(stored, "application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", content)
+        archive.writestr("META-INF/manifest.xml", manifest)
+    _kill_libreoffice()
+    time.sleep(0.3)
+    profile = tmp_path / "writer-txt"
+    _writer_profile(profile)
+    outdir = tmp_path / "exported"
+    outdir.mkdir()
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    converted = subprocess.run(
+        [
+            binary, "--headless", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}",
+            "--convert-to", "txt:Text",
+            "--outdir", str(outdir), str(odt),
+        ],
+        env=env, capture_output=True, text=True, timeout=90,
+    )
+    txt = outdir / "memo.txt"
+    assert txt.is_file(), (converted.returncode, converted.stdout[-400:], converted.stderr[-400:])
+    from a11y_computer_use.agent.core import check_conditions
+    checked = check_conditions(
+        [{"file_exists": str(txt), "contains": memo}],
+        None,
+        goal="Save the memo to memo.txt",
+    )
+    assert checked[0]["ok"] is True, (checked[0], txt.read_bytes()[:80])
+    number = check_conditions(
+        [{"file_exists": str(txt), "contains": "68.3755"}],
+        None,
+        goal="Save the average to memo.txt",
+    )
+    assert number[0]["ok"] is True, number[0]
+    raw = txt.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf"), raw[:16]
+    assert "bom_present: true" in number[0]["detail"]
+    missing = check_conditions(
+        [{"file_exists": str(txt), "contains": "We will hire three engineers"}],
+        None,
+    )
+    assert missing[0]["ok"] is False
+    assert "does not contain" in missing[0]["detail"]
+    _kill_libreoffice()
+
+
 def _soffice_displays() -> set[str]:
     found: set[str] = set()
     try:

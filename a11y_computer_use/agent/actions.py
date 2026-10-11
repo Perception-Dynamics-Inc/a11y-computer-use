@@ -579,9 +579,14 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
         "When the goal saves or creates a file, include file_exists, and contains "
         "for the text the file should hold. When the goal says to replace or "
         "remove text, contains is the new text, not the text being replaced or "
-        "removed; a file that still has the old text is rejected. contains on "
-        ".odt, .ods, .docx, and .xlsx reads the document text inside the zip, "
-        "not the raw bytes. A window title alone does not prove a file was written.",
+        "removed; a file that still has the old text is rejected. contains treats "
+        "a newline, CR, CRLF, U+2028, U+2029, and U+FFFC as the same break, and "
+        "ignores one leading UTF-8 BOM. A plain-text file that starts with that "
+        "mark still passes, and the evidence includes bom_present: true, unless "
+        "the goal forbids a byte-order mark. contains on .odt, .ods, .docx, and "
+        ".xlsx reads the document text inside the zip, not the raw bytes, and a "
+        "paragraph end or a line break in that text is a newline. A window title "
+        "alone does not prove a file was written.",
         {
             "answer": _STR,
             "conditions": {
