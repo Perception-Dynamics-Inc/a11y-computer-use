@@ -33,6 +33,13 @@ app with no window is `app_not_found`. The error does not say the call is
 macOS-only. An empty `app` is `invalid_arguments` on every tool that accepts
 the argument.
 
+`type` also takes an optional `ref`. The ref is resolved the same way `click`
+and `set_value` resolve one, including `stale_ref` when the process instance
+was replaced (`app_restarted`). The call then focuses that element and types
+only after focus reads back on it. If focus cannot be confirmed, the result
+is `focus_lost` and nothing is typed. The outcome read-back is the target
+element, not whichever field already had the caret.
+
 ## What still needs the app in front
 
 Coordinate clicks, drags, and wheel scrolls. AppKit drops pointer events that

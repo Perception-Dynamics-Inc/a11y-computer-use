@@ -745,6 +745,26 @@ def _set_focused(handle: object) -> bool:
         return False
 
 
+def focus_for_type(element: Element) -> bool:
+    """Focus ``element`` and return True only when AXFocused reads back true.
+
+    Does not type. False means the caller must not send keystrokes: the
+    set failed, the handle is gone, or the read-back does not show focus.
+    """
+    if element.secure:
+        return False
+    handle = ax_handle_for(element.snapshot_id, element.ref)
+    if handle is None:
+        return False
+    if not _set_focused(handle):
+        return False
+    try:
+        err, value = _appservices().AXUIElementCopyAttributeValue(handle, "AXFocused", None)
+    except Exception:
+        return False
+    return err == 0 and bool(value)
+
+
 def render_text(
     snap: Snapshot,
     *,

@@ -610,6 +610,130 @@ def _value_of(snap, title: str):
     return next(el.value for el in snap.elements if el.title == title)
 
 
+# Not ``_TWO_APP``: that name is assigned again later in this module
+# (``cuatwowin``), and the later binding is the one tests see.
+_TWO_ENTRY_APP = "cuatwoentry"
+
+_GTK_TWO_ENTRY = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuatwoentry")
+    win = Gtk.Window(title="cuatwoentry")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    other = Gtk.Button(label="Other")
+    other.connect("clicked", lambda _b: win.set_focus(None))
+    field_a = Gtk.Entry()
+    field_a.get_accessible().set_name("FieldA")
+    field_b = Gtk.Entry()
+    field_b.get_accessible().set_name("FieldB")
+    box.pack_start(other, False, False, 0)
+    box.pack_start(field_a, False, False, 0)
+    box.pack_start(field_b, False, False, 0)
+    win.add(box)
+    win.set_default_size(420, 220)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    other.grab_focus()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_two_entry(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cuatwoentry.py"
+    script.write_text(_GTK_TWO_ENTRY)
+    return subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_two_entry(driver, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, _TWO_ENTRY_APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            titles = {el.title for el in last.elements}
+            if {"FieldA", "FieldB", "Other"} <= titles:
+                return last
+        time.sleep(0.5)
+    return last
+
+
+def _shown(value) -> str:
+    return "" if value is None else str(value)
+
+
+def test_linux_type_ref_lands_only_in_the_named_gtk_entry(tmp_path) -> None:
+    """Live. type(ref=FieldB) writes FieldB when FieldA is focused and when nothing is.
+
+    Clearing focus is the Other button. A following set_value focuses FieldA.
+    FieldA does not gain either string.
+    """
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    proc = _launch_two_entry(tmp_path)
+    try:
+        snap = _wait_two_entry(driver)
+        assert snap is not None, "the two-entry window did not expose FieldA and FieldB"
+        other = next(el for el in snap.elements if el.title == "Other")
+        assert driver.press_element(driver.resolve_ref(snap, other.ref))
+        time.sleep(0.3)
+        store = safety.PermissionStore(tmp_path / "two-entry-permissions.json")
+        store.set_tier(_TWO_ENTRY_APP, safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != _TWO_ENTRY_APP:
+            store.set_tier(front, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "two-entry-audit"), driver=driver,
+        )
+        runtime.desktop_snapshot(_TWO_ENTRY_APP)
+        field_b = next(el for el in runtime._current.elements if el.title == "FieldB")
+        typed = runtime.type_text("from-none", ref=field_b.ref)
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert "from-none" in typed.evidence
+        quiet = _wait_two_entry(driver)
+        assert quiet is not None
+        assert "from-none" not in _shown(_value_of(quiet, "FieldA"))
+        assert "from-none" in _shown(_value_of(quiet, "FieldB"))
+
+        runtime.desktop_snapshot(_TWO_ENTRY_APP)
+        field_a = next(el for el in runtime._current.elements if el.title == "FieldA")
+        set_a = runtime.set_value(field_a.ref, "in-a")
+        assert str(set_a).startswith("set "), set_a
+        runtime.desktop_snapshot(_TWO_ENTRY_APP)
+        field_b = next(el for el in runtime._current.elements if el.title == "FieldB")
+        again = runtime.type_text("from-a", ref=field_b.ref)
+        assert again.outcome == "confirmed", (again.outcome, again.evidence)
+        assert "from-a" in again.evidence
+        final = _wait_two_entry(driver)
+        assert final is not None
+        assert _shown(_value_of(final, "FieldA")) == "in-a"
+        # Focusing FieldB selects its current text, so the second type
+        # replaces "from-none". The new characters are only in FieldB.
+        assert _shown(_value_of(final, "FieldB")) == "from-a"
+        assert "from-a" not in _shown(_value_of(final, "FieldA"))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
     """Live AT-SPI: byte-exact insert, caret, selection, CRLF, entry role, disabled click and menu."""
     import json
@@ -724,7 +848,7 @@ def test_linux_gtk_type_caret_unicode_and_disabled_controls(tmp_path) -> None:
 
 
 def test_linux_type_unknown_argument_types_nothing(tmp_path) -> None:
-    """MCP type with an undeclared ref sends no text."""
+    """MCP type with an undeclared key sends no text. ref is a declared argument."""
     import asyncio
 
     from mcp.shared.memory import create_connected_server_and_client_session as client_session
@@ -753,13 +877,14 @@ def test_linux_type_unknown_argument_types_nothing(tmp_path) -> None:
 
         async def _call():
             async with client_session(mcp) as client:
-                return await client.call_tool("type", {"text": "TYPED", "ref": "e1"})
+                return await client.call_tool("type", {"text": "TYPED", "zoom": 1})
 
         result = asyncio.run(_call())
         assert result.isError
         text = result.content[0].text
         assert "invalid_arguments: type:" in text
-        assert "unknown field 'ref'" in text
+        assert "unknown field 'zoom'" in text
+        assert "ref" in text
         assert _value_of(driver.snapshot(Scope.WINDOW, _TYPE_APP), "single") == "keep"
     finally:
         proc.terminate()
@@ -1156,7 +1281,143 @@ def _chrome_binary() -> str | None:
         found = shutil.which(name)
         if found:
             return found
+    for path in ("/opt/google/chrome/chrome", "/usr/bin/google-chrome"):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
     return None
+
+
+def test_linux_chrome_type_ref_lands_only_in_the_named_field(tmp_path) -> None:
+    """Live Chrome. type(ref=FieldB) writes FieldB when nothing is focused and when FieldA is.
+
+    FieldA stays empty in the first call and stays ``in-a`` in the second.
+    """
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the type-ref form")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "type-ref.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuatypeform</title>"
+        "<button id=other>Other</button>"
+        "<label>FieldA <input id=a aria-label=FieldA></label>"
+        "<label>FieldB <input id=b aria-label=FieldB></label>"
+        "<script>document.getElementById('other').addEventListener('click', function () {"
+        "if (document.activeElement && document.activeElement.blur) document.activeElement.blur();"
+        "this.focus();});</script>"
+    )
+    profile = tmp_path / "chrome-type-ref"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last_note = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the form was exposed")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                last_note = exc.message
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                last_note = " ".join(sorted(titles))[:400]
+                if {"FieldA", "FieldB", "Other"} <= titles:
+                    snap = shot
+                    break
+            time.sleep(0.5)
+        assert snap is not None, f"Chrome did not expose FieldA and FieldB\n{last_note}"
+        other = next(el for el in snap.elements if el.title == "Other" and el.clickable)
+        assert driver.press_element(driver.resolve_ref(snap, other.ref))
+        time.sleep(0.3)
+        store = safety.PermissionStore(tmp_path / "chrome-type-ref-permissions.json")
+        store.set_tier("chrome", safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != "chrome":
+            store.set_tier(front, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "chrome-type-ref-audit"), driver=driver,
+        )
+
+        def _fields():
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            runtime._current = shot
+            wanted = {}
+            for el in shot.elements:
+                if el.title in {"FieldA", "FieldB"} and el.title not in wanted:
+                    wanted[el.title] = el
+            return wanted
+
+        fields = _fields()
+        typed = runtime.type_text("from-none", ref=fields["FieldB"].ref)
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert "from-none" in typed.evidence
+        deadline = time.monotonic() + 4
+        shown_a = shown_b = ""
+        while time.monotonic() < deadline:
+            fields = _fields()
+            shown_a = _shown(fields["FieldA"].value)
+            shown_b = _shown(fields["FieldB"].value)
+            if "from-none" in shown_b and "from-none" not in shown_a:
+                break
+            time.sleep(0.25)
+        assert "from-none" not in shown_a, shown_a
+        assert "from-none" in shown_b, shown_b
+
+        # Chrome's AT-SPI replace can miss once immediately after the type
+        # into FieldB. Retry until FieldA holds in-a. The following type
+        # still has to leave that string in FieldA and add from-a only in FieldB.
+        set_a = None
+        last_error = ""
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            fields = _fields()
+            try:
+                set_a = runtime.set_value(fields["FieldA"].ref, "in-a")
+            except ComputerUseError as exc:
+                last_error = exc.message
+                time.sleep(0.25)
+                continue
+            if str(set_a).startswith("set "):
+                break
+            last_error = str(set_a)
+            time.sleep(0.25)
+        assert set_a is not None and str(set_a).startswith("set "), last_error
+        fields = _fields()
+        again = runtime.type_text("from-a", ref=fields["FieldB"].ref)
+        assert again.outcome == "confirmed", (again.outcome, again.evidence)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            fields = _fields()
+            shown_a = _shown(fields["FieldA"].value)
+            shown_b = _shown(fields["FieldB"].value)
+            if shown_a == "in-a" and "from-a" in shown_b and "from-none" in shown_b:
+                break
+            time.sleep(0.25)
+        assert shown_a == "in-a", shown_a
+        assert "from-none" in shown_b and "from-a" in shown_b, shown_b
+        assert "from-a" not in shown_a
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def test_linux_chrome_form_state_and_set_value(tmp_path) -> None:
@@ -5700,6 +5961,120 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
             assert any(title.startswith("ITEM-020") for title in shown), sorted(
                 title for title in shown if title.startswith("ITEM-")
             )
+    finally:
+        _stop(proc)
+
+
+def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
+    """Find row 300 of a long document table and click that row's button.
+
+    Live Chrome, not a synthetic tree. The page is a 5000-row ``<table>``
+    with no overflow wrapper, so the document scrolls. ``scroll_to_find``
+    for ROW-0300 has to leave the row on screen: a follow-up ``find`` for
+    its ``edit 300`` button must see it, and the click has to land.
+    Four passes in one Chrome process. Each pass after the first reloads
+    the page so the search starts at the top again. Skips when no Chrome
+    binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the large-table scroll test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        "<tr>"
+        f"<td>ROW-{i:04d}</td><td>val {i}</td>"
+        f"<td><button type=button onclick=\"clicks+=1;document.title='clicked-'+clicks\">"
+        f"edit {i}</button></td>"
+        "</tr>"
+        for i in range(1, 5001)
+    )
+    page = tmp_path / "rows-5000.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>rowtable</title>"
+        "<style>body{margin:0;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td{padding:0 8px}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));"
+        "let clicks=0</script>"
+        f"<table>{rows}</table>"
+    )
+    profile = tmp_path / "chrome-rowtable-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        def wait_at_top(timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            shown: list[str] = []
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"Chrome exited with status {proc.returncode} before the table top"
+                    )
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.APP_NOT_FOUND:
+                        raise
+                else:
+                    titles = _titles(shot)
+                    shown = sorted(title for title in titles if title.startswith("ROW-"))[:12]
+                    if any(title.startswith("ROW-0001") for title in titles) and not any(
+                        title.startswith("ROW-0300") for title in titles
+                    ):
+                        return
+                time.sleep(0.4)
+            raise AssertionError(f"Chrome did not show the top of the table without ROW-0300: {shown}")
+
+        wait_at_top(45)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        seen = 0
+        for _pass in range(4):
+            if _pass:
+                runtime.key("f5")
+                wait_at_top(30)
+            found = runtime.scroll_to_find(
+                "chrome", text="ROW-0300", direction="down", max_scrolls=60,
+            )
+            assert "ROW-0300" in found, found
+            assert "not found" not in found, found
+            assert "found after 0" not in found, found
+            located = runtime.find("chrome", text="edit 300")
+            assert "no elements match" not in located, located
+            button = next(
+                (
+                    el for el in runtime._current.elements
+                    if el.role == "AXButton" and (el.title or "").strip() == "edit 300"
+                ),
+                None,
+            )
+            assert button is not None, [
+                (el.role, el.title) for el in runtime._current.elements
+                if "edit" in (el.title or "")
+            ]
+            before = {str(row.get("title") or "") for row in driver.windows() or []}
+            runtime.click(button.ref)
+            clicked = None
+            deadline = time.monotonic() + 4
+            while time.monotonic() < deadline:
+                titles = {str(row.get("title") or "") for row in driver.windows() or []}
+                if any(title.startswith("clicked-") for title in titles) and titles != before:
+                    clicked = titles
+                    break
+                time.sleep(0.15)
+            assert clicked is not None, driver.windows()
+            seen += 1
+        assert seen == 4
     finally:
         _stop(proc)
 

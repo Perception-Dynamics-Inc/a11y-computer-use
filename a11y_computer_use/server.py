@@ -129,6 +129,13 @@ MAX_WAIT_TIMEOUT_S = 60.0
 MAX_BATCH_STEPS = 100
 MAX_BATCH_DURATION_S = 60.0
 MAX_SCROLLS = 100
+# A hit in the same turn as the wheel can still be the pre-scroll tree.
+# A later read has to show the match inside the window. The pause is the
+# gap in which Chrome replaces that tree; a row that vanishes on the
+# second read has already left the viewport. A vanished name is scrolled
+# back toward, at most this many times, before the search gives up.
+_SCROLL_VERIFY_PAUSE_S = 0.15
+_SCROLL_VERIFY_BACKS = 3
 
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
@@ -136,7 +143,7 @@ _TARGET_REQUIRED = "target an element ref, or both x and y coordinates"
 _ACT_STEP_FIELDS: dict[str, frozenset[str]] = {
     "click": frozenset({"do", "ref", "x", "y", "display_id", "button", "count", "modifiers"}),
     "hover": frozenset({"do", "ref", "x", "y", "display_id"}),
-    "type": frozenset({"do", "text"}),
+    "type": frozenset({"do", "text", "ref"}),
     "key": frozenset({"do", "chord", "modifiers"}),
     "scroll": frozenset({"do", "ref", "x", "y", "display_id", "dx", "dy", "unit", "into_view"}),
     "drag": frozenset({
@@ -161,6 +168,22 @@ def _optional_app_arg(app: object, tool: str) -> str | None:
     text = app.strip()
     if not text:
         raise ValueError(f"{tool} app must be a non-empty app id")
+    return text
+
+
+def _optional_ref_arg(ref: object, tool: str) -> str | None:
+    """None means the caller omitted ``ref``. A blank value is not a ref.
+
+    Callers map ``ValueError`` to ``invalid_arguments``. Nothing is typed
+    when this raises.
+    """
+    if ref is None:
+        return None
+    if not isinstance(ref, str):
+        raise ValueError(f"{tool} ref must be a non-empty element ref")
+    text = ref.strip()
+    if not text:
+        raise ValueError(f"{tool} ref must be a non-empty element ref")
     return text
 
 
@@ -4532,9 +4555,131 @@ class Runtime:
             key_focus=True, focus_before=focus_before,
         )
 
+    def _type_target_error(self, element: Element) -> ComputerUseError | None:
+        """Refuse a ref that cannot take text. None when it can.
+
+        A paragraph, button, or document is not a type target. Raising here
+        happens before focus and before any keystroke.
+        """
+        if element.editable:
+            return None
+        from a11y_computer_use.observe import _EDITABLE_ROLES
+
+        if element.role in _EDITABLE_ROLES:
+            return None
+        title = f" {element.title!r}" if element.title else ""
+        return ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{element.ref} ({element.role}{title}) is not editable",
+            detail={"ref": element.ref, "role": element.role, "reason": "not_editable"},
+        )
+
+    def _focus_lost_type(self, element: Element) -> ComputerUseError:
+        """Focus did not land on ``element``. No keystrokes were sent."""
+        return ComputerUseError(
+            ErrorCode.FOCUS_LOST,
+            f"focus is not confirmed on {element.ref}; nothing was typed",
+            detail={
+                "ref": element.ref,
+                "role": element.role,
+                "reason": "focus_lost",
+                "outcome": "refused",
+                "next": ["ref", "cdp"],
+                "evidence": "focus did not land on the target, so no keystrokes were sent",
+            },
+        )
+
+    def _deliver_type_at_ref(self, element: Element, text: str) -> int:
+        """Focus ``element``, confirm it, then type. A miss types nothing.
+
+        A driver with ``type_into`` does both and reads that element back.
+        Any other driver must confirm focus before ``type_text`` runs, so
+        keystrokes cannot fall into whatever already had the caret.
+        """
+        typer = getattr(self.driver, "type_into", None)
+        if callable(typer):
+            typed = typer(element, text)
+        else:
+            focuser = getattr(self.driver, "focus_for_type", None)
+            if not callable(focuser) or focuser(element) is not True:
+                raise self._focus_lost_type(element)
+            typed = self.driver.type_text(text)
+        if isinstance(typed, int) and not isinstance(typed, bool):
+            return typed
+        return len(text)
+
+    def _type_at_ref(self, text: str, ref: str, app: str | None) -> str:
+        """Type ``text`` into ``ref`` only after focus is confirmed on it.
+
+        Resolution is the same path click and set_value use, so a replaced
+        process is ``stale_ref`` with reason ``app_restarted`` and nothing is
+        typed. The outcome read-back is this element, not the field that
+        happened to be focused before the call.
+        """
+        snap, live = self._resolve(ref, "typetext")
+        element_app = (snap.app or "").strip()
+        if app is not None and element_app and not (
+            _same_window_app(app, element_app) or _same_window_app(element_app, app)
+        ):
+            raise ValueError(
+                f"type ref {ref} belongs to {element_app!r}, not {app!r}"
+            )
+        gate = element_app or app or self._frontmost()
+        refused = self._type_target_error(live)
+        if refused is not None:
+            raise refused
+        before = self._capture(gate)
+        if before is not None and getattr(snap, "scope", None) is not None:
+            before = {**before, "scope": snap.scope}
+        previous = "" if live.value is None else str(live.value)
+        cover = self._cover_owner(live, gate)
+        if cover and cover != "off_screen":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{ref} is covered by {cover}",
+                detail={
+                    "ref": ref,
+                    "role": live.role,
+                    "reason": "covered",
+                    "outcome": "refused",
+                    "next": ["foreground", "ref"],
+                    "evidence": f"the window is covered by {cover}",
+                },
+            )
+        if live.secure:
+            self._record_failure(
+                "typetext", app=gate, params={"ref": ref, "role": live.role},
+                result=ErrorCode.SECURE_FIELD.value,
+            )
+            raise ComputerUseError(
+                ErrorCode.SECURE_FIELD,
+                "refusing to type into a secure field; secrets are entered by the human",
+                detail={"ref": ref, "role": live.role},
+            )
+        action = TypeText(text=text)
+        note: list[str] = []
+
+        def execute() -> int:
+            self._reject_domain(Click(target=live), app=gate)
+            self._refuse_disabled(live, verb="type")
+            self._guard_user(gate)
+            note.append(self._dismiss_open_menu(gate))
+            return self._deliver_type_at_ref(live, text)
+
+        count = self._run_gated(action, gate, execute)
+        shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
+        return self._conclude(
+            f"typed {shown} characters into {ref}{''.join(note)}",
+            tool="type", app=gate, before=before, element=live, requested=text,
+            had_ref=True, previous=previous,
+        )
+
     @_serialized
-    def type_text(self, text: str, app: str | None = None) -> str:
+    def type_text(self, text: str, app: str | None = None, ref: str | None = None) -> str:
         app = _optional_app_arg(app, "type")
+        ref = _optional_ref_arg(ref, "type")
+        if ref is not None:
+            return self._type_at_ref(text, ref, app)
         addressed = self._linux_addressed_app(app)
         if addressed is not None:
             return self._linux_type_text(text, addressed)
@@ -4828,7 +4973,7 @@ class Runtime:
         Step shapes (key ``do`` selects the action):
           {"do":"click","ref":"e5"}  (+ button, count, modifiers, or x/y/display_id)
           {"do":"hover","ref":"e5"}  (or x/y/display_id; no button)
-          {"do":"type","text":"..."}
+          {"do":"type","text":"..."}  (optional "ref" focuses that element first)
           {"do":"key","chord":"cmd+s"}  (modifiers: ["ctrl"] folds into the chord)
           {"do":"scroll","ref":"e3","dy":5}  (+ dx, unit, into_view, or x/y)
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
@@ -4912,6 +5057,10 @@ class Runtime:
             detail = _ref_or_point_error(step, "ref", "x", "y", _TARGET_REQUIRED)
         elif do == "type":
             detail = _required_str_error(step, "text")
+            if detail is None and step.get("ref") is not None:
+                ref = step.get("ref")
+                if not isinstance(ref, str) or not ref.strip():
+                    detail = "'ref' must be a non-empty string"
         elif do == "key":
             detail = self._key_step_error(step)
         elif do == "scroll":
@@ -4961,6 +5110,11 @@ class Runtime:
         if do == "hover":
             return self.hover(step.get("x"), step.get("y"), step.get("display_id"), step.get("ref"))
         if do == "type":
+            # Omit ref when the step has none. Callers that replace type_text
+            # with a one-argument stub keep working, and a present ref still
+            # focuses that element before any text is entered.
+            if step.get("ref"):
+                return self.type_text(step["text"], ref=step["ref"])
             return self.type_text(step["text"])
         if do == "key":
             return self.key(_folded_key_chord(step))
@@ -5107,7 +5261,15 @@ class Runtime:
         in-scroll row read was still the old head (``rows_stale``) is not
         the end of the search either: the page did move, and the next
         iteration snapshots the tree again instead of aborting or turning
-        around."""
+        around.
+
+        The snapshot taken in the same turn as the wheel can still be the
+        pre-scroll tree: the row is named at its old position after the
+        page has moved past it. A hit is returned only when a later
+        snapshot still shows that match and its center lies inside the
+        window. Otherwise the search scrolls back toward the row and
+        checks again. The ref and the bounds are from that confirming
+        snapshot, not from the pre-scroll one."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -5133,6 +5295,94 @@ class Runtime:
         def rows_stale(exc: ComputerUseError) -> bool:
             return exc.code is ErrorCode.UNSUPPORTED and exc.detail.get("reason") == "rows_stale"
 
+        def viewport_box(snap: Snapshot) -> tuple[int, int, int, int] | None:
+            """Window rectangle, or the main display when the snapshot has no window."""
+            windows = [
+                el for el in snap.elements
+                if el.role in ("AXWindow", "AXSheet", "AXDialog")
+                and el.bounds.width > 40 and el.bounds.height > 40
+            ]
+            if windows:
+                box = max(windows, key=lambda el: el.bounds.width * el.bounds.height).bounds
+                return (box.x, box.y, box.x + box.width, box.y + box.height)
+            if not snap.displays:
+                return None
+            display = next((item for item in snap.displays if item.is_main), snap.displays[0])
+            return (0, 0, display.width, display.height)
+
+        def on_screen(el: Element, snap: Snapshot) -> bool:
+            """True when ``el``'s center sits inside the window.
+
+            A row the page has parked above the viewport can still carry the
+            y it had before the wheel. Overlapping the top edge is not enough:
+            the center has to be inside the window.
+            """
+            bounds = el.bounds
+            if bounds.width < 1 or bounds.height < 1:
+                return False
+            box = viewport_box(snap)
+            if box is None:
+                return True
+            left, top, right, bottom = box
+            center_x = bounds.x + bounds.width / 2
+            center_y = bounds.y + bounds.height / 2
+            return left <= center_x < right and top <= center_y < bottom
+
+        def visible_matches(snap: Snapshot) -> list[Element]:
+            return [
+                el for el in observe.find_elements(snap, text=text, role=role)
+                if on_screen(el, snap)
+            ]
+
+        def place_of(snap: Snapshot) -> str:
+            """Where the match sits relative to the window.
+
+            ``visible`` is a center inside the window. ``above`` and ``below``
+            are a match whose center is outside that window. ``missing`` is
+            no match in this snapshot. A document table keeps rows that have
+            already left the viewport, so a name in the tree is not a hit.
+            """
+            found = observe.find_elements(snap, text=text, role=role)
+            if not found:
+                return "missing"
+            if any(on_screen(el, snap) for el in found):
+                return "visible"
+            box = viewport_box(snap)
+            if box is None:
+                return "visible"
+            _left, top, _right, bottom = box
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            if center_y < top:
+                return "above"
+            if center_y >= bottom:
+                return "below"
+            return "visible"
+
+        def confirming_snapshot(scrolls_issued: int) -> tuple[str, str | None]:
+            """``(found, text)`` when a later snapshot still shows the match.
+
+            The read in the same turn as the wheel can be the pre-scroll
+            tree. A second read that drops the match, or moves its center
+            out of the window, is not a hit. ``above`` / ``below`` /
+            ``missing`` tell the caller which way to scroll.
+            """
+            fresh = self.driver.snapshot(Scope(scope), bundle)
+            self._current = fresh
+            kind = place_of(fresh)
+            if kind != "visible":
+                return kind, None
+            time.sleep(_SCROLL_VERIFY_PAUSE_S)
+            later = self.driver.snapshot(Scope(scope), bundle)
+            self._current = later
+            kind = place_of(later)
+            if kind != "visible":
+                return kind, None
+            visible = visible_matches(later)
+            return "found", (
+                f"found after {scrolls_issued} scroll(s):\n"
+                f"{observe.render_matches(later, visible)}"
+            )
+
         def execute() -> str:
             # Several lines per step can pass the target and stop at the end
             # of the list. On the 0.4.17 retest the search reached ITEM-193
@@ -5147,6 +5397,7 @@ class Runtime:
             issued = 0
             turned = False
             stalls = 0
+            backs = 0
             limit = max_scrolls
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
@@ -5159,7 +5410,55 @@ class Runtime:
                     )
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
-                    return f"found after {issued} scroll(s):\n{observe.render_matches(snap, matches)}"
+                    shown = visible_matches(snap)
+                    if shown and issued == 0:
+                        return (
+                            f"found after {issued} scroll(s):\n"
+                            f"{observe.render_matches(snap, shown)}"
+                        )
+                    if issued > 0:
+                        # The naming snapshot can be the tree from before this
+                        # wheel. Return a ref only when a later snapshot still
+                        # has the match inside the window.
+                        kind, verified = confirming_snapshot(issued)
+                        if kind == "found" and verified is not None:
+                            return verified
+                        if issued >= limit:
+                            break
+                        if kind == "above":
+                            recover = -abs(dy)
+                        elif kind == "below":
+                            recover = abs(dy)
+                        else:
+                            # The row left the tree. The last step went past it.
+                            backs += 1
+                            if backs > _SCROLL_VERIFY_BACKS:
+                                break
+                            recover = -step if step else -dy
+                        step = recover
+                        anchor = (
+                            self.driver.resolve_ref(pinned[0], ref, live=self._current)
+                            if pinned is not None else _scroll_anchor(self._current)
+                        )
+                        if anchor is None:
+                            break
+                        try:
+                            self._run_gated(
+                                Scroll(target=anchor, dy=recover), bundle,
+                                partial(inject_scroll, anchor, recover),
+                                recheck=partial(self._recheck_target, target=anchor),
+                            )
+                        except ComputerUseError as exc:
+                            if rows_stale(exc):
+                                issued += 1
+                                stalls = 0
+                                continue
+                            if page_unchanged(exc):
+                                break
+                            raise
+                        issued += 1
+                        stalls = 0
+                        continue
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
@@ -6482,8 +6781,8 @@ def accepted_keywords(fn: Callable) -> set[str] | None:
 def seal_mcp_tools(server: object) -> None:
     """Reject unknown tool arguments and publish a closed input schema.
 
-    FastMCP's argument model ignores extra keys, so ``type`` with ``ref``
-    used to type into whatever had focus and report success. Each tool's
+    FastMCP's argument model ignores extra keys, so an undeclared argument
+    used to be dropped and the tool still ran. Each tool's
     model forbids extras, its published schema sets ``additionalProperties``
     to false, and validation raises ``invalid_arguments`` naming the unknown
     keys before the tool function runs. ``Tool.run`` wraps that exception, so
@@ -6538,7 +6837,9 @@ _INSTRUCTIONS = (
     "element refs (click ref='e14'); refs are valid ONLY against the latest "
     "snapshot — a stale_ref error means the UI changed, re-observe; if its reason is "
     "app_restarted the process that issued the ref has quit and nothing was written to "
-    "whatever replaced it, so re-snapshot instead of reusing the ref; if its reason is "
+    "whatever replaced it, so re-snapshot instead of reusing the ref. type may take "
+    "ref: that element is focused and text is entered only after focus is confirmed "
+    "on it; unconfirmed focus is focus_lost and types nothing. If its reason is "
     "title_changed the list reordered under the ref and the candidates name the element now at "
     "that position: find(text=...) or scroll_to_find the target again, never click the slot. Prefer "
     "mode='interactive' (actionable elements only, same refs, far fewer tokens) "
@@ -7055,34 +7356,48 @@ def build_server(
         return await run(runtime.hover, x, y, display_id, ref)
 
     @server.tool(name="type")
-    async def type_text(text: str, app: str | None = None) -> CallToolResult:
+    async def type_text(
+        text: str, app: str | None = None, ref: str | None = None,
+    ) -> CallToolResult:
         """Type literal text into the focused element (clipboard-paste path
-        for long text). An undeclared argument, including ref, is
-        invalid_arguments and no text is sent. With app=<bundle id or name> on
-        macOS the keystrokes are addressed to that app's process: it need not
-        be frontmost, nothing is activated, and the user's screen stays where
-        it is. On Linux, app=
-        resolves that app's window from the EWMH list and the AT-SPI
-        application, focuses it when it is not already active, checks that it
-        became the active window, and then types. A window that cannot be
-        focused is focus_changed. An app with no window is app_not_found. The
-        call is not reported as macOS-only. Without app: the frontmost app.
-        On Linux, text goes in at the caret and replaces a selection, including
-        after a coordinate click that did not remember a ref: the focused
-        editable is looked up and inserted with the same helper. A CRLF is one
-        newline; the reported count is the number of characters the field read
-        back, and a mismatch is an error rather than success. LibreOffice Calc
-        is confirmed from the open cell editor or the selected cell's text.
-        That editor is not a password field. A sheet that does not show the
-        characters is a mismatch. Chrome's address
-        bar is polled until the URL is visible or the bar settles on its own
-        string; a settled rewrite is not a mismatch. The find bar already
-        showing exactly that query is a match. An empty app is
-        invalid_arguments. Gated at tier 'full' against the target app; refuses
-        with secure_field when a password field has focus — secrets are typed
-        by the human, never by this tool. The text is unchanged. Structured
-        content adds outcome, next, and evidence."""
-        return _publish(await run(runtime.type_text, text, app, _outcome=True, _tool="type"))
+        for long text). Optional ref is an element from the latest
+        desktop_snapshot. When ref is set, it is resolved the same way click
+        and set_value resolve a ref (a replaced process is stale_ref with
+        reason app_restarted), that element is focused, and focus has to be
+        read back on it before any text is entered. If focus cannot be
+        confirmed, the result is focus_lost and nothing is typed, so
+        keystrokes cannot land in a different field. The outcome read-back
+        is that element. Without ref: the focused element. An undeclared
+        argument is invalid_arguments and no text is sent. With app=<bundle
+        id or name> on macOS the keystrokes are addressed to that app's
+        process: it need not be frontmost, nothing is activated, and the
+        user's screen stays where it is. On Linux, app= resolves that app's
+        window from the EWMH list and the AT-SPI application, focuses it
+        when it is not already active, checks that it became the active
+        window, and then types. A window that cannot be focused is
+        focus_changed. An app with no window is app_not_found. The call is
+        not reported as macOS-only. Without app and without ref: the
+        frontmost app. On Linux, text goes in at the caret and replaces a
+        selection, including after a coordinate click that did not remember
+        a ref: the focused editable is looked up and inserted with the same
+        helper. A CRLF is one newline; the reported count is the number of
+        characters the field read back, and a mismatch is an error rather
+        than success. LibreOffice Calc is confirmed from the open cell
+        editor or the selected cell's text. That editor is not a password
+        field. A sheet that does not show the characters is a mismatch.
+        Chrome's address bar is polled until the URL is visible or the bar
+        settles on its own string; a settled rewrite is not a mismatch. The
+        find bar already showing exactly that query is a match. An empty
+        app, or an empty ref, is invalid_arguments. A ref that belongs to a
+        different app than app= is invalid_arguments and nothing is typed.
+        Gated at tier 'full' against the target app; refuses with
+        secure_field when a password field has focus or the ref is a secure
+        field — secrets are typed by the human, never by this tool. The
+        text is unchanged. Structured content adds outcome, next, and
+        evidence."""
+        return _publish(await run(
+            runtime.type_text, text, app, ref, _outcome=True, _tool="type",
+        ))
 
     @server.tool(name="key")
     async def key(chord: str, app: str | None = None) -> CallToolResult:
@@ -7191,7 +7506,7 @@ def build_server(
         Supported steps:
           {"do":"click","ref":"e5"}  (or "x"/"y"; + "button","count","modifiers")
           {"do":"hover","ref":"e5"}  (or "x"/"y"; no button)
-          {"do":"type","text":"..."}
+          {"do":"type","text":"..."}  (optional "ref" focuses that element first)
           {"do":"key","chord":"cmd+s"}  (or "chord":"a","modifiers":["ctrl"])
           {"do":"scroll","ref":"e3","dy":5}  (+ "into_view")
           {"do":"drag","start_ref":"e1","end_ref":"e2"}
@@ -7246,7 +7561,11 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. A wheel that does not move the page
+        matching ref(s) or a not-found note. The ref is from a snapshot taken
+        after the scroll settles, and only when that match's center is inside
+        the window. A name that disappears on the re-read was the pre-scroll
+        tree; the search scrolls back toward the row and checks again instead
+        of returning that stale ref. A wheel that does not move the page
         (page_unchanged) is repeated once: the tree can still be the pre-scroll
         rows. A second still page does not end the search while the other
         direction has not been tried and the target has not been shown. The

@@ -439,9 +439,11 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
     ),
     (
         "type",
-        "Type text into the focused element. An undeclared argument, including ref, "
-        "is invalid_arguments and no text is sent. Never use this for passwords, OTP, or card numbers.",
-        {"text": _STR, "app": _STR},
+        "Type text. With ref, focus that element, confirm the focus landed, and type only "
+        "there; if focus cannot be confirmed, nothing is typed. Without ref, type into "
+        "the focused element. An undeclared argument is invalid_arguments and no text "
+        "is sent. Never use this for passwords, OTP, or card numbers.",
+        {"text": _STR, "app": _STR, "ref": _STR},
         ["text"],
     ),
     (
