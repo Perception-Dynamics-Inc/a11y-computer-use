@@ -6248,7 +6248,129 @@ def test_linux_dialog_run_snapshot_stays_fast_and_ok_clicks(tmp_path) -> None:
         _stop(proc)
 
 
-def test_linux_gtk_file_chooser_is_a_real_window_and_opens_a_path(tmp_path) -> None:
+def test_linux_menu_press_opens_two_dialogs_within_the_time_bound(tmp_path) -> None:
+    """Two dialogs opened from the menu in one session stay readable.
+
+    Live GTK. The same driver presses File > Create Folder, reads the dialog,
+    closes it, and presses the item again. A second ``Gtk.Dialog.run()`` used
+    to make the menu call and the next snapshot take about 25s and return one
+    opaque region. Each press and each snapshot has a bound well under that,
+    and a missing dialog fails the test.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    app = "cuamenudlg"
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuamenudlg.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuamenudlg")
+        win = Gtk.Window(title="MenuHost")
+        bar = Gtk.MenuBar()
+        menu = Gtk.Menu()
+        file_item = Gtk.MenuItem(label="File")
+        file_item.set_submenu(menu)
+        leaf = Gtk.MenuItem(label="Create Folder")
+        status = Gtk.Label(label="count=0")
+        state = {"n": 0}
+
+        def on_activate(_item):
+            dialog = Gtk.Dialog(title="Create New Folder", transient_for=win, modal=True)
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Create", Gtk.ResponseType.OK)
+            dialog.set_default_size(360, 160)
+            dialog.move(40, 40)
+            entry = Gtk.Entry()
+            entry.set_text("untitled")
+            dialog.get_content_area().pack_start(entry, False, False, 0)
+            dialog.show_all()
+            response = dialog.run()
+            if response == Gtk.ResponseType.OK:
+                state["n"] += 1
+            status.set_text("count=%s" % state["n"])
+            dialog.destroy()
+
+        leaf.connect("activate", on_activate)
+        menu.append(leaf)
+        bar.append(file_item)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.pack_start(bar, False, False, 0)
+        box.pack_start(status, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 200)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 15
+        ready = False
+        while time.monotonic() < deadline:
+            try:
+                rows = driver.menu_items(app, "File")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                rows = []
+            if any(row.get("title") == "Create Folder" for row in rows):
+                ready = True
+                break
+            time.sleep(0.2)
+        assert ready, "the menu host never published File > Create Folder"
+
+        def press_and_read(which: str):
+            started = time.monotonic()
+            title = driver.menu_press(app, "File > Create Folder")
+            elapsed = time.monotonic() - started
+            assert elapsed < 4.0, f"{which} menu press took {elapsed:.1f}s"
+            assert title == "Create Folder"
+            dialog = None
+            last = None
+            found_by = time.monotonic() + 4
+            while time.monotonic() < found_by:
+                last = _snap_within(driver, app, Scope.APP, limit_s=5.0)
+                titles = _titles(last)
+                opaque = [el for el in last.elements if el.role == "opaque_region"]
+                assert not (
+                    len(last.elements) == 1 and last.elements[0].role in {"opaque_region", "AXGroup"}
+                ), [(el.role, el.title, el.enabled) for el in last.elements]
+                if "Create" in titles and "Cancel" in titles:
+                    dialog = last
+                    break
+                assert len(opaque) != len(last.elements)
+                time.sleep(0.1)
+            assert dialog is not None, [
+                (el.role, el.title, el.enabled) for el in (last.elements if last else [])
+            ]
+            assert any(el.role == "AXTextField" or el.editable for el in dialog.elements), [
+                (el.role, el.title) for el in dialog.elements
+            ]
+            return dialog
+
+        first = press_and_read("first")
+        create = next(el for el in first.elements if el.title == "Create" and el.clickable)
+        driver.click(create)
+        closed = False
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            shot = _snap_within(driver, app, Scope.APP, limit_s=5.0)
+            shown = " ".join(_titles(shot))
+            if "count=1" in shown and "Create New Folder" not in shown:
+                closed = True
+                break
+            time.sleep(0.1)
+        assert closed, "the first dialog did not close"
+        press_and_read("second")
+    finally:
+        _stop(proc)
     """A GTK FileChooserDialog is a real window, and a typed path opens the file.
 
     Live GTK, not a synthetic tree. The chooser is opened with Dialog.run()

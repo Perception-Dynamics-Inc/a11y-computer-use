@@ -9564,6 +9564,293 @@ def _a11y_bus_address() -> str | None:
     return address or None
 
 
+# Leaf menu actions that open Gtk.Dialog.run() must not be sent on the
+# connection later reads use. The first such action wedges libatspi's private
+# socket; revive switches reads onto the shared accessibility bus, and that
+# snapshot still shows the dialog. The next leaf DoAction on that shared bus
+# holds its dispatch lock for the whole modal loop, so the following snapshot
+# waits out the reply and comes back as one opaque region. The leaf is sent
+# on the private socket instead, with a short timeout, and reads stay on the
+# bus that was already in place.
+_MENU_LEAF_TIMEOUT_MS = 400
+_MENU_DIALOG_WAIT_S = 2.0
+_DIALOG_ROLES = frozenset({
+    "dialog", "file chooser", "alert", "color chooser", "font chooser",
+})
+_private_socket_address_cache: dict[str, str] = {}
+_private_action_bus: dict[str, int] = {}
+
+
+def _application_view(acc):
+    """The ``AtspiApplication`` struct for ``acc``, or None for a test double."""
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _GObject(ctypes.Structure):
+        _fields_ = [
+            ("g_class", ctypes.c_void_p),
+            ("ref_count", ctypes.c_uint),
+            ("pad", ctypes.c_uint),
+            ("qdata", ctypes.c_void_p),
+        ]
+
+    class _AtspiObject(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("app", ctypes.c_void_p),
+            ("path", ctypes.c_char_p),
+        ]
+
+    class _AtspiApplication(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("hash", ctypes.c_void_p),
+            ("bus_name", ctypes.c_char_p),
+            ("bus", ctypes.c_void_p),
+        ]
+
+    try:
+        obj = _AtspiObject.from_address(pointer)
+        if not obj.app:
+            return None
+        app = _AtspiApplication.from_address(obj.app)
+        bus_name = app.bus_name or b""
+        if not bus_name.startswith(b":"):
+            return None
+        return app
+    except Exception:
+        return None
+
+
+def _open_registered_connection(address: str) -> int | None:
+    """A private dbus connection registered on ``address``, or None."""
+    if not address:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _DBusError(ctypes.Structure):
+        _fields_ = [
+            ("name", ctypes.c_char_p),
+            ("message", ctypes.c_char_p),
+            ("dummy", ctypes.c_uint),
+            ("padding", ctypes.c_void_p),
+        ]
+
+    try:
+        lib = ctypes.CDLL("libdbus-1.so.3")
+        lib.dbus_error_init.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_error_is_set.restype = ctypes.c_int
+        lib.dbus_error_free.argtypes = [ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.argtypes = [ctypes.c_char_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_connection_open_private.restype = ctypes.c_void_p
+        lib.dbus_bus_register.argtypes = [ctypes.c_void_p, ctypes.POINTER(_DBusError)]
+        lib.dbus_bus_register.restype = ctypes.c_int
+        err = _DBusError()
+        lib.dbus_error_init(ctypes.byref(err))
+        conn = lib.dbus_connection_open_private(address.encode(), ctypes.byref(err))
+        if not conn or lib.dbus_error_is_set(ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return None
+        lib.dbus_error_init(ctypes.byref(err))
+        if not lib.dbus_bus_register(conn, ctypes.byref(err)):
+            if lib.dbus_error_is_set(ctypes.byref(err)):
+                lib.dbus_error_free(ctypes.byref(err))
+            return None
+        return int(conn)
+    except Exception:
+        return None
+
+
+def _private_socket_address(bus_name: str) -> str | None:
+    """The app's private AT-SPI socket, from ``GetApplicationBusAddress``."""
+    cached = _private_socket_address_cache.get(bus_name)
+    if cached:
+        return cached
+    a11y = _a11y_bus_address()
+    if not a11y:
+        return None
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Gio, GLib
+
+        conn = Gio.DBusConnection.new_for_address_sync(
+            a11y,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            None, None,
+        )
+        reply = conn.call_sync(
+            bus_name, "/org/a11y/atspi/accessible/root",
+            "org.a11y.atspi.Application", "GetApplicationBusAddress",
+            None, GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NONE, 1000, None,
+        )
+        address = reply.get_child_value(0).get_string()
+    except Exception:
+        return None
+    if not address:
+        return None
+    _private_socket_address_cache[bus_name] = address
+    return address
+
+
+def _private_action_connection(bus_name: str) -> int | None:
+    """A connection to the app's private socket, reused until a leaf times out."""
+    cached = _private_action_bus.get(bus_name)
+    if cached:
+        return cached
+    address = _private_socket_address(bus_name)
+    if not address:
+        return None
+    conn = _open_registered_connection(address)
+    if conn:
+        _private_action_bus[bus_name] = conn
+    return conn
+
+
+@contextmanager
+def _leaf_action_bus(acc):
+    """Point ``acc``'s app at its private socket for one action, then restore.
+
+    The connection that was already installed stays the one later reads use.
+    When the private socket cannot be opened, the action uses the current bus.
+    """
+    app = _application_view(acc)
+    if app is None:
+        yield
+        return
+    saved = app.bus
+    bus_name = (app.bus_name or b"").decode("utf-8", "replace")
+    private = _private_action_connection(bus_name)
+    swapped = bool(private) and private != saved
+    if swapped:
+        app.bus = private
+    try:
+        yield
+    finally:
+        if swapped:
+            app.bus = saved
+
+
+def _drop_private_action_bus(acc) -> None:
+    app = _application_view(acc)
+    if app is None:
+        return
+    bus_name = (app.bus_name or b"").decode("utf-8", "replace")
+    _private_action_bus.pop(bus_name, None)
+
+
+def dispatch_menu_leaf(node) -> str:
+    """Press a menu leaf without waiting out a modal dialog's D-Bus reply.
+
+    Returns ``ok``, ``dispatched``, or ``refused``. A real accessible is
+    invoked on the app's private socket with a 400ms reply budget. A fake
+    tree used in tests has no D-Bus connection and is pressed directly.
+    """
+    from a11y_computer_use.drivers import _linux_menus
+
+    if _gobject_pointer(node) is None:
+        start = time.monotonic()
+        failed = False
+        try:
+            result = _linux_menus._invoke_press(node)
+        except Exception:
+            failed = True
+            result = False
+        return _linux_menus.classify_leaf_press(
+            result is True, failed=failed, elapsed=time.monotonic() - start,
+        )
+
+    Atspi = None
+    try:
+        Atspi = _atspi()
+        Atspi.set_timeout(_MENU_LEAF_TIMEOUT_MS, 0)
+    except Exception:
+        Atspi = None
+    start = time.monotonic()
+    failed = False
+    result = False
+    try:
+        with _leaf_action_bus(node):
+            try:
+                result = _linux_menus._invoke_press(node)
+            except Exception:
+                failed = True
+                result = False
+    finally:
+        if Atspi is not None:
+            try:
+                Atspi.set_timeout(300, 0)
+            except Exception:
+                pass
+    elapsed = time.monotonic() - start
+    outcome = _linux_menus.classify_leaf_press(
+        result is True, failed=failed, elapsed=elapsed,
+    )
+    if outcome == "dispatched":
+        _drop_private_action_bus(node)
+    return outcome
+
+
+def _is_dialog_role(role: str) -> bool:
+    return role in _DIALOG_ROLES or role.endswith(" dialog")
+
+
+def _menu_dialog_open(acc) -> bool:
+    """True when a dialog is the app itself, a child, or one level under that."""
+    count = _raw_child_count(acc)
+    if count <= 0 or call_went_unanswered():
+        return False
+    for index in range(min(int(count), 24)):
+        child = _child_at(acc, index)
+        if child is None:
+            continue
+        if _is_dialog_role(_role_name(child)):
+            return True
+        nested = _raw_child_count(child)
+        if nested <= 0 or call_went_unanswered():
+            continue
+        for sub_index in range(min(int(nested), 16)):
+            sub = _child_at(child, sub_index)
+            if sub is not None and _is_dialog_role(_role_name(sub)):
+                return True
+    return False
+
+
+def await_menu_dialog(acc, *, dispatched: bool = False) -> None:
+    """Wait until a dialog opened by the leaf is readable, or the budget ends.
+
+    A healthy app with no dialog (Save, Undo) returns after one look. A
+    wedged child count replaces the app bus once, then polls for the window.
+    ``dispatched`` is a leaf whose reply timed out; that poll runs even when
+    the first read still answers, because the dialog may still be mapping.
+    """
+    if _gobject_pointer(acc) is None:
+        return
+    deadline = time.monotonic() + (_MENU_DIALOG_WAIT_S if dispatched else 0.0)
+    while True:
+        count = _raw_child_count(acc)
+        wedged = count < 0 or call_went_unanswered()
+        if wedged and _revive_application(acc):
+            deadline = max(deadline, time.monotonic() + _MENU_DIALOG_WAIT_S)
+        if _menu_dialog_open(acc):
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.05)
+
+
 def _revive_application(acc) -> bool:
     """Replace a wedged per-app D-Bus connection with a fresh accessibility-bus one.
 

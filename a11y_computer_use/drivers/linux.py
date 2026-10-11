@@ -3475,10 +3475,16 @@ class LinuxDriver:
         return self._run(lambda: _linux_menus.menu_items(root, path))
 
     def menu_press(self, app: str, path: str) -> str:
-        from a11y_computer_use.drivers import _linux_menus
+        from a11y_computer_use.drivers import _atspi, _linux_menus
 
         root = self._menu_root(app)
-        return self._run(lambda: _linux_menus.menu_press(root, path))
+        # The leaf goes out on the app's private socket. Dialog.run() from
+        # that handler must not hold the connection the next read uses.
+        return self._run(lambda: _linux_menus.menu_press(
+            root, path,
+            dispatch=_atspi.dispatch_menu_leaf,
+            await_dialog=_atspi.await_menu_dialog,
+        ))
 
     def menu_mnemonic(self, app: str, letter: str) -> str | None:
         """Top-level menu whose Alt mnemonic is ``letter``, or None."""

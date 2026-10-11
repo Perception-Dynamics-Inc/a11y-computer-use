@@ -249,20 +249,69 @@ def _describe(node: object) -> MenuItem:
     )
 
 
-def _press(node: object) -> bool:
-    action = _call(node, ("get_action_iface", "get_action"))
+# A leaf DoAction that does not answer within this long was delivered and then
+# swallowed. at-spi2-atk queues the method return and then runs the action;
+# Gtk.Dialog.run() can hold that reply until the client gives up. A quicker
+# false is the application refusing the action.
+LEAF_DISPATCH_S = 0.30
+
+
+def classify_leaf_press(result: object, *, failed: bool, elapsed: float) -> str:
+    """``ok``, ``dispatched``, or ``refused`` for one leaf action result.
+
+    True is the reply. A timeout, or a false that took at least
+    `LEAF_DISPATCH_S`, is ``dispatched``: the action was already sent. A
+    quick false or a quick error is ``refused``.
+    """
+    if result is True and not failed:
+        return "ok"
+    if elapsed >= LEAF_DISPATCH_S:
+        return "dispatched"
+    return "refused"
+
+
+def _invoke_press(node: object) -> bool:
+    """Run the node's activating action. D-Bus errors propagate.
+
+    ``_press`` turns those errors into false so a parent menu that cannot
+    open still reports a refusal. The leaf classifier needs the exception
+    and the elapsed time to tell a timeout from a real refusal.
+    """
+    getter = None
+    for name in ("get_action_iface", "get_action"):
+        method = getattr(node, name, None)
+        if method is not None:
+            getter = method
+            break
+    if getter is None:
+        return False
+    action = getter()
     if action is None:
         return False
-    count = _call(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    count_method = getattr(action, "get_n_actions", None) or getattr(action, "get_nActions", None)
+    if count_method is None:
+        return False
     try:
-        total = int(count)  # type: ignore[arg-type]
+        total = int(count_method() or 0)
     except (TypeError, ValueError):
         return False
     for index in range(total):
-        raw = str(_call(action, ("get_action_name", "get_name"), index, default="") or "").lower()
-        if raw in _PRESS_ACTIONS:
-            return bool(_call(action, ("do_action", "doAction"), index, default=False))
+        name_method = getattr(action, "get_action_name", None) or getattr(action, "get_name", None)
+        raw = str(name_method(index) or "").lower() if name_method is not None else ""
+        if raw not in _PRESS_ACTIONS:
+            continue
+        do = getattr(action, "do_action", None) or getattr(action, "doAction", None)
+        if do is None:
+            return False
+        return bool(do(index))
     return False
+
+
+def _press(node: object) -> bool:
+    try:
+        return _invoke_press(node)
+    except Exception:
+        return False
 
 
 def find_menu_bar(root: object) -> object | None:
@@ -487,13 +536,19 @@ def _open_branch(app: object, path: str, settle) -> object:
     return top
 
 
-def menu_press(app: object, path: str, *, settle=None, dismiss=None) -> str:
+def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=None, await_dialog=None) -> str:
     """Activate the item at ``path``; returns its title.
 
     A refusal after a menu was opened sends Escape. Pressing the bar entry
     again leaves GTK menu tracking on, so the Edit menu stayed open after a
     disabled Undo. Escape restores the state from before the press. If the
     menu is still open, the refusal says so.
+
+    ``dispatch`` presses the leaf when the driver has one. It returns
+    ``ok``, ``dispatched``, or ``refused``. A modal dialog's D-Bus reply is
+    ``dispatched``, not a refusal. ``await_dialog(app, dispatched=...)``
+    then waits for that window on the connection used for reads. Parent
+    menus stay on the synchronous press.
     """
     settle = settle or _settle
     dismiss = dismiss or _dismiss_menu
@@ -539,6 +594,18 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None) -> str:
                 f"{title!r} has no submenu",
                 detail={"component": wanted},
             )
+        if last and dispatch is not None:
+            outcome = dispatch(node)
+            if outcome == "refused":
+                abandon()
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"the app refused to press {title!r}",
+                    detail={"path": path, "reason": "press_failed", "level": depth},
+                )
+            if await_dialog is not None:
+                await_dialog(app, dispatched=(outcome == "dispatched"))
+            return title
         if not _press(node):
             abandon()
             raise ComputerUseError(
