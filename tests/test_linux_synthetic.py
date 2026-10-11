@@ -6818,6 +6818,7 @@ def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkey
     """
     placed: list[str | None] = []
     caret = {"address": "B1"}
+    opened = {"text": "=SUM(B2:B4)"}
 
     def cell(text, formula=""):
         node = _Acc("table cell", name="X")
@@ -6830,7 +6831,9 @@ def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkey
     monkeypatch.setattr(_atspi, "_cell_for_address", lambda _app, address: nodes.get(address))
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
     monkeypatch.setattr(_atspi, "_sheet_caret_address", lambda _app: caret["address"])
-    monkeypatch.setattr(_atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": "=SUM(B2:B4)")
+    monkeypatch.setattr(
+        _atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": opened["text"],
+    )
     monkeypatch.setattr(
         _atspi, "_place_sheet_caret", lambda _app, address: placed.append(address) or True,
     )
@@ -6848,6 +6851,7 @@ def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkey
 
     placed.clear()
     caret["address"] = "C6"
+    opened["text"] = "=SUM(C2:C4)"
     nodes = {
         "A1": cell("Item"),
         "B1": cell("Q1"),
@@ -6857,9 +6861,7 @@ def test_sheet_grid_restores_the_caret_after_the_formula_read(fake_atspi, monkey
     assert placed == ["C6"]
 
     placed.clear()
-    monkeypatch.setattr(
-        _atspi, "committed_sheet_formula", lambda _cell, _app="soffice.bin": "=SUM(B2:B9)",
-    )
+    opened["text"] = "=SUM(B2:B9)"
     mismatch = _atspi.sheet_grid_check("soffice.bin", "A1", "Item\tQ1\t=SUM(C2:C4)")
     assert mismatch[0] == "C1"
     assert mismatch[1] == "=SUM(C2:C4)"
