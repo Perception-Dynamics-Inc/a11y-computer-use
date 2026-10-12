@@ -1384,6 +1384,51 @@ def test_find_bar_snapshot_is_remembered_and_the_address_bar_is_not() -> None:
     _atspi._BROWSER_BAR_PIDS.clear()
 
 
+def test_find_field_focus_latches_and_the_address_bar_does_not(monkeypatch) -> None:
+    """scroll_to_find types into Find without snapshotting the open bar."""
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+
+    class Find:
+        def get_name(self):
+            return "Find"
+
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **_k: (Find(), False))
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda _acc: {})
+    monkeypatch.setattr(_atspi, "pid_of", lambda _acc: 4242)
+    _atspi.note_focused_find_bar("chrome")
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+
+    class Address(Find):
+        def get_name(self):
+            return "Address and search bar"
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app, **_k: (Address(), False))
+    _atspi.note_focused_find_bar("chrome")
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+
+def test_stale_find_frame_beside_the_page_clears_the_cache(monkeypatch) -> None:
+    """A cached find-in-page sibling is dropped even before the pid is latched."""
+    cleared: list[object] = []
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _root: True)
+    monkeypatch.setattr(_atspi, "_browser_bar_latched", lambda _root: False)
+    monkeypatch.setattr(
+        _atspi, "_call_first", lambda _obj, _names, *_a, **_k: "app",
+    )
+    monkeypatch.setattr(_atspi, "_application_bar_frame", lambda _app: "bar")
+    monkeypatch.setattr(_atspi, "_is_browser_bar_frame", lambda node: node == "bar")
+    monkeypatch.setattr(_atspi, "_clear_browser_bar_cache", lambda node: cleared.append(node))
+    assert _atspi.chromium_snapshot_root("page") == "page"
+    assert cleared == ["app"]
+    cleared.clear()
+    assert _atspi.chromium_snapshot_root("bar") == "bar"
+    assert cleared == []
+
+
 def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
     """Find-in-page parks the content root above the viewport.
 

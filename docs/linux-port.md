@@ -30,7 +30,7 @@ A Chrome `<input type=date>`, `type=time`, or `type=month` is a `date editor` wh
 
 Closing that bar leaves the page scrolled to the match. Chrome then reports the content root (a viewport-sized section under the active tab's document) at a negative Y, so the box misses the screen, while the text now on screen keeps real coordinates under it. A snapshot walks that root and keeps those descendants. The group is no longer an empty `group "<title>" (focus)`. A control above the viewport, and the rest of the page below the fold, still drop.
 
-The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. Reload does not reuse the cached document.
+The find bar and an omnibox popup also stick in the AT-SPI client cache. A snapshot taken while the bar is open remembers that Chrome process. Typing in the find field does too, which is what ``scroll_to_find`` does: it opens the bar, types, and closes it before the next snapshot, so that snapshot would not otherwise see the find field. The next snapshot, including one after the bar closes and one after Reload, drops that cache and walks the frame that holds the selected tab rather than a leftover find-in-page or omnibox frame. A page-window snapshot that still has a cached find-in-page or omnibox frame beside it drops that cache even when the process was not remembered yet. Reload does not reuse the cached document. The address bar by itself does not remember the process.
 
 ## Primitive mapping (Driver → AT-SPI2 / X11)
 

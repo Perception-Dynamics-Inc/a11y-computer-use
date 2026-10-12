@@ -2680,6 +2680,10 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if app_id:
+            # The find field latches this process even when the open bar is
+            # not in a snapshot. scroll_to_find types and closes it first.
+            self._run(lambda: _atspi.note_focused_find_bar(app_id))
         if (
             handle is not None
             and ("\t" in text or "\n" in text)
