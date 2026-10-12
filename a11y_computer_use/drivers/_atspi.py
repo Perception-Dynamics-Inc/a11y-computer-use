@@ -14034,6 +14034,381 @@ def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object])
     return None
 
 
+def _fold_text(value: str) -> str:
+    """Case-folded text with NBSP read as a space, matching ``find``."""
+    return value.replace("\u00a0", " ").lower()
+
+
+def _buffer_text(acc) -> str | None:
+    """The node's whole Text buffer, or None when it has none."""
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return None
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if not isinstance(got, str) or not got:
+        return None
+    return got
+
+
+def _is_multiline_document(acc) -> bool:
+    """A text widget whose Text interface can be longer than the viewport.
+
+    AT-SPI ``text`` is a GtkTextView or a Scintilla document. A single-line
+    GTK entry uses that same role and is not this widget. A terminal keeps
+    its own on-screen slice. A browser document is not walked here.
+    """
+    role = _role_name(acc)
+    if role == "terminal":
+        return False
+    if role == "text":
+        if _state_has(acc, "SINGLE_LINE") and not _state_has(acc, "MULTI_LINE"):
+            return False
+        return True
+    if role == "document text":
+        return True
+    if role == "entry":
+        return _state_has(acc, "MULTI_LINE")
+    return False
+
+
+_BUFFER_SKIP_ROLES = frozenset({
+    "document web", "document frame", "terminal", "tree", "tree table",
+    "table", "list", "menu", "menu bar", "tool bar", "status bar",
+    "scroll bar", "separator",
+})
+
+
+def _multiline_documents(root) -> list:
+    """Multi-line text widgets under ``root``, skipping trees and menus.
+
+    Geany's Symbols outline is a tree of cells. Diving into it spends the
+    walk before the editor, which is a sibling under a scroll pane.
+    """
+    found: list = []
+    queue = [root]
+    seen: set[object] = set()
+    examined = 0
+    while queue and examined < 400 and len(found) < 8:
+        node = queue.pop(0)
+        if node is None:
+            continue
+        key = _frame_cache_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        examined += 1
+        role = _role_name(node)
+        if _is_multiline_document(node):
+            found.append(node)
+            continue
+        if role in _BUFFER_SKIP_ROLES:
+            continue
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        for index in range(min(int(count), 40)):
+            queue.append(_child_at(node, index))
+    return found
+
+
+def _widget_screen_box(acc):
+    """The widget's screen box, or None when it has no on-screen size."""
+    rect = _raw_rect(acc, "SCREEN")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        return None
+    return rect
+
+
+def _glyph_place(acc, text: str, offset: int, box) -> str | None:
+    """Where the glyph at ``offset`` sits relative to ``box``.
+
+    ``hit`` intersects the widget. ``above`` and ``below`` are a real glyph
+    outside it. ``off`` is a zero-size glyph or one that misses horizontally.
+    None means the extents could not be read. A newline has no glyph, so a
+    few following characters are tried before giving up.
+    """
+    count = len(text)
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return None
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    saw_off = False
+    for shift in range(4):
+        index = offset + shift
+        if index < 0 or index >= count:
+            break
+        if text[index] in "\r\n\t":
+            continue
+        rect = _safe(lambda index=index: Atspi.Text.get_character_extents(acc, index, coord))
+        hit = _rect_hits_box(rect, box)
+        if hit is None:
+            return None
+        if hit:
+            return "hit"
+        try:
+            x = float(getattr(rect, "x"))
+            y = float(getattr(rect, "y"))
+            width = float(getattr(rect, "width"))
+            height = float(getattr(rect, "height"))
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if width <= 0 or height <= 0:
+            saw_off = True
+            continue
+        top = box[1]
+        bottom = top + box[3]
+        if y + height <= top:
+            return "above"
+        if y >= bottom:
+            return "below"
+        left = box[0]
+        right = left + box[2]
+        if x + width <= left or x >= right:
+            return "off"
+        saw_off = True
+    return "off" if saw_off else None
+
+
+def _span_edge(place, left: int, right: int, *, entering: bool) -> int | None:
+    """First hit at or after ``left``, or last hit at or before ``right``."""
+    if entering:
+        lo, hi = left, right
+        while lo < hi:
+            mid = (lo + hi) // 2
+            flag = place(mid)
+            if flag is None:
+                return None
+            if flag == "hit":
+                hi = mid
+            else:
+                lo = mid + 1
+        flag = place(lo)
+        if flag is None:
+            return None
+        return lo if flag == "hit" else None
+    lo, hi = left, right
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        flag = place(mid)
+        if flag is None:
+            return None
+        if flag == "hit":
+            lo = mid
+        else:
+            hi = mid - 1
+    flag = place(lo)
+    if flag is None:
+        return None
+    return lo if flag == "hit" else None
+
+
+def _visible_text_span(acc, text: str) -> tuple[int, int] | None:
+    """``[start, end)`` of characters whose glyphs intersect the widget.
+
+    None when extents cannot be read, so the caller does not invent a
+    scroll. ``(0, 0)`` means the glyphs were read and none intersect the
+    widget. The range is contiguous: a document viewport is one band.
+    """
+    count = len(text)
+    if count <= 0:
+        return None
+    box = _widget_screen_box(acc)
+    if box is None:
+        return None
+
+    def place(offset: int) -> str | None:
+        if offset < 0 or offset >= count:
+            return "off"
+        return _glyph_place(acc, text, offset, box)
+
+    probes = [0, count - 1, count // 2]
+    caret = _caret_offset(acc)
+    if isinstance(caret, int) and 0 <= caret < count:
+        probes.append(caret)
+    hit_at = None
+    readable = False
+    for offset in probes:
+        flag = place(offset)
+        if flag is None:
+            continue
+        readable = True
+        if flag == "hit":
+            hit_at = offset
+            break
+    if hit_at is None and readable:
+        first = place(0)
+        last = place(count - 1)
+        if first == "above" and last == "below":
+            lo, hi = 0, count - 1
+            while lo + 1 < hi:
+                mid = (lo + hi) // 2
+                flag = place(mid)
+                if flag is None:
+                    return None
+                if flag == "hit":
+                    hit_at = mid
+                    break
+                if flag == "above":
+                    lo = mid
+                elif flag == "below":
+                    hi = mid
+                else:
+                    return None
+        elif first == last and first in {"above", "below"}:
+            return (0, 0)
+    if hit_at is None:
+        # Extents were read and no probe intersected the widget.
+        return None if not readable else (0, 0)
+    start = _span_edge(place, 0, hit_at, entering=True)
+    last = _span_edge(place, hit_at, count - 1, entering=False)
+    if start is None or last is None or last < start:
+        return None
+    return start, last + 1
+
+
+def _folded_offset(body: str, needle: str) -> int:
+    """Character offset of ``needle`` in ``body``, or -1.
+
+    The folded string has to keep the same indexes. A casefold that changes
+    length is not an AT-SPI offset.
+    """
+    folded = _fold_text(body)
+    want = _fold_text(needle)
+    if not want or len(folded) != len(body):
+        return -1
+    return folded.find(want)
+
+
+def _buffer_match_visible(acc, body: str, needle: str) -> bool | None:
+    """True when ``needle`` sits in the on-screen slice of ``body``."""
+    span = _visible_text_span(acc, body)
+    if span is None:
+        return None
+    start, end = span
+    if start >= end:
+        return False
+    window = body[start:end]
+    folded = _fold_text(window)
+    want = _fold_text(needle)
+    if not want or len(folded) != len(window):
+        return None
+    return want in folded
+
+
+def text_offset_on_screen(acc, needle: str) -> bool | None:
+    """Whether ``needle`` is inside ``acc``'s on-screen glyphs.
+
+    None when ``acc`` is not a multi-line text buffer, the buffer does not
+    contain ``needle``, or character extents cannot be read. False when the
+    buffer contains ``needle`` and no matching glyph intersects the widget.
+    True when one does. A short accessible name that contains ``needle`` is
+    on screen with the widget. The name is ignored when it is the buffer
+    itself. Browsers are None: their text is sought with the document walk.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or acc is None:
+        return None
+    if _chromium_app(acc) or _gecko_app(acc):
+        return None
+    if not _is_multiline_document(acc):
+        return None
+    body = _buffer_text(acc)
+    if body is None:
+        return None
+    if _folded_offset(body, text) < 0:
+        return None
+    name = str(_call_first(acc, ("get_name", "getName"), default="") or "")
+    folded_name = _fold_text(name).strip()
+    folded_body = _fold_text(body).strip()
+    if folded_name and len(folded_name) < len(folded_body) and _fold_text(text) in folded_name:
+        return True
+    return _buffer_match_visible(acc, body, text)
+
+
+def _scroll_text_substring(acc, start: int, end: int) -> bool:
+    """AT-SPI ``scroll_substring_to``. False when the toolkit has no such call."""
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return False
+    scroll = getattr(getattr(Atspi, "Text", None), "scroll_substring_to", None)
+    if not callable(scroll):
+        return False
+    kind = getattr(getattr(Atspi, "ScrollType", None), "ANYWHERE", 0)
+    result = _safe(lambda: scroll(acc, int(start), int(end), kind))
+    _drop_read_cache()
+    return result is True or result == 1
+
+
+def _bring_buffer_match_into_view(acc, body: str, offset: int, needle: str) -> bool:
+    """Scroll or move the caret until ``needle`` intersects the widget.
+
+    ``scroll_substring_to`` is tried first. Scintilla implements
+    ``set_caret_offset`` as ``SCI_GOTOPOS``, which scrolls the caret into
+    view. GtkTextView's caret offset does the same. A true result is a
+    glyph of the match inside the widget, not a caret move that left the
+    line below the viewport.
+    """
+    want = _fold_text(needle)
+    end = min(len(body), offset + max(1, len(want)))
+    if _scroll_text_substring(acc, offset, end) and _buffer_match_visible(acc, body, needle) is True:
+        return True
+    try:
+        Atspi = _atspi()
+    except Exception:
+        return False
+    _move_caret(Atspi, acc, offset)
+    for _attempt in range(5):
+        if _buffer_match_visible(acc, body, needle) is True:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def reveal_multiline_text(root, needle: str):
+    """Scroll a multi-line text buffer so ``needle`` is inside the widget.
+
+    ``(moved, on_screen)``. ``moved`` is true only when a scroll or a caret
+    move put the match on screen. ``(False, True)`` means a matching glyph
+    was already inside the widget, and the caret is left where it was.
+    ``(False, False)`` means the buffer contains ``needle`` and it is still
+    outside the widget. None when no multi-line buffer contains it, the app
+    is a browser, or extents cannot be read. A plain snapshot does not call
+    this.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None:
+        return None
+    if _chromium_app(root) or _gecko_app(root):
+        return None
+    judged = []
+    for acc in _multiline_documents(root):
+        body = _buffer_text(acc)
+        if body is None or _folded_offset(body, text) < 0:
+            continue
+        visible = _buffer_match_visible(acc, body, text)
+        if visible is None:
+            continue
+        judged.append((acc, body, visible))
+    if not judged:
+        return None
+    if any(item[2] for item in judged):
+        return False, True
+    pool = [item for item in judged if _state_has(item[0], "FOCUSED")] or judged
+    acc, body, _visible = max(pool, key=lambda item: len(item[1]))
+    offset = _folded_offset(body, text)
+    if offset < 0:
+        return None
+    if _bring_buffer_match_into_view(acc, body, offset, text):
+        return True, True
+    return False, False
+
+
 def reveal_text_in_document(root, needle: str) -> bool:
     """Scroll a document-order match for ``needle`` onto the screen.
 

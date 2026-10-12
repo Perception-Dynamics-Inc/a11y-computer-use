@@ -237,6 +237,13 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends evince
           command -v evince
+      # geany 2.0 is the Scintilla document live test. The editor exposes
+      # the whole file as one textarea. A separate step, so the shared
+      # apt line stays as it is. The test skips when the binary is absent.
+      - name: install Geany
+        run: |
+          sudo apt-get install -y --no-install-recommends geany
+          command -v geany
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;

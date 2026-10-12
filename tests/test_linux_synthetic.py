@@ -2977,7 +2977,24 @@ class _FakeAtspi:
         @staticmethod
         def set_caret_offset(acc, offset):
             acc.caret = int(offset)
+            hook = getattr(acc, "on_caret", None)
+            if callable(hook):
+                hook(int(offset))
             return True
+
+        @staticmethod
+        def get_character_extents(acc, offset, _coord):
+            glyph = getattr(acc, "glyph_at", None)
+            if not callable(glyph):
+                raise RuntimeError("no glyph")
+            return glyph(int(offset))
+
+        @staticmethod
+        def scroll_substring_to(acc, start, end, scroll_type):
+            hook = getattr(acc, "on_scroll_substring", None)
+            if not callable(hook):
+                raise RuntimeError("no scroll_substring_to")
+            return hook(int(start), int(end), scroll_type)
 
         @staticmethod
         def add_selection(acc, start_offset, end_offset):
@@ -11599,3 +11616,198 @@ def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     assert _linux_system.window_id_for_toplevel(
         title="Missing", pid=9, extents=None,
     ) is None
+
+
+def _scintilla_window(*, lines: int = 304, view_lines: int = 18, scroll: bool = True):
+    """A Scintilla-shaped text widget. The buffer is the whole document.
+
+    Eighteen lines fit in the box. ``set_caret_offset`` scrolls like
+    ``SCI_GOTOPOS`` when ``scroll`` is true. Not a live Geany window.
+    """
+    line_h = 16
+    rows = [f"ROW-{index:03d} document line" for index in range(1, lines + 1)]
+    body = "\n".join(rows) + "\n"
+    state = {"head": 0, "caret": 0}
+    widget = _Acc(
+        "text",
+        name="Scintilla",
+        states=("ENABLED", "SENSITIVE", "SHOWING", "FOCUSABLE", "EDITABLE", "MULTI_LINE"),
+        width=600,
+        height=view_lines * line_h,
+    )
+    _place_row(widget, 40, 80, 600, view_lines * line_h)
+    widget.text = body
+    widget.caret = 0
+    _bind_gtk_app(widget)
+
+    def glyph_at(offset: int):
+        bounded = max(0, min(int(offset), max(0, len(body) - 1)))
+        line = body[:bounded].count("\n")
+        local = line - state["head"]
+        return _Rect(8, line_h, 48, 80 + local * line_h)
+
+    def on_caret(offset: int) -> None:
+        state["caret"] = int(offset)
+        widget.caret = int(offset)
+        if not scroll:
+            return
+        line = body[: int(offset)].count("\n")
+        if line < state["head"]:
+            state["head"] = line
+        elif line >= state["head"] + view_lines:
+            state["head"] = min(line, max(0, lines - view_lines))
+
+    widget.glyph_at = glyph_at
+    widget.on_caret = on_caret
+    window = _Acc("frame", name="Geany", width=800, height=600)
+    _place_row(window, 0, 0, 800, 600)
+    app = widget.get_application()
+    window.get_application = lambda: app
+    _adopt(window, widget)
+    return window, widget, state, body
+
+
+def test_offscreen_scintilla_line_is_not_visible_until_the_caret_moves(fake_atspi) -> None:
+    """Synthetic Scintilla buffer. Not a live Geany window.
+
+    ROW-001 is in the viewport. ROW-150 is in the buffer and below it.
+    Moving the caret scrolls that line in. A second reveal does not move.
+    """
+    window, widget, state, _body = _scintilla_window()
+    assert _atspi.text_offset_on_screen(widget, "ROW-001") is True
+    assert _atspi.text_offset_on_screen(widget, "ROW-150") is False
+    assert state["head"] == 0 and state["caret"] == 0
+    assert _atspi.reveal_multiline_text(window, "ROW-150") == (True, True)
+    assert state["head"] >= 140
+    assert _atspi.text_offset_on_screen(widget, "ROW-150") is True
+    assert _atspi.reveal_multiline_text(window, "ROW-150") == (False, True)
+
+
+def test_scintilla_reveal_reports_unseen_when_the_caret_does_not_scroll(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic buffer. ``set_caret_offset`` does not move the viewport."""
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    window, _widget, state, _body = _scintilla_window(scroll=False)
+    assert _atspi.reveal_multiline_text(window, "ROW-150") == (False, False)
+    assert state["head"] == 0
+
+
+def test_chromium_text_is_not_treated_as_a_scintilla_buffer(fake_atspi) -> None:
+    """A browser textarea keeps the document walk. Not a live window."""
+    window, widget, state, _body = _scintilla_window()
+    app = widget.get_application()
+    app.get_toolkit_name = lambda: "chrome"
+    app.get_name = lambda: "chrome"
+    assert _atspi.reveal_multiline_text(window, "ROW-150") is None
+    assert _atspi.text_offset_on_screen(widget, "ROW-150") is None
+    assert state["caret"] == 0
+
+
+def test_scroll_to_find_does_not_claim_an_offscreen_scintilla_line(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic Geany document. The textarea box is on screen.
+
+    scroll_to_find used to return found after 0 scrolls because that box
+    contains the window center. ROW-150 stays below the viewport until the
+    caret moves. A line already on screen does not move the caret.
+    """
+    from a11y_computer_use import server
+
+    window, _widget, state, _body = _scintilla_window()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    top = runtime.scroll_to_find("geany", text="ROW-001", max_scrolls=6)
+    assert top.startswith("found after 0 scroll"), top
+    assert state["head"] == 0 and state["caret"] == 0
+    found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=6)
+    assert found.startswith("found after "), found
+    assert not found.startswith("found after 0"), found
+    assert "not found" not in found
+    assert "not in view" not in found
+    assert state["head"] >= 140
+    area = next(el for el in runtime._current.elements if el.role == "AXTextArea")
+    handle = observe.ax_handle_for(runtime._current.snapshot_id, area.ref)
+    assert _atspi.text_offset_on_screen(handle, "ROW-150") is True
+
+
+def test_scroll_to_find_says_not_in_view_when_the_scintilla_caret_stays_put(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic buffer whose caret offset does not scroll. Not a live window."""
+    from a11y_computer_use import server
+
+    window, _widget, state, _body = _scintilla_window(scroll=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=6)
+    assert not found.startswith("found after"), found
+    assert "not in view" in found
+    assert "needs in-document navigation" in found
+    assert state["head"] == 0
+
+
+def test_scroll_to_find_keeps_a_visible_button_ahead_of_an_offscreen_line(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A button titled ROW-150 is the hit. The buffer caret stays put."""
+    from a11y_computer_use import server
+
+    window, widget, state, _body = _scintilla_window()
+    button = _Acc(
+        "push button", name="ROW-150", width=80, height=24,
+        states=("ENABLED", "SHOWING", "SENSITIVE"),
+    )
+    _place_row(button, 40, 40, 80, 24)
+    app = widget.get_application()
+    button.get_application = lambda: app
+    _adopt(window, button, widget)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=6)
+    assert found.startswith("found after 0 scroll"), found
+    assert "button" in found and "ROW-150" in found
+    assert state["head"] == 0 and state["caret"] == 0
+
+
+def test_find_scrolls_a_scintilla_line_into_view(fake_atspi, monkeypatch) -> None:
+    """Synthetic document. find moves the caret instead of reporting the box."""
+    from a11y_computer_use import server
+
+    window, _widget, state, _body = _scintilla_window()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    top = runtime.find("geany", text="ROW-001")
+    assert "not in view" not in top
+    assert state["head"] == 0
+    found = runtime.find("geany", text="ROW-150")
+    assert "no elements match" not in found
+    assert "not in view" not in found
+    assert "needs in-document navigation" not in found
+    assert state["head"] >= 140
+
+
+def test_find_marks_a_scintilla_line_that_the_caret_cannot_reach(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic buffer. The match stays in the text and out of the viewport."""
+    from a11y_computer_use import server
+
+    window, _widget, state, _body = _scintilla_window(scroll=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    found = runtime.find("geany", text="ROW-150")
+    assert "not in view" in found
+    assert "needs in-document navigation" in found
+    assert state["head"] == 0

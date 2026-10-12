@@ -1536,6 +1536,202 @@ def test_linux_scroll_to_find_reaches_a_10k_gtk_tree(tmp_path) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
 
+
+_DOC_APP = "cudocview"
+
+_GTK_DOC_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cudocview")
+    LINES = 304
+    body = "\\n".join("ROW-%03d document line" % index for index in range(1, LINES + 1)) + "\\n"
+    buf = Gtk.TextBuffer()
+    buf.set_text(body)
+    start = buf.get_start_iter()
+    buf.place_cursor(start)
+    win = Gtk.Window(title="cudocview")
+    view = Gtk.TextView(buffer=buf)
+    view.set_wrap_mode(Gtk.WrapMode.NONE)
+    view.get_accessible().set_name("Document")
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_size_request(420, 220)
+    scrolled.add(view)
+    win.add(scrolled)
+    win.set_default_size(480, 280)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    view.scroll_to_iter(start, 0.0, True, 0.0, 0.0)
+    view.grab_focus()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_doc(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cudocview.py"
+    script.write_text(_GTK_DOC_APP)
+    return subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _doc_areas(shot):
+    return [el for el in shot.elements if el.role == "AXTextArea"]
+
+
+def test_linux_scroll_to_find_brings_an_offscreen_text_line_into_view(tmp_path) -> None:
+    """Live GtkTextView, 304 lines. Not a synthetic buffer.
+
+    The textarea box sits in the window and its accessible text is the
+    whole buffer, the same AT-SPI shape Geany uses for a Scintilla
+    document. ROW-001 is in the viewport. ROW-150 is in the buffer and
+    below it. scroll_to_find must not report that line found after 0
+    scrolls. After the call, a glyph of ROW-150 intersects the widget.
+    find does the same for a later line once the caret is back at the top.
+    """
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _DOC_APP, "python3")
+    proc = _launch_doc(tmp_path)
+    try:
+        snap = _wait_named_tree(
+            driver,
+            _DOC_APP,
+            lambda shot: any(
+                "ROW-001" in (el.value or "") for el in _doc_areas(shot)
+            ),
+        )
+        assert snap is not None, "the text view never published ROW-001"
+        area = next(el for el in _doc_areas(snap) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(area, "ROW-001") is True
+        assert driver.text_offset_on_screen(area, "ROW-150") is False
+        top = runtime.scroll_to_find(_DOC_APP, text="ROW-001", max_scrolls=4)
+        assert top.startswith("found after 0 scroll"), top
+        found = runtime.scroll_to_find(_DOC_APP, text="ROW-150", max_scrolls=6)
+        assert found.startswith("found after "), found
+        assert not found.startswith("found after 0"), found
+        assert "not found" not in found, found
+        assert "not in view" not in found, found
+        shot = runtime._current
+        shown = next(el for el in _doc_areas(shot) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(shown, "ROW-150") is True, found
+        handle = observe_handle(shot, shown)
+        Atspi = _atspi._atspi()
+        _atspi._move_caret(Atspi, handle, 0)
+        time.sleep(0.3)
+        again = driver.snapshot(Scope.WINDOW, _DOC_APP)
+        reset = next(el for el in _doc_areas(again) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(reset, "ROW-220") is False
+        located = runtime.find(_DOC_APP, text="ROW-220")
+        assert "no elements match" not in located, located
+        assert "not in view" not in located, located
+        assert "needs in-document navigation" not in located, located
+        final = runtime._current
+        landed = next(el for el in _doc_areas(final) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(landed, "ROW-220") is True, located
+    finally:
+        _stop(proc)
+
+
+def observe_handle(shot, element):
+    from a11y_computer_use import observe
+
+    return observe.ax_handle_for(shot.snapshot_id, element.ref)
+
+
+def test_linux_geany_scroll_to_find_brings_an_offscreen_scintilla_line_into_view(tmp_path) -> None:
+    """Live Geany 2.0 Scintilla document. Not a synthetic buffer.
+
+    The editor is one textarea whose Text interface is the whole file.
+    ROW-150 starts below the viewport while the widget box stays on
+    screen. scroll_to_find must not report found after 0 scrolls. After
+    it returns, that line's glyph intersects the widget and the caret
+    sits on that line. find reaches a later line the same way.
+    """
+    import shutil
+
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = shutil.which("geany")
+    if not binary:
+        pytest.skip("geany is not installed")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, "geany")
+    config = tmp_path / "geany-config"
+    config.mkdir()
+    document = tmp_path / "notes.py"
+    document.write_text(
+        "\n".join(f"ROW-{index:03d} document line" for index in range(1, 305)) + "\n"
+    )
+    proc = subprocess.Popen(
+        [
+            binary, "-i", "-s", "-m", "-p", "-n", "-t",
+            "-c", str(config), str(document),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        def opened(shot) -> bool:
+            for el in _doc_areas(shot):
+                if "ROW-001" not in (el.value or ""):
+                    continue
+                return driver.text_offset_on_screen(el, "ROW-150") is False
+            return False
+
+        snap = _wait_named_tree(driver, "geany", opened, timeout_s=20.0)
+        assert snap is not None, "Geany never published the Scintilla buffer"
+        area = next(el for el in _doc_areas(snap) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(area, "ROW-001") is True
+        assert driver.text_offset_on_screen(area, "ROW-150") is False
+        top = runtime.scroll_to_find("geany", text="ROW-001", max_scrolls=4)
+        assert top.startswith("found after 0 scroll"), top
+        found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=6)
+        assert found.startswith("found after "), found
+        assert not found.startswith("found after 0"), found
+        assert "not found" not in found, found
+        assert "not in view" not in found, found
+        shot = runtime._current
+        shown = next(el for el in _doc_areas(shot) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(shown, "ROW-150") is True, found
+        handle = observe_handle(shot, shown)
+        caret = _atspi._caret_offset(handle)
+        body = _atspi._buffer_text(handle) or ""
+        assert isinstance(caret, int)
+        assert 140 <= body[:caret].count("\n") + 1 <= 160, caret
+        Atspi = _atspi._atspi()
+        _atspi._move_caret(Atspi, handle, 0)
+        time.sleep(0.3)
+        again = driver.snapshot(Scope.WINDOW, "geany")
+        reset = next(el for el in _doc_areas(again) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(reset, "ROW-220") is False
+        located = runtime.find("geany", text="ROW-220")
+        assert "no elements match" not in located, located
+        assert "not in view" not in located, located
+        assert "needs in-document navigation" not in located, located
+        final = runtime._current
+        landed = next(el for el in _doc_areas(final) if "ROW-001" in (el.value or ""))
+        assert driver.text_offset_on_screen(landed, "ROW-220") is True, located
+        landed_handle = observe_handle(final, landed)
+        landed_caret = _atspi._caret_offset(landed_handle)
+        landed_body = _atspi._buffer_text(landed_handle) or ""
+        assert isinstance(landed_caret, int)
+        assert 210 <= landed_body[:landed_caret].count("\n") + 1 <= 230, landed_caret
+    finally:
+        _stop(proc)
+
+
 def _chrome_binary() -> str | None:
     import shutil
 

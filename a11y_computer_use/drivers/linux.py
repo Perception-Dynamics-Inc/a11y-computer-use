@@ -2535,6 +2535,46 @@ class LinuxDriver:
 
         return self._run(go)
 
+    def text_offset_on_screen(self, element: Element, text: str) -> bool | None:
+        """Whether ``text`` is inside ``element``'s on-screen glyphs.
+
+        None when ``element`` is not a multi-line text buffer, or character
+        extents cannot be read. False when the buffer contains ``text`` and
+        the matched glyphs miss the widget. True when a glyph intersects it.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        try:
+            return self._run(lambda: _atspi.text_offset_on_screen(handle, text))
+        except Exception:
+            return None
+
+    def reveal_text_match(self, app: str, text: str):
+        """Bring ``text`` inside a multi-line text widget.
+
+        ``(moved, on_screen)`` when a buffer contains ``text``. ``moved`` is
+        true only when AT-SPI scrolling or a caret move put the match on
+        screen. ``(False, False)`` means the line is still outside the
+        widget. None when this window has no such buffer, or the app is a
+        browser. A plain snapshot does not call this.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def go():
+            root = _atspi.find_root(app, Scope.WINDOW)
+            if root is None:
+                return None
+            return _atspi.reveal_multiline_text(root, text)
+
+        return self._run(go)
+
     def scroll_viewport_page(self, target: Element, direction: int) -> bool:
         """Page a large GTK table by one painted viewport. False otherwise.
 

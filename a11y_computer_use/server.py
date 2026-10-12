@@ -4066,6 +4066,52 @@ class Runtime:
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
+    def _buffer_match_flag(self, element: Element, text: str) -> bool | None:
+        """False when ``text`` is in a multi-line buffer and off the widget.
+
+        None when this element is not that kind of buffer, or the driver
+        cannot place the glyphs. True when a glyph of the match intersects
+        the widget. A terminal is left to its own on-screen note.
+        """
+        if not text or element.role != "AXTextArea" or element.subrole == "terminal":
+            return None
+        judge = getattr(self.driver, "text_offset_on_screen", None)
+        if not callable(judge):
+            return None
+        try:
+            flag = judge(element, text)
+        except Exception:
+            return None
+        if flag is True or flag is False:
+            return flag
+        return None
+
+    def _hidden_buffer_matches(self, matches, text: str | None) -> list[Element]:
+        """Matches whose text sits in a multi-line buffer outside the widget."""
+        if not text:
+            return []
+        return [el for el in matches if self._buffer_match_flag(el, text) is False]
+
+    def _note_hidden_buffer(self, rendered: str, matches, text: str | None) -> str:
+        """Mark buffer matches that are still outside the widget.
+
+        The navigation sentence is only for a result whose every match is
+        that kind of miss. A visible button beside the buffer stays a hit.
+        """
+        hidden = self._hidden_buffer_matches(matches, text)
+        if not hidden:
+            return rendered
+        refs = {el.ref for el in hidden}
+        lines = []
+        for line in rendered.splitlines():
+            stripped = line.strip()
+            if any(stripped.startswith(ref + " ") for ref in refs) and "not in view" not in line:
+                line += " (not in view)"
+            lines.append(line)
+        if len(hidden) == len(tuple(matches)):
+            lines.append("needs in-document navigation")
+        return "\n".join(lines)
+
     @_serialized
     def find(
         self,
@@ -4086,7 +4132,11 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. A multi-line text
+        widget is the same kind of miss: the widget box is on screen while
+        the matched characters are not. Linux moves the caret until those
+        glyphs intersect the widget. When that does not happen, the match
+        is marked not in view."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4118,7 +4168,27 @@ class Runtime:
             matches = observe.find_elements(
                 snap, text=text, role=role, editable=editable, clickable=clickable
             )
-            return observe.render_matches(snap, matches, text=text)
+            # The widget is on screen. The matched line in a Scintilla or
+            # GtkTextView buffer may not be. Move the caret only when every
+            # hit is that kind of miss, so a visible button keeps the view.
+            hidden = self._hidden_buffer_matches(matches, seek)
+            reveal = getattr(self.driver, "reveal_text_match", None)
+            if (
+                seek
+                and hidden
+                and len(hidden) == len(matches)
+                and callable(reveal)
+            ):
+                jumped = reveal(bundle, seek)
+                if isinstance(jumped, tuple) and len(jumped) == 2 and jumped[0] and jumped[1]:
+                    snap = self.driver.snapshot(Scope(scope), bundle)
+                    self._current = snap
+                    matches = observe.find_elements(
+                        snap, text=text, role=role, editable=editable, clickable=clickable
+                    )
+            return self._note_hidden_buffer(
+                observe.render_matches(snap, matches, text=text), matches, seek,
+            )
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
@@ -6021,6 +6091,14 @@ class Runtime:
         vertical bar by one viewport of painted rows. Chromium, Firefox,
         and a short table keep the five-line wheel.
 
+        A multi-line text widget is not on screen just because its box is.
+        The accessible text is the whole buffer, which is how Geany exposes
+        a Scintilla document. A match whose glyphs miss that box is scrolled
+        with AT-SPI ``scroll_substring_to`` or by moving the caret. That
+        counts as one scroll only when a later read shows the glyph inside
+        the widget. If the viewport does not move, the result is not found
+        and says in-document navigation is still required.
+
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
         Once a document names the match and the center is just outside
@@ -6078,6 +6156,23 @@ class Runtime:
             display = next((item for item in snap.displays if item.is_main), snap.displays[0])
             return (0, 0, display.width, display.height)
 
+        # Glyph visibility is per snapshot. A later read of the same ref
+        # must not reuse a flag from before the caret moved.
+        offset_flags: dict[tuple[str, str], bool | None] = {}
+
+        def text_hidden(el: Element) -> bool:
+            """True when ``text`` is in this textarea and outside its box.
+
+            The widget's own center can sit in the window while the
+            matched line is hundreds of rows below. That is not a hit.
+            """
+            if not text or el.role != "AXTextArea" or el.subrole == "terminal":
+                return False
+            key = (el.snapshot_id, el.ref)
+            if key not in offset_flags:
+                offset_flags[key] = self._buffer_match_flag(el, text)
+            return offset_flags[key] is False
+
         def on_screen(el: Element, snap: Snapshot) -> bool:
             """True when ``el``'s center sits inside the window.
 
@@ -6090,11 +6185,17 @@ class Runtime:
                 return False
             box = viewport_box(snap)
             if box is None:
-                return True
+                return not text_hidden(el)
             left, top, right, bottom = box
             center_x = bounds.x + bounds.width / 2
             center_y = bounds.y + bounds.height / 2
-            return left <= center_x < right and top <= center_y < bottom
+            if not (left <= center_x < right and top <= center_y < bottom):
+                return False
+            # A textarea's box is the editor. The matched line can still be
+            # below that viewport. The widget center is not the glyph.
+            if text_hidden(el):
+                return False
+            return True
 
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
@@ -6107,7 +6208,9 @@ class Runtime:
 
             ``visible`` is a center inside the window. ``above`` and ``below``
             are a match whose center is outside that window. ``missing`` is
-            no match in this snapshot. A document table keeps rows that have
+            no match in this snapshot. ``document`` is a multi-line buffer
+            whose box is in the window and whose matched glyphs are not.
+            A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
             found = observe.find_elements(snap, text=text, role=role)
@@ -6116,6 +6219,8 @@ class Runtime:
                 return "missing"
             if any(on_screen(el, snap) for el in located):
                 return "visible"
+            if any(text_hidden(el) for el in located):
+                return "document"
             box = viewport_box(snap)
             if box is None:
                 return "visible"
@@ -6217,6 +6322,7 @@ class Runtime:
             document_ran_past = False
             find_tried = False
             table_jumped = False
+            buffer_tried = False
             frame_latched = False
             frame_waits = 0
             same_rows = 0
@@ -6225,6 +6331,15 @@ class Runtime:
             progress_rows: tuple[str, ...] | None = None
             progress_offset = "unset"
             progress_seen = False
+
+            def buffer_unseen(count: int, shot: Snapshot, hidden: list[Element]) -> str:
+                body = observe.render_matches(shot, hidden, text=text) if hidden else ""
+                note = (
+                    f"not found after {count} scroll(s): "
+                    f"text={text!r} is in a multi-line text buffer but not in view; "
+                    f"needs in-document navigation"
+                )
+                return note + ("\n" + body if body else "")
 
             def row_names(shot: Snapshot, anchor: Element | None = None) -> tuple[str, ...]:
                 under: set[str] = set()
@@ -6581,6 +6696,35 @@ class Runtime:
                         same_rows = 0
                     previous_rows = seen
                 matches = observe.find_elements(snap, text=text, role=role)
+                if (
+                    not buffer_tried
+                    and text
+                    and matches
+                    and callable(getattr(self.driver, "reveal_text_match", None))
+                ):
+                    hidden = [el for el in matches if text_hidden(el)]
+                    if hidden and not visible_matches(snap):
+                        # One caret or substring scroll. A wheel on the
+                        # window does not move a Scintilla buffer, and the
+                        # widget box would otherwise count as a hit.
+                        buffer_tried = True
+                        jumped = self.driver.reveal_text_match(bundle, text)
+                        if isinstance(jumped, tuple) and len(jumped) == 2:
+                            moved, seen = bool(jumped[0]), bool(jumped[1])
+                            if seen and moved:
+                                issued += 1
+                                stalls = 0
+                                continue
+                            if seen:
+                                # The buffer read already shows the glyph.
+                                # The snapshot this turn started from does
+                                # not, so read again before calling it found.
+                                continue
+                            return buffer_unseen(issued, snap, hidden)
+                if buffer_tried and text and matches:
+                    hidden_now = [el for el in matches if text_hidden(el)]
+                    if hidden_now and not visible_matches(snap):
+                        return buffer_unseen(issued, snap, hidden_now)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
@@ -6641,6 +6785,14 @@ class Runtime:
                         kind, verified = confirming_snapshot(issued)
                         if kind == "found" and verified is not None:
                             return verified
+                        if kind == "document":
+                            hidden = [
+                                el for el in observe.find_elements(
+                                    self._current, text=text, role=role,
+                                )
+                                if text_hidden(el)
+                            ]
+                            return buffer_unseen(issued, self._current, hidden)
                         if issued >= limit:
                             break
                         anchor = (
@@ -8602,7 +8754,11 @@ def build_server(
         text = case-insensitive substring of an element's title or its full value
         (text past the 200 characters kept on the element still matches). A
         terminal's shown value is the on-screen text; a match only in the
-        scrolled-off buffer is still returned and marked above the view. role =
+        scrolled-off buffer is still returned and marked above the view. A
+        multi-line text widget is not a visible match while the characters
+        sit outside the widget. Linux moves the caret until they are in
+        view. If the viewport does not move, the match is marked not in
+        view and the reply says in-document navigation is still required. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,
@@ -9043,7 +9199,10 @@ def build_server(
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. A large GTK table is searched once
         through its row index before that wheel, and a miss there steps
-        the vertical bar by one viewport. page_unchanged is raised only when that
+        the vertical bar by one viewport. A multi-line text buffer is not
+        found while the matched glyphs sit outside the widget: the caret
+        is moved until they are in view, or the reply says the match is
+        not in view and needs in-document navigation. page_unchanged is raised only when that
         container's scroll offset was read and did not move. The ref is from a snapshot taken
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll
