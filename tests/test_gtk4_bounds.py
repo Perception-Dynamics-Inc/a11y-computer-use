@@ -7,6 +7,7 @@ that collapsed point. Synthetic nodes and fake X windows; no live GTK.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace as _NS
 
 import pytest
@@ -301,13 +302,27 @@ def _element(bounds: Bounds, role: str = "AXButton") -> Element:
     return Element("e12", role, "7", None, bounds, "snap-gtk4", clickable=True)
 
 
+@contextmanager
+def _held(_modifiers=()):
+    """Stand-in for ``_linux_input.held``, which imports Xlib even with no modifiers."""
+    yield
+
+
+def _stub_click(monkeypatch) -> list[tuple[int, int]]:
+    """Record the pointer click and do not open an X display."""
+    clicks: list[tuple[int, int]] = []
+
+    def click(x, y, *_args, **_kwargs):
+        clicks.append((int(x), int(y)))
+
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
+    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.held", _held)
+    return clicks
+
+
 def test_unrecovered_gtk4_click_uses_the_action_and_not_the_origin(monkeypatch) -> None:
     """No X origin: do_action runs, and the pointer is not moved to (0, 0)."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
     monkeypatch.setattr(_linux_system, "gtk4_content_origin", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"))
@@ -323,11 +338,7 @@ def test_unrecovered_gtk4_click_uses_the_action_and_not_the_origin(monkeypatch) 
 
 def test_unrecovered_gtk4_without_an_action_is_not_a_successful_click(monkeypatch) -> None:
     """A collapsed box with no action is not_actionable. Nothing is clicked."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
     monkeypatch.setattr(_linux_system, "gtk4_content_origin", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"))
@@ -348,11 +359,8 @@ def test_unrecovered_gtk4_without_an_action_is_not_a_successful_click(monkeypatc
 
 def test_recovered_gtk4_click_uses_the_real_center(monkeypatch) -> None:
     """A box that was shifted off the origin is a normal pointer click."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"))
     monkeypatch.setattr(
         "a11y_computer_use.observe.ax_handle_for", lambda *_args, **_kwargs: button,
@@ -366,11 +374,7 @@ def test_recovered_gtk4_click_uses_the_real_center(monkeypatch) -> None:
 
 def test_a_real_origin_window_still_receives_a_pointer_click(monkeypatch) -> None:
     """GTK 4 at screen (0, 0) because the client window is there is a real point."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
     monkeypatch.setattr(_linux_system, "gtk4_content_origin", lambda *_args, **_kwargs: (0, 0))
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"), screen=(0, 0, 71, 44), window=(0, 0, 71, 44))
@@ -386,11 +390,7 @@ def test_a_real_origin_window_still_receives_a_pointer_click(monkeypatch) -> Non
 
 def test_degenerate_gtk4_box_is_not_clicked(monkeypatch) -> None:
     """All-zero and a zero side are unknown. The pointer stays put."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"), screen=(0, 0, 0, 0), window=(0, 0, 0, 0))
     button.actions = ()
@@ -440,11 +440,7 @@ def test_collapsed_gtk4_bounds_are_not_reported_covered(monkeypatch) -> None:
 
 def test_right_click_on_a_collapsed_box_is_refused(monkeypatch) -> None:
     """A non-primary click cannot fall through to the origin either."""
-    clicks: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        "a11y_computer_use.drivers._linux_input.click",
-        lambda x, y, *_args, **_kwargs: clicks.append((int(x), int(y))),
-    )
+    clicks = _stub_click(monkeypatch)
     monkeypatch.setattr(_linux_system, "gtk4_content_origin", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(CoordType=_NS(SCREEN=0, WINDOW=1)))
     _frame, button = _button(_App("GTK", "4.18.6"))
