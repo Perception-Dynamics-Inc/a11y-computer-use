@@ -182,7 +182,9 @@ jobs:
       # libreoffice-impress is the Impress title ref-click test and the
       # text-frame type test. The Lights template ships in libreoffice-common,
       # which calc already pulls in; without the impress component soffice
-      # never exposes the slide frames.
+      # never exposes the slide frames. libreoffice-draw is the Draw shape
+      # text test. Writer and Impress do not install sdraw; the test fails
+      # when that binary is absent.
       # python3-pyqt6 is the
       # Qt fixture for the live line-edit, combo, and value test. The fixture
       # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's
@@ -198,9 +200,24 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             at-spi2-core gir1.2-atspi-2.0 gir1.2-gtk-3.0 python3-gi python3-pyqt6 \
             libreoffice-calc libreoffice-gtk3 libreoffice-writer libreoffice-impress \
+            libreoffice-draw \
             xvfb dbus dbus-x11 openbox xdotool x11-utils xclip tesseract-ocr \
             curl xz-utils libdbus-glib-1-2 libxt6t64 libasound2t64 \
             pcmanfm xterm mousepad
+      # Writer, Calc, and Impress do not install sdraw. The shape-text test
+      # fails when Draw is absent, so install the component when the binary
+      # is not already on the image.
+      - name: install LibreOffice Draw when it is missing
+        run: |
+          if [ -x /usr/lib/libreoffice/program/sdraw ] || [ -x /usr/lib/libreoffice/program/sdraw.bin ]; then
+            echo "Draw already installed"
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends libreoffice-draw
+          if [ ! -x /usr/lib/libreoffice/program/sdraw ] && [ ! -x /usr/lib/libreoffice/program/sdraw.bin ]; then
+            echo "::error::libreoffice-draw did not install sdraw"
+            exit 1
+          fi
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;

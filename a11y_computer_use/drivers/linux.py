@@ -1104,12 +1104,13 @@ def _accepts_text(element: Element) -> bool:
     """True when the snapshot says ``set_value`` may write ``element``.
 
     The snapshot sets ``editable`` from a text-field role, or from an AT-SPI
-    editable entry (not a paragraph, document, or combo). A synthetic element
-    can name an editable role without that flag; the role set is the one the
-    pruner uses. A menu, static text, button, or combo is not in it unless
-    the snapshot flag is set. A combo is written earlier, through its own
-    items. A live handle that is not an editable entry is refused even when
-    this flag is set, before any select-all.
+    editable entry. A browser paragraph, document, or combo is not an entry.
+    An Impress or Draw paragraph with ``STATE_EDITABLE`` and EditableText is.
+    A synthetic element can name an editable role without that flag; the role
+    set is the one the pruner uses. A menu, static text, button, or combo is
+    not in it unless the snapshot flag is set. A combo is written earlier,
+    through its own items. A live handle that is not an editable entry is
+    refused even when this flag is set, before any select-all.
     """
     if element.editable:
         return True
@@ -1969,12 +1970,13 @@ class LinuxDriver:
                         f"{element.ref} ({element.role}) has no Value interface",
                         detail={"ref": element.ref, "role": element.role, "reason": "text_mismatch"},
                     )
-        # A menu, heading, label, button, paragraph, or select is not a text
-        # target. Raising here is what stops the Runtime from focusing it and
-        # typing the value into whatever is frontmost. No key, click, or focus
-        # is sent. The snapshot flag is not enough: Firefox reports
+        # A menu, heading, label, button, browser paragraph, or select is not
+        # a text target. Raising here is what stops the Runtime from focusing
+        # it and typing the value into whatever is frontmost. No key, click,
+        # or focus is sent. The snapshot flag is not enough: Firefox reports
         # STATE_EDITABLE and EditableText on static nodes, and selecting one
-        # selects the page. The live node has to be an editable entry.
+        # selects the page. The live node has to be an editable entry. An
+        # Impress or Draw paragraph with that state and EditableText is one.
         if not _accepts_text(element):
             raise _not_editable(element)
         if handle is None:
@@ -2583,9 +2585,25 @@ class LinuxDriver:
         self._refuse_hidden(element, handle)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
-        self._run(lambda: _atspi.grab_focus(handle))
-        if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
-            raise self._focus_lost_on(element)
+        if self._run(lambda: _atspi.drawing_text_editable(handle)):
+            # The paragraph often has no Component. Focus lands on it or on
+            # the shape panel, and EditableText inserts on the paragraph.
+            # A paragraph that was not already editing reports caret 0. Move
+            # it to the end, including after the grab, so the insert appends.
+            # A paragraph that already has focus keeps the caret the user set.
+            editing = self._run(lambda: _atspi._state_has(handle, "FOCUSED"))
+            if not editing:
+                self._run(lambda: _atspi.place_drawing_caret_at_end(handle))
+            if not self._run(lambda: _atspi.focus_drawing_text(handle)):
+                raise self._focus_lost_on(element)
+            if not editing:
+                self._run(
+                    lambda: _atspi.place_drawing_caret_at_end(handle, ignore_focus=True)
+                )
+        else:
+            self._run(lambda: _atspi.grab_focus(handle))
+            if not self._run(lambda: _atspi._confirm_focus_on_target(handle)):
+                raise self._focus_lost_on(element)
         self._focused_editable = handle
         peers: dict = {}
         try:

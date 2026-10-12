@@ -2392,6 +2392,11 @@ class _FakeAtspi:
             return True
 
         @staticmethod
+        def set_caret_offset(acc, offset):
+            acc.caret = int(offset)
+            return True
+
+        @staticmethod
         def add_selection(acc, start_offset, end_offset):
             acc.selection = (int(start_offset), int(end_offset))
             return True
@@ -7969,6 +7974,209 @@ def test_focused_editable_descends_to_the_impress_paragraph(fake_atspi, monkeypa
     frame.parent = chrome
     monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (frame, False))
     assert _atspi.focused_editable("chrome") is None
+
+
+class _Grab:
+    """Component.grab_focus sets FOCUSED on the node it was given."""
+
+    def __init__(self, node):
+        self.node = node
+
+    def grab_focus(self):
+        self.node.states.add("FOCUSED")
+        return True
+
+
+def _shape_paragraph(text, *, states, role="document frame", doc_name="Untitled 1 - LibreOffice Drawing",
+                     app_name="soffice.bin", iface=True, read_only=False):
+    """A shape panel and its paragraph under an Impress slide or a Draw page."""
+    app = _Acc("application", name=app_name)
+    doc = _Acc(role, name=doc_name, states=("SHOWING",))
+    doc.get_application = lambda: app
+    held = set(states)
+    if read_only:
+        held.add("READ_ONLY")
+    panel = _Acc("panel", name="EllipseB", states=("SHOWING",))
+    paragraph = _Acc("paragraph", name="", states=held)
+    paragraph.text = text
+    if iface:
+        def set_text_contents(value, _paragraph=paragraph):
+            _paragraph.text = value
+            return True
+
+        def insert_text(pos, value, length, _paragraph=paragraph):
+            body = value[:int(length)]
+            _paragraph.text = _paragraph.text[:int(pos)] + body + _paragraph.text[int(pos):]
+            return True
+
+        paragraph.set_text_contents = set_text_contents
+        paragraph.insert_text = insert_text
+        paragraph.get_editable_text_iface = lambda: paragraph
+    _adopt(panel, paragraph)
+    _adopt(doc, panel)
+    _adopt(app, doc)
+    return panel, paragraph
+
+
+def test_draw_shape_paragraph_is_an_edit_target_and_a_browser_paragraph_is_not(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A Draw or Impress paragraph with EDITABLE and EditableText is edit.
+
+    The role stays static text. set_value replaces through set_text_contents
+    and does not select. type(ref) inserts at the caret. A paragraph that
+    lacks the state or the interface is not edit. A Writer paragraph and a
+    Firefox paragraph stay refused, including when the snapshot flag was set.
+    The shape panel is not an entry.
+    """
+    from a11y_computer_use import observe
+
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((4.0, 8.0), (120.0, 24.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: getattr(acc, "text", None))
+    panel, paragraph = _shape_paragraph("ELLIPSE_B", states={"EDITABLE", "ENABLED", "SHOWING", "FOCUSABLE"})
+    accessor = _atspi.ATSPIAccessor()
+    accessor.libreoffice = True
+    raw = accessor.read(paragraph)
+    assert raw.role == "AXStaticText"
+    assert raw.editable is True
+    assert _atspi.drawing_paragraph_shown(paragraph) == "ELLIPSE_B"
+    assert _atspi.drawing_paragraph_shown(panel) is None
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="soffice.bin", pid=1, geometry=_geometry(),
+    )
+    assert snap.elements[0].editable is True
+    assert "edit" in observe.render_text(snap)
+    shape = accessor.read(panel)
+    assert shape.editable is False
+
+    _panel, quiet = _shape_paragraph("ELLIPSE_B", states={"ENABLED", "SHOWING"}, iface=True)
+    assert accessor.read(quiet).editable is False
+    _panel, no_iface = _shape_paragraph(
+        "ELLIPSE_B", states={"EDITABLE", "ENABLED"}, iface=False,
+    )
+    assert accessor.read(no_iface).editable is False
+    _panel, frozen = _shape_paragraph(
+        "ELLIPSE_B", states={"EDITABLE", "ENABLED"}, read_only=True,
+    )
+    assert accessor.read(frozen).editable is False
+
+    impress_panel, impress = _shape_paragraph(
+        "Alpha Slide Title", states={"EDITABLE", "ENABLED"},
+        role="document presentation", doc_name="Untitled 1 - LibreOffice Presentation",
+    )
+    del impress_panel
+    assert accessor.read(impress).editable is True
+
+    writer = _Acc("document text", name="notes", states=("SHOWING",))
+    writer_app = _Acc("application", name="soffice.bin")
+    writer.get_application = lambda: writer_app
+    writer_paragraph = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    writer_paragraph.text = "Beta"
+    writer_paragraph.get_editable_text_iface = lambda: writer_paragraph
+    _adopt(writer, writer_paragraph)
+    _adopt(writer_app, writer)
+    assert accessor.read(writer_paragraph).editable is False
+    assert _atspi.drawing_text_editable(writer_paragraph) is False
+
+    slides = _Acc("document frame", name="Slides View", states=("SHOWING",))
+    slides.get_application = lambda: writer_app
+    sorter = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    sorter.text = "slide"
+    sorter.get_editable_text_iface = lambda: sorter
+    _adopt(slides, sorter)
+    assert _atspi.drawing_text_editable(sorter) is False
+
+    browser = _Acc("application", name="Firefox")
+    page = _Acc("document web", name="page", states=("SHOWING",))
+    page.get_application = lambda: browser
+    gecko = _Acc("paragraph", name="", states={"EDITABLE", "SHOWING"})
+    gecko.text = "idle"
+    gecko.get_editable_text_iface = lambda: gecko
+    _adopt(page, gecko)
+    _adopt(browser, page)
+    plain = _atspi.ATSPIAccessor()
+    assert plain.read(gecko).editable is False
+    assert _atspi._blocks_text_replace(gecko) is True
+
+    deleted = {"n": 0}
+
+    def delete_text(*_args):
+        deleted["n"] += 1
+        raise AssertionError("select")
+
+    paragraph.delete_text = delete_text
+    assert _atspi.set_text(paragraph, "RECT_SET") is True
+    assert paragraph.text == "RECT_SET"
+    assert deleted["n"] == 0
+    paragraph.text = "stuck"
+
+    def set_stuck(_value):
+        return True
+
+    paragraph.set_text_contents = set_stuck
+    assert _atspi.set_text(paragraph, "NOPE") is False
+    assert paragraph.text == "stuck"
+    assert deleted["n"] == 0
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    box = Bounds(0, 8, 40, 120, 20)
+    element = Element(
+        "e26", "AXStaticText", "Paragraph: 0 ELLIPSE_B", "ELLIPSE_B", box, "snap-1",
+        editable=True,
+    )
+    paragraph.text = "ELLIPSE_B"
+    paragraph.set_text_contents = lambda value: (_set_paragraph(paragraph, value))
+    assert LinuxDriver().set_value(element, "SV_e26") is True
+    assert paragraph.text == "SV_e26"
+    refused = Element(
+        "e26", "AXStaticText", "Paragraph: 0 ELLIPSE_B", "ELLIPSE_B", box, "snap-1",
+    )
+    with pytest.raises(ComputerUseError) as missing_flag:
+        LinuxDriver().set_value(refused, "NO")
+    assert missing_flag.value.detail["reason"] == "not_editable"
+    assert paragraph.text == "SV_e26"
+
+    assert accessor.read(panel).editable is False
+
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: gecko)
+    wrongly = Element("e9", "AXStaticText", "", "idle", box, "snap-1", editable=True)
+    with pytest.raises(ComputerUseError) as gecko_exc:
+        LinuxDriver().set_value(wrongly, "nope")
+    assert gecko_exc.value.detail["reason"] == "not_editable"
+    assert gecko.text == "idle"
+
+    paragraph.component = _Grab(paragraph)
+    paragraph.text = "ELLIPSE_B"
+    # Draw reports offset 0 until the shape is in text edit. type(ref) appends.
+    paragraph.caret = 0
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: paragraph)
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    assert driver.type_into(element, "_T") == 2
+    assert paragraph.text == "ELLIPSE_B_T"
+    assert paragraph.caret == len("ELLIPSE_B")
+
+    paragraph.text = "ELLIPSE_B"
+    paragraph.caret = 0
+    paragraph.states.add("FOCUSED")
+    assert driver.type_into(element, "Q") == 1
+    assert paragraph.text == "QELLIPSE_B"
+    assert paragraph.caret == 0
+    paragraph.states.discard("FOCUSED")
+
+    bare = _shape_paragraph("ELLIPSE_B", states={"EDITABLE", "ENABLED", "SHOWING"})[1]
+    bare.component = None
+    parent = bare.parent
+    parent.component = _Grab(parent)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: bare)
+    assert driver.type_into(element, "Z") == 1
+    assert bare.text.endswith("Z")
+
+
+def _set_paragraph(paragraph, value):
+    paragraph.text = value
+    return True
 
 
 def test_drawing_type_confirms_multiline_paragraphs(fake_atspi, monkeypatch) -> None:

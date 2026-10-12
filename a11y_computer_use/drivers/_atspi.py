@@ -2036,6 +2036,20 @@ class ATSPIAccessor:
             for acc, pos, size in rows:
                 self._visible_bounds[id(acc)] = (pos, size)
 
+    def _drawing_paragraph(self, node: object, role_str: str, state_editable: bool) -> bool:
+        """True for an editable Impress or Draw paragraph in this snapshot.
+
+        Only a LibreOffice snapshot asks. A Firefox paragraph that reports
+        ``STATE_EDITABLE`` is not walked. Both the state and EditableText
+        are required, and the paragraph has to sit in a slide or a Draw page.
+        """
+        if not self.libreoffice or role_str not in {"paragraph", "heading"} or not state_editable:
+            return False
+        try:
+            return drawing_text_editable(node, role_str=role_str, state_editable=state_editable)
+        except Exception:
+            return False
+
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
@@ -2107,6 +2121,7 @@ class ATSPIAccessor:
             atspi_web=atspi_web_kind(role_str),
             editable=editable_entry(
                 node, role_str=role_str, attrs=attrs, state_editable=state_editable,
+                drawing=self._drawing_paragraph(node, role_str, state_editable),
             ),
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
@@ -5259,22 +5274,28 @@ def editable_entry(
     role_str: str | None = None,
     attrs: dict | None = None,
     state_editable: bool | None = None,
+    drawing: bool = False,
 ) -> bool:
     """True when this node itself is an editable text entry.
 
     Firefox reports ``STATE_EDITABLE``, and exposes EditableText, on
     document and static nodes. Those are not entries. A paragraph, panel,
     document, or combo/select is not an entry. A read-only node is not.
+    ``drawing`` is the one exception: an Impress or Draw paragraph that has
+    ``STATE_EDITABLE`` and EditableText. The snapshot sets that only for a
+    LibreOffice tree. A browser paragraph stays false.
 
     An entry, password, or text role is an entry when it has EditableText or
     ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
     whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
     Chromium often has no EditableText (#221). Firefox's own roleless
-    contenteditable has EditableText. A paragraph is not that section.
+    contenteditable has EditableText. A browser paragraph is not that section.
     """
     if acc is None:
         return False
     role = role_str if role_str is not None else _role_name(acc)
+    if role in {"paragraph", "heading"}:
+        return bool(drawing)
     if role in {"combo box", "combo-box"} or role in _STATIC_REPLACE_ROLES:
         return False
     if role in _ENTRY_ROLE_NAMES:
@@ -5307,12 +5328,15 @@ def editable_entry(
 def _blocks_text_replace(acc) -> bool:
     """True when ``set_text`` must not select or type into this node.
 
-    A role-less object is a synthetic field. A paragraph, panel, document,
-    or combo is blocked even when it exposes EditableText or
-    ``STATE_EDITABLE``. A contenteditable section and a real entry are not.
+    A role-less object is a synthetic field. A browser paragraph, panel,
+    document, or combo is blocked even when it exposes EditableText or
+    ``STATE_EDITABLE``. An Impress or Draw paragraph with both is not
+    blocked. A contenteditable section and a real entry are not.
     """
     role = _role_name(acc)
     if role == "":
+        return False
+    if role in {"paragraph", "heading"} and drawing_text_editable(acc, role_str=role):
         return False
     if role in _STATIC_REPLACE_ROLES:
         return True
@@ -7077,6 +7101,13 @@ def _drawing_document_of(acc):
         try:
             if _is_drawing_document(node):
                 return node
+            role = _role_name(node)
+            # A Writer document, a web page, or the application is not inside
+            # a slide. Stop here so a paragraph does not walk the rest of the app.
+            if role in _WRITER_DOCUMENT_ROLES or role in {
+                "document web", "document email", "application",
+            }:
+                return None
         except Exception:
             return None
         parent = _parent_of(node)
@@ -7173,6 +7204,24 @@ def _drawing_edit_paragraph(acc):
     return paragraphs[-1]
 
 
+def drawing_paragraph_shown(acc) -> str | None:
+    """Text of an Impress or Draw paragraph, or None for any other node.
+
+    The snapshot title includes that text, so a replace changes the title
+    and a later snapshot does not match the element that was written. This
+    is ``Text.get_text(0, -1)``, the same read the write already checked.
+    """
+    try:
+        if not is_drawing_text_paragraph(acc):
+            return None
+        shown = _full_text(acc)
+    except Exception:
+        return None
+    if not isinstance(shown, str):
+        return None
+    return shown
+
+
 def is_drawing_text_paragraph(acc) -> bool:
     """A paragraph inside an Impress slide or a Draw page."""
     if acc is None:
@@ -7183,6 +7232,110 @@ def is_drawing_text_paragraph(acc) -> bool:
     except Exception:
         return False
     return _drawing_document_of(acc) is not None
+
+
+def drawing_text_editable(
+    acc,
+    *,
+    role_str: str | None = None,
+    state_editable: bool | None = None,
+) -> bool:
+    """An Impress or Draw paragraph that ``set_value`` and ``type(ref)`` may write.
+
+    Both ``STATE_EDITABLE`` and EditableText are required. A read-only node
+    is not a target. A browser paragraph that reports those is not one: it
+    has to sit in a slide or a Draw page.
+    """
+    if acc is None:
+        return False
+    try:
+        role = role_str if role_str is not None else _role_name(acc)
+    except Exception:
+        return False
+    if role not in {"paragraph", "heading"}:
+        return False
+    if state_editable is None:
+        state_editable = _state_has(acc, "EDITABLE")
+    if not state_editable or _state_has(acc, "READ_ONLY"):
+        return False
+    if _editable_iface(acc) is None:
+        return False
+    return is_drawing_text_paragraph(acc)
+
+
+def _drawing_focus_frame(acc):
+    """The shape that can take focus for this paragraph, or None.
+
+    A shape or text-frame role wins. Draw publishes the shape as a panel
+    named for the shape, and that panel is the paragraph's parent.
+    """
+    frame = _shape_text_frame(acc)
+    if frame is not None and frame is not acc:
+        return frame
+    parent = _parent_of(acc)
+    if parent is None or parent is acc:
+        return None
+    try:
+        role = _role_name(parent)
+    except Exception:
+        return None
+    if role in _SHAPE_FRAME_ROLES or role == "panel":
+        return parent
+    return None
+
+
+def place_drawing_caret_at_end(acc, *, ignore_focus: bool = False) -> None:
+    """Move the caret to the end of a drawing paragraph that is not in text edit.
+
+    Draw reports offset 0 until the shape is editing, so an insert would land
+    in front of the existing words. A paragraph that already has focus keeps
+    its caret and its selection. ``ignore_focus`` is the retry after this
+    caller's own ``grab_focus``: the paragraph was not editing before that
+    grab. A missing text interface is left alone.
+    """
+    if acc is None:
+        return
+    if not ignore_focus and _state_has(acc, "FOCUSED"):
+        return
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return
+    text = _full_text(acc)
+    if not isinstance(text, str):
+        return
+    count = _safe(lambda: Atspi.Text.get_n_selections(acc))
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        return
+    _safe(lambda: Atspi.Text.set_caret_offset(acc, len(text)))
+
+
+def focus_drawing_text(acc) -> bool:
+    """Focus an editable drawing paragraph, or the shape that holds it.
+
+    The paragraph often has no Component. The shape panel does. True when
+    the paragraph or that frame reports focus. False when ``acc`` is not an
+    editable drawing paragraph, or focus never arrives. No key is sent.
+    """
+    if not drawing_text_editable(acc):
+        return False
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    grab_focus(acc)
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    frame = _drawing_focus_frame(acc)
+    if frame is None:
+        return False
+    grab_focus(frame)
+    seen = _focus_on_target(acc)
+    if seen is True or seen is None:
+        return True
+    if _confirm_focus_on_target(frame):
+        return True
+    return _focus_on_target(acc) is True
 
 
 def _drawing_frame_text(doc) -> tuple[str, str | None]:
@@ -10726,6 +10879,22 @@ def _replace_editable_text(acc, text: str) -> bool:
     return _shown_is(acc, text)
 
 
+def _replace_drawing_paragraph(acc, text: str) -> bool:
+    """Replace an Impress or Draw paragraph. No selection and no keys.
+
+    One ``set_text_contents``. Success is ``Text.get_text(0, -1)`` equaling
+    ``text``, the same read a snapshot uses, polled the way other
+    EditableText replaces are. A miss is false and the caller raises
+    ``text_mismatch``. Selecting the paragraph is not the fallback: that
+    select is what a browser paragraph must not do.
+    """
+    eti = _editable_iface(acc)
+    if eti is None:
+        return False
+    _call_first(eti, ("set_text_contents",), text, default=False)
+    return _confirm_text(acc, text)
+
+
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -10761,12 +10930,16 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     Success is the readable text, where one trailing newline is the ``<br>``.
     A Chrome date, time, or month segment is typed and checked against
     ``valuetext``. The Value interface is not that check.
-    A paragraph, panel, document, or combo is not replaced. Firefox exposes
-    EditableText on those nodes, and selecting one selects the page. This
-    returns false before any selection or key. ``force`` is the Writer
+    A browser paragraph, a panel, a document, or a combo is not replaced.
+    Firefox exposes EditableText on those nodes, and selecting one selects
+    the page. This returns false before any selection or key. An Impress
+    or Draw paragraph with ``STATE_EDITABLE`` and EditableText is replaced
+    with ``set_text_contents`` and no selection. ``force`` is the Writer
     table-cell path: one EditableText replace, with no selection and no
     keys. The cell writer polls until the new paragraph is the value.
     """
+    if drawing_text_editable(acc):
+        return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
         return False
     if force:
