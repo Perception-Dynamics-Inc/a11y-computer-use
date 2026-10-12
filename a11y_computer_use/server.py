@@ -1856,6 +1856,109 @@ def _same_app(owner: str, app: str) -> bool:
     return _comm_matches_identifier(app, owner) or _comm_matches_identifier(owner, app)
 
 
+def _path_is_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path)
+    except OSError:
+        return False
+
+
+def _path_is_dir(path: str) -> bool:
+    try:
+        return os.path.isdir(path)
+    except OSError:
+        return False
+
+
+def _drag_local_path(text: object) -> str | None:
+    """An absolute local path or ``file:`` URI, or None.
+
+    The filesystem root is not a folder a drop can target: a title of ``/``
+    would otherwise treat every short name as a child of the root.
+    """
+    import urllib.parse
+
+    raw = str(text or "").strip()
+    if not raw or any(ch in raw for ch in "\n\r\x00") or len(raw) > 4096:
+        return None
+    if raw.lower().startswith("file:"):
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.scheme.lower() != "file" or parsed.netloc not in {"", "localhost"}:
+            return None
+        raw = urllib.parse.unquote(parsed.path or "")
+        # file:///C:/dir is parsed as /C:/dir. Drop the extra slash.
+        if os.name == "nt" and len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":
+            raw = raw[1:]
+    if not os.path.isabs(raw):
+        return None
+    if os.path.dirname(raw) == raw:
+        return None
+    return raw
+
+
+def _drag_segment(text: object) -> str | None:
+    """A single path segment, such as a file or folder name."""
+    raw = str(text or "").strip()
+    if not raw or raw in {".", ".."} or "/" in raw or "\\" in raw or len(raw) > 255:
+        return None
+    return raw
+
+
+def _drag_source_name(start: object | None) -> str | None:
+    if start is None:
+        return None
+    for text in (getattr(start, "title", ""), getattr(start, "value", "") or ""):
+        path = _drag_local_path(text)
+        if path is not None:
+            name = os.path.basename(path.rstrip("/"))
+            if name not in {"", ".", ".."}:
+                return name
+    return _drag_segment(getattr(start, "title", "")) or _drag_segment(getattr(start, "value", "") or "")
+
+
+def _drag_directories(snap: object | None) -> list[str]:
+    found: list[str] = []
+    if snap is None:
+        return found
+    for el in getattr(snap, "elements", ()) or ():
+        for text in (getattr(el, "title", ""), getattr(el, "value", "") or ""):
+            path = _drag_local_path(text)
+            if path is not None and path not in found and _path_is_dir(path):
+                found.append(path)
+    return found
+
+
+def _drag_target_folder(snap: object | None, end: object | None) -> str | None:
+    """The directory the drop is aimed at, when the tree names one."""
+    if end is None:
+        return None
+    for text in (getattr(end, "title", ""), getattr(end, "value", "") or ""):
+        path = _drag_local_path(text)
+        if path is not None and _path_is_dir(path):
+            return path
+    name = _drag_segment(getattr(end, "title", "")) or _drag_segment(getattr(end, "value", "") or "")
+    if name is None:
+        return None
+    for parent in _drag_directories(snap):
+        child = os.path.join(parent, name)
+        if _path_is_dir(child):
+            return child
+    return None
+
+
+def _drag_dest_file(snap: object | None, start: object | None, end: object | None) -> str | None:
+    """``folder/filename`` when both ends resolve, else None.
+
+    The file is not required to exist yet. The caller records that and
+    checks again after the stroke.
+    """
+    folder = _drag_target_folder(snap, end)
+    name = _drag_source_name(start)
+    if folder is None or name is None:
+        return None
+    return os.path.join(folder, name)
+
+
 # ---------------------------------------------------------------------------
 # Runtime: the transport-free execution core
 # ---------------------------------------------------------------------------
@@ -2420,6 +2523,9 @@ class Runtime:
     # How long to watch a live Linux pid after an action. A click handler that
     # quits on the next main-loop turn is still alive when the call returns.
     _PROCESS_SETTLE_S = 0.3
+    # A file drop can land on the next main-loop turn. Only a drag that
+    # resolved a target folder waits, and only until the file appears.
+    _DRAG_DROP_SETTLE_S = 0.4
 
     def _freeze(self, snap: "Snapshot") -> dict:
         """Fingerprints of ``snap``, taken now so a later in-place edit cannot move them."""
@@ -5099,6 +5205,13 @@ class Runtime:
             self._guard_user(start_app)
             self.driver.drag(start, end, path=waypoints)
 
+        before = self._capture(start_app)
+        before_snap = before.get("snap") if isinstance(before, dict) else None
+        start_el = start if isinstance(start, Element) else outcome.element_at_point(before_snap, start)
+        end_el = end if isinstance(end, Element) else outcome.element_at_point(before_snap, end)
+        dest = _drag_dest_file(before_snap, start_el, end_el)
+        existed = _path_is_file(dest) if dest is not None else None
+
         self._run_gated(
             action,
             start_app,
@@ -5107,8 +5220,37 @@ class Runtime:
                 gated, *items
             ),
         )
+        scope = getattr(before_snap, "scope", None) or Scope.WINDOW
+        after = self._reread(start_app, scope)
+        file_landed = None
+        if dest is not None and existed is not None:
+            file_landed = self._drag_file_landed(dest, existed)
+        verdict = outcome.drag_drop_verdict(
+            before_snap, after, start_el, end_el, file_landed=file_landed,
+        )
         via = f" via {len(waypoints)} waypoints" if waypoints else ""
-        return f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
+        text = f"dragged {self._label(start_ref, start)} -> {self._label(end_ref, end)}{via}"
+        if verdict[0] != "confirmed":
+            text += "; drop not confirmed"
+        return self._conclude(
+            text, tool="drag", app=start_app, before=before,
+            element=start_el if isinstance(start_el, Element) else None,
+            had_ref=start_ref is not None or end_ref is not None,
+            verdict=verdict,
+        )
+
+    def _drag_file_landed(self, dest: str, existed: bool) -> bool:
+        """True when ``dest`` is a file now and was not before the drag."""
+        if existed:
+            return False
+        if _path_is_file(dest):
+            return True
+        deadline = time.monotonic() + max(0.0, float(self._DRAG_DROP_SETTLE_S))
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            if _path_is_file(dest):
+                return True
+        return False
 
     def _drag_path(self, path: list | None, start: Target, display_id: int | None) -> tuple[Point, ...]:
         """Turn ``[[x, y], ...]`` into display-qualified waypoints on the start's display.
@@ -8026,7 +8168,7 @@ def build_server(
         end_y: int | None = None,
         display_id: int | None = None,
         path: list[list[int]] | None = None,
-    ) -> str:
+    ) -> CallToolResult:
         """Press at the start target, move, and release at the end target.
         Each target is an element ref from the latest snapshot or an x/y
         point in physical pixels. Every coordinate, including each `path`
@@ -8035,9 +8177,18 @@ def build_server(
         input. An unknown display_id is invalid_arguments and names the valid
         ids. `path` waypoints share the start's display. The pointer passes
         through them with the button held: one call paints a whole curve on a
-        canvas or draws a lasso. Gated at tier 'click' against the app under
-        the start target."""
-        return await run(runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y, display_id, path)
+        canvas or draws a lasso. On Linux the stroke pauses once it has
+        passed the GTK drag threshold and rests on the target before
+        release, so a short drag can drop. The result is confirmed when the
+        dragged item changes order or moves relative to the target, or when
+        the file is in the target folder afterwards. Otherwise the text says
+        the drop was not confirmed. A selection change is not a drop. Gated
+        at tier 'click' against the app under the start target. Structured
+        content adds outcome, next, and evidence."""
+        return _publish(await run(
+            runtime.drag, start_ref, start_x, start_y, end_ref, end_x, end_y,
+            display_id, path, _outcome=True, _tool="drag",
+        ))
 
     @server.tool(name="wait_for")
     async def wait_for(ref: str, condition: str = "exists", timeout_s: float = 10.0) -> str:

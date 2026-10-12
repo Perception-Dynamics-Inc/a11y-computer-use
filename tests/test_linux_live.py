@@ -3648,6 +3648,59 @@ def test_linux_caps_lock_does_not_invert_keystroke_typing(tmp_path) -> None:
         _stop(proc)
 
 
+_DND_APP = "cuadndapp"
+
+_GTK_DND_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+    GLib.set_prgname("cuadndapp")
+    Gdk.set_program_class("cuadndapp")
+    win = Gtk.Window(title="cuadndapp")
+    win.set_name("cuadndapp")
+    win.move(80, 80)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+    probe = Gtk.Label(label="order:notes,readme.txt")
+    probe.set_name("order")
+    store = Gtk.ListStore(str)
+    for name in ("notes", "readme.txt"):
+        store.append([name])
+
+    def publish(*_args):
+        names = []
+        iterator = store.get_iter_first()
+        while iterator is not None:
+            names.append(store.get_value(iterator, 0))
+            iterator = store.iter_next(iterator)
+        probe.set_text("order:" + ",".join(names))
+
+    store.connect("row-deleted", publish)
+    store.connect("row-inserted", publish)
+    store.connect("rows-reordered", publish)
+    tree = Gtk.TreeView(model=store)
+    tree.set_reorderable(True)
+    tree.set_headers_visible(False)
+    tree.get_accessible().set_name("files")
+    renderer = Gtk.CellRendererText()
+    renderer.set_fixed_size(-1, 18)
+    renderer.set_padding(4, 4)
+    column = Gtk.TreeViewColumn("name", renderer, text=0)
+    tree.append_column(column)
+    box.pack_start(probe, False, False, 0)
+    box.pack_start(tree, True, True, 0)
+    win.add(box)
+    win.set_default_size(280, 120)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.set_keep_above(True)
+    win.present()
+    Gtk.main()
+    """
+)
+
+
 def _require_ewmh() -> None:
     """Skip unless an EWMH window manager owns this display.
 
@@ -3673,6 +3726,95 @@ def _require_ewmh() -> None:
                 display.close()
             except Exception:
                 pass
+
+
+def test_short_gtk_drag_drops_onto_the_row_above(tmp_path) -> None:
+    """A one-row drag must pass GTK's threshold and actually reorder.
+
+    The probe changes only when the list model reorders. Selecting the row
+    leaves ``order:notes,readme.txt`` in place, and the tool must not report
+    a drop it cannot see in that order.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    _require_ewmh()
+    if _pointer_xy() is None:
+        pytest.skip("no X pointer (python-xlib or DISPLAY unavailable)")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuadndapp.py"
+    script.write_text(_GTK_DND_APP)
+    err_path = tmp_path / "dnd.err"
+    err_file = err_path.open("w")
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=err_file,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            try:
+                shot = driver.snapshot(Scope.WINDOW, _DND_APP)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                titles = {el.title for el in shot.elements}
+                if {"notes", "readme.txt"} <= titles and any(
+                    str(el.title or "").startswith("order:") for el in shot.elements
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.25)
+        assert snap is not None, (
+            f"dnd window did not appear (exit {proc.poll()}): {err_path.read_text()[-500:]}"
+        )
+        for row in driver.windows() or []:
+            if row.get("title") == _DND_APP or row.get("wm_class") == _DND_APP:
+                driver.raise_window(row["window_id"])
+                break
+        time.sleep(0.4)
+        snap = driver.snapshot(Scope.WINDOW, _DND_APP)
+
+        def _cell(title: str):
+            hits = [
+                el for el in snap.elements
+                if (el.title == title or el.value == title) and el.role != "AXWindow"
+            ]
+            assert hits, [(el.role, el.title, el.value, el.bounds) for el in snap.elements]
+            return min(hits, key=lambda el: el.bounds.width * el.bounds.height)
+
+        source, target = _cell("readme.txt"), _cell("notes")
+        gap = abs(source.bounds.center.y - target.bounds.center.y)
+        assert 9 <= gap <= 80, (gap, source.bounds, target.bounds)
+        runtime = _runtime_for(tmp_path, driver, _DND_APP, "python3")
+        runtime.desktop_snapshot(_DND_APP)
+        snap = runtime._current
+        assert snap is not None
+        source, target = _cell("readme.txt"), _cell("notes")
+        result = runtime.drag(start_ref=source.ref, end_ref=target.ref)
+        seen = ""
+        fresh = snap
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            fresh = driver.snapshot(Scope.WINDOW, _DND_APP)
+            seen = " ".join(
+                str(el.title or "") for el in fresh.elements if str(el.title or "").startswith("order:")
+            )
+            if "order:readme.txt,notes" in seen:
+                break
+            time.sleep(0.1)
+        assert "order:readme.txt,notes" in seen, (
+            seen, result, [(el.role, el.title) for el in fresh.elements]
+        )
+        assert result.outcome == "confirmed", (result.outcome, result.evidence, result)
+        assert "drop not confirmed" not in str(result)
+    finally:
+        err_file.close()
+        _stop(proc)
 
 
 def _key_target_source(name: str, initial: str) -> str:

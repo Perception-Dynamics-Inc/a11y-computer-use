@@ -335,7 +335,11 @@ def test_drag_and_scroll_accept_o_refs(tmp_path, monkeypatch) -> None:
     driver = FakeDriver()
     rt = make_runtime(tmp_path, driver=driver)
     rt.screen_text()
-    assert rt.drag(start_ref="o1", end_ref="o3") == "dragged o1 (text 'Telegram') -> o3 (text 'Write a message...')"
+    out = rt.drag(start_ref="o1", end_ref="o3")
+    assert out == (
+        "dragged o1 (text 'Telegram') -> o3 (text 'Write a message...'); drop not confirmed"
+    )
+    assert out.outcome == "suspected_noop"
     start, end = driver.calls["drag"][0]
     assert isinstance(start, Point) and isinstance(end, Point)
     assert rt.scroll(ref="o2", dy=3).startswith("scrolled o2 (text 'Saved Messages') by")

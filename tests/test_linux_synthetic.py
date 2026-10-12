@@ -1922,6 +1922,8 @@ def test_click_button_and_count(xtest_recorder) -> None:
 
 def test_drag_moves_absolutely_at_both_endpoints(xtest_recorder, monkeypatch) -> None:
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_HOVER_S", 0)
     events, display = xtest_recorder
     _linux_input.drag(10, 20, 300, 400)
     assert events[:2] == [(_X_MOTION, 0, 10, 20), (_X_BPRESS, 1, 0, 0)]
@@ -1937,6 +1939,8 @@ def test_drag_walks_through_every_waypoint_in_order(xtest_recorder, monkeypatch)
     """A freehand-brush stroke: the waypoints must all be visited, in order,
     with the button held, so a canvas draws the curve rather than a chord."""
     monkeypatch.setattr(_linux_input, "DRAG_PACE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_THRESHOLD_PAUSE_S", 0)
+    monkeypatch.setattr(_linux_input, "DRAG_HOVER_S", 0)
     events, _display = xtest_recorder
     path = [(60, 20), (60, 80), (10, 80)]
     _linux_input.drag(10, 20, 10, 20, path=path)
@@ -1951,6 +1955,51 @@ def test_hops_end_exactly_on_the_target() -> None:
     assert _linux_input._hops(0, 0, 0, 0) == [(0, 0)]
     hops = _linux_input._hops(0, 0, 100, 0)
     assert hops[-1] == (100, 0) and len(hops) == 13
+
+
+def test_drag_pauses_past_the_gtk_threshold_then_hovers(xtest_recorder, monkeypatch) -> None:
+    """A short stroke still walks in small hops. GTK needs a pause once the
+    pointer is past the threshold, and a rest on the target before release."""
+    import time
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+    events, _display = xtest_recorder
+    _linux_input.drag(0, 0, 0, 28)
+    assert events[0] == (_X_MOTION, 0, 0, 0)
+    assert events[1] == (_X_BPRESS, 1, 0, 0)
+    assert events[-2:] == [(_X_MOTION, 0, 0, 28), (_X_BRELEASE, 1, 0, 0)]
+    motions = [(x, y) for kind, _d, x, y in events[2:-1]]
+    hops = [abs(by - ay) for (_ax, ay), (_bx, by) in zip([(0, 0), *motions], motions)]
+    assert hops and max(hops) <= _linux_input.DRAG_STEP_PX + 1
+    # 28px is four hops: 7 (still under the threshold), 14 (past it), 21, 28.
+    assert sleeps == [
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_THRESHOLD_PAUSE_S,
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_HOVER_S,
+    ]
+    sleeps.clear()
+    _linux_input.drag(0, 0, 0, 9)
+    assert sleeps == [
+        _linux_input.DRAG_PACE_S,
+        _linux_input.DRAG_THRESHOLD_PAUSE_S,
+        _linux_input.DRAG_HOVER_S,
+    ]
+
+
+def test_drag_below_the_gtk_threshold_does_not_pause(xtest_recorder, monkeypatch) -> None:
+    """A slider nudge that never clears the threshold keeps the old short pace."""
+    import time
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, "sleep", lambda seconds: sleeps.append(seconds))
+    events, _display = xtest_recorder
+    _linux_input.drag(0, 0, 0, 8)
+    assert events[-2:] == [(_X_MOTION, 0, 0, 8), (_X_BRELEASE, 1, 0, 0)]
+    assert sleeps == [_linux_input.DRAG_PACE_S]
+    assert _linux_input.DRAG_THRESHOLD_PAUSE_S not in sleeps
+    assert _linux_input.DRAG_HOVER_S not in sleeps
 
 
 def test_scroll_positions_before_wheel_notches(xtest_recorder) -> None:
