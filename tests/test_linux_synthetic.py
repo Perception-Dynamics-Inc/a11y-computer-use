@@ -1251,6 +1251,77 @@ def test_editable_section_is_shown_as_an_editable_group(fake_atspi, monkeypatch)
     assert _atspi.ATSPIAccessor().read(gecko).editable is True
 
 
+def test_gecko_contenteditable_section_is_a_text_role(fake_atspi, monkeypatch) -> None:
+    """A Firefox contenteditable section with a text interface is a text role.
+
+    MULTI_LINE, or a multiline attribute, is a textarea. A single-line editor
+    is a text field. A section without EDITABLE, or without a text interface,
+    stays a group. Chromium's section stays a group. Not a live Firefox.
+    """
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((10.0, 20.0), (240.0, 48.0)))
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+
+    def read(node: _Section):
+        return _atspi.ATSPIAccessor().read(node)
+
+    def gecko(name: str, text: str, states: set[str], *, iface: bool = True, tag: str = "div"):
+        node = _Section(name, text, states)
+        node.attrs["tag"] = tag
+        node.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+        if iface:
+            node.get_editable_text_iface = lambda: object()
+        return node
+
+    multi = gecko("Notes box", "editable block", {"EDITABLE", "MULTI_LINE", "ENABLED", "FOCUSABLE"})
+    raw = read(multi)
+    assert raw.role == "AXTextArea"
+    assert raw.editable is True
+    assert raw.value == "editable block"
+    snap = build_snapshot(
+        (raw, []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textarea "Notes box" ="editable block"' in observe.render_text(snap)
+
+    single = gecko("Plain", "one line", {"EDITABLE", "ENABLED", "FOCUSABLE"})
+    assert read(single).role == "AXTextField"
+    single_snap = build_snapshot(
+        (read(single), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Plain"' in observe.render_text(single_snap)
+
+    by_attr = gecko("Rich", "rich old", {"EDITABLE", "ENABLED"})
+    by_attr.attrs["aria-multiline"] = "true"
+    assert read(by_attr).role == "AXTextArea"
+    by_bool = gecko("Rich", "rich old", {"EDITABLE", "ENABLED"})
+    by_bool.attrs["multiline"] = True
+    assert read(by_bool).role == "AXTextArea"
+    off = gecko("Plain", "one line", {"EDITABLE", "ENABLED"})
+    off.attrs["multiline"] = "false"
+    off.attrs["aria-multiline"] = False
+    assert read(off).role == "AXTextField"
+
+    quiet = gecko("Quiet", "static words", {"ENABLED"})
+    assert read(quiet).role == "AXGroup"
+    assert read(quiet).editable is False
+
+    no_iface = _Section("Bare", "words", {"EDITABLE", "MULTI_LINE", "ENABLED"})
+    no_iface.get_application = lambda: _toolkit_app("Gecko", "Firefox")
+    del no_iface.text
+    assert read(no_iface).role == "AXGroup"
+
+    chrome = _Section("Notes box", "old note", {"EDITABLE", "MULTI_LINE", "ENABLED", "FOCUSABLE"})
+    chrome.get_application = lambda: _toolkit_app("Chromium", "Google Chrome")
+    chrome.get_editable_text_iface = lambda: object()
+    assert read(chrome).role == "AXGroup"
+    assert read(chrome).editable is True
+
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: 0.0)
+    numbered = read(multi)
+    assert numbered.role == "AXTextArea"
+    assert numbered.value == "editable block"
+
+
 def test_roleless_contenteditable_set_text_clears_then_types(fake_atspi, monkeypatch) -> None:
     """Fake Chrome section. No EditableText. The #165 clear runs, then the keys.
 
@@ -4630,6 +4701,185 @@ def test_gecko_contenteditable_set_value_accepts_a_nbsp_read_back(fake_atspi, mo
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
     assert _atspi.set_text(field, "Set 0") is True
     assert field.text.replace("\u00a0", " ") == "Set 0"
+
+
+class _GeckoEditableSection:
+    """A Firefox ``<div contenteditable>``: AT-SPI section, not an entry.
+
+    EditableText returns true and does not change the DOM unless a test
+    says it does. Not a live browser.
+    """
+
+    def __init__(self, text: str = "editable block"):
+        self.text = text
+        self.states = {"EDITABLE", "ENABLED", "FOCUSABLE", "MULTI_LINE"}
+        self.attrs = {"tag": "div"}
+        self.focused = False
+        self.writes: list[str] = []
+        self.deletes = 0
+        self.selected_all = False
+        self._land = False
+
+    def get_role_name(self):
+        return "section"
+
+    def get_name(self):
+        return ""
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        names = set(self.states)
+        if self.focused:
+            names.add("FOCUSED")
+        return _States(names)
+
+    def get_attributes(self):
+        return dict(self.attrs)
+
+    def get_application(self):
+        return _toolkit_app("Gecko", "Firefox")
+
+    def get_editable_text_iface(self):
+        return self
+
+    def set_text_contents(self, text):
+        self.writes.append(text)
+        if self._land:
+            self.text = text
+        return True
+
+    def delete_text(self, _start, _end):
+        self.deletes += 1
+        return True
+
+    def get_component_iface(self):
+        return self
+
+    def grab_focus(self):
+        self.focused = True
+        return True
+
+    def get_child_count(self):
+        return 0
+
+
+def test_gecko_contenteditable_set_value_types_only_after_focus(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. Keys run only after focus is confirmed.
+
+    EditableText does not change the DOM. The read-back accepts one trailing
+    newline. Text selection is not used. Not a live browser.
+    """
+    field = _GeckoEditableSection("editable block")
+    sent: list[str] = []
+    selected: list = []
+
+    def press_chord(chord: str) -> None:
+        assert field.focused
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and field.selected_all:
+            field.text = "\n"
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        assert field.focused
+        # One character is one batch once focus can be read. A trailing
+        # newline is the empty paragraph, added once the request is complete.
+        if field.text in ("", "\n"):
+            field.text = text
+        else:
+            field.text = field.text.rstrip("\n") + text
+        if field.text == "CE_VAL_1":
+            field.text += "\n"
+
+    monkeypatch.setattr(
+        fake_atspi.Text, "set_selection", lambda *args: selected.append(args) or True,
+    )
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "CE_VAL_1") is True
+    assert field.text.replace("\n", "") == "CE_VAL_1"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
+    assert field.writes == ["CE_VAL_1"]
+    assert selected == []
+    assert field.deletes == 0
+
+    field._land = True
+    field.text = "editable block"
+    field.focused = False
+    sent.clear()
+    assert _atspi.set_text(field, "CE_VAL_2") is True
+    assert field.text == "CE_VAL_2"
+    assert sent == []
+
+
+def test_gecko_contenteditable_set_value_types_nothing_without_focus(fake_atspi, monkeypatch) -> None:
+    """Fake Firefox contenteditable. Unconfirmed focus sends no keys.
+
+    Not a live browser. The DOM stays on the original text.
+    """
+    field = _GeckoEditableSection("editable block")
+    field.grab_focus = lambda: True
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: sent.append(chord))
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: sent.append(text))
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: field)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_text(field, "CE_VAL")
+    assert exc.value.code is ErrorCode.FOCUS_LOST
+    assert exc.value.detail["reason"] == "focus_lost"
+    assert sent == []
+    assert field.text == "editable block"
+
+    box = Bounds(0, 8, 8, 200, 40)
+    element = Element(
+        "e40", "AXTextArea", "", "editable block", box, "snap-1", editable=True,
+    )
+    with pytest.raises(ComputerUseError) as driver_exc:
+        LinuxDriver().set_value(element, "CE_VAL")
+    assert driver_exc.value.code is ErrorCode.FOCUS_LOST
+    assert sent == []
+    assert field.text == "editable block"
+
+
+def test_gecko_contenteditable_set_value_restores_when_focused_keys_miss(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Fake Firefox contenteditable. A missed read-back types the original back.
+
+    Focus is confirmed, so the keys are the fallback. Not a live browser.
+    """
+    field = _GeckoEditableSection("editable block")
+    sent: list[str] = []
+    field.chunks: list[str] = []
+
+    def press_chord(chord: str) -> None:
+        sent.append(chord)
+        if chord == "ctrl+a":
+            field.selected_all = True
+        elif chord == "backspace" and field.selected_all:
+            field.text = "\n"
+            field.chunks.clear()
+            field.selected_all = False
+
+    def type_string(text: str) -> None:
+        # One character is one batch. The replacement reads back wrong.
+        # The original is typed back one character at a time after the clear.
+        field.chunks.append(text)
+        joined = "".join(field.chunks)
+        field.text = "WRONG" if joined.startswith("C") else joined
+
+    monkeypatch.setattr(_linux_input, "press_chord", press_chord)
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+    assert _atspi.set_text(field, "CE_VAL") is False
+    assert field.text == "editable block"
+    assert sent[:3] == ["ctrl+a", "backspace", "delete"]
 
 
 def test_driver_set_value_replaces_on_a_web_field_and_on_a_text_area(fake_atspi, monkeypatch) -> None:

@@ -8914,7 +8914,12 @@ def build_server(
         marks it edit, and set_value replaces that paragraph through
         EditableText and reads the text back. No select-all is sent. A
         browser paragraph stays refused. A select is still set as a combo. A Chrome or
-        Firefox contenteditable section stays editable. A combo or
+        Firefox contenteditable section stays editable. A Firefox contenteditable
+        with STATE_EDITABLE and a text interface is a text field, or a textarea
+        when it is multi-line. set_value on that control succeeds only when the
+        read-back matches. If EditableText does not stick, focus is confirmed
+        and the same key path type(ref) uses types the value; unconfirmed focus
+        types nothing. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
         them. A spin button, slider, or other Value control is set through that
