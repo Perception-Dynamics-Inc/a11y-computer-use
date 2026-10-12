@@ -6191,6 +6191,12 @@ class Runtime:
             stall_deadline = started + budget_s
             hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
             page_mode = True
+            # A document table that began below the window has reached the
+            # end once its box sits inside the window. Page Down is for a
+            # table that fit from the start. Using it after the document
+            # scroll spends another pair of snapshots and misses the short
+            # page's time bound.
+            document_ran_past = False
             find_tried = False
             frame_latched = False
             frame_waits = 0
@@ -6275,6 +6281,15 @@ class Runtime:
                 if now >= stall_deadline:
                     return budget_s
                 return None
+
+            def table_runs_past(shot: Snapshot, anchor: Element | None) -> bool:
+                """True when a table's box still extends below the window."""
+                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                return anchor.bounds.y + anchor.bounds.height > box[3] + 8
 
             def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
                 """A paginated or virtualized table that already fits the window.
@@ -6520,6 +6535,8 @@ class Runtime:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
+                if table_runs_past(snap, last_anchor):
+                    document_ran_past = True
                 note_progress(snap, last_anchor)
                 cap = expired_cap()
                 if cap is not None and (issued > 0 or budget_s <= 0):
@@ -6660,6 +6677,14 @@ class Runtime:
                 cap = expired_cap()
                 if cap is not None:
                     return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
+                if (
+                    document_ran_past
+                    and issued > 0
+                    and last_anchor is not None
+                    and last_anchor.role in ("AXTable", "AXGrid", "AXOutline")
+                    and not table_runs_past(snap, last_anchor)
+                ):
+                    return unfinished(issued, snap, last_anchor, budget_hit=False)
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
