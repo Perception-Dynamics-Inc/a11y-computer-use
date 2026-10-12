@@ -11829,19 +11829,24 @@ def test_linux_chrome_dom_form_merges_when_the_port_is_opt_in(tmp_path) -> None:
             name.bounds.x, name.bounds.y, name.bounds.width, name.bounds.height,
         )
         assert driver.set_value(name, "Grace") is True
+        window_title = next((el.title for el in snap.elements if el.role == "AXWindow" and el.title), "")
         written = _cdp_forms._evaluate(
-            port, "",
-            "document.getElementById('name').__a11yCuDom === 1"
-            " && document.getElementById('name').value === 'Grace'",
+            port, window_title,
+            "(() => { const el = document.getElementById('name');"
+            " if (!el) return 'missing';"
+            " return {mark: el.getAttribute('data-a11y-cu-dom'), value: el.value}; })()",
         )
-        assert written is True
+        assert written == {"mark": "1", "value": "Grace"}, (
+            written, name.role, name.enabled, name.instance_id, port,
+        )
         with pytest.raises(ValueError, match="Kazakhstan"):
             driver.set_value(country, "Mars")
         untouched = _cdp_forms._evaluate(
-            port, "",
-            "document.getElementById('country').__a11yCuDom === 1",
+            port, window_title,
+            "(() => { const el = document.getElementById('country');"
+            " return el ? el.getAttribute('data-a11y-cu-dom') : 'missing'; })()",
         )
-        assert untouched is not True
+        assert untouched != "1"
         assert driver.set_value(country, "Peru") is True
         with pytest.raises(ValueError, match="not a number"):
             driver.set_value(seats, "abc")

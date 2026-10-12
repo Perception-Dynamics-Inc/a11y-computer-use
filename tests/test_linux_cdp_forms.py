@@ -82,6 +82,13 @@ def test_debug_port_requires_the_flag_and_rejects_bad_types(tmp_path) -> None:
         f"--user-data-dir={folder}\x00--remote-debugging-port=0\x00"
     ).encode()
     assert _cdp_forms.debug_port_from_cmdline(repeated) == 9334
+    child = b"chrome\x00--type=renderer\x00"
+    browser = b"chrome\x00--remote-debugging-port=9333\x00"
+    assert _cdp_forms.port_from_process_chain((child, browser)) == 9333
+    assert _cdp_forms.port_from_process_chain((browser, child)) == 9333
+    assert _cdp_forms.port_from_process_chain((child,)) is None
+    with pytest.raises(TypeError):
+        _cdp_forms.port_from_process_chain([child])
     with pytest.raises(TypeError):
         _cdp_forms.port_for_pid(True)
     with pytest.raises(ValueError):

@@ -199,7 +199,10 @@ _WRITE_JS = r"""
     el.dispatchEvent(new Event('input', {bubbles: true}));
     el.dispatchEvent(new Event('change', {bubbles: true}));
   };
-  const mark = () => { el.__a11yCuDom = 1; };
+  const mark = () => {
+    el.__a11yCuDom = 1;
+    el.setAttribute('data-a11y-cu-dom', '1');
+  };
   if (spec.action === 'toggle') {
     if (kind === 'radio') el.checked = true;
     else el.checked = !el.checked;
@@ -323,18 +326,77 @@ def debug_port_from_cmdline(raw: object) -> int | None:
     return _port_file(folder)
 
 
+def port_from_process_chain(cmdlines: object) -> int | None:
+    """The first cmdline that opted in, process first and ancestors after.
+
+    A renderer or zygote often has no ``--remote-debugging-port``. The
+    browser process that started it does. An ancestor is not a guess when
+    the process itself has no flag.
+    """
+    if isinstance(cmdlines, (bytes, bytearray)) or not isinstance(cmdlines, tuple):
+        raise TypeError("cmdlines must be a tuple of bytes")
+    for raw in cmdlines:
+        if not isinstance(raw, (bytes, bytearray)):
+            raise TypeError("cmdlines must be a tuple of bytes")
+        port = debug_port_from_cmdline(raw)
+        if port is not None:
+            return port
+    return None
+
+
 def port_for_pid(pid: object) -> int | None:
-    """DevTools port of process ``pid``, or None when it did not opt in."""
+    """DevTools port of process ``pid``, or of an ancestor, or None.
+
+    None means this process was not started with the flag and neither was
+    an ancestor. A missing flag is not a default port.
+    """
     if isinstance(pid, bool) or not isinstance(pid, int):
         raise TypeError("pid must be a positive int")
     if pid <= 0:
         raise ValueError("pid must be a positive int")
+    return port_from_process_chain(_cmdline_chain(pid))
+
+
+def _cmdline_chain(pid: int) -> tuple[bytes, ...]:
+    found: list[bytes] = []
+    current = pid
+    seen: set[int] = set()
+    for _ in range(16):
+        if current in seen or current <= 1:
+            break
+        seen.add(current)
+        raw = _read_cmdline(current)
+        if raw is not None:
+            found.append(raw)
+        parent = _parent_pid(current)
+        if parent is None:
+            break
+        current = parent
+    return tuple(found)
+
+
+def _read_cmdline(pid: int) -> bytes | None:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as handle:
-            raw = handle.read()
+            return handle.read()
     except OSError:
         return None
-    return debug_port_from_cmdline(raw)
+
+
+def _parent_pid(pid: int) -> int | None:
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.startswith("PPid:"):
+                    continue
+                text = line.split(":", 1)[1].strip()
+                if text.isdigit():
+                    parent = int(text)
+                    return parent if parent > 1 else None
+                return None
+    except OSError:
+        return None
+    return None
 
 
 def pid_from_instance(instance_id: object) -> int | None:
