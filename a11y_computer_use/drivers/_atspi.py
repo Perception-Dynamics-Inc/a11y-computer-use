@@ -1653,6 +1653,91 @@ def _aria_spin_value(acc) -> str | None:
     return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
 
 
+def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
+    """Whether ``rect`` intersects ``box``, or None when the rect is unreadable.
+
+    A zero-size glyph is off the widget. Coordinates are the same space as
+    ``box`` (screen pixels).
+    """
+    if rect is None:
+        return None
+    try:
+        x = float(getattr(rect, "x"))
+        y = float(getattr(rect, "y"))
+        width = float(getattr(rect, "width"))
+        height = float(getattr(rect, "height"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if width <= 0 or height <= 0:
+        return False
+    left, top, box_w, box_h = box
+    return y < top + box_h and y + height > top and x < left + box_w and x + width > left
+
+
+def _terminal_on_screen(acc, full: str) -> str:
+    """The on-screen slice of a VTE buffer.
+
+    ``Text.get_text`` is the scrollback plus the screen on some builds and
+    only the screen on others. Characters above the widget are omitted and
+    a leading ellipsis marks that cut. When a character cannot be placed,
+    the whole buffer is returned and the snapshot cap keeps its tail.
+    """
+    text = full
+    count = len(text)
+    if count <= 1:
+        return text
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return text
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+
+    def on_screen(offset: int) -> bool | None:
+        rect = _safe(lambda index=offset: Atspi.Text.get_character_extents(acc, index, coord))
+        return _rect_hits_box(rect, box)
+
+    first = on_screen(0)
+    last = on_screen(count - 1)
+    if first is None or last is None:
+        return text
+    start = 0
+    end = count
+    if not first:
+        if not last:
+            return text
+        lo, hi = 0, count - 1
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                hi = mid
+            else:
+                lo = mid
+        start = hi
+    if not last:
+        lo, hi = start, count - 1
+        if not (0 <= start < count - 1):
+            return text
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                lo = mid
+            else:
+                hi = mid
+        end = lo + 1
+    screen = text[start:end]
+    if not screen:
+        return text
+    if start > 0 and not screen.startswith("…"):
+        return "…" + screen
+    return screen
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -1707,6 +1792,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
                     if expanded:
                         return expanded
             else:
+                # A terminal keeps the whole buffer here. ``read`` records
+                # the on-screen slice separately so the snapshot can show
+                # that text while find still searches this string.
                 return got
         handled, choice = _choice_value(acc, role, role_name)
         if handled:
@@ -2120,9 +2208,12 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        screen_text = None
+        if role_str == "terminal" and isinstance(value, str) and value:
+            screen_text = _terminal_on_screen(node, value)
         return RawNode(
             role=role,
-            subrole=None,
+            subrole="terminal" if role_str == "terminal" else None,
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -2146,6 +2237,7 @@ class ATSPIAccessor:
             # Only a group can be suppressed as browser chrome. A button,
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
+            screen_text=screen_text,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
