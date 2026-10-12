@@ -367,10 +367,63 @@ def _shown_note(value: str | None) -> str:
     return value or ""
 
 
+def _unescape_compact_value(shown: str) -> str:
+    """Turn ``\\n`` and ``\\r`` in a compact snapshot field back into breaks.
+
+    A value with no backslash is unchanged, including the older
+    space-flattened form.
+    """
+    if "\\" not in shown:
+        return shown
+    out: list[str] = []
+    index = 0
+    while index < len(shown):
+        if shown[index] == "\\" and index + 1 < len(shown):
+            nxt = shown[index + 1]
+            if nxt == "n":
+                out.append("\n")
+                index += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                index += 2
+                continue
+            if nxt == "\\":
+                out.append("\\")
+                index += 2
+                continue
+        out.append(shown[index])
+        index += 1
+    return "".join(out)
+
+
 def _note_landed(value: str | None) -> bool:
     shown = _shown_note(value)
     flat = NOTE.replace("\n", " ")
-    return shown == flat or shown == NOTE or (shown.endswith("…") and flat.startswith(shown[:-1]))
+    restored = _unescape_compact_value(shown)
+    return (
+        shown == flat
+        or shown == NOTE
+        or restored == NOTE
+        or (shown.endswith("…") and flat.startswith(shown[:-1]))
+    )
+
+
+def test_note_landed_accepts_the_compact_newline_field() -> None:
+    """The save script treats an escaped snapshot value as the written note.
+
+    Compact output is ``M1 live note\\nsecond line\\n``. The space-flattened
+    field and the raw note still count. A shorter or different string does not.
+    """
+    escaped = NOTE.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    assert _note_landed(escaped)
+    assert _note_landed(NOTE.replace("\n", " "))
+    assert _note_landed(NOTE)
+    assert not _note_landed("WRONG")
+    assert not _note_landed("M1 live note")
+    line = f'  e7 textarea "Notes" ="{escaped}" (edit,focus)'
+    seen = pick(parse_snapshot(line), role="textarea", name="Notes")
+    assert seen is not None and seen.value == escaped and _note_landed(seen.value)
 
 
 class _SaveScript:
