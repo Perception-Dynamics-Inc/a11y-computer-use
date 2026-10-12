@@ -13311,3 +13311,80 @@ def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
         assert xs["ID"] < xs["Item"] < xs["Qty"]
     finally:
         _stop(proc)
+
+
+def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> None:
+    """Live Geany Symbols row. Not a synthetic tree.
+
+    The row has an activate action that a single click does not run. The
+    snapshot says the row activates on double-click, and count=1 stays a
+    single click: the caret does not move. count=2 is that double-click
+    and the caret moves to the function.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("geany")
+    if not binary:
+        pytest.skip("geany is not installed")
+    lines = ["# pad"] * 300
+    lines.extend(["def target_fn_row150():", "    return 1", ""])
+    document = tmp_path / "geany-sym.py"
+    document.write_text("\n".join(lines))
+    home = tmp_path / "geany-home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    auth = os.environ.get("XAUTHORITY")
+    if not auth:
+        candidate = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(candidate):
+            env["XAUTHORITY"] = candidate
+    runtime = _runtime_for(tmp_path, driver, "geany")
+    proc = subprocess.Popen(
+        [binary, "--no-plugins", str(document)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        shot = _wait_named_tree(
+            driver,
+            "geany",
+            lambda snap: any("target_fn_row150" in (el.title or "") for el in snap.elements),
+            timeout_s=20,
+        )
+        assert shot is not None and proc.poll() is None, "geany never listed the symbol"
+        listed = runtime.desktop_snapshot("geany")
+        assert "(activates on double-click)" in listed
+        shot = runtime._current
+        assert shot is not None
+        cell = next(el for el in shot.elements if "target_fn_row150" in (el.title or ""))
+        assert cell.note == "activates on double-click"
+        single = runtime.click(cell.ref)
+        assert "clicked" in single
+        assert "(activates on double-click)" in single
+        assert single.outcome == "partial"
+        assert single.evidence == "the row was selected and activates on double-click"
+        after_single = driver.snapshot(Scope.WINDOW, "geany")
+        status = "\n".join(
+            f"{el.title or ''} {el.value or ''}" for el in after_single.elements
+        )
+        assert "line: 301" not in status, status
+        runtime._current = after_single
+        cell = next(el for el in after_single.elements if "target_fn_row150" in (el.title or ""))
+        double = runtime.click(cell.ref, count=2)
+        assert "clicked" in double
+        assert "(activates on double-click)" not in str(double)
+        assert double.outcome != "partial"
+        jumped = "\n".join(
+            f"{el.title or ''} {el.value or ''}"
+            for el in driver.snapshot(Scope.WINDOW, "geany").elements
+        )
+        assert "line: 301" in jumped, jumped
+    finally:
+        _stop_group(proc)

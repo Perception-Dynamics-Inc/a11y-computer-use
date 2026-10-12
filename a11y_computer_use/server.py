@@ -4703,6 +4703,17 @@ class Runtime:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
         msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        outline_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "activates on double-click"
+        )
+        if outline_note:
+            # The click stayed a single click. The row opens on a double-click.
+            msg = f"{msg} (activates on double-click)"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
         judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
@@ -4715,6 +4726,8 @@ class Runtime:
                 verdict = self._opaque_click_verdict(target)
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
+        if verdict is None and outline_note:
+            verdict = ("partial", "the row was selected and activates on double-click")
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
