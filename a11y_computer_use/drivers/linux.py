@@ -1320,6 +1320,9 @@ class LinuxDriver:
         application that does not answer is omitted and the others are
         returned. A stopped target of ``Scope.WINDOW`` or ``Scope.APP``
         raises ``app_not_responding`` instead of an empty tree.
+
+        ``Scope.WINDOW`` includes every showing top-level window of the app.
+        The active window is first. One showing window stays a single tree.
         """
         from a11y_computer_use.drivers import _dbus_guard
 
@@ -1456,10 +1459,16 @@ class LinuxDriver:
                 detail={"app": resolved},
             )
 
-        return self._snapshot_root(resolved, root, scope, caller=app)
+        # WINDOW lists every showing sibling (a preferences dialog next to
+        # the editor). APP stays the application node. DISPLAY walks each
+        # application once and does not expand those siblings again.
+        return self._snapshot_root(
+            resolved, root, scope, caller=app, all_windows=scope is Scope.WINDOW,
+        )
 
     def _snapshot_root(
         self, app: str, root: object, scope: Scope, caller: str | None = None,
+        *, all_windows: bool = False,
     ) -> Snapshot:
         """Pruned snapshot of one already-resolved AT-SPI root.
 
@@ -1488,40 +1497,63 @@ class LinuxDriver:
                 accessor.libreoffice = _atspi.libreoffice_app(app or "") or _atspi.libreoffice_app(
                     caller or ""
                 )
+                roots = [root]
+                if all_windows:
+                    listed = _atspi.showing_toplevels(root)
+                    if len(listed) > 1:
+                        roots = listed
                 # LibreOffice 25.2 reports content a title bar high until the
                 # first pointer event. A status-bar motion, then this walk,
                 # republishes those boxes. LibreOffice 24 already matches and
                 # is not moved, so its pointer inset and the placement cache
-                # stay as they were.
+                # stay as they were. Each window that is walked is settled.
                 if accessor.libreoffice:
-                    _atspi.settle_libreoffice_geometry(root)
+                    for item in roots:
+                        _atspi.settle_libreoffice_geometry(item)
                 # A table that starts below the viewport is dropped before
                 # children() can seek it. Scroll the matching cell first, and
                 # only for Chromium: GTK tables seek inside their own walk.
                 # After the find bar, the page frame is ``walked``.
                 seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
-                if seek and _atspi._chromium_app(root):
-                    _atspi.reveal_text_in_document(walked, seek)
-                # Chromium lists: the rows are read from the list node this walk
-                # holds. A saved head on another wrapper is not the snapshot.
-                accessor.refresh_visible(walked)
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
-                snap = observe.build_snapshot(
-                    walked, accessor, scope=scope, app=app, pid=watch.pid,
-                    geometry=_atspi.primary_geometry(),
+                geometry = _atspi.primary_geometry()
+                if len(roots) == 1:
+                    # After the find bar, the page frame is ``walked``. One
+                    # window keeps that root so the cached bar is not the tree.
+                    if seek and _atspi._chromium_app(root):
+                        _atspi.reveal_text_in_document(walked, seek)
+                    # Chromium lists: the rows are read from the list node this
+                    # walk holds. A saved head on another wrapper is not the snapshot.
+                    accessor.refresh_visible(walked)
+                    snap = observe.build_snapshot(
+                        walked, accessor, scope=scope, app=app, pid=watch.pid,
+                        geometry=geometry,
+                    )
+                    _atspi.note_browser_bar(walked, snap.elements)
+                    return snap
+                snaps = []
+                seen: set[object] = set()
+                for item in roots:
+                    chosen = _atspi.chromium_snapshot_root(item)
+                    key = _atspi._frame_cache_key(chosen)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if seek and _atspi._chromium_app(chosen):
+                        _atspi.reveal_text_in_document(chosen, seek)
+                    accessor.refresh_visible(chosen)
+                    snap = observe.build_snapshot(
+                        chosen, accessor, scope=scope, app=app, pid=watch.pid,
+                        geometry=geometry,
+                    )
+                    _atspi.note_browser_bar(chosen, snap.elements)
+                    snaps.append(snap)
+                if len(snaps) == 1:
+                    return snaps[0]
+                return observe.merge_window_snapshots(
+                    snaps, scope=scope, app=app, pid=watch.pid,
                 )
-                # A GTK table cell find could not scroll on screen. Attach
-                # it with the extents AT-SPI reported, which the pruner
-                # drops when they miss the display. No box is invented.
-                pending = list(accessor._offscreen_seek)
-                if pending:
-                    specs = []
-                    for cell, table in pending:
-                        specs.append((cell, accessor.read(cell), table))
-                    snap = observe.attach_offscreen_matches(snap, specs)
-                _atspi.note_browser_bar(walked, snap.elements)
-                return snap
 
         return self._run(_do)
 
@@ -1756,6 +1788,37 @@ class LinuxDriver:
             return
         raise self._not_showing_error(element.ref, element.role, element.title)
 
+    def _raise_handle_window(self, handle) -> None:
+        """Raise the X window that owns ``handle`` when that window is not active.
+
+        A ref in a sibling dialog is acted on only after that dialog is
+        frontmost. No matching X window does not fail the action: the AT-SPI
+        action still runs. An already ACTIVE window is left alone.
+        """
+        if handle is None or _on_wayland():
+            return
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        try:
+            target = self._run(lambda: _atspi.toplevel_raise_target(handle))
+        except Exception:
+            return
+        if target is None or target[0]:
+            return
+        _active, title, pid, extents = target
+        try:
+            window_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+        except Exception:
+            return
+        if window_id is None:
+            return
+        try:
+            self.raise_window(int(window_id))
+        except Exception:
+            return
+
     def press_element(self, element: Element) -> bool:
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
@@ -1784,6 +1847,7 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
+        self._raise_handle_window(handle)
         # A Writer paragraph's action does not place the caret, and an
         # Impress or Draw shape's action does not enter text edit. The click
         # path does, and the outcome checks that result afterwards.
@@ -2034,6 +2098,8 @@ class LinuxDriver:
             return False
         self._focused_editable = None
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is not None:
+            self._raise_handle_window(handle)
         peers: dict = {}
         if handle is not None:
             try:
@@ -2209,6 +2275,7 @@ class LinuxDriver:
 
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
+            self._raise_handle_window(handle)
         x, y = _point_of(target)
         if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
@@ -2505,6 +2572,7 @@ class LinuxDriver:
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._raise_handle_window(handle)
         container = None
         if handle is not None and (int(dx) or int(dy)):
             container = self._run(lambda: _atspi.list_container(handle))
@@ -2735,6 +2803,7 @@ class LinuxDriver:
         handle = None
         if isinstance(target, Element):
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+            self._raise_handle_window(handle)
         x, y = _point_of(target)
 
         def do() -> bool:
@@ -2799,6 +2868,7 @@ class LinuxDriver:
         if handle is None:
             raise self._focus_lost_on(element)
         self._refuse_hidden(element, handle)
+        self._raise_handle_window(handle)
         if not _accepts_text(element) or self._run(lambda: _atspi._blocks_text_replace(handle)):
             raise _not_editable(element)
         if self._run(lambda: _atspi.drawing_text_editable(handle)):

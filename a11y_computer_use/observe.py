@@ -463,6 +463,64 @@ def merge_snapshots(snaps: Sequence[Snapshot]) -> Snapshot:
     )
 
 
+def merge_window_snapshots(
+    snaps: Sequence[Snapshot],
+    *,
+    scope: Scope,
+    app: str | None,
+    pid: int | None,
+) -> Snapshot:
+    """One app snapshot whose roots are ``snaps``, in the order given.
+
+    The first snapshot is the active window. Refs are renumbered and the
+    live handles move with them, so a ref in a window that is not active
+    still activates. ``scope``, ``app``, and ``pid`` stay the caller's.
+    Two or more windows mark the first root ``(active)`` when rendered.
+    One snapshot is returned unchanged, with no active mark.
+    """
+    if not snaps:
+        raise ValueError("merge_window_snapshots needs at least one snapshot")
+    if len(snaps) == 1:
+        return snaps[0]
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    handles: dict[str, object] = {}
+    elisions: dict[str, int] = {}
+    full_values: dict[str, str] = {}
+    for snap in snaps:
+        mapping: dict[str, str] = {}
+        old_handles = _HANDLES.get(snap.snapshot_id, {})
+        old_values = _FULL_VALUES.get(snap.snapshot_id, {})
+        old_elisions = _EPOCHS.get(snap.snapshot_id, {})
+        for el in snap.elements:
+            new_ref = f"e{len(elements) + 1}"
+            mapping[el.ref] = new_ref
+            parent = mapping[el.parent] if el.parent and el.parent in mapping else None
+            elements.append(
+                dataclasses.replace(el, ref=new_ref, snapshot_id=snapshot_id, parent=parent)
+            )
+            if el.ref in old_handles:
+                handles[new_ref] = old_handles[el.ref]
+            if el.ref in old_values:
+                full_values[new_ref] = old_values[el.ref]
+        for parent_ref, count in old_elisions.items():
+            mapped = mapping.get(parent_ref)
+            if mapped is not None:
+                elisions[mapped] = count
+    _register_epoch(snapshot_id, elisions, handles, full_values)
+    if elements:
+        _note_active_root(snapshot_id, elements[0].ref)
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=scope,
+        app=app,
+        pid=pid,
+        created_at=time.time(),
+        displays=snaps[0].displays,
+        elements=tuple(elements),
+    )
+
+
 def resolve_ref(snap: Snapshot, ref: str, *, live: Snapshot | None = None) -> Element:
     """Re-resolve a snapshot-scoped ref against the *live* tree.
 
@@ -835,7 +893,10 @@ def render_text(
     basis): the header always survives, lines are kept in order until the next
     one would overflow, and a final marker states how many element lines were
     omitted so the agent knows to use ``find``/``scroll_to_find`` or raise it.
-    Deterministic for a given snapshot.
+    Two or more top-level windows share that budget. Each window is offered
+    an equal part of what remains, and a window that does not fit ends with
+    ``… N more`` instead of the single-window tail marker. Deterministic for
+    a given snapshot.
     """
     if mode not in RENDER_MODES:
         raise ValueError(f"mode must be one of {RENDER_MODES}")
@@ -843,6 +904,8 @@ def render_text(
         entries = _interactive_entries(snap, include_bounds)
     else:
         entries = _full_entries(snap, include_bounds)
+    if budget is not None and _several_windows(entries):
+        return "\n".join(_apply_window_budget(entries, budget))
     return "\n".join(_apply_budget(entries, budget))
 
 
@@ -1040,6 +1103,87 @@ def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> li
             f"… truncated at ~{budget} tokens: {omitted} element lines omitted; "
             "use find / scroll_to_find for the rest, or raise budget"
         )
+    return out
+
+
+def _several_windows(entries: Sequence[tuple[str, bool]]) -> bool:
+    """True when ``entries`` has two or more depth-1 roots."""
+    roots = 0
+    for line, _is_element in entries[1:]:
+        if len(line) - len(line.lstrip(" ")) == 2:
+            roots += 1
+            if roots >= 2:
+                return True
+    return False
+
+
+def _split_window_entries(
+    entries: Sequence[tuple[str, bool]],
+) -> tuple[tuple[str, bool], list[list[tuple[str, bool]]], list[tuple[str, bool]]]:
+    """Header, one group per top-level window, and unindented footer lines."""
+    header = entries[0]
+    groups: list[list[tuple[str, bool]]] = []
+    footer: list[tuple[str, bool]] = []
+    current: list[tuple[str, bool]] | None = None
+    for item in entries[1:]:
+        indent = len(item[0]) - len(item[0].lstrip(" "))
+        if indent == 0:
+            footer.append(item)
+            continue
+        if indent == 2:
+            if current:
+                groups.append(current)
+            current = [item]
+            continue
+        if current is None:
+            current = [item]
+        else:
+            current.append(item)
+    if current:
+        groups.append(current)
+    return header, groups, footer
+
+
+def _apply_window_budget(entries: Sequence[tuple[str, bool]], budget: int) -> list[str]:
+    """Split ``budget`` across top-level windows and fold each overflow.
+
+    Each window is offered ``remaining / windows_left`` characters, with the
+    same newline accounting as `_apply_budget`. Characters a window does not
+    use stay in the pool for the windows after it. A window that does not
+    fit ends with ``… N more``, counting the element lines of that window
+    that were left out. One window, or no budget, stays on `_apply_budget`.
+    """
+    if budget <= 0:
+        raise ValueError("budget must be a positive token count")
+    header, groups, footer = _split_window_entries(entries)
+    if len(groups) < 2:
+        return _apply_budget(entries, budget)
+    limit = budget * 4
+    out = [header[0]]
+    used = len(out[0])
+    remaining = len(groups)
+    for group in groups:
+        share = max(0, limit - used) // remaining if remaining else 0
+        cap = used + share
+        omitted = 0
+        kept_any = False
+        for line, is_element in group:
+            if used + 1 + len(line) <= cap:
+                out.append(line)
+                used += 1 + len(line)
+                kept_any = True
+            else:
+                omitted += int(is_element)
+        if omitted:
+            marker = ("    " if kept_any else "  ") + f"… {omitted} more"
+            if used + 1 + len(marker) <= limit:
+                out.append(marker)
+                used += 1 + len(marker)
+        remaining -= 1
+    for line, _is_element in footer:
+        if used + 1 + len(line) <= limit:
+            out.append(line)
+            used += 1 + len(line)
     return out
 
 
@@ -2682,6 +2826,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         )
         if on
     ]
+    if _ACTIVE_ROOTS.get(el.snapshot_id) == el.ref:
+        flags.append("active")
     if flags:
         parts.append(f"({','.join(flags)})")
     # An opaque region is addressed by its box. Always print the bounds, in
@@ -2737,6 +2883,16 @@ _HANDLES: OrderedDict[str, dict[str, object]] = OrderedDict()
 #: the model and the audit anchor never see a whole document; `find_elements`
 #: reads this so a substring past the cap still matches. Same bounded FIFO.
 _FULL_VALUES: OrderedDict[str, dict[str, str]] = OrderedDict()
+#: snapshot_id -> ref of the active top-level window, only when that snapshot
+#: merged two or more windows. Render adds ``(active)`` on that line.
+_ACTIVE_ROOTS: OrderedDict[str, str] = OrderedDict()
+
+
+def _note_active_root(snapshot_id: str, ref: str) -> None:
+    _ACTIVE_ROOTS[snapshot_id] = ref
+    _ACTIVE_ROOTS.move_to_end(snapshot_id)
+    while len(_ACTIVE_ROOTS) > _MAX_EPOCHS:
+        _ACTIVE_ROOTS.popitem(last=False)
 
 
 def _register_epoch(
@@ -2762,7 +2918,7 @@ def touch_epoch(snapshot_id: str) -> None:
     A probe snapshot taken to judge an action must not evict the handles the
     action's own ref still uses.
     """
-    for store in (_EPOCHS, _HANDLES, _FULL_VALUES):
+    for store in (_EPOCHS, _HANDLES, _FULL_VALUES, _ACTIVE_ROOTS):
         if snapshot_id in store:
             store.move_to_end(snapshot_id)
 

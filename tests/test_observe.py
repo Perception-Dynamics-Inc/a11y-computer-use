@@ -1562,6 +1562,45 @@ def test_budget_truncates_deterministically_and_reports_omissions() -> None:
     assert estimate_tokens(snap, mode="interactive") < estimate_tokens(snap)
 
 
+def test_several_windows_share_a_budget_and_mark_the_active_one() -> None:
+    """The active window is first and marked. A tight budget still lists the other window."""
+    editor = ax(
+        "AXWindow", title="Editor", at=(0.0, 0.0), size=(400.0, 300.0),
+        children=[button(f"Row {i}", (10.0, 40.0 + 16.0 * i)) for i in range(12)],
+    )
+    preferences = ax(
+        "AXDialog", title="Preferences", at=(500.0, 40.0), size=(240.0, 160.0),
+        children=[button("Font", (16.0, 40.0))],
+    )
+    accessor = DictAccessor()
+    editor_snap = build_snapshot(
+        editor, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    dialog_snap = build_snapshot(
+        preferences, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    merged = observe.merge_window_snapshots(
+        [editor_snap, dialog_snap], scope=Scope.WINDOW, app="mousepad", pid=9,
+    )
+    assert merged.app == "mousepad" and merged.pid == 9 and merged.scope is Scope.WINDOW
+    assert merged.elements[0].title == "Editor" and merged.elements[0].parent is None
+    assert any(el.title == "Preferences" and el.parent is None for el in merged.elements)
+    font = next(el for el in merged.elements if el.title == "Font")
+    assert observe.ax_handle_for(merged.snapshot_id, font.ref)["title"] == "Font"
+    full = render_text(merged)
+    assert "(active)" not in render_text(editor_snap)
+    assert full.index("Editor") < full.index("Preferences")
+    assert "Font" in full and "Row 11" in full
+    active_lines = [ln for ln in full.splitlines() if "(active)" in ln]
+    assert len(active_lines) == 1 and "Editor" in active_lines[0]
+    cut = render_text(merged, budget=80)
+    assert "truncated at" not in cut
+    assert "Font" in cut and "Preferences" in cut
+    assert cut.index("Editor") < cut.index("Preferences")
+    assert "… " in cut[:cut.index("Preferences")] and " more" in cut[:cut.index("Preferences")]
+    assert any("(active)" in ln and "Editor" in ln for ln in cut.splitlines())
+
+
 def test_render_text_rejects_unknown_mode() -> None:
     snap = snap_of(save_window())
     with pytest.raises(ValueError):

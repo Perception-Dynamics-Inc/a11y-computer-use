@@ -18,7 +18,12 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 
 1. Observe. The first observation of a window is `Runtime.desktop_snapshot`
    of the tracked app, or the frontmost app before one has been launched or
-   focused: the pruned tree. Later observations of that same window are a
+   focused: the pruned tree. On Linux that tree includes every showing
+   top-level window of the app. The active window is first, and its root
+   line is marked `(active)` when another window is showing. A token budget
+   is split across those windows; a window that does not fit its share ends
+   with `… N more`. A ref in a window that is not active raises that window
+   before the action. Later observations of that same window are a
    diff of added, removed, and changed elements, plus the focused element
    when it did not change. Refs from the latest full snapshot stay valid for
    elements that are still there, including refs the diff does not repeat.

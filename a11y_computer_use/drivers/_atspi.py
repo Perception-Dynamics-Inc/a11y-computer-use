@@ -4364,6 +4364,100 @@ def find_root(app: str, scope) -> object | None:
         return picked if picked is not None else app_acc
 
 
+# Top-level windows a named-app snapshot lists. Menus, popups, and tooltips
+# are not windows: they belong to the frame that owns them.
+_TOPLEVEL_ROLES = frozenset({
+    "frame", "window", "dialog", "alert", "file chooser", "color chooser",
+})
+
+
+def _application_of(node):
+    """The AT-SPI application that owns ``node``, or None."""
+    if node is None:
+        return None
+    if _role_name(node) == "application":
+        return node
+    app = _call_first(node, ("get_application", "getApplication"))
+    if app is not None and _role_name(app) == "application":
+        return app
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and _role_name(parent) == "application":
+        return parent
+    return None
+
+
+def _toplevel_of(node):
+    """The showing-window ancestor of ``node``, or None at the application."""
+    current = node
+    for _ in range(32):
+        if current is None:
+            return None
+        role = _role_name(current)
+        if role in _TOPLEVEL_ROLES:
+            return current
+        if role == "application":
+            return None
+        current = _call_first(current, ("get_parent", "getParent"))
+    return None
+
+
+def showing_toplevels(node) -> list:
+    """Showing top-level windows of ``node``'s application, active first.
+
+    One showing window is that window alone, so a single-window snapshot
+    stays one tree. A window that is not SHOWING (minimized) is left out, as
+    are menus and tooltips. When several windows are ACTIVE, the first in
+    child order leads and the rest keep that order.
+    """
+    if node is None:
+        return []
+    app = _application_of(node)
+    if app is None:
+        return [node]
+    count = _child_count(app)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    frames = []
+    for index in range(int(count)):
+        child = _child_at(app, index)
+        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+            continue
+        if not _state_has(child, "SHOWING"):
+            continue
+        frames.append(child)
+    if len(frames) <= 1:
+        return frames or [node]
+    active = [frame for frame in frames if _state_has(frame, "ACTIVE")]
+    head = active[:1]
+    if not head and _role_name(node) in _TOPLEVEL_ROLES and _state_has(node, "SHOWING"):
+        # find_root already chose this window. Lead with it when AT-SPI has
+        # not marked any frame ACTIVE.
+        chosen = _frame_cache_key(node)
+        head = [frame for frame in frames if _frame_cache_key(frame) == chosen][:1]
+    head_keys = {_frame_cache_key(frame) for frame in head}
+    return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
+
+
+def toplevel_raise_target(node):
+    """``(active, title, pid, extents)`` for the window that owns ``node``.
+
+    None when ``node`` is not inside a top-level window. ``active`` is
+    STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
+    screen pixels, or None when the window has no box. The caller raises the
+    matching X window before it acts, and leaves an already active window
+    alone.
+    """
+    top = _toplevel_of(node)
+    if top is None:
+        return None
+    title = str(_call_first(top, ("get_name", "getName"), default="") or "")
+    position, size = _extents(top)
+    extents = None
+    if position is not None and size is not None:
+        extents = (float(position[0]), float(position[1]), float(size[0]), float(size[1]))
+    return (_state_has(top, "ACTIVE"), title, pid_of(top), extents)
+
+
 def desktop_application_roots() -> DesktopApplications:
     """Every application under the AT-SPI desktop.
 
