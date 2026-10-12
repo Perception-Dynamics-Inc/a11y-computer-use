@@ -251,6 +251,105 @@ def test_exists_and_gone_return_only_the_checker_element() -> None:
         )
 
 
+class _CacheNode:
+    def __init__(self, *kids: "_CacheNode") -> None:
+        self.kids = list(kids)
+        self.parent: _CacheNode | None = None
+        self.cleared = 0
+        for kid in self.kids:
+            kid.parent = self
+
+    def clear_cache(self) -> None:
+        self.cleared += 1
+
+    def get_child_count(self) -> int:
+        return len(self.kids)
+
+    def get_child_at_index(self, index: int) -> "_CacheNode":
+        return self.kids[index]
+
+    def get_parent(self) -> "_CacheNode | None":
+        return self.parent
+
+
+def test_refresh_event_cache_is_a_noop_until_the_listener_is_up(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    node = _CacheNode()
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    _atspi._refresh_event_cache(node)
+    _atspi._refresh_event_cache(None)
+    assert node.cleared == 0
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    _atspi._refresh_event_cache(node)
+    assert node.cleared == 1
+
+
+def test_refresh_event_cache_drops_the_menu_and_its_items(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    nested = _CacheNode()
+    item = _CacheNode(nested)
+    menu = _CacheNode(item)
+    combo = _CacheNode(menu)
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    _atspi._refresh_event_cache(combo)
+    assert combo.cleared == 1
+    assert menu.cleared == 1
+    assert item.cleared == 1
+    assert nested.cleared == 0
+
+
+def test_gecko_choice_shows_refreshes_before_the_selected_read(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    order: list[str] = []
+
+    def refresh(combo: object) -> None:
+        order.append("refresh")
+
+    def selected(combo: object) -> str:
+        order.append("read")
+        return "Blue"
+
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", refresh)
+    monkeypatch.setattr(_atspi, "_selected_option_text", selected)
+    assert _atspi._gecko_choice_shows(object(), "Blue", wait=False) is True
+    assert order == ["refresh", "read"]
+
+
+def test_gecko_set_combo_refreshes_before_collecting_options(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    order: list[str] = []
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda acc: order.append("refresh"))
+    monkeypatch.setattr(_atspi, "_combo_entry", lambda acc: order.append("entry") or "entry")
+    monkeypatch.setattr(_atspi, "_collect_options", lambda acc: order.append("collect") or [])
+    monkeypatch.setattr(_atspi, "_set_entry_contents", lambda entry, value: True)
+    monkeypatch.setattr(_atspi, "_close_combo_popup", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: False)
+    monkeypatch.setattr(_atspi, "_combo_landed", lambda acc, entry, value: True)
+    _atspi.set_combo_value(object(), "Blue")
+    assert order[:3] == ["refresh", "entry", "collect"]
+
+
+def test_other_combos_do_not_refresh_the_event_cache(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    called: list[object] = []
+    monkeypatch.setattr(_atspi, "_gecko_app", lambda acc: False)
+    monkeypatch.setattr(_atspi, "_refresh_event_cache", lambda acc: called.append(acc))
+    monkeypatch.setattr(_atspi, "_combo_entry", lambda acc: "entry")
+    monkeypatch.setattr(_atspi, "_collect_options", lambda acc: [])
+    monkeypatch.setattr(_atspi, "_set_entry_contents", lambda entry, value: True)
+    monkeypatch.setattr(_atspi, "_close_combo_popup", lambda acc: None)
+    monkeypatch.setattr(_atspi, "_state_has", lambda acc, name: False)
+    monkeypatch.setattr(_atspi, "_combo_landed", lambda acc, entry, value: True)
+    _atspi.set_combo_value(object(), "Blue")
+    assert called == []
+
+
 def test_refresh_cached_tree_is_a_noop_until_the_listener_is_up(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi
 

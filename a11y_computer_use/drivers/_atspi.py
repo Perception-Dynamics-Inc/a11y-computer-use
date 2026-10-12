@@ -10709,15 +10709,22 @@ def _activate_web_option(combo, label: str, node, index: int) -> None:
     _choice_shows(combo, label)
 
 
+def _gecko_selected(combo) -> str | None:
+    """Firefox's selected option, after a cache drop when the listener is up."""
+    _refresh_event_cache(combo)
+    return _selected_option_text(combo)
+
+
 def _gecko_choice_shows(combo, label: str, *, wait: bool = True) -> bool:
     """Whether Firefox's selected option text is ``label``.
 
     The selected menu item can update a beat after the key. The wait is
-    bounded and stops on the first match.
+    bounded and stops on the first match. Each read drops the event cache
+    first: ``event_main`` would otherwise keep the previous SELECTED state.
     """
     attempts = 6 if wait else 1
     for attempt in range(attempts):
-        if _selected_option_text(combo) == label:
+        if _gecko_selected(combo) == label:
             return True
         if attempt + 1 < attempts:
             time.sleep(0.05)
@@ -10733,7 +10740,7 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
     does, and the selected option is read back. The popup is not opened:
     opening it and then sending Escape puts the previous value back.
     """
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
     target = _option_named(combo, label) or node
     _do_action_named(target, frozenset({"select", "click", "press", "activate"}))
@@ -10743,15 +10750,15 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
         return
     grab_focus(combo)
     labels = [item[0] for item in options if item[0]]
-    current = _selected_option_text(combo)
+    current = _gecko_selected(combo)
     if current in labels and label in labels and current != label:
         delta = labels.index(label) - labels.index(current)
         chord = "Down" if delta > 0 else "Up"
         for _ in range(abs(delta)):
             _chord_into_target(combo, chord)
-            if _selected_option_text(combo) == label:
+            if _gecko_selected(combo) == label:
                 return
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
     _type_into_target(combo, label)
 
@@ -10799,6 +10806,8 @@ def set_combo_value(acc, value: str) -> None:
     A popup this call opened is closed. The call raises when the read-back is
     not ``value``. A highlighted popup row is not a successful read-back.
     """
+    if _gecko_app(acc):
+        _refresh_event_cache(acc)
     entry = _combo_entry(acc)
     options = _collect_options(acc)
     if entry is None and not options:
@@ -15733,6 +15742,47 @@ def _invalidate_tree_cache(acc) -> None:
         seen.add(id(node))
         _call_first(node, ("clear_cache", "clearCache"))
         node = _parent_of(node)
+
+
+# Firefox's select is a combo, a menu, and menu items. Two levels reaches
+# the item whose SELECTED state the read-back uses. A wider walk would clear
+# a whole document on every option check.
+_EVENT_CACHE_DEPTH = 2
+_EVENT_CACHE_CHILD_CAP = 64
+
+
+def _clear_cached_descendants(acc, depth: int) -> None:
+    """``clear_cache`` on descendants, ``depth`` levels down."""
+    if acc is None or isinstance(depth, bool) or not isinstance(depth, int) or depth <= 0:
+        return
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return
+    children: list[object] = []
+    for index in range(min(count, _EVENT_CACHE_CHILD_CAP)):
+        child = _child_at(acc, index)
+        if child is not None:
+            children.append(child)
+    for child in children:
+        _clear_cached_descendants(child, depth - 1)
+        _call_first(child, ("clear_cache", "clearCache"))
+
+
+def _refresh_event_cache(acc) -> None:
+    """Drop cached children and states while the event listener is up.
+
+    ``event_main`` answers child and state reads from the cache. Firefox's
+    selected option updates on the bus and not in that cache, so a combo
+    read-back would still show the previous option. Clearing the combo alone
+    leaves the menu item's SELECTED flag cached. With the listener off the
+    cache is not trusted and this does nothing.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    if acc is None or not _atspi_events.listening():
+        return
+    _clear_cached_descendants(acc, _EVENT_CACHE_DEPTH)
+    _invalidate_tree_cache(acc)
 
 
 def _descendant_names(acc) -> tuple[str, ...]:
