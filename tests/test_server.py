@@ -2414,6 +2414,62 @@ def test_scroll_to_find_document_inches_when_the_row_is_already_named(monkeypatc
     assert 5 not in scrolls
 
 
+def test_scroll_to_find_document_bursts_toward_a_far_row(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome document.
+
+    The row is already named, but its center is many windows below.
+    One notch cannot arrive within the scroll cap. The document keeps
+    the five-line burst until a later snapshot shows the row up close.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+    y = {"v": 5000}
+
+    def page() -> Snapshot:
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1280, 800, 1.0, True),),
+            elements=(
+                Element(ref="win", role="AXWindow", title="page", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+                Element(ref="doc", role="AXGroup", title="document", value=None,
+                        bounds=Bounds(0, 80, 80, 900, 500), snapshot_id="s"),
+                Element(ref="row", role="AXCell", title="ROW-0300", value=None,
+                        bounds=Bounds(0, 40, y["v"], 80, 20), snapshot_id="s", parent="doc"),
+            ),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return page()
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            if len(scrolls) >= 2:
+                y["v"] = 200
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
+
+    out = rt.scroll_to_find("app", text="ROW-0300", direction="down", max_scrolls=60)
+    assert "ROW-0300" in out
+    assert "found after" in out
+    assert "not found" not in out
+    assert scrolls
+    assert 1 not in scrolls
+    assert all(abs(dy) == 5 for dy in scrolls)
+
+
 def test_scroll_to_find_document_keeps_inching_after_the_row_vanishes(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome document.
 

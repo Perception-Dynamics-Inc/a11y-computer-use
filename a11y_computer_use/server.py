@@ -5501,11 +5501,12 @@ class Runtime:
 
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
-        Once a document names the match and the center is still outside
+        Once a document names the match and the center is just outside
         the window, the next steps are one notch, so the search does not
-        jump another viewport past the row. A list or scroll area keeps
-        the five-line correction: one line there is the track click, and
-        the walk back to an early row needs the five-line step."""
+        jump another viewport past the row. A match more than one window
+        away keeps the five-line burst. A list or scroll area keeps the
+        five-line correction: one line there is the track click, and the
+        walk back to an early row needs the five-line step."""
         app = _required_app_arg(app, "scroll_to_find")
         if text is None and role is None:
             raise ValueError("give text and/or role to find")
@@ -5638,6 +5639,28 @@ class Runtime:
             """
             return anchor is not None and anchor.role in ("AXGroup", "AXWebArea")
 
+        def match_is_far(snap: Snapshot) -> bool:
+            """True when the named row sits more than one window away.
+
+            A document inch is for a row just outside the window. A row
+            many viewports below never arrives one line at a time, so
+            the search keeps the five-line burst until the row is close.
+            """
+            found = observe.find_elements(snap, text=text, role=role)
+            box = viewport_box(snap)
+            if not found or box is None:
+                return False
+            _left, top, _right, bottom = box
+            height = bottom - top
+            if height < 1:
+                return False
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            if center_y < top:
+                return (top - center_y) > height
+            if center_y >= bottom:
+                return (center_y - bottom) > height
+            return False
+
         def execute() -> str:
             # Several lines per step can pass the target and stop at the end
             # of the list. On the 0.4.17 retest the search reached ITEM-193
@@ -5668,7 +5691,7 @@ class Runtime:
             previous_rows: tuple[str, ...] | None = None
             last_anchor: Element | None = None
             progress_rows: tuple[str, ...] | None = None
-            progress_offset = "unknown"
+            progress_offset = "unset"
             progress_seen = False
 
             def row_names(shot: Snapshot, anchor: Element | None = None) -> tuple[str, ...]:
@@ -5709,7 +5732,6 @@ class Runtime:
                 names = row_names(shot, anchor)
                 if not progress_seen:
                     progress_rows = names
-                    progress_offset = read_offset(anchor)
                     progress_seen = True
                     return
                 rows_moved = names != progress_rows
@@ -5718,9 +5740,15 @@ class Runtime:
                     progress_rows = names
                 else:
                     offset = read_offset(anchor)
-                    offset_moved = offset != "unknown" and offset != progress_offset
-                    if offset != "unknown":
-                        progress_offset = offset
+                    # The first unchanged read is the baseline. A later
+                    # read counts only when the bar value actually moves.
+                    if progress_offset == "unset":
+                        if offset != "unknown":
+                            progress_offset = offset
+                    else:
+                        offset_moved = offset != "unknown" and offset != progress_offset
+                        if offset != "unknown":
+                            progress_offset = offset
                 if budget_s > 0 and (rows_moved or offset_moved):
                     stall_deadline = time.monotonic() + budget_s
 
@@ -5849,6 +5877,12 @@ class Runtime:
                 except Exception:
                     pass
                 kind, verified = confirming_snapshot(issued + 1)
+                if kind != "found":
+                    # A long table can still be publishing the row that
+                    # find scrolled to. One more read before a viewport
+                    # wheel jumps past it.
+                    time.sleep(0.2)
+                    kind, verified = confirming_snapshot(issued + 1)
                 if kind == "found":
                     return verified
                 return None
@@ -5904,14 +5938,18 @@ class Runtime:
                         if anchor is not None and document_anchor(anchor):
                             if issued >= limit:
                                 break
-                            seen_document = True
                             kind = place_of(snap)
+                            # One notch only when the row is already close.
+                            # A far row stays on the viewport burst.
+                            lines = 1 if not match_is_far(snap) else abs(dy)
+                            if lines == 1:
+                                seen_document = True
                             if kind == "above":
-                                recover = -1
+                                recover = -lines
                             elif kind == "below":
-                                recover = 1
+                                recover = lines
                             else:
-                                recover = -1 if dy < 0 else 1
+                                recover = -lines if dy < 0 else lines
                             step = recover
                             try:
                                 self._run_gated(
@@ -5949,9 +5987,13 @@ class Runtime:
                         # Once the name is in the tree, one notch walks onto
                         # the row instead of jumping past it. A list keeps
                         # five lines.
-                        lines = 1 if document_anchor(anchor) else abs(dy)
+                        lines = abs(dy)
                         if document_anchor(anchor):
-                            seen_document = True
+                            if match_is_far(self._current):
+                                lines = abs(dy)
+                            else:
+                                lines = 1
+                                seen_document = True
                         if kind == "above":
                             recover = -lines
                         elif kind == "below":
@@ -6009,7 +6051,9 @@ class Runtime:
                 # the one-notch step so the next wheel does not jump a
                 # viewport past the row again. A list stays on ``step``.
                 wheel = step
-                if seen_document and document_anchor(anchor):
+                if document_anchor(anchor) and match_is_far(snap):
+                    wheel = abs(dy) if step > 0 else -abs(dy)
+                elif seen_document and document_anchor(anchor):
                     wheel = 1 if step > 0 else -1
                 last_anchor = anchor
                 if not find_tried and wants_in_page_find(snap, anchor):
@@ -8209,11 +8253,12 @@ def build_server(
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll
         tree; the search scrolls back toward the row and checks again instead
-        of returning that stale ref. While the name is not in the tree the
+        of returning that stale ref.         While the name is not in the tree the
         step stays five lines: on a document that is one burst of wheel
         notches, about a viewport. Once a document names the match and the
-        center is still outside the window, the next steps are one notch.
-        A list keeps the five-line correction. A wheel that does not move the page
+        center is just outside the window, the next steps are one notch.
+        A match more than one window away keeps that burst. A list keeps
+        the five-line correction. A wheel that does not move the page
         (page_unchanged) is repeated once: the tree can still be the pre-scroll
         rows. A second still page does not end the search while the other
         direction has not been tried and the target has not been shown. The
