@@ -469,8 +469,14 @@ def active_window() -> dict | None:
 
 
 def _window_at_point(d, x: float, y: float):
-    """Topmost managed window containing a screen point, or None."""
+    """Topmost on-screen managed window containing a screen point, or None.
+
+    A minimized window keeps the rectangle it had before it was iconified.
+    That rectangle is not on screen, so it is not a hit and not a cover.
+    """
     for win in reversed(_managed_windows(d)):  # topmost first
+        if _is_hidden(win, d):
+            continue
         geom = _geometry_on_root(win, d)
         if geom is None:
             continue
@@ -1110,6 +1116,177 @@ def _frame_insets(win, d) -> tuple[int, int]:
     """(left, top) of the window-manager frame around the client window."""
     left, _right, top, _bottom = _frame_extent_box(win, d)
     return left, top
+
+
+def _client_rows_for_pid(d, pid: int) -> list[tuple]:
+    """On-screen ``(window, x, y, width, height)`` rows owned by ``pid``."""
+    rows = []
+    for win in _managed_windows(d):
+        if _is_hidden(win, d):
+            continue
+        owner = _pid_of(win, d)
+        if not owner or int(owner) != int(pid):
+            continue
+        geom = _geometry_on_root(win, d)
+        if geom is None:
+            continue
+        x, y, w, h = geom
+        if w <= 0 or h <= 0:
+            continue
+        rows.append((win, int(x), int(y), int(w), int(h)))
+    return rows
+
+
+def _choose_client_row(rows: list[tuple], width: float | None, height: float | None):
+    """The one row whose origin is known, or None when the windows disagree.
+
+    One window, or several that share an origin, is that origin. A size
+    match breaks a tie between different origins. Anything else is None.
+    """
+    if not rows:
+        return None
+    origins = {(row[1], row[2]) for row in rows}
+    if len(origins) == 1:
+        if width is None or height is None:
+            return rows[0]
+        try:
+            want_w = float(width)
+            want_h = float(height)
+        except (TypeError, ValueError):
+            return rows[0]
+        sized = [
+            row for row in rows
+            if want_w > 0 and want_h > 0
+            and abs(row[3] - want_w) <= 8 and abs(row[4] - want_h) <= 8
+        ]
+        return sized[0] if sized else rows[0]
+    if width is None or height is None:
+        return None
+    try:
+        want_w = float(width)
+        want_h = float(height)
+    except (TypeError, ValueError):
+        return None
+    if want_w <= 0 or want_h <= 0:
+        return None
+    sized = [
+        row for row in rows
+        if abs(row[3] - want_w) <= 8 and abs(row[4] - want_h) <= 8
+    ]
+    unique = {(row[1], row[2]) for row in sized}
+    if len(unique) == 1:
+        return sized[0]
+    return None
+
+
+def client_origin_for_pid(
+    pid: int, width: float | None = None, height: float | None = None,
+) -> tuple[int, int] | None:
+    """X client origin of an on-screen window owned by ``pid``, or None.
+
+    Hidden windows are skipped. One on-screen window is that window, and
+    several windows that share an origin are that origin. Several origins
+    resolve only when ``width`` and ``height`` match one window's client
+    size within a few pixels. Disagreeing origins with no unique size match
+    are None: picking one would place every element in the wrong window.
+    """
+    try:
+        wanted = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if wanted <= 0:
+        return None
+    try:
+        with _open_display() as d:
+            chosen = _choose_client_row(_client_rows_for_pid(d, wanted), width, height)
+    except ComputerUseError:
+        raise
+    except Exception:
+        return None
+    if chosen is None:
+        return None
+    return chosen[1], chosen[2]
+
+
+def _input_shape_rect(d, win):
+    """The window's one X input-shape rectangle, or None.
+
+    A client-side-decorated GTK window is larger than the surface that
+    receives clicks. The input shape is that surface, in window coordinates.
+    A missing extension, or more than one rectangle, is None rather than a
+    guessed margin.
+    """
+    try:
+        if not d.has_extension("SHAPE"):
+            return None
+    except Exception:
+        return None
+    method = getattr(win, "shape_get_rectangles", None)
+    if method is None:
+        return None
+    try:
+        from Xlib.ext import shape
+
+        kind = shape.SK.Input
+    except Exception:
+        kind = 2
+    try:
+        reply = method(kind)
+    except Exception:
+        return None
+    rects = list(getattr(reply, "rectangles", None) or [])
+    if len(rects) != 1:
+        return None
+    rect = rects[0]
+    try:
+        return int(rect.x), int(rect.y), int(rect.width), int(rect.height)
+    except (TypeError, ValueError):
+        return None
+
+
+def gtk4_content_origin(
+    pid: int, width: float | None = None, height: float | None = None,
+) -> tuple[int, int] | None:
+    """Screen origin of a GTK 4 frame inside the X window that owns ``pid``.
+
+    The client origin plus the input-shape offset. When that shape is a few
+    pixels larger than the AT-SPI frame on every side, half the difference
+    is the border between the shape and the frame (a shadow or resize
+    margin). A shape that cannot be read leaves the client origin as it is.
+    None when no on-screen window matches.
+    """
+    try:
+        wanted = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if wanted <= 0:
+        return None
+    try:
+        with _open_display() as d:
+            chosen = _choose_client_row(_client_rows_for_pid(d, wanted), width, height)
+            if chosen is None:
+                return None
+            win, x, y, _w, _h = chosen
+            rect = _input_shape_rect(d, win)
+    except ComputerUseError:
+        raise
+    except Exception:
+        return None
+    if rect is None:
+        return x, y
+    ix, iy, iw, ih = rect
+    dx, dy = ix, iy
+    try:
+        frame_w = float(width) if width is not None else 0.0
+        frame_h = float(height) if height is not None else 0.0
+    except (TypeError, ValueError):
+        frame_w = frame_h = 0.0
+    extra_w = iw - frame_w
+    extra_h = ih - frame_h
+    if frame_w > 0 and frame_h > 0 and 0 <= extra_w <= 48 and 0 <= extra_h <= 48:
+        dx += int(round(extra_w / 2))
+        dy += int(round(extra_h / 2))
+    return int(x + dx), int(y + dy)
 
 
 def client_origin_for_outer_frame(

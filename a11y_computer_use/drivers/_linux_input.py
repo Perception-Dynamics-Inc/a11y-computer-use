@@ -441,11 +441,19 @@ def press_chord(chord: str) -> None:
 @contextmanager
 def held(modifiers):
     """Hold ``modifiers`` (e.g. ('shift',)) pressed for the block — modifier
-    clicks. Unknown modifiers are ignored."""
+    clicks. Unknown modifiers are ignored.
+
+    Nothing to hold does not import python-xlib or open a display. A plain
+    click is that path. The package is not installed on macOS or Windows,
+    and the hermetic Linux step has no display name.
+    """
+    names = [m for m in (modifiers or ()) if m in _KEYSYM_MODS]
+    if not names:
+        yield
+        return
     from Xlib import X
 
-    kcs = [_disp().keysym_to_keycode(_KEYSYM_MODS[m]) for m in (modifiers or ())
-           if m in _KEYSYM_MODS]
+    kcs = [_disp().keysym_to_keycode(_KEYSYM_MODS[m]) for m in names]
     kcs = [kc for kc in kcs if kc]
     for kc in kcs:
         _fake(X.KeyPress, kc)

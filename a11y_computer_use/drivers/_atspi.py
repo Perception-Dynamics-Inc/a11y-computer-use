@@ -1748,6 +1748,142 @@ def _gtk_combo(acc) -> bool:
     return "gtk" in _toolkit_name(acc)
 
 
+def _toolkit_version(acc) -> str:
+    """AT-SPI toolkit version for ``acc``'s application, cached per application.
+
+    An empty string means the application did not report one. Callers that
+    need GTK 4 do not guess from a missing version.
+    """
+    app = _call_first(acc, ("get_application", "getApplication")) or acc
+    cached = getattr(app, "_a11y_toolkit_version", None)
+    if isinstance(cached, str):
+        return cached
+    version = _call_first(app, ("get_toolkit_version", "getToolkitVersion"), default="") or ""
+    text = str(version).strip()
+    try:
+        setattr(app, "_a11y_toolkit_version", text)
+    except Exception:
+        pass
+    return text
+
+
+def _gtk_major(acc) -> int | None:
+    """Major GTK version, or None when the toolkit is not GTK or has no version."""
+    if "gtk" not in _toolkit_name(acc):
+        return None
+    text = _toolkit_version(acc)
+    if not text:
+        return None
+    head = text.split(".", 1)[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _gtk4_app(acc) -> bool:
+    """True for GTK 4 or newer. GTK 3, Qt, Chromium, and a missing version are not."""
+    major = _gtk_major(acc)
+    return major is not None and major >= 4
+
+
+def _gtk4_frame_size(acc) -> tuple[int, int]:
+    """Client size of ``acc``'s frame, from WINDOW extents, else SCREEN."""
+    frame = _frame_ancestor(acc) or acc
+    rect = _raw_rect(frame, "WINDOW")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        rect = _raw_rect(frame, "SCREEN")
+    if rect is None or rect[2] <= 0 or rect[3] <= 0:
+        return 0, 0
+    return int(rect[2]), int(rect[3])
+
+
+def _gtk4_client_origin(acc, cache: dict | None = None) -> tuple[int, int] | None:
+    """X client origin for a GTK 4 accessible, or None when it cannot be read.
+
+    The result is cached by pid and frame size for one snapshot. None is
+    cached too, so a missing window is not looked up again for every node.
+    """
+    if not _gtk4_app(acc):
+        return None
+    pid = pid_of(acc)
+    if not pid:
+        app = _call_first(acc, ("get_application", "getApplication"))
+        pid = pid_of(app)
+    width, height = _gtk4_frame_size(acc)
+    key = (int(pid or 0), width, height)
+    if cache is not None and key in cache:
+        return cache[key]
+    origin: tuple[int, int] | None = None
+    if pid:
+        try:
+            from a11y_computer_use.drivers import _linux_system
+
+            origin = _linux_system.gtk4_content_origin(int(pid), width, height)
+        except Exception:
+            origin = None
+    if cache is not None:
+        cache[key] = origin
+    return origin
+
+
+def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
+    """Screen position and size for a GTK 4 node, or None to keep SCREEN.
+
+    GTK 4 reports every SCREEN origin as (0, 0) while WINDOW coordinates are
+    relative to the X client window. The screen point is that window's origin
+    plus the WINDOW box. A sum that is already the SCREEN point is left
+    alone, including a window that really sits at the origin. A missing
+    origin is None: the SCREEN point is not replaced with a guess. Negative
+    extents and a non-zero SCREEN origin are left alone.
+    """
+    if position is None or size is None or not _gtk4_app(acc):
+        return None
+    x, y = float(position[0]), float(position[1])
+    width, height = float(size[0]), float(size[1])
+    if width < 0 or height < 0 or x < 0 or y < 0:
+        return None
+    if abs(x) > 0.5 or abs(y) > 0.5:
+        return None
+    window = _raw_rect(acc, "WINDOW")
+    if window is None or window[2] <= 0 or window[3] <= 0:
+        return None
+    origin = _gtk4_client_origin(acc, cache)
+    if origin is None:
+        return None
+    nx = float(origin[0]) + float(window[0])
+    ny = float(origin[1]) + float(window[1])
+    if abs(nx - x) <= 1 and abs(ny - y) <= 1:
+        return None
+    return (nx, ny), (float(window[2]), float(window[3]))
+
+
+def published_origin_untrusted(acc) -> bool:
+    """True when a box published at screen (0, 0) is not that pixel.
+
+    GTK 4's SCREEN origin is (0, 0) while the WINDOW box is elsewhere, and
+    the X client origin was not added (or could not be read). A window whose
+    origin plus its WINDOW box is (0, 0) really is at the origin. Other
+    toolkits, and a GTK build with no version, are not this case.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    screen = _raw_rect(acc, "SCREEN")
+    window = _raw_rect(acc, "WINDOW")
+    if screen is None or window is None:
+        return True
+    if screen[2] <= 0 or screen[3] <= 0 or window[2] <= 0 or window[3] <= 0:
+        return True
+    if abs(float(screen[0])) > 0.5 or abs(float(screen[1])) > 0.5:
+        return False
+    origin = _gtk4_client_origin(acc, None)
+    if origin is None:
+        return True
+    nx = float(origin[0]) + float(window[0])
+    ny = float(origin[1]) + float(window[1])
+    return abs(nx) > 1 or abs(ny) > 1
+
+
 def _sane_range(low: float, high: float) -> bool:
     """True when minimum and maximum are a real widget range.
 
@@ -2422,6 +2558,9 @@ class ATSPIAccessor:
         # A childless browser-frame view is not a page region.
         self._browser_app: bool | None = None
         self._browser_chrome_cache: dict[object, bool] = {}
+        # GTK 4 client origins for this walk, keyed by pid and frame size.
+        # None means the origin could not be read and must not be invented.
+        self._gtk4_origins: dict[tuple[int, int, int], tuple[int, int] | None] = {}
 
     def _bound_instance_id(self, node: object) -> str | None:
         if not self._instance_ready:
@@ -2492,6 +2631,10 @@ class ATSPIAccessor:
                 shifted = self._libreoffice_position(node, position, size)
                 if shifted is not None:
                     position = shifted
+            else:
+                recovered = gtk4_recovered_box(node, position, size, self._gtk4_origins)
+                if recovered is not None:
+                    position, size = recovered
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
         # A GTK combo does not set EXPANDABLE, so the shared flag stays unset
         # while its menu is on screen. The open popup is that menu becoming

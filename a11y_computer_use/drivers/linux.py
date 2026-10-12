@@ -2133,6 +2133,20 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
         x, y = _point_of(target)
+        if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
+            plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
+            if plain and self._run(lambda: _atspi.do_press(handle)):
+                return None
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{target.ref} ({target.role}) has no usable screen bounds, so the click was not sent",
+                detail={
+                    "ref": target.ref,
+                    "role": target.role,
+                    "reason": "not_actionable",
+                    "outcome": "refused",
+                },
+            )
         # A plain left click on an Impress or Draw shape or text frame is a
         # pointer click at the element's center. A single click that does
         # not enter text edit is followed by a double-click. Writer text
@@ -2171,6 +2185,32 @@ class LinuxDriver:
         ) == ("confirmed", "the caret is in the target paragraph"):
             self._focused_editable = handle
         return None
+
+    def _gtk4_point_untrusted(self, target: Element, handle) -> bool:
+        """True when a pointer event at ``target`` would use a bogus GTK 4 box.
+
+        A positive box whose origin is not (0, 0) was recovered, or was never
+        the collapsed SCREEN point, and stays a real hit. A box still published
+        at (0, 0), or a degenerate box, is untrusted only when the live node
+        is GTK 4 and the X origin plus its WINDOW box is not that point. Other
+        toolkits keep the coordinate click they already had. No live node is
+        not this case.
+        """
+        if handle is None:
+            return False
+        from a11y_computer_use.drivers import _atspi
+
+        bounds = target.bounds
+        positive = bounds.width > 0 and bounds.height > 0
+        at_origin = bounds.x == 0 and bounds.y == 0
+        if positive and not at_origin:
+            return False
+        try:
+            if not positive:
+                return bool(self._run(lambda: _atspi._gtk4_app(handle)))
+            return bool(self._run(lambda: _atspi.published_origin_untrusted(handle)))
+        except Exception:
+            return False
 
     def _click_shape_text(self, handle, x: int, y: int, count: int) -> None:
         """Click the center of an Impress or Draw text frame, then enter edit.
@@ -3887,11 +3927,22 @@ class LinuxDriver:
         pid is that window's comm (``covered by <comm>``). An unknown pid is
         not a cover: a missing hit-test must not refuse the crop.
         """
+        from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi, _linux_system
 
         bounds = element.bounds
         if bounds is None:
             return "off_screen"
+        handle = None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            handle = None
+        if self._gtk4_point_untrusted(element, handle):
+            # A collapsed or degenerate GTK 4 box is not a screen point. It is
+            # not evidence that some other window covers the element, and it
+            # is not a reason to skip the check once a real box is known.
+            return None
         cx = float(bounds.x) + float(bounds.width) / 2.0
         cy = float(bounds.y) + float(bounds.height) / 2.0
         try:
