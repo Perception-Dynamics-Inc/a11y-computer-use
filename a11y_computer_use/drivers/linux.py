@@ -1257,7 +1257,15 @@ class LinuxDriver:
                 with _atspi.read_cache():
                     return fn()
 
-            return _atspi_events.submit(wrapped) if _atspi_events.enabled() else wrapped()
+            # The cache opt-in routes every call. A wait that has started the
+            # listener does too: libatspi is not safe to use from this thread
+            # and from the GLib loop at the same time. A call that is already
+            # on the event thread runs inline so a nested read cannot deadlock.
+            # The getter cache is entered on the thread that runs ``fn``.
+            marshalled = _atspi_events.enabled() or _atspi_events.listening()
+            if marshalled and not _atspi_events.on_event_thread():
+                return _atspi_events.submit(wrapped)
+            return wrapped()
 
         return _dbus_guard.call_with_reconnect(once)
 
@@ -1297,14 +1305,22 @@ class LinuxDriver:
         comm from app list is the fallback, which is how ``LibreOffice``
         becomes ``soffice.bin``.
         """
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _actionable, _atspi
 
-        root = self._run(lambda name=app: _atspi.find_root(name, scope))
+        def lookup(name: str):
+            root = _atspi.find_root(name, scope)
+            # The listener turns the child cache on for the process. Drop it
+            # before the walk so a page that was never cached is still read.
+            if root is not None:
+                _actionable.refresh_cached_tree(root)
+            return root
+
+        root = self._run(lambda name=app: lookup(name))
         if root is not None:
             return app, root
         resolved = _resolved_app(app)
         if resolved != app:
-            root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+            root = self._run(lambda name=resolved: lookup(name))
             return resolved, root
         return app, None
 
@@ -1351,9 +1367,15 @@ class LinuxDriver:
         the failure instead of an empty success.
         """
         from a11y_computer_use import observe
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _actionable, _atspi
 
-        found = self._run(_atspi.desktop_application_roots)
+        def _roots():
+            found = _atspi.desktop_application_roots()
+            for _name, root in found.ready:
+                _actionable.refresh_cached_tree(root)
+            return found
+
+        found = self._run(_roots)
         if not found.ready:
             if found.silent:
                 raise ComputerUseError(
@@ -4033,42 +4055,81 @@ class LinuxDriver:
 
     def wait_for(self, target: Element, *, condition: WaitCondition, timeout_s: float,
                  checker: Callable | None = None) -> Element:
-        """Poll ``checker`` until ``condition`` holds or ``timeout_s`` elapses.
+        """Wait until ``condition`` holds or ``timeout_s`` elapses.
 
         The Runtime supplies ``checker`` (built from the originating snapshot and
-        re-resolving through this driver), so the poll loop is identical across
-        platforms — the platform-specific re-resolution lives in `resolve_ref`.
+        re-resolving through this driver). ``exists`` and ``gone`` return only
+        what that checker returns. When the event thread is on, a quiet event
+        wait does not read the tree again; an event does. ``actionable`` also
+        requires a fresh AT-SPI read: visible, enabled, stable bounds, and the
+        center receiving events. The listener starts on a Linux display. The
+        wait wakes on state, children, bounds, and focus events, and otherwise
+        polls at 0.1s. An actionable timeout names the check that failed.
         """
         if checker is None:
             raise ValueError("LinuxDriver.wait_for needs a checker; the Runtime supplies one")
-        from a11y_computer_use.drivers import _atspi_events
+        if not callable(checker):
+            raise TypeError("checker must be callable")
+        if not isinstance(target, Element):
+            raise TypeError("target must be an Element")
+        if not isinstance(condition, WaitCondition):
+            raise TypeError("condition must be a WaitCondition")
+        from a11y_computer_use.drivers import _actionable, _atspi_events
 
-        events_on = _atspi_events.enabled()
-        deadline = time.monotonic() + timeout_s
-        # The first pass always reads the tree. After that, a quiet event
-        # wait is not a reason to snapshot again.
+        limit = _actionable.require_timeout(timeout_s)
+        _atspi_events.ensure_started()
+
+        def _wake(remaining: float) -> bool:
+            if _atspi_events.listening():
+                found = _atspi_events.wait_for_event(
+                    _atspi_events.current_seq(),
+                    timeout=min(_actionable.EVENT_WAIT_CAP_S, remaining),
+                )
+                return found is not None
+            time.sleep(min(_actionable.FALLBACK_POLL_S, remaining))
+            return False
+
+        if condition is WaitCondition.ACTIONABLE:
+            def read() -> _actionable.Observation:
+                return self._run(lambda: _actionable.read_target(target))
+
+            def confirm() -> Element | None:
+                found = checker(target, condition)
+                if isinstance(found, Element) and found.actionable is True:
+                    return found
+                return None
+
+            return _actionable.wait_until_actionable(
+                target, timeout_s=limit, read=read, confirm=confirm, wait_event=_wake,
+            )
+
+        # exists and gone. The first pass always reads. After that, a quiet
+        # event wait is not a reason to snapshot again.
+        events_on = _atspi_events.enabled() or _atspi_events.listening()
+        deadline = time.monotonic() + limit
         check = True
         while True:
             if check:
                 result = checker(target, condition)
                 if result is not None:
+                    if not isinstance(result, Element):
+                        raise TypeError("checker must return an Element or None")
                     return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ComputerUseError(
                     ErrorCode.TIMEOUT,
-                    f"{target.ref} did not reach {condition.value} within {timeout_s}s",
-                    detail={"ref": target.ref, "condition": condition.value, "timeout_s": timeout_s},
+                    f"{target.ref} did not reach {condition.value} within {limit}s",
+                    detail={"ref": target.ref, "condition": condition.value, "timeout_s": limit},
                 )
             if events_on:
-                # An event re-reads the tree. A timeout does not: the next
-                # loop waits again until the deadline.
                 woke = _atspi_events.wait_for_event(
-                    _atspi_events.current_seq(), timeout=min(0.4, remaining),
+                    _atspi_events.current_seq(),
+                    timeout=min(_actionable.EVENT_WAIT_CAP_S, remaining),
                 )
                 check = woke is not None
             else:
-                time.sleep(min(0.1, remaining))
+                time.sleep(min(_actionable.FALLBACK_POLL_S, remaining))
                 check = True
 
     def displays(self):

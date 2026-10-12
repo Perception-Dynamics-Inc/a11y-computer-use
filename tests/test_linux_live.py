@@ -12396,6 +12396,270 @@ def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
         _kill_thunar()
 
 
+def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
+    """Live GTK. An insensitive button times out as enabled; a covered one does not succeed.
+
+    Late becomes sensitive. The wait returns that button only after it is
+    visible, enabled, stable, and the window at its center is this process.
+    Stuck stays insensitive, so the timeout names enabled and is not a
+    success. A second window over Covered times out as receiving_events.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi_events
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import WaitCondition
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuawait120.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        GLib.set_prgname("cuawait120")
+        win = Gtk.Window(title="cuawait120")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        late = Gtk.Button(label="Late")
+        late.set_sensitive(False)
+        stuck = Gtk.Button(label="Stuck")
+        stuck.set_sensitive(False)
+        covered = Gtk.Button(label="Covered")
+        box.pack_start(late, False, False, 0)
+        box.pack_start(stuck, False, False, 0)
+        box.pack_start(covered, False, False, 0)
+        win.add(box)
+        win.set_default_size(360, 220)
+        win.move(60, 60)
+        win.connect("destroy", Gtk.main_quit)
+
+        def _enable():
+            late.set_sensitive(True)
+            return False
+
+        def _pulse():
+            stuck.set_sensitive(not stuck.get_sensitive())
+            stuck.set_sensitive(False)
+            return True
+
+        win.show_all()
+        win.present()
+        GLib.timeout_add(400, _enable)
+        GLib.timeout_add(200, _pulse)
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen([sys.executable, str(script)], env=env, start_new_session=True)
+    cover = None
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuawait120")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                titles = {el.title for el in shot.elements}
+                if {"Late", "Stuck", "Covered"} <= titles:
+                    snap = shot
+                    break
+            time.sleep(0.3)
+        assert snap is not None, last[:800]
+        assert _atspi_events.ensure_started() is True
+        woke = _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=2.0)
+        assert woke is not None, "the listener did not report a GTK event"
+        assert any(
+            token in str(woke[1])
+            for token in ("state-changed", "children-changed", "bounds-changed", "focus")
+        ), woke
+
+        def checker(origin):
+            def _check(target, condition):
+                try:
+                    live = driver.resolve_ref(origin, target.ref)
+                except ComputerUseError as exc:
+                    if exc.code is ErrorCode.STALE_REF:
+                        return None
+                    raise
+                if condition is WaitCondition.ACTIONABLE and not live.actionable:
+                    return None
+                return live
+            return _check
+
+        late = next(el for el in snap.elements if el.title == "Late" and el.role == "AXButton")
+        ready = driver.wait_for(
+            late, condition=WaitCondition.ACTIONABLE, timeout_s=6.0, checker=checker(snap),
+        )
+        assert ready.title == "Late" and ready.actionable and ready.enabled
+
+        stuck = next(el for el in snap.elements if el.title == "Stuck" and el.role == "AXButton")
+        with pytest.raises(ComputerUseError) as info:
+            driver.wait_for(
+                stuck, condition=WaitCondition.ACTIONABLE, timeout_s=0.8, checker=checker(snap),
+            )
+        assert info.value.code is ErrorCode.TIMEOUT
+        assert info.value.detail["check"] == "enabled", info.value.detail
+        assert info.value.detail["visible"] is True
+        assert info.value.detail["enabled"] is False
+
+        covered = next(el for el in snap.elements if el.title == "Covered" and el.role == "AXButton")
+        box = covered.bounds
+        assert box is not None and box.width > 0 and box.height > 0
+        # An undecorated window keeps the client origin on the button. A
+        # decorated move lands the client below the title bar, past this button.
+        cover_script = tmp_path / "cuacover120.py"
+        cover_script.write_text(textwrap.dedent(
+            f"""
+            import gi
+            gi.require_version("Gtk", "3.0")
+            from gi.repository import GLib, Gtk
+            GLib.set_prgname("cuacover120")
+            win = Gtk.Window(title="cuacover120")
+            win.set_decorated(False)
+            win.set_keep_above(True)
+            win.set_default_size({box.width + 80}, {box.height + 80})
+            win.move({box.x - 20}, {box.y - 20})
+            win.add(Gtk.Label(label="cover"))
+            win.connect("destroy", Gtk.main_quit)
+            win.show_all()
+            win.present()
+            Gtk.main()
+            """
+        ))
+        cover = subprocess.Popen(
+            [sys.executable, str(cover_script)], env=env, start_new_session=True,
+        )
+        from a11y_computer_use.drivers import _linux_system
+
+        center_x = box.x + box.width // 2
+        center_y = box.y + box.height // 2
+        seen = time.monotonic() + 8
+        while time.monotonic() < seen:
+            try:
+                top = driver.snapshot(Scope.WINDOW, "cuacover120")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                top = None
+            if (
+                top is not None
+                and top.elements
+                and _linux_system.pid_at_point(center_x, center_y) == cover.pid
+            ):
+                break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("the covering window did not become the top window at the button")
+        with pytest.raises(ComputerUseError) as covered_info:
+            driver.wait_for(
+                covered, condition=WaitCondition.ACTIONABLE, timeout_s=1.0, checker=checker(snap),
+            )
+        assert covered_info.value.code is ErrorCode.TIMEOUT
+        assert covered_info.value.detail["check"] == "receiving_events", covered_info.value.detail
+        _stop_group(cover)
+        cover = None
+        clear = driver.wait_for(
+            covered, condition=WaitCondition.ACTIONABLE, timeout_s=4.0, checker=checker(snap),
+        )
+        assert clear.title == "Covered" and clear.actionable
+    finally:
+        if cover is not None:
+            _stop_group(cover)
+        _stop_group(proc)
+
+
+def test_linux_chrome_actionable_wait_names_enabled(tmp_path) -> None:
+    """Live Chrome. A button that stays disabled times out as enabled.
+
+    Late loses ``disabled``. The wait returns it only when the accessible
+    read passes. Stuck stays disabled, so a passing checker is not success.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import WaitCondition
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the actionable wait")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "cuawaitchrome.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuawaitchrome</title>"
+        "<button id=late disabled>Late</button>"
+        "<button id=stuck disabled>Stuck</button>"
+        "<script>setTimeout(function(){"
+        "document.getElementById('late').disabled=false;"
+        "}, 600);</script>"
+    )
+    profile = tmp_path / "chrome-actionable"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the buttons were exposed")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = " ".join(sorted({el.title for el in shot.elements}))[:500]
+                titles = {el.title for el in shot.elements}
+                if {"Late", "Stuck"} <= titles:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Chrome did not expose Late and Stuck\n{last}"
+
+        def checker(target, condition):
+            try:
+                live = driver.resolve_ref(snap, target.ref)
+            except ComputerUseError as exc:
+                if exc.code is ErrorCode.STALE_REF:
+                    return None
+                raise
+            if condition is WaitCondition.ACTIONABLE and not live.actionable:
+                return None
+            return live
+
+        late = next(el for el in snap.elements if el.title == "Late" and el.clickable)
+        ready = driver.wait_for(
+            late, condition=WaitCondition.ACTIONABLE, timeout_s=8.0, checker=checker,
+        )
+        assert ready.title == "Late" and ready.actionable and ready.enabled
+        stuck = next(el for el in snap.elements if el.title == "Stuck" and el.role == "AXButton")
+        with pytest.raises(ComputerUseError) as info:
+            driver.wait_for(
+                stuck, condition=WaitCondition.ACTIONABLE, timeout_s=1.0, checker=checker,
+            )
+        assert info.value.code is ErrorCode.TIMEOUT, info.value
+        assert info.value.detail["check"] == "enabled", info.value.detail
+        assert info.value.detail["visible"] is True
+        assert info.value.detail["enabled"] is False
+    finally:
+        _stop_group(proc)
+
+
 _VTE_SCREEN = textwrap.dedent(
     """
     import gi

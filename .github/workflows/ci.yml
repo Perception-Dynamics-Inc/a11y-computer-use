@@ -230,9 +230,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor
           command -v gnome-calculator
           command -v gnome-text-editor
-      # evince is the side-pane thumbnail live test. A separate step, so the
-      # shared apt line stays as it is. The test skips when the binary
-      # is absent.
+      # evince is the PDF page-text and side-pane thumbnail live tests.
+      # A separate step, so the shared apt line stays as it is. The tests
+      # skip when the binary is absent.
       - name: install Evince
         run: |
           sudo apt-get install -y --no-install-recommends evince
@@ -367,7 +367,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py -v -rs --tb=line -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:
@@ -409,29 +409,37 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb openbox x11-utils
           {
             echo 'import importlib.metadata as md'
+            echo 'import time'
             echo 'reqs = md.requires("a11y-computer-use") or []'
             echo 'assert any("python-xlib" in r and "linux" in r for r in reqs), reqs'
             echo 'from a11y_computer_use.drivers._linux_system import windows'
-            echo 'rows = windows()'
-            echo 'blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
+            echo 'deadline = time.monotonic() + 8'
+            echo 'rows = []'
+            echo 'blob = ""'
+            echo 'while True:'
+            echo '    rows = windows()'
+            echo '    blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
+            echo '    if "xmessage" in blob or "clean-install-window" in blob or time.monotonic() >= deadline:'
+            echo '        break'
+            echo '    time.sleep(0.25)'
             echo 'print(rows)'
             echo 'raise SystemExit(0 if ("xmessage" in blob or "clean-install-window" in blob) else 1)'
           } > /tmp/list-windows.py
-          # One second is not enough for openbox to publish _NET_CLIENT_LIST.
-          # Run 38272489843 listed [] and the step failed. Wait for the
-          # window manager, then for the xmessage window, and keep the
-          # openbox log when neither appears.
+          # xprop exits 0 when the atom is missing, so the ready check has to
+          # see a window id. xmessage mapped before that never enters
+          # _NET_CLIENT_LIST.
           # Run 38286187392 set _NET_SUPPORTING_WM_CHECK and then listed []
           # for the whole poll. The property can land before openbox adopts
           # a client, and an xmessage started in that gap never joins
           # _NET_CLIENT_LIST. setsid keeps the WM off the shell's process
-          # group. The message is started only after the check holds, and
-          # restarted if that process has already exited.
+          # group. The message is started only after the check holds.
+          # A process that stays alive but never appears in the client list
+          # is replaced, not left running.
           xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
             setsid openbox >/tmp/openbox-pkg.log 2>&1 < /dev/null &
             ready=0
             for _ in $(seq 1 40); do
-              if xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+              if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
                 ready=1
                 break
               fi
@@ -443,7 +451,7 @@ jobs:
               exit 1
             fi
             sleep 0.5
-            if ! xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
               echo "openbox log:"
               cat /tmp/openbox-pkg.log
               exit 1
@@ -455,9 +463,16 @@ jobs:
               if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
                 exit 0
               fi
-              if ! pgrep -x xmessage >/dev/null 2>&1 && [ "$restarts" -lt 2 ]; then
+              # A live xmessage that openbox never adopted stays out of
+              # _NET_CLIENT_LIST. Process-death is not the only miss: run
+              # 38300008066 printed [] for the whole poll while xmessage
+              # was still alive. Replace it a few times.
+              if [ "$restarts" -lt 4 ]; then
                 restarts=$((restarts + 1))
+                pkill -x xmessage >/dev/null 2>&1 || true
+                sleep 0.2
                 xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+                sleep 0.3
               fi
               sleep 0.25
             done

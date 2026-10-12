@@ -1,4 +1,4 @@
-"""Opt-in AT-SPI event thread (``A11Y_COMPUTER_USE_ATSPI_EVENTS=1``). Linux-only.
+"""AT-SPI event thread. Linux-only.
 
 libatspi keeps a full client-side cache of each accessible (role, name, states,
 attributes, parent, children) but only *serves reads from it* when a GLib main
@@ -10,24 +10,31 @@ collapse to the cache (measured ~1.8x faster repeat snapshots on a 26-node tree)
 This module runs that loop on ONE dedicated daemon thread that owns libatspi, and
 ``submit(fn)`` marshals a whole driver operation onto it via ``GLib.idle_add``
 (safe to call from any thread), blocking the caller for the result. libatspi
-stays single-threaded, so the driver routes every AT-SPI op through here when
-enabled. The standing event registrations also give us a live change feed for
-event-driven waits (a follow-up).
+stays single-threaded. Once the loop is running, the driver routes AT-SPI calls
+through here. A call that is already on the event thread runs inline, so a
+snapshot submitted from the caller cannot deadlock on a nested submit.
 
-Default OFF: without the env flag ``enabled()`` is False and the driver runs
-AT-SPI calls inline exactly as before (the CI-verified path) — zero risk to the
-shipped backend.
+``enabled()`` is still the opt-in that routes every driver call through the
+cache thread from the first operation (``A11Y_COMPUTER_USE_ATSPI_EVENTS`` set
+to a non-empty value). Actionability waits call ``ensure_started`` themselves,
+so on a Linux display the listener is on without that variable. The standing
+registrations are ``object:state-changed``, ``object:children-changed``,
+``object:bounds-changed``, and ``focus:``, plus the text, name, document, and
+window events the cache path already watched.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from collections import deque
 
 _STANDING_EVENTS = (
     "object:children-changed",
     "object:state-changed",
+    "object:bounds-changed",
+    "focus:",
     "object:text-changed",
     "object:property-change:accessible-name",
     "document:load-complete",
@@ -36,16 +43,59 @@ _STANDING_EVENTS = (
 
 _thread: threading.Thread | None = None
 _ready = threading.Event()
+_listening = threading.Event()
 _start_lock = threading.Lock()
 _listener = None
+_listener_failed = False
 _events: deque = deque(maxlen=4096)
 _events_cv = threading.Condition()
 _seq = 0
 
 
 def enabled() -> bool:
-    """True when the event thread is opted in via ``A11Y_COMPUTER_USE_ATSPI_EVENTS``."""
+    """True when the cache thread is opted in via ``A11Y_COMPUTER_USE_ATSPI_EVENTS``.
+
+    Any non-empty value is on, including ``"0"``. An unset variable is off.
+    Actionability waits do not use this flag; they call `ensure_started`.
+    """
     return bool(os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS"))
+
+
+def event_names() -> tuple[str, ...]:
+    """Event types the listener registers, in registration order."""
+    return _STANDING_EVENTS
+
+
+def listening() -> bool:
+    """True once the GLib loop is up and the standing events are registered."""
+    return _listening.is_set()
+
+
+def on_event_thread() -> bool:
+    """True when the caller is the thread that runs ``Atspi.event_main``."""
+    return _thread is not None and threading.current_thread() is _thread
+
+
+def ensure_started() -> bool:
+    """Start the listener on a Linux display. False when it cannot run.
+
+    A missing display does not mark the listener failed: a later opt-in can
+    still start it. A failed init is not retried on every wait.
+    """
+    global _listener_failed
+    if _listening.is_set():
+        return True
+    if _listener_failed:
+        return False
+    if not sys.platform.startswith("linux"):
+        return False
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    _ensure()
+    if not _listening.is_set():
+        _listener_failed = True
+        return False
+    return True
 
 
 def current_seq() -> int:
@@ -145,9 +195,19 @@ def _run() -> None:
                 _listener.register(ev)
             except Exception:  # noqa: BLE001 - a missing event type must not abort the rest
                 pass
+        # Set before _ready so a waiter that observes _ready also observes
+        # the listener. event_main runs only after that.
+        _listening.set()
+    except Exception:  # noqa: BLE001 - a dead bus must not look like a live listener
+        _listening.clear()
     finally:
         _ready.set()
-    Atspi.event_main()  # runs the GLib loop; blocks this (daemon) thread
+    if not _listening.is_set():
+        return
+    try:
+        Atspi.event_main()  # runs the GLib loop; blocks this (daemon) thread
+    finally:
+        _listening.clear()
 
 
 def _ensure() -> None:
@@ -167,7 +227,13 @@ def submit(fn, timeout: float = 15.0):
     """Run ``fn`` on the a11y thread (where the GLib loop runs, so libatspi's
     read cache is trusted) and return its result. Marshals via ``GLib.idle_add``,
     which is safe to call from any thread. Raises ``fn``'s exception, or
-    ``TimeoutError`` if it does not complete within ``timeout`` seconds."""
+    ``TimeoutError`` if it does not complete within ``timeout`` seconds.
+
+    A call that is already on the event thread runs ``fn`` inline. Waiting
+    for an idle callback from inside one would deadlock the loop.
+    """
+    if on_event_thread():
+        return fn()
     _ensure()
     from gi.repository import GLib
 

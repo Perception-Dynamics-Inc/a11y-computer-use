@@ -2826,8 +2826,18 @@ class Runtime:
             and getattr(self.driver, "name", None) == "linux"
             and stale_read
         ):
-            for _attempt in range(8):
+            def _pause_for_ui() -> None:
+                # Same 0.05s bound. When the AT-SPI listener is up, a state
+                # or text event wakes the read instead of sleeping the whole gap.
+                from a11y_computer_use.drivers import _atspi_events
+
+                if _atspi_events.listening():
+                    _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=0.05)
+                    return
                 time.sleep(0.05)
+
+            for _attempt in range(8):
+                _pause_for_ui()
                 later = self._reread(app, scope)
                 if later is None:
                     break

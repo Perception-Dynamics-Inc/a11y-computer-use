@@ -61,6 +61,12 @@ _ROLE = {
     "text": "AXTextArea",
     "document text": "AXTextArea",
     "terminal": "AXTextArea",  # VTE (gnome-terminal, tilix): its Text iface is the screen contents
+    # ATSPI_ROLE_PAGE. Evince puts the PDF page on this role: an empty name
+    # and a Text interface that holds the page. The AXGroup fallback never
+    # reads that text, and the pruner then publishes the page as an unnamed
+    # opaque_region. AXStaticText is not an editable field. A blank page is
+    # put back to a group while reading, so the box is not dropped.
+    "page": "AXStaticText",
     "document frame": "AXGroup",
     "document web": "AXGroup",
     "document email": "AXGroup",
@@ -958,6 +964,111 @@ def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
     if split is None:
         return name, description
     return split
+
+
+# A GIMP image window's canvas is a focusable childless panel. Its name is
+# not on that panel. The image title is a label elsewhere in the frame, and
+# the frame name is the window title. This search is local to that one
+# panel; it does not raise the snapshot's depth or child caps.
+_SURFACE_SKIP_ROLES = frozenset({"layered pane", "menu", "menu bar", "table", "tree table"})
+_SURFACE_WALK_NODES = 480
+_SURFACE_WALK_DEPTH = 16
+_SURFACE_WALK_CHILDREN = 48
+_TITLE_PREFIX_NEXT = frozenset(" .-(–—")
+
+
+def _page_tab_ancestor(acc):
+    """Nearest page tab above ``acc``, or None when a window comes first."""
+    node = acc
+    for _ in range(32):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role == "page tab":
+            return node
+        if role in {"application", "frame", "window", "dialog"}:
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _title_prefix_label(name: str, title: str) -> bool:
+    """True when ``name`` is the image title copied into the window title.
+
+    GIMP's frame name starts with the image title and then a view suffix
+    (``[Untitled]-1.0 (RGB...``). The next character is ``.``, a space, a
+    dash, or ``(``. A label that merely shares a shorter stem is not used.
+    """
+    if not name or _generic_region_name(name):
+        return False
+    if not title.startswith(name) or len(title) <= len(name):
+        return False
+    return title[len(name)] in _TITLE_PREFIX_NEXT
+
+
+def _prefix_image_labels(frame, title: str) -> list[str]:
+    """Label names under ``frame`` that are the image-title prefix.
+
+    Menus, icon grids, and tables are not walked. The budget stops the
+    search; a miss falls back to the frame title rather than a guess.
+    """
+    found: list[str] = []
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth: int) -> None:
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH or len(found) > 1:
+            return
+        budget -= 1
+        role = _role_name(node)
+        if role == "label":
+            name = _node_name(node)
+            if _title_prefix_label(name, title):
+                found.append(name)
+        if role in _SURFACE_SKIP_ROLES:
+            return
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return
+        for index in range(min(int(count), _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None:
+                walk(child, depth + 1)
+
+    walk(frame, 0)
+    return found
+
+
+def _panel_surface_name(node, size, focusable: bool) -> str:
+    """Image or window title for a focusable childless unnamed panel.
+
+    Empty unless the panel sits under a page tab, which is the GIMP image
+    canvas. The name is a label that prefixes the frame title when exactly
+    one such label is in the frame, otherwise the frame title itself. No
+    string is invented: an empty frame title leaves the panel unnamed.
+    """
+    if not focusable or size is None:
+        return ""
+    try:
+        if float(size[0]) < 32 or float(size[1]) < 32:
+            return ""
+    except (TypeError, ValueError, IndexError):
+        return ""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count != 0:
+        return ""
+    if _page_tab_ancestor(node) is None:
+        return ""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    title = str(_call_first(frame, ("get_name",), default="") or "").strip()
+    if not title or _generic_region_name(title):
+        return ""
+    labels = _prefix_image_labels(frame, title)
+    if len(labels) == 1:
+        return labels[0]
+    return title
 
 
 def _hidden_page_tab(node) -> bool:
@@ -2345,6 +2456,44 @@ def _terminal_on_screen(acc, full: str) -> str:
     return screen
 
 
+# Characters taken from a page's Text interface. The snapshot still clips
+# what the model reads (`observe._MAX_VALUE_CHARS`) and what the line shows
+# (`observe._RENDER_VALUE_CHARS`). Find searches this string, including the
+# part past those caps. A longer page is cut here. This does not raise a
+# walk, depth, or child cap, and ``get_text`` is not asked for ``-1``.
+_PAGE_TEXT_CHARS = 4000
+
+
+def _page_text(acc) -> str | None:
+    """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
+
+    Evince (and poppler) expose each PDF page as AT-SPI role ``page``. The
+    name is empty. The words are ``Text.get_text`` from the start through
+    the character count, or through ``_PAGE_TEXT_CHARS`` when the page is
+    longer. ``None`` is a missing interface or a blank page. An embedded
+    object character is expanded the same way a paragraph's is.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    limit = min(int(count), _PAGE_TEXT_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str) or not got:
+        return None
+    if _OBJECT_REPLACEMENT in got:
+        expanded = _expand_embedded(acc, got)
+        if expanded.strip():
+            got = expanded
+        else:
+            got = got.replace(_OBJECT_REPLACEMENT, "")
+    text = got.replace("\u00a0", " ").strip()
+    return text or None
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -2911,9 +3060,20 @@ class ATSPIAccessor:
         # the inline sentence; reading that one string is what find matches.
         # A file chooser is a dialog, but its name is the title. Probing Value
         # used to be skipped when the role was a window.
-        value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
-            node, role, role_str,
-        )
+        # A PDF page is the exception: its Text interface is the page, and
+        # the name is empty. The read is bounded. A blank page stays a group
+        # so a childless on-screen page is still a region, not a dropped label.
+        if role_str == "page":
+            page_text = _page_text(node)
+            if page_text:
+                value = page_text
+            else:
+                role = "AXGroup"
+                value = None
+        else:
+            value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
+                node, role, role_str,
+            )
         if (
             role_str == "section"
             and role in {"AXTextField", "AXTextArea"}
@@ -2930,6 +3090,9 @@ class ATSPIAccessor:
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
+        surface_name = ""
+        if role_str == "panel" and not str(name).strip() and not str(description).strip():
+            surface_name = _panel_surface_name(node, size, focusable)
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -2958,6 +3121,7 @@ class ATSPIAccessor:
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
+            surface_name=surface_name,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -5232,6 +5396,15 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    # A PDF page's Text interface is the document, not a field. Evince
+    # leaves that page focused while Ctrl+F types into the find bar. Using
+    # the page as the read-back makes the type look like a mismatch and
+    # scroll_to_find never confirms the hit.
+    try:
+        if _role_name(acc) == "page":
+            return None
+    except Exception:
+        return None
     try:
         return _readable_text(acc)
     except Exception:
@@ -6554,6 +6727,7 @@ _STATIC_REPLACE_ROLES = frozenset({
     "paragraph", "heading", "label", "static", "caption",
     "panel", "grouping", "filler",
     "document web", "document frame", "document email",
+    "page",
     "combo box", "combo-box",
 })
 _ENTRY_ROLE_NAMES = frozenset({
@@ -10938,15 +11112,22 @@ def _activate_web_option(combo, label: str, node, index: int) -> None:
     _choice_shows(combo, label)
 
 
+def _gecko_selected(combo) -> str | None:
+    """Firefox's selected option, after a cache drop when the listener is up."""
+    _refresh_event_cache(combo)
+    return _selected_option_text(combo)
+
+
 def _gecko_choice_shows(combo, label: str, *, wait: bool = True) -> bool:
     """Whether Firefox's selected option text is ``label``.
 
     The selected menu item can update a beat after the key. The wait is
-    bounded and stops on the first match.
+    bounded and stops on the first match. Each read drops the event cache
+    first: ``event_main`` would otherwise keep the previous SELECTED state.
     """
     attempts = 6 if wait else 1
     for attempt in range(attempts):
-        if _selected_option_text(combo) == label:
+        if _gecko_selected(combo) == label:
             return True
         if attempt + 1 < attempts:
             time.sleep(0.05)
@@ -10962,7 +11143,7 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
     does, and the selected option is read back. The popup is not opened:
     opening it and then sending Escape puts the previous value back.
     """
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
     target = _option_named(combo, label) or node
     _do_action_named(target, frozenset({"select", "click", "press", "activate"}))
@@ -10972,15 +11153,15 @@ def _activate_gecko_option(combo, label: str, node, options) -> None:
         return
     grab_focus(combo)
     labels = [item[0] for item in options if item[0]]
-    current = _selected_option_text(combo)
+    current = _gecko_selected(combo)
     if current in labels and label in labels and current != label:
         delta = labels.index(label) - labels.index(current)
         chord = "Down" if delta > 0 else "Up"
         for _ in range(abs(delta)):
             _chord_into_target(combo, chord)
-            if _selected_option_text(combo) == label:
+            if _gecko_selected(combo) == label:
                 return
-    if _selected_option_text(combo) == label:
+    if _gecko_selected(combo) == label:
         return
     _type_into_target(combo, label)
 
@@ -11028,6 +11209,8 @@ def set_combo_value(acc, value: str) -> None:
     A popup this call opened is closed. The call raises when the read-back is
     not ``value``. A highlighted popup row is not a successful read-back.
     """
+    if _gecko_app(acc):
+        _refresh_event_cache(acc)
     entry = _combo_entry(acc)
     options = _collect_options(acc)
     if entry is None and not options:
@@ -16104,6 +16287,47 @@ def _invalidate_tree_cache(acc) -> None:
         seen.add(id(node))
         _call_first(node, ("clear_cache", "clearCache"))
         node = _parent_of(node)
+
+
+# Firefox's select is a combo, a menu, and menu items. Two levels reaches
+# the item whose SELECTED state the read-back uses. A wider walk would clear
+# a whole document on every option check.
+_EVENT_CACHE_DEPTH = 2
+_EVENT_CACHE_CHILD_CAP = 64
+
+
+def _clear_cached_descendants(acc, depth: int) -> None:
+    """``clear_cache`` on descendants, ``depth`` levels down."""
+    if acc is None or isinstance(depth, bool) or not isinstance(depth, int) or depth <= 0:
+        return
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return
+    children: list[object] = []
+    for index in range(min(count, _EVENT_CACHE_CHILD_CAP)):
+        child = _child_at(acc, index)
+        if child is not None:
+            children.append(child)
+    for child in children:
+        _clear_cached_descendants(child, depth - 1)
+        _call_first(child, ("clear_cache", "clearCache"))
+
+
+def _refresh_event_cache(acc) -> None:
+    """Drop cached children and states while the event listener is up.
+
+    ``event_main`` answers child and state reads from the cache. Firefox's
+    selected option updates on the bus and not in that cache, so a combo
+    read-back would still show the previous option. Clearing the combo alone
+    leaves the menu item's SELECTED flag cached. With the listener off the
+    cache is not trusted and this does nothing.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    if acc is None or not _atspi_events.listening():
+        return
+    _clear_cached_descendants(acc, _EVENT_CACHE_DEPTH)
+    _invalidate_tree_cache(acc)
 
 
 def _descendant_names(acc) -> tuple[str, ...]:
