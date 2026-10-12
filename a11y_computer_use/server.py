@@ -645,11 +645,11 @@ def text_click_control(elements, target: Element) -> Element | None:
 #: unconfirmed. Set ``A11Y_COMPUTER_USE_CONFIRM=0`` to disable the gate entirely.
 CONFIRMATION_GATE = os.environ.get("A11Y_COMPUTER_USE_CONFIRM", "1") != "0"
 
-#: When a snapshot exposes no actionable element, run on-device OCR of the
-#: display right away and append the text lines as ``o`` refs, so the planner
-#: gets something to target in the same round-trip (`ocr.py`). Set
-#: ``A11Y_COMPUTER_USE_AUTO_OCR=0`` to keep snapshots pure.
-AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "1") != "0"
+#: Empty snapshots stay on the accessibility tree. On-device OCR of that
+#: snapshot is opt-in: set ``A11Y_COMPUTER_USE_AUTO_OCR=1`` to append ``o``
+#: refs in the same reply (`ocr.py`). ``screen_text`` and ``find(ocr=true)``
+#: are unchanged. ``crop`` still reads text in the crop.
+AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "0") == "1"
 
 #: Re-OCR the display when an ``o`` ref is acted on and re-resolve the ref by
 #: text near its old position (the OCR analogue of re-resolving an ``e`` ref
