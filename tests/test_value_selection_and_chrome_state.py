@@ -1329,6 +1329,195 @@ def test_expandable_gtk_cell_still_uses_the_center_when_selection_does_not(monke
     assert clicks == ["e19"]
 
 
+def _window(entry_text, body, *, crumb=None):
+    """A frame whose toolbar is a location entry or one path-bar button."""
+    if crumb is not None:
+        bar_child = crumb
+    else:
+        bar_child = _Node("entry", "", text=entry_text)
+    toolbar = _Node("tool bar", "", children=[bar_child])
+    panel = _Node("panel", "", children=[toolbar, body])
+    return _Node("frame", "Files", children=[panel]), bar_child
+
+
+def _side_place(entry_text="/home/ubuntu/"):
+    """A Thunar shortcut cell outside the folder view, with a location entry."""
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED", "SENSITIVE", "SHOWING"},
+        x=100, y=200, w=130, h=24,
+    )
+    row = _Node(
+        "table cell", "", children=[place],
+        actions=["expand or contract", "edit", "activate"],
+    )
+    table = _Node("table", "", children=[row])
+    scroll = _Node("scroll pane", "", children=[table])
+    filler = _Node("filler", "", children=[scroll])
+    split = _Node("split pane", "", children=[filler])
+    frame, entry = _window(entry_text, split)
+    return place, entry, frame
+
+
+def test_side_pane_click_uses_the_pointer_and_not_activate(monkeypatch) -> None:
+    """A shortcut cell opens on a pointer click. Selection and activate do not.
+
+    The cell's first actions are expand and edit. activate reports success
+    and leaves the folder. The click is the row's center.
+    """
+    place, entry, _frame = _side_place()
+    driver = _driver(monkeypatch, place)
+    clicked = []
+
+    def click(element, **_kwargs):
+        clicked.append((element.ref, element.bounds.x, element.bounds.y))
+        entry.text = "/"
+
+    driver.click = click  # type: ignore[method-assign]
+    element = _element("e33", "AXCell", "File System", clickable=True, x=100, y=200, w=130, h=24)
+    assert _atspi.navigation_gesture(place) == "pointer"
+    assert driver.press_element(element) is True
+    assert clicked == [("e33", 100, 200)]
+    assert place.action_log == []
+    assert "SELECTED" not in place.states
+    assert entry.text == "/"
+
+
+def test_location_entry_nested_under_a_wide_toolbar_is_the_place() -> None:
+    """Thunar nests the location entry under a toolbar of many empty panels.
+
+    The entry is panel, panel, filler, then a text field, and that panel is
+    not one of the first few toolbar children. The walk has to reach it.
+    """
+    entry = _Node("text", "", text="/home/ubuntu/")
+    nested = _Node("panel", "", children=[
+        _Node("panel", "", children=[
+            _Node("filler", "", children=[entry]),
+        ]),
+    ])
+    slots = []
+    for index in range(18):
+        if index == 14:
+            slots.append(nested)
+        else:
+            slots.append(_Node("panel", "", children=[
+                _Node("push button", "Back" if index == 0 else ""),
+            ]))
+    toolbar = _Node("tool bar", "", children=slots)
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED"},
+    )
+    table = _Node("table", "", children=[place])
+    split = _Node("split pane", "", children=[table])
+    panel = _Node("panel", "", children=[toolbar, split])
+    frame = _Node("frame", "ubuntu - Thunar", children=[panel])
+    assert _atspi.folder_place(place) == ("/home/ubuntu/", "location")
+    assert _atspi.navigating_folder_row(place) is True
+    del frame
+
+
+def test_folder_view_row_still_selects(monkeypatch) -> None:
+    """A file row inside the view tab is selected. It is not opened."""
+    file_cell = _Node(
+        "table cell", "adduser",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED", "SENSITIVE"},
+    )
+    file_table = _Node("table", "", children=[file_cell])
+    view = _Node("page tab list", "", children=[file_table])
+    split = _Node("split pane", "", children=[view])
+    _frame, entry = _window("/usr/share/doc/", split)
+    driver = _driver(monkeypatch, file_cell)
+    clicked = []
+    driver.click = lambda element, **_kwargs: clicked.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e47", "AXCell", "adduser", clickable=True)
+    assert _atspi.navigation_gesture(file_cell) is None
+    assert driver.press_element(element) is True
+    assert clicked == []
+    assert file_cell.action_log == []
+    assert "SELECTED" in file_cell.states
+    assert entry.text == "/usr/share/doc/"
+
+
+def test_tree_row_with_its_own_activate_action_uses_that_action(monkeypatch) -> None:
+    """A tree row whose only action is activate opens through that action.
+
+    Expand and edit are not present, so activate is the row's own
+    activation. The pointer is not sent.
+    """
+    item = _Node("tree item", "Documents", actions=["activate"], states={"ENABLED"})
+    tree = _Node("tree", "Folders", children=[item])
+    frame, entry = _window("/home/ubuntu/", tree)
+
+    def do_action(index, _node=item):
+        item.action_log.append(item.actions[index])
+        entry.text = "/home/ubuntu/Documents"
+        return True
+
+    item.do_action = do_action
+    driver = _driver(monkeypatch, item)
+    clicked = []
+    driver.click = lambda element, **_kwargs: clicked.append(element.ref)  # type: ignore[method-assign]
+    element = _element("e8", "AXRow", "Documents", clickable=True)
+    assert _atspi.navigation_gesture(item) == "activate"
+    assert driver.press_element(element) is True
+    assert item.action_log == ["activate"]
+    assert clicked == []
+    assert entry.text == "/home/ubuntu/Documents"
+    del frame
+
+
+def test_return_opens_a_navigating_row_that_has_no_box(monkeypatch) -> None:
+    """Return is the activation only when the row has no box and no activate."""
+    from a11y_computer_use.drivers import _linux_input
+
+    item = _Node("tree item", "Remote", actions=[], states={"ENABLED"}, w=0, h=0)
+    tree = _Node("tree", "Folders", children=[item])
+    _frame, _entry = _window("/home/ubuntu/", tree)
+    driver = _driver(monkeypatch, item)
+    keys = []
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "press_chord", lambda key: keys.append(key))
+    element = _element("e9", "AXRow", "Remote", clickable=True, w=0, h=0)
+    assert _atspi.navigation_gesture(item) == "return"
+    assert driver.press_element(element) is True
+    assert keys == ["Return"]
+    assert "SELECTED" in item.states
+
+
+def test_path_bar_change_confirms_and_a_selected_row_does_not(monkeypatch) -> None:
+    """The path bar is the location when there is no entry.
+
+    A different crumb confirms. The same crumb is partial, even if the
+    row became selected.
+    """
+    crumb = _Node("push button", "ubuntu", states={"CHECKED"})
+    place = _Node(
+        "table cell", "File System",
+        actions=["expand or contract", "edit", "activate"],
+        states={"ENABLED"},
+    )
+    row = _Node("table cell", "", children=[place])
+    table = _Node("table", "", children=[row])
+    split = _Node("split pane", "", children=[table])
+    frame, _button = _window("", split, crumb=crumb)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    monkeypatch.setattr(_atspi, "_FOLDER_LOCATION_WAIT_S", 0)
+    assert _atspi.folder_place(place) == ("ubuntu", "path bar")
+    crumb.name = "File System"
+    assert _atspi.folder_navigation_verdict(place, "ubuntu") == (
+        "confirmed", "the path bar changed",
+    )
+    crumb.name = "ubuntu"
+    assert _atspi.folder_navigation_verdict(place, "ubuntu") == (
+        "partial", "the row was selected but the location did not change",
+    )
+    del frame
+
+
 def test_tree_row_click_errors_when_the_selection_stays_put(monkeypatch) -> None:
     table, rows = _table()
     table.select_fails = True

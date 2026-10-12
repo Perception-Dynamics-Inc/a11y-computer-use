@@ -401,6 +401,43 @@ def test_writer_paragraph_click_is_confirmed_only_when_the_caret_lands(tmp_path,
     assert landed.evidence == "the caret is in the target paragraph"
 
 
+def test_side_pane_click_is_confirmed_only_when_the_location_changes(tmp_path, monkeypatch) -> None:
+    """Selecting the row is not confirmation. The location has to change."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _atspi
+
+    driver = TreeDriver()
+    driver.name = "linux"
+
+    def press(element: Element) -> bool:
+        driver.calls.append(("press", element.ref))
+        driver._replace("e5", title="selected")
+        return True
+
+    driver.press_element = press  # type: ignore[method-assign]
+    monkeypatch.setattr(observe, "ax_handle_for", lambda snapshot_id, ref: object() if ref == "e4" else None)
+    monkeypatch.setattr(_atspi, "navigating_folder_row", lambda handle: True)
+    monkeypatch.setattr(_atspi, "folder_location", lambda handle: "/home/ubuntu/")
+    monkeypatch.setattr(
+        _atspi, "folder_navigation_verdict",
+        lambda handle, before: ("partial", "the row was selected but the location did not change"),
+    )
+    runtime = _runtime(tmp_path, driver)
+    missed = runtime.click("e4")
+    assert missed.outcome == "partial"
+    assert missed.evidence == "the row was selected but the location did not change"
+    assert missed.outcome != "confirmed"
+
+    monkeypatch.setattr(
+        _atspi, "folder_navigation_verdict",
+        lambda handle, before: ("confirmed", "the location changed"),
+    )
+    driver._replace("e5", title="opened")
+    opened = runtime.click("e4")
+    assert opened.outcome == "confirmed"
+    assert opened.evidence == "the location changed"
+
+
 def test_canvas_click_stays_unverifiable_when_the_tree_changes(tmp_path, monkeypatch) -> None:
     """Focus moving onto a canvas is not confirmation.
 
