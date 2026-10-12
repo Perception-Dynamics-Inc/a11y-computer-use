@@ -359,7 +359,10 @@ def ports_for_pid(pid: object) -> tuple[int, ...]:
     """Distinct DevTools ports on ``pid`` and its ancestors, process first.
 
     A renderer often copies a port that is not the one the browser bound.
-    The browser's port is later in the chain. Callers try them in order.
+    The browser's port is later in the chain. On one process the profile's
+    ``DevToolsActivePort`` is tried before a numeric flag: a launcher can
+    leave an earlier port on the command line while the profile bound
+    another. Callers try them in order.
     """
     if isinstance(pid, bool) or not isinstance(pid, int):
         raise TypeError("pid must be a positive int")
@@ -367,10 +370,29 @@ def ports_for_pid(pid: object) -> tuple[int, ...]:
         raise ValueError("pid must be a positive int")
     found: list[int] = []
     for raw in _cmdline_chain(pid):
-        port = debug_port_from_cmdline(raw)
-        if port is not None and port not in found:
-            found.append(port)
+        for port in _ports_on_cmdline(raw):
+            if port not in found:
+                found.append(port)
     return tuple(found)
+
+
+def _ports_on_cmdline(raw: bytes) -> tuple[int, ...]:
+    """Ports this command line opted into, active profile file first."""
+    flags = list(_PORT_FLAG.finditer(raw))
+    if not flags:
+        return ()
+    ordered: list[int] = []
+    users = list(_USER_DATA.finditer(raw))
+    if users:
+        active = _port_file(os.fsdecode(users[-1].group(1)))
+        if active is not None:
+            ordered.append(active)
+    number = flags[-1].group(1)
+    if number is not None:
+        port = int(number)
+        if 1 <= port <= 65535 and port not in ordered:
+            ordered.append(port)
+    return tuple(ordered)
 
 
 def _cmdline_chain(pid: int) -> tuple[bytes, ...]:
@@ -574,7 +596,9 @@ def fetch_form_controls(port: object, window_title: object) -> tuple[FormControl
     return tuple(found)
 
 
-def write_element(element: Element, value: object, window_title: str = "") -> bool | None:
+def write_element(
+    element: Element, value: object, window_title: str = "", pids: tuple[int, ...] = (),
+) -> bool | None:
     """Write one form control through the DOM.
 
     None means this element is not a CDP form write (no port, no unique
@@ -589,10 +613,12 @@ def write_element(element: Element, value: object, window_title: str = "") -> bo
         raise TypeError("value must be a string")
     if element.role not in _FORM_ROLES or element.secure is True or element.enabled is not True:
         return None
-    return _commit(element, _write_spec(element, value), window_title)
+    return _commit(element, _write_spec(element, value), window_title, pids)
 
 
-def press_checkable(element: Element, window_title: str = "") -> bool | None:
+def press_checkable(
+    element: Element, window_title: str = "", pids: tuple[int, ...] = (),
+) -> bool | None:
     """Toggle a checkbox, or select a radio, through the DOM.
 
     None means CDP is not used for this element. True means the DOM
@@ -611,7 +637,7 @@ def press_checkable(element: Element, window_title: str = "") -> bool | None:
         "kind": kind,
         "action": "toggle",
     }
-    reply = _commit_raw(element, spec, window_title)
+    reply = _commit_raw(element, spec, window_title, pids)
     if reply is None:
         return None
     if reply.get("wrote") is True and type(reply.get("checked")) is bool:
@@ -650,8 +676,10 @@ def _kind_for_element(element: Element) -> str:
     return "text"
 
 
-def _commit(element: Element, spec: dict, window_title: str = "") -> bool | None:
-    reply = _commit_raw(element, spec, window_title)
+def _commit(
+    element: Element, spec: dict, window_title: str = "", pids: tuple[int, ...] = (),
+) -> bool | None:
+    reply = _commit_raw(element, spec, window_title, pids)
     if reply is None:
         return None
     _raise_rejected(element, reply, spec)
@@ -663,16 +691,33 @@ def _commit(element: Element, spec: dict, window_title: str = "") -> bool | None
     return True
 
 
-def _commit_raw(element: Element, spec: dict, window_title: str = "") -> dict | None:
+def _commit_raw(
+    element: Element, spec: dict, window_title: str = "", pids: tuple[int, ...] = (),
+) -> dict | None:
     if not isinstance(window_title, str):
         raise TypeError("window_title must be a string")
-    pid = pid_from_instance(element.instance_id)
-    if pid is None:
+    if isinstance(pids, (str, bytes)) or not isinstance(pids, tuple):
+        raise TypeError("pids must be a tuple of ints")
+    if any(isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in pids):
+        raise TypeError("pids must be a tuple of positive ints")
+    ordered: list[int] = []
+    primary = pid_from_instance(element.instance_id)
+    if primary is not None:
+        ordered.append(primary)
+    for pid in pids:
+        if pid not in ordered:
+            ordered.append(pid)
+    if not ordered:
         return None
-    try:
-        ports = ports_for_pid(pid)
-    except OSError:
-        return None
+    ports: list[int] = []
+    for pid in ordered:
+        try:
+            found = ports_for_pid(pid)
+        except OSError:
+            continue
+        for port in found:
+            if port not in ports:
+                ports.append(port)
     if not ports:
         return None
     expression = f"{_WRITE_JS}({json.dumps(spec)})"
@@ -717,16 +762,34 @@ def _evaluate(port: int, window_title: str, expression: str) -> object:
     from a11y_computer_use.drivers._cdp import page_targets
 
     pages = page_targets(f"http://127.0.0.1:{port}")
+    locate = _locate_expression(expression)
     socket = choose_socket(pages, window_title)
-    if socket is None:
-        # The window title missed, or the write has no title. One page is
-        # that page. Several pages are probed with a locate that does not
-        # change the DOM, and the write runs only on the single page that
-        # has the control. Two pages with the same control are not a guess.
-        socket = _only_form_page(pages, _locate_expression(expression))
-    if socket is None:
-        return None
-    return _eval_socket(socket, expression)
+    reply = None
+    if socket is not None:
+        reply = _eval_socket(socket, expression)
+        # A title match that does not contain this control is not the tab
+        # the snapshot showed. Chrome can publish a UI page whose title is
+        # the whole window title, ahead of the document title.
+        if locate is None or not _page_missed_control(reply):
+            return reply
+    if locate is None:
+        return reply
+    fallback = _only_form_page(pages, locate)
+    if fallback is None or fallback == socket:
+        return reply
+    return _eval_socket(fallback, expression)
+
+
+def _page_missed_control(reply: object) -> bool:
+    """True when a write ran and that page does not have the control.
+
+    An ambiguous match stays on this page. A read result is not a miss.
+    """
+    if not isinstance(reply, dict):
+        return False
+    if reply.get("found") is True or reply.get("ambiguous") is True:
+        return False
+    return True
 
 
 def _locate_expression(expression: str) -> str | None:
@@ -760,6 +823,19 @@ def _only_form_page(pages: list, expression: str | None) -> str | None:
         if isinstance(value, dict) and value.get("found") is True:
             found.append(socket)
     if len(found) == 1:
+        return found[0]
+    # One document can show up as two page targets while it loads. Same
+    # URL is that document. Two different URLs are not a guess.
+    urls: list[str] = []
+    for page in pages:
+        if not isinstance(page, dict) or page.get("webSocketDebuggerUrl") not in found:
+            continue
+        url = page.get("url")
+        if not isinstance(url, str) or not url:
+            urls = []
+            break
+        urls.append(url)
+    if urls and len(urls) == len(found) and len(set(urls)) == 1:
         return found[0]
     if not answered and last_error is not None:
         raise last_error

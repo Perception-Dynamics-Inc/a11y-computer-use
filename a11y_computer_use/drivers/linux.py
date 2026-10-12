@@ -1762,7 +1762,9 @@ class LinuxDriver:
 
         handle = observe.ax_handle_for(element.snapshot_id, element.ref)
         pressed = _cdp_forms.press_checkable(
-            element, window_title=self._dom_window_title(handle),
+            element,
+            window_title=self._dom_window_title(handle),
+            pids=self._dom_pids(handle),
         )
         if pressed is not None:
             return pressed
@@ -2047,6 +2049,32 @@ class LinuxDriver:
             return ""
         return title if isinstance(title, str) else ""
 
+    def _dom_pids(self, handle) -> tuple[int, ...]:
+        """Pids that may own this node's DevTools port.
+
+        The element records the application pid. A Chrome content node can
+        report a different pid than the browser process that bound the port.
+        Both are tried. An unreadable node contributes nothing.
+        """
+        if handle is None:
+            return ()
+        from a11y_computer_use.drivers import _atspi
+
+        def read() -> tuple[int, ...]:
+            app = _atspi._call_first(handle, ("get_application", "getApplication"))
+            found: list[int] = []
+            for acc in (handle, app):
+                pid = _atspi.pid_of(acc)
+                if isinstance(pid, int) and pid > 0 and pid not in found:
+                    found.append(pid)
+            return tuple(found)
+
+        try:
+            pids = self._run(read)
+        except Exception:
+            return ()
+        return pids if isinstance(pids, tuple) else ()
+
     def _apply_set_value(self, element: Element, value: str, handle) -> bool:
         from a11y_computer_use.drivers import _atspi, _cdp_forms
 
@@ -2055,7 +2083,9 @@ class LinuxDriver:
         # Chrome that was not started with a debugging port. The window
         # title selects the tab when more than one page target is open.
         dom = _cdp_forms.write_element(
-            element, value, window_title=self._dom_window_title(handle),
+            element, value,
+            window_title=self._dom_window_title(handle),
+            pids=self._dom_pids(handle),
         )
         if dom is not None:
             return dom
