@@ -1570,19 +1570,37 @@ def _labelled_by_name(acc) -> str:
     return ""
 
 
+def _strip_label_colon(label: str) -> str:
+    """``Orientation:`` is the label text. The control's title is ``Orientation``."""
+    text = label.strip()
+    if text.endswith(":"):
+        text = text[:-1].rstrip()
+    return text
+
+
 def _combo_display_name(acc, name: str) -> str:
     """Title for a combo box.
 
-    On Linux, Qt puts the current item in the accessible name and says the
-    label relation is the widget's name. A GTK combo already carries the name
-    it was given, so this returns that name unchanged.
+    Qt puts the current item in the accessible name and says the label
+    relation is the widget's name. That override is unchanged.
+
+    Any other combo that was given a name keeps it. LibreOffice's GTK
+    sidebar combos are not given one: the name is empty and the label is a
+    LABELLED_BY relation (``Orientation:``). The title is that label without
+    the trailing colon, so find can match ``Orientation``.
     """
-    if not _qt_app(acc):
+    if _qt_app(acc):
+        label = _labelled_by_name(acc)
+        if label and label != name:
+            return label
+        return name
+    if str(name).strip():
         return name
     label = _labelled_by_name(acc)
-    if label and label != name:
-        return label
-    return name
+    if not label:
+        return name
+    title = _strip_label_colon(label)
+    return title or name
 
 
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
@@ -8877,12 +8895,103 @@ def _combo_entry(acc):
     return None
 
 
+def _label_texts(acc) -> set[str]:
+    """Folded LABELLED_BY strings, with and without a trailing colon."""
+    raw = _labelled_by_name(acc).strip()
+    if not raw:
+        return set()
+    names = {raw.casefold()}
+    stripped = _strip_label_colon(raw)
+    if stripped:
+        names.add(stripped.casefold())
+    return names
+
+
+def _sibling_entry_text(acc) -> str | None:
+    """Text of an entry that sits beside the combo, not inside it.
+
+    LibreOffice's GTK combo hides the stock combo and shows a button. The
+    editable text, when there is one, is a sibling entry. A label sibling is
+    the caption, not the value.
+    """
+    parent = _parent_of(acc)
+    if parent is None:
+        return None
+    captions = _label_texts(acc)
+    count = min(_child_count(parent), 8)
+    for index in range(count):
+        child = _child_at(parent, index)
+        if child is None or child is acc:
+            continue
+        if _role_name(child) not in {"entry", "text"}:
+            continue
+        label = _option_label(child).strip()
+        if label and label.casefold() not in captions:
+            return label
+    return None
+
+
+def _descendant_combo_value(acc) -> str | None:
+    """A selected descendant, or the one text the combo itself displays.
+
+    The active menu item is already ``_selected_option_text``. This is the
+    rest: a selected table cell (LibreOffice's popup is a tree, not a menu),
+    or a single label/entry under the combo when nothing is selected. Menu
+    rows that are only listed are not the value. Several different texts are
+    not one value.
+    """
+    captions = _label_texts(acc)
+    selected: list[str] = []
+    plain: list[str] = []
+
+    def take(child, into: list[str]) -> None:
+        label = _option_label(child).strip()
+        if not label or label.casefold() in captions or label in into:
+            return
+        into.append(label)
+
+    def walk(node, depth: int) -> None:
+        if depth > 4 or selected:
+            return
+        count = min(_child_count(node), 32)
+        for index in range(count):
+            child = _child_at(node, index)
+            if child is None:
+                continue
+            role = _role_name(child)
+            if role in {"menu", "popup menu"}:
+                continue
+            if _state_has(child, "SELECTED"):
+                take(child, selected)
+                if selected:
+                    return
+            elif role in {"entry", "text", "label", "static"}:
+                take(child, plain)
+                continue
+            if role in _OPTION_CONTAINER_NAMES or role in {
+                "table", "tree table", "tree", "viewport", "filler", "panel",
+                "scroll pane", "box",
+            }:
+                walk(child, depth + 1)
+                if selected:
+                    return
+
+    walk(acc, 0)
+    if selected:
+        return selected[0]
+    if len(plain) == 1:
+        return plain[0]
+    return None
+
+
 def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
     """(handled, value) for a combo or list.
 
     An editable combo's value is its own entry's text, including when that
-    text is empty. A non-editable combo uses the active option. Neither falls
-    through to the Value interface.
+    text is empty. A non-editable combo uses the active option, then its own
+    text, then a sibling entry or a displayed descendant. Neither falls
+    through to the Value interface. The label relation is the title, not the
+    value.
     """
     if role not in _CHOICE_ROLES and role_name not in _CHOICE_ROLE_NAMES:
         return False, None
@@ -8899,7 +9008,19 @@ def _choice_value(acc, role: str, role_name: str) -> tuple[bool, str | None]:
         current = _node_name(acc)
         if current:
             return True, current
-    return True, _selected_option_text(acc)
+    selected = _selected_option_text(acc)
+    if selected:
+        return True, selected
+    if role_name != "combo box" and role != "AXComboBox":
+        return True, None
+    shown = _direct_text(acc)
+    cleaned = _strip_objects(shown).strip()
+    if cleaned and cleaned.casefold() not in _label_texts(acc):
+        return True, cleaned
+    sibling = _sibling_entry_text(acc)
+    if sibling:
+        return True, sibling
+    return True, _descendant_combo_value(acc)
 
 
 def _set_entry_contents(entry, value: str) -> bool:
