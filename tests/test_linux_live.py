@@ -3746,8 +3746,13 @@ def test_short_gtk_drag_drops_onto_the_row_above(tmp_path) -> None:
     script.write_text(_GTK_DND_APP)
     err_path = tmp_path / "dnd.err"
     err_file = err_path.open("w")
+    env = os.environ.copy()
+    # CI exports this for the whole job. A desktop session that leaves the
+    # bridge off still has to publish the tree, or the rows never appear.
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
     proc = subprocess.Popen(
-        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=err_file,
+        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=err_file, env=env,
     )
     try:
         deadline = time.monotonic() + 15
