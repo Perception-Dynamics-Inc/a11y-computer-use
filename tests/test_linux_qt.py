@@ -834,3 +834,62 @@ def test_hidden_window_is_omitted_and_a_showing_window_stays(atspi) -> None:
     )
     assert not any(el.title == "Replacement" for el in whole.elements)
     assert any(el.title == "Tools" for el in whole.elements)
+
+
+def test_hidden_frame_that_wraps_a_showing_document_stays(atspi) -> None:
+    """A Firefox content frame with no SHOWING state still holds the page.
+
+    The outer window is SHOWING. The frame under it reports only ENABLED,
+    and the showing document web is inside that frame. Dropping the frame
+    would omit the page. A sibling dialog that is not showing, and that
+    does not wrap a document, is still omitted.
+    """
+    button = _Node(
+        "push button", "Div button",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Gecko", x=20, y=80, w=80, h=24,
+    )
+    document = _Node(
+        "document web", "cuapara",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, children=[button],
+        toolkit="Gecko", x=0, y=60, w=800, h=500,
+    )
+    content = _Node(
+        "frame", "content", states={"ENABLED"}, children=[document],
+        toolkit="Gecko", x=0, y=40, w=800, h=540,
+    )
+    notice = _Node(
+        "label", "Update", states={"ENABLED"}, toolkit="Gecko",
+        x=8, y=8, w=80, h=16,
+    )
+    hidden_dialog = _Node(
+        "dialog", "Hidden notice", states={"ENABLED"}, children=[notice],
+        toolkit="Gecko", x=200, y=200, w=120, h=40,
+    )
+    chrome = _Node(
+        "frame", "cuapara — Mozilla Firefox",
+        states={"SHOWING", "VISIBLE", "ENABLED", "ACTIVE"},
+        children=[content, hidden_dialog],
+        toolkit="Gecko", x=0, y=0, w=900, h=700,
+    )
+    app = _Node("application", "firefox", children=[chrome], toolkit="Gecko")
+
+    kids = list(ATSPIAccessor().children(chrome))
+    assert content in kids
+    assert hidden_dialog not in kids
+    assert document in list(ATSPIAccessor().children(content))
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    geometry = (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="firefox", pid=None,
+        geometry=geometry,
+    )
+    titles = [el.title for el in snap.elements]
+    assert "Div button" in titles
+    assert "cuapara" in titles
+    assert "Hidden notice" not in titles
+    assert "Update" not in titles

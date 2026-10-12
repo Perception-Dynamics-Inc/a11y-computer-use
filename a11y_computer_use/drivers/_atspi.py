@@ -13265,18 +13265,12 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
 _TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
 
 
-def _hidden_window(node) -> bool:
-    """True for a frame, window, or dialog that is not on screen.
+def _window_lacks_showing_and_visible(node) -> bool:
+    """True when ``node`` reported states and none of them are on screen.
 
-    FeatherPad keeps its Replace dialog in the tree as a frame named
-    Replacement. The state set is only ENABLED, and the box is a strip at
-    the parent origin, so bounds alone would keep it. A window that is
-    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
-    node that never reported states is not treated as hidden. Other roles
-    are not this case.
+    An empty or missing state set is false: a node that never reported
+    states is not treated as hidden.
     """
-    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
-        return False
     sset = _call_first(node, ("get_state_set",))
     if sset is None:
         return False
@@ -13287,6 +13281,52 @@ def _hidden_window(node) -> bool:
             return False
         return "SHOWING" not in folded and "VISIBLE" not in folded
     return not _state_has(node, "SHOWING") and not _state_has(node, "VISIBLE")
+
+
+def _wraps_showing_browser_document(node, depth: int = 0) -> bool:
+    """True when a frame still holds the page the user can see.
+
+    Firefox parents the showing ``document web`` under a frame whose own
+    state set is only ENABLED. That frame is the page. A hidden dialog
+    whose children are ordinary controls is not. The walk is bounded and
+    uses the raw child list, so it does not call back into the filter.
+    """
+    if node is None or depth > 5:
+        return False
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return False
+    for index in range(min(count, 12)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if (
+            role in {"document web", "internal frame", "document frame"}
+            and _state_has(child, "SHOWING")
+        ):
+            return True
+        if _wraps_showing_browser_document(child, depth + 1):
+            return True
+    return False
+
+
+def _hidden_window(node) -> bool:
+    """True for a frame, window, or dialog that is not on screen.
+
+    FeatherPad keeps its Replace dialog in the tree as a frame named
+    Replacement. The state set is only ENABLED, and the box is a strip at
+    the parent origin, so bounds alone would keep it. A window that is
+    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
+    node that never reported states is not treated as hidden. Other roles
+    are not this case. A frame that still wraps a SHOWING browser document
+    stays, because that document is the page.
+    """
+    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
+        return False
+    if not _window_lacks_showing_and_visible(node):
+        return False
+    return not _wraps_showing_browser_document(node)
 
 
 def _without_hidden_windows(kids: list) -> list:
