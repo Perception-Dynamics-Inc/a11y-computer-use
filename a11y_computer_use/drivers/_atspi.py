@@ -6828,8 +6828,21 @@ def _state_has(acc, name: str) -> bool:
 
     A fake state set matches the name string. The GI binding matches
     ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
+    The event-thread property cache is dropped first so a SELECTED or
+    SHOWING bit is the bus value.
     """
-    _drop_cached_properties(acc)
+    return _state_flag(acc, name, drop_cache=True)
+
+
+def _state_flag(acc, name: str, *, drop_cache: bool) -> bool:
+    """Whether the state set contains ``name``.
+
+    ``drop_cache`` is false when the caller is about to read text on this
+    same node. ``clear_cache_single`` on a Chromium contenteditable makes
+    the following ``get_text`` return NULL.
+    """
+    if drop_cache:
+        _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return False
@@ -14982,11 +14995,17 @@ def target_vanished(acc) -> bool:
     if acc is None:
         return False
     try:
-        if _state_has(acc, "DEFUNCT"):
+        java = _java_app(acc)
+    except Exception:
+        java = False
+    try:
+        # Java needs a fresh DEFUNCT bit. Every other toolkit keeps the
+        # cached state: dropping it here clears a Chrome editor's text.
+        if _state_flag(acc, "DEFUNCT", drop_cache=java):
             return True
     except Exception:
         return True
-    if not _java_app(acc):
+    if not java:
         return False
     try:
         role = _role_name(acc)
