@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.66] - 2026-10-12
 
-Fifty-five commits since v0.4.65, through #455.
+Fifty-six commits since v0.4.65, through #463.
 
 ### Safety
 
@@ -63,6 +63,7 @@ Fifty-five commits since v0.4.65, through #455.
 - Firefox exposes a page textarea as an AT-SPI entry with `STATE_MULTI_LINE`, the same role as a single-line input. That state, and a multiline attribute, map Gecko entries to textarea. A single-line input stays a text field. Chromium entries keep their own mapping. Fixes #432 (#434) (80c45a3, 2026-10-13).
 - A 10k-row GTK3 TreeView exposes every cell on the Table interface, including rows the on-screen walk never visits. `find` searches that model past the old 4096-row window and, when the interface has no cell, the non-showing children AT-SPI still lists. A cell that stays off screen is reported with no bounds instead of an invented rectangle. Fixes #439 (#443) (e8e6ca4, 2026-10-13).
 - Five wheel lines move about a dozen rows, so 50 scrolls stayed near the top of a 10000-row list. A large GTK table is jumped once through `Table.get_accessible_at` and the vertical bar's row index. When the name is not a cell, each later step pages that bar by the painted row count. Chromium keeps the five-line wheel. Fixes #440 (#444) (585b2e1, 2026-10-13).
+- Java ATK's `Table.get_column_header` objects share one native header. Asking for the next column rewrites the name on every header already returned, so a later snapshot read showed the last name on every column. The name and the screen box are copied before the next column is requested. Fixes #460 (#463) (901efd4, 2026-10-13).
 - Chromium's empty input publishes a subnormal double on Atk Value. Character count 0 on an entry, text field, or paragraph is an empty value, and that double is dropped on text roles. A filler still keeps it. When `set_text_contents` fails and the text read is NULL, the field is typed and accepted only if the next read matches. Fixes #55 (#423) (c287224, 2026-10-12).
 - GTK 4 reports every SCREEN origin as (0, 0) while WINDOW coordinates are relative to the client. The screen point is the X window's content origin plus that WINDOW box. The content origin is the client origin plus the input-shape margin, so a shadow around the window is not part of the control. A missing origin is left as reported. A pointer click is not sent to a still-collapsed or degenerate GTK 4 box. The AT-SPI click action is used when it exists; otherwise the click is `not_actionable`. The covered check does not treat that box as a screen point, and a minimized window is not a hit. A click that holds no modifier does not import Xlib. Fixes #399 (#402) (d23f8a7, 2026-10-12).
 - An empty GTK 4 text field implements Text and not Value. Reading CurrentValue published an uninitialized double, about 6.93e-310. That read is skipped when the Value interface is absent. A character count of 0 is already an empty value. When the text interface does not report a count, a subnormal on a text role is dropped, and zero and a small normalized value stay when the interface is present. A filler still keeps the double. Fixes #400 (#415) (0004972, 2026-10-13).
