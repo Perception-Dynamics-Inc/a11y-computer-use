@@ -7,6 +7,29 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.65] - 2026-10-12
+
+Seven commits since v0.4.64, through #355.
+
+### Safety
+
+- An explicit `x`/`y` click stays that point. The resolver and look-again already left it in place. Escalation did not: a failed point inside the window was retried at the window center, and a point on a focused control became Return. `coordinate_action` and `keyboard_action` now leave a click that already has both coordinates alone. A ref click can still escalate to that element's center. Look-again, a snap to a ref or an OCR word, escalation, and retry may record another target, and they do not replace `x` and `y`. Goal text that names a different element is not a target. The lock is covered by hermetic tests of the vision-order resolver, look-again and snap, escalation and retry, the agent loop, HTTP `POST /runs`, agent MCP `run_goal`, and the desktop `click` tool. Refs #333 (5b62b67, 2026-10-12).
+
+### Agent and vision
+
+- A subgoal is the work since the last verified step. `stuck_steps` (default 6) and `stuck_time_s` (default 120) bound one tactic of that subgoal. When either budget runs out, the loop switches strategy in a fixed order: keyboard path, then the vision fallback, then a re-plan. Each switch is a `strategy_switch` line in `trajectory.jsonl`. When every switch has been used and the budget runs out again, the run stops with `status` `stuck` and does not wait for `max_time`. A switch does not rewrite a click that already has `x` and `y`. `max_time` is also a hard deadline for a driver or tool call. Each snapshot, screenshot, crop, and tool call runs on a worker. If that call is still blocked when the budget is spent, the loop abandons it and stops with `status` `timeout` and `reason` `max_time`. It does not wait for Chrome or AT-SPI to return. A model call still uses `model_timeout_s`. A model that returns after the budget is already spent stays `status` `failed` with `reason` `max_time` (1481738, 2026-10-12).
+
+### Linux drivers
+
+- `find` searches the whole Chromium document, including a table that starts below the viewport, and scrolls the matching cell into the snapshot. The walk keys nodes by their AT-SPI object path so a recycled proxy cannot skip the table at the end of a long page. `expand` pages a contiguous range of the named node's own children. A positive cursor is that index exactly, so a later listed name cannot skip the hole in front of it. Children in the page stay in the snapshot even when they sit below the viewport. Fixes #313 (154ee36, 2026-10-12).
+- LibreOffice Calc reports about a million rows. `desktop_snapshot` and `find` kept the first 96 cells that had a positive size, so the sample stopped at A1..P6 even when later rows were still inside the table's on-screen box. The visible rows and columns are now the ones whose boxes meet that rectangle. The search is exponential and then binary. When those boxes do not advance, a hit-test along the same rectangle names the span. The cells are grouped into bands of 96 so the existing child caps keep the lower rows. A sheet that reports neither a box nor a hit still returns the previous first 96 addresses. A short table stays on the child-index walk. Fixes #351 (32ccb19, 2026-10-12).
+- `scroll_to_find` on a Chrome document watches the on-screen rows, not the window buttons or the file infobar, and sends a four-notch burst while the name is absent. A hit is still returned only when a later snapshot shows the center inside the window. The scroll container is the scrollable ancestor of the target, not always the document. A call stops after `budget_s` seconds (default 15) and returns the container, its scroll position, and the last rows on screen. `page_unchanged` is raised only when that container's scroll offset was read and did not move. A short table that still runs past the window uses the document wheel and stops at the end with not-found, instead of reporting the page unchanged. A document or a table is searched with Ctrl+F first. A paginated or virtualized table that already fits in the window then uses Page Down. Fixes #340 and #346 (e5e54e4, 2026-10-12).
+- `menu` reported that LibreOffice Writer exposes no menu bar. Writer publishes the bar under two panels and a root pane. The search walked that tree with a seen-set of `id(proxy)`, and a collected proxy's id was reused for the root pane, so the pane was skipped. The search now keeps every proxy alive for the walk. The seen-set uses the AT-SPI bus name plus object path when both can be read, and `id()` only for a wrapper that has no such key. A parent cycle stops after 64 steps. Fixes #354 (1dd7dee, 2026-10-12).
+
+### Packaging
+
+- A `+cpu` torch plus the default PyPI torchvision wheel raises `RuntimeError: operator torchvision::nms does not exist` from `import torchvision`. `HoloLocalGrounding` only treated `ImportError` as `GroundingUnavailable`, so that mismatch escaped as a raw `RuntimeError`. Import and load failures from torch, torchvision, and transformers are now `GroundingUnavailable`. The `torchvision::nms` error, and an `OSError` that names torchvision or libtorch, name the mismatch and the fix: install torchvision from the same index as torch. A missing module stays the existing "not installed" message. An unrelated load error, such as a truncated weights file, stays a load error. `[holo]` still lists the packages with no URL and no CUDA index. Fixes #341 (81c7e3c, 2026-10-12).
+
 ## [0.4.64] - 2026-10-12
 
 Ten commits since v0.4.63, through #338.
