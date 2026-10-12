@@ -30,6 +30,7 @@ from a11y_computer_use.agent.models.base import (
     tool_schema,
     usage_dict,
 )
+from a11y_computer_use.agent.models.sampling import resolve_sampling
 
 __all__ = ["GeminiModel"]
 
@@ -52,6 +53,8 @@ class GeminiModel:
         sleep: Callable[[float], None] | None = None,
         max_attempts: int = 3,
         default_timeout: float = 120.0,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         require_httpx()
         if not model:
@@ -68,6 +71,15 @@ class GeminiModel:
                 "gemini model needs GEMINI_API_KEY or GOOGLE_API_KEY "
                 "(no key in the environment or constructor)"
             )
+        # generateContent takes both under generationConfig.
+        self.sampling = resolve_sampling(
+            temperature=temperature,
+            seed=seed,
+            supports_temperature=True,
+            supports_seed=True,
+            temperature_gap="",
+            seed_gap="",
+        )
         self._client = client
         self._sleep = sleep
         self._max_attempts = max_attempts
@@ -87,6 +99,9 @@ class GeminiModel:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         if tools:
             body["tools"] = [{"functionDeclarations": [_wire_tool(tool) for tool in tools]}]
+        fields = self.sampling.request_fields()
+        if fields:
+            body["generationConfig"] = fields
         headers: dict[str, str] = {}
         if self.api_key:
             headers["x-goog-api-key"] = self.api_key

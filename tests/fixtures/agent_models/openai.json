@@ -1,6 +1,8 @@
 {
   "roundtrip_request": {
     "model": "gpt-4.1",
+    "temperature": 0.0,
+    "seed": 0,
     "messages": [
       {
         "role": "system",
@@ -100,6 +102,8 @@
   },
   "multi_request": {
     "model": "gpt-4.1",
+    "temperature": 0.0,
+    "seed": 0,
     "messages": [
       {
         "role": "user",
@@ -179,6 +183,8 @@
   },
   "image_request": {
     "model": "gpt-4.1",
+    "temperature": 0.0,
+    "seed": 0,
     "messages": [
       {
         "role": "user",
@@ -243,6 +249,8 @@
   },
   "tool_image_request": {
     "model": "gpt-4.1",
+    "temperature": 0.0,
+    "seed": 0,
     "messages": [
       {
         "role": "user",

@@ -83,7 +83,11 @@
           }
         ]
       }
-    ]
+    ],
+    "generationConfig": {
+      "temperature": 0.0,
+      "seed": 0
+    }
   },
   "roundtrip_response": {
     "candidates": [
@@ -161,7 +165,11 @@
           }
         ]
       }
-    ]
+    ],
+    "generationConfig": {
+      "temperature": 0.0,
+      "seed": 0
+    }
   },
   "multi_response": {
     "candidates": [
@@ -255,7 +263,11 @@
           }
         ]
       }
-    ]
+    ],
+    "generationConfig": {
+      "temperature": 0.0,
+      "seed": 0
+    }
   },
   "tool_image_request": {
     "contents": [
@@ -313,7 +325,11 @@
           }
         ]
       }
-    ]
+    ],
+    "generationConfig": {
+      "temperature": 0.0,
+      "seed": 0
+    }
   },
   "text_response": {
     "candidates": [
