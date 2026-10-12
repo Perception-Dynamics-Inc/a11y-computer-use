@@ -16,8 +16,10 @@ snapshot submitted from the caller cannot deadlock on a nested submit.
 
 On Linux, ``enabled()`` is true when the variable is unset and the AT-SPI
 typelib imports. ``0``, ``false``, ``no``, and ``off`` force the inline path.
-Any other value turns the thread on. Other platforms stay inline when the
-variable is unset, so constructing a Linux driver there does not start it.
+``1``, ``true``, ``yes``, and ``on`` turn the thread on. Any other value is
+ignored, with a warning, and the unset default is used. Other platforms stay
+inline when the variable is unset, so constructing a Linux driver there does
+not start it.
 Actionability waits call ``ensure_started`` themselves, so on a Linux display
 the listener is on even when the variable forces the inline path. The standing
 registrations are ``object:state-changed``, ``object:children-changed``,
@@ -30,6 +32,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import warnings
 from collections import deque
 
 _STANDING_EVENTS = (
@@ -54,8 +57,10 @@ _events_cv = threading.Condition()
 _seq = 0
 
 
+_ON = frozenset({"1", "true", "yes", "on"})
 _OFF = frozenset({"0", "false", "no", "off"})
 _typelib_ok: bool | None = None
+_warned_values: set[str] = set()
 
 
 def typelib_imports() -> bool:
@@ -78,17 +83,39 @@ def typelib_imports() -> bool:
     return True
 
 
+def _default_enabled() -> bool:
+    """Unset means on for a Linux process that can import the typelib."""
+    return sys.platform.startswith("linux") and typelib_imports()
+
+
 def enabled() -> bool:
     """True when libatspi calls should run on the event thread.
 
     Unset on Linux is on when the typelib imports. ``0``, ``false``, ``no``,
-    and ``off`` are off. Any other set value is on, including off Linux.
-    Actionability waits do not use this flag; they call `ensure_started`.
+    and ``off`` are off. ``1``, ``true``, ``yes``, and ``on`` are on. Any
+    other value warns once and uses that unset default. Comparison ignores
+    case and surrounding whitespace. Actionability waits do not use this
+    flag; they call `ensure_started`.
     """
     raw = os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS")
     if raw is None:
-        return sys.platform.startswith("linux") and typelib_imports()
-    return raw.strip().lower() not in _OFF
+        return _default_enabled()
+    value = raw.strip().lower()
+    if value in _ON:
+        return True
+    if value in _OFF:
+        return False
+    if value not in _warned_values:
+        _warned_values.add(value)
+        default_on = _default_enabled()
+        warnings.warn(
+            f"A11Y_COMPUTER_USE_ATSPI_EVENTS={raw!r} is not 0/false/no/off or "
+            "1/true/yes/on; using the default "
+            f"({'on' if default_on else 'off'})",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return _default_enabled()
 
 
 def event_names() -> tuple[str, ...]:
