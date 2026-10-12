@@ -262,6 +262,10 @@ class RawNode:
     #: when the driver could not separate the screen from the buffer. The
     #: snapshot shows this text; ``find`` still searches ``value``.
     screen_text: str | None = None
+    #: A control the toolkit did not allocate, such as a notebook page tab
+    #: while the tab bar is hidden. The snapshot keeps the name and does not
+    #: invent a box. Default false, so every other node is unchanged.
+    unallocated: bool = False
 
 
 class TreeAccessor(Protocol):
@@ -1170,8 +1174,8 @@ def render_matches(
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
         line = _render_line(el)
-        if el.parent is not None:  # _render_line prints bounds only for roots
-            b = el.bounds
+        b = el.bounds
+        if b is not None and el.parent is not None:  # _render_line prints bounds only for roots
             line += f" [{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]"
         note = _terminal_match_note(snap, el, text)
         if note:
@@ -1241,7 +1245,13 @@ def _state_changes(a: Element, b: Element) -> dict[str, tuple]:
         if av != bv:
             changes[attr] = (av, bv)
     ab, bb = a.bounds, b.bounds
-    if (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
+    if ab is None or bb is None:
+        if (ab is None) != (bb is None):
+            changes["bounds"] = (
+                None if ab is None else (ab.x, ab.y),
+                None if bb is None else (bb.x, bb.y),
+            )
+    elif (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
         changes["bounds"] = ((ab.x, ab.y), (bb.x, bb.y))
     return changes
 
@@ -1353,7 +1363,7 @@ class _PNode:
     """One kept node of the pruned tree, pre-flattening."""
 
     raw: RawNode
-    bounds: Bounds
+    bounds: Bounds | None
     children: list[_PNode]
     elided: int  #: direct children hidden by the depth/fan-out caps
     has_interactive: bool  #: self or any kept descendant is interactive
@@ -1421,7 +1431,7 @@ def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
     if raw.role == OPAQUE_ROLE:
         return True, False, False
     clickable, editable, secure = _flags(raw)
-    if _plain_zero_wrapper(raw):
+    if _plain_zero_wrapper(raw) or raw.unallocated:
         clickable = False
     return clickable, editable, secure
 
@@ -1503,6 +1513,13 @@ def _prune_inner(
         child_web_depth = 0
 
     bounds = _to_bounds(raw.position, raw.size, geometry)
+    if raw.unallocated:
+        # A hidden notebook tab has a name and no box. Do not adopt the
+        # page as its bounds, and do not drop the name. The page is hoisted
+        # onto the tab list, so this node keeps no children.
+        return _PNode(
+            raw=raw, bounds=None, children=[], elided=0, has_interactive=False, node=node,
+        )
     # An empty label or paragraph is decorative static text. Returning here
     # used to drop the checkbox, button, or field inside it (#124, #136).
     # Walk those children. A childless empty text node is still dropped below.
@@ -1632,12 +1649,16 @@ def _prune_inner(
     if hollow:
         if not kept:
             return None  # zero-size and nothing visible below it
-        bounds = _union_bounds([c.bounds for c in kept])
+        rects = [c.bounds for c in kept if c.bounds is not None]
+        if not rects:
+            return None
+        bounds = _union_bounds(rects)
     if text_container:
         if not kept:
             return None  # empty static text with nothing under it stays decorative
         if bounds is None:
-            bounds = _union_bounds([c.bounds for c in kept])
+            rects = [c.bounds for c in kept if c.bounds is not None]
+            bounds = _union_bounds(rects) if rects else None
         # One control replaces the empty label, the same way a wrapper
         # collapses. Several controls stay parented so none of them is dropped.
         if len(kept) == 1 and elided == 0:
@@ -2169,6 +2190,7 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
             ("collapsed", el.expanded is False),
             ("focus", el.focused),
             ("disabled", not el.enabled),
+            ("hidden", el.bounds is None),
         )
         if on
     ]
@@ -2176,8 +2198,9 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         parts.append(f"({','.join(flags)})")
     # An opaque region is addressed by its box. Always print the bounds, in
     # both views, so a coordinate click does not have to guess the size.
-    if bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None):
-        b = el.bounds
+    # A hidden control has no box. Printing one would invent a click target.
+    b = el.bounds
+    if b is not None and (bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None)):
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
     return " ".join(parts)
 
@@ -2424,7 +2447,9 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
     return pool[0][1], ""
 
 
-def _center_distance(a: Bounds, b: Bounds) -> float:
+def _center_distance(a: Bounds | None, b: Bounds | None) -> float:
+    if a is None or b is None:
+        return 0.0 if a is None and b is None else math.inf
     ca, cb = a.center, b.center
     if ca.display_id != cb.display_id:
         return math.inf

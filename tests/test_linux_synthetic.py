@@ -992,12 +992,12 @@ class _PageNode:
 
 
 def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch) -> None:
-    """A notebook page with no allocation is a small named tab, not the page.
+    """A notebook page with no allocation is a named hidden tab, not the page.
 
     GTK reports (-1, -1, -1, -1) and an empty name for the lone page tab.
-    The frame name is the page label. The page content is hoisted to the
-    tab list, and the tab's box stays tab-sized. A page tab that already
-    has a box and a name is left on that box.
+    The frame name is the page label. The page is hoisted to the tab list.
+    The tab has no box and is not clickable. A page tab that already has a
+    box and a name keeps that box.
     """
     def extents(acc, *, keep_zero=False):
         box = getattr(acc, "box", None)
@@ -1029,11 +1029,9 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
     assert raw.role == "AXButton"
     assert raw.title == "Probe Title"
     assert raw.selected is True
-    assert raw.size is not None and raw.size[1] == 19
-    assert raw.size[0] <= 160
-    assert raw.position is not None
-    assert raw.position[1] + raw.size[1] == 160
-    assert raw.position[0] + raw.size[0] == 110 + 780
+    assert raw.unallocated is True
+    assert raw.position is None and raw.size is None
+    assert raw.actions == ()
     assert accessor.children(hidden) == []
     assert accessor.children(tabs) == [hidden, page]
 
@@ -1041,7 +1039,8 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
     labelled.parent = tabs
     labelled_raw = accessor.read(labelled)
     assert labelled_raw.title == "Kept Label"
-    assert labelled_raw.size is not None and labelled_raw.size[1] == 19
+    assert labelled_raw.unallocated is True
+    assert labelled_raw.position is None and labelled_raw.size is None
 
     visible = _PageNode("page tab", "Alpha Title", box=((565.0, 402.0), (74.0, 19.0)))
     visible_page = _PageNode("panel", "", box=((551.0, 429.0), (818.0, 420.0)))
@@ -1060,22 +1059,61 @@ def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch
     buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
     assert len(buttons) == 1
     tab = buttons[0]
-    assert tab.bounds.height == 19
-    assert tab.bounds.width <= 160
+    assert tab.bounds is None
+    assert tab.clickable is False
+    assert tab.actionable is False
+    rendered = observe.render_text(snap, include_bounds=True)
+    line = next(
+        item for item in rendered.splitlines()
+        if "button" in item and "Probe Title" in item
+    )
+    assert "hidden" in line
+    assert "@" not in line
     text = [el for el in snap.elements if el.role == "AXTextArea" and el.title == "Terminal"]
     assert len(text) == 1
     area = text[0]
-    center_x = area.bounds.x + area.bounds.width / 2
-    center_y = area.bounds.y + area.bounds.height / 2
-    assert not (
-        tab.bounds.x <= center_x < tab.bounds.x + tab.bounds.width
-        and tab.bounds.y <= center_y < tab.bounds.y + tab.bounds.height
-    )
+    assert area.bounds is not None
     by_ref = {el.ref: el for el in snap.elements}
     parent = area.parent
     while parent is not None:
         assert by_ref[parent].ref != tab.ref
         parent = by_ref[parent].parent
+
+
+def test_hidden_page_tab_ref_click_is_not_a_pointer_click() -> None:
+    """A ref click on a hidden tab is a typed no-op. The pointer is not called."""
+    from a11y_computer_use import server
+
+    tab = Element(
+        "e2", "AXButton", "Probe Title", None, None, "s",
+        clickable=False, selected=True,
+    )
+    clicks: list[object] = []
+
+    class _Driver:
+        name = "linux"
+
+        def click(self, target, **kwargs):
+            clicks.append(target)
+
+        def press_element(self, element):
+            clicks.append(("press", element.ref))
+            return False
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _Driver()
+    rt._current = Snapshot("s", Scope.WINDOW, "xfce4-terminal", 1, 0.0, (), (tab,))
+    rt._reject_coordinate = lambda *args, **kwargs: None
+    rt._target = lambda *args, **kwargs: (tab, "xfce4-terminal")
+    rt._capture = lambda app=None: {}
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._refuse_disabled = lambda *args, **kwargs: None
+    rt._refuse_secure = lambda *args, **kwargs: None
+    result = rt.click(ref="e2")
+    assert clicks == []
+    assert result.outcome == "suspected_noop"
+    assert result.evidence == "not_actionable"
+    assert "no click was sent" in result
 
 
 def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> None:

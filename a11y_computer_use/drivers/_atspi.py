@@ -673,68 +673,6 @@ def _frame_accessible_name(node) -> str:
     return str(_call_first(frame, ("get_name",), default="") or "").strip()
 
 
-# A real xfce4-terminal tab is about this tall. A hidden label has no
-# allocation, so the substitute stays this tall instead of adopting the page.
-_HIDDEN_TAB_HEIGHT = 19.0
-_HIDDEN_TAB_MAX_WIDTH = 160.0
-
-
-def _hidden_page_tab_box(node, label: str):
-    """A tab-sized on-screen box for a notebook page GTK did not allocate.
-
-    One page hides the tab bar. The page tab's extents are (-1, -1, -1, -1)
-    and the page content is the only real box under it. Adopting that box
-    publishes the terminal as a selected button. The substitute is one
-    tab-height strip in the gap above the page, on the trailing edge so it
-    does not cover the menu titles, and still inside the frame.
-    """
-    text = str(label or "").strip()
-    width = float(min(_HIDDEN_TAB_MAX_WIDTH, max(32, 7 * max(len(text), 1) + 16)))
-    height = _HIDDEN_TAB_HEIGHT
-    frame = _frame_ancestor(node)
-    frame_pos, frame_size = _extents(frame) if frame is not None else (None, None)
-    parent = _call_first(node, ("get_parent", "getParent"))
-    parent_pos, parent_size = _extents(parent) if parent is not None else (None, None)
-
-    def usable(pos, size) -> bool:
-        if pos is None or size is None:
-            return False
-        try:
-            return (
-                float(size[0]) > 0
-                and float(size[1]) > 0
-                and float(pos[0]) > -1_000_000
-                and float(pos[1]) > -1_000_000
-            )
-        except (TypeError, ValueError):
-            return False
-
-    if usable(frame_pos, frame_size) and usable(parent_pos, parent_size):
-        gap = float(parent_pos[1]) - float(frame_pos[1])
-        if gap >= height:
-            span = min(width, float(parent_size[0]))
-            x = float(parent_pos[0]) + float(parent_size[0]) - span
-            y = float(parent_pos[1]) - height
-            left = float(frame_pos[0])
-            right = left + float(frame_size[0])
-            if x < left:
-                x = left
-            if x + span > right:
-                x = max(left, right - span)
-            if y >= 0:
-                return (x, y), (span, height)
-    if usable(frame_pos, frame_size):
-        span = min(width, float(frame_size[0]))
-        x = float(frame_pos[0]) + float(frame_size[0]) - span
-        y = float(frame_pos[1])
-        if y >= 0 and x >= 0:
-            return (x, y), (span, height)
-    if usable(parent_pos, parent_size) and float(parent_size[1]) > height:
-        span = min(width, float(parent_size[0]))
-        return (float(parent_pos[0]), float(parent_pos[1])), (span, height)
-    return (0.0, 0.0), (width, height)
-
-
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -2312,16 +2250,19 @@ class ATSPIAccessor:
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        unallocated = False
         if role_str == "page tab" and _negative_extent(size):
-            # A notebook with one page hides the tab label and reports no
-            # allocation. The accessible name is empty; the frame name is
-            # the page label (the terminal title). The page box must not
-            # become this control.
+            # A notebook with one page hides the tab bar. GTK reports no
+            # allocation and, for a terminal, an empty name. The frame name
+            # is the page label. Inventing a box would put a click on the
+            # menu or the page, so this control stays hidden: named, with
+            # no bounds and no press action.
             label = str(name).strip()
             if not label:
                 label = _frame_accessible_name(node)
             name = label
-            position, size = _hidden_page_tab_box(node, label)
+            position, size = None, None
+            unallocated = True
         if checked is None and role == "AXButton":
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
@@ -2346,7 +2287,8 @@ class ATSPIAccessor:
             focusable=focusable,
             position=position,
             size=size,
-            actions=_action_names(node),
+            actions=() if unallocated else _action_names(node),
+            unallocated=unallocated,
             value=value,
             checked=checked,
             selected=selected,

@@ -73,9 +73,19 @@ def _resolved_app(identifier: str) -> str:
 
 def _point_of(target: Target) -> tuple[int, int]:
     """Screen (x, y) for a coordinate action: a Point directly, else an
-    Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1)."""
+    Element's center. AT-SPI SCREEN coords == our physical-pixel space (scale 1).
+
+    An element with no box is not a pointer target. Callers that already
+    returned a typed no-op do not reach this.
+    """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
+    if target.bounds is None:
+        raise ComputerUseError(
+            ErrorCode.UNSUPPORTED,
+            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
+        )
     return int(target.bounds.center.x), int(target.bounds.center.y)
 
 
@@ -1661,7 +1671,7 @@ class LinuxDriver:
             found = self._run(lambda: _atspi.offscreen_extents(handle))
         except Exception:
             return None
-        if found is None:
+        if found is None or element.bounds is None:
             return None
         pos, size = found
         return Bounds(
@@ -3832,6 +3842,8 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _atspi, _linux_system
 
         bounds = element.bounds
+        if bounds is None:
+            return "off_screen"
         cx = float(bounds.x) + float(bounds.width) / 2.0
         cy = float(bounds.y) + float(bounds.height) / 2.0
         try:

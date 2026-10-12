@@ -11842,16 +11842,20 @@ def _covers_point(bounds, x: float, y: float) -> bool:
     )
 
 
-def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, page_outside_tab: bool) -> None:
+def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, hidden: bool) -> None:
     from a11y_computer_use import observe
 
+    rendered = observe.render_text(snap, include_bounds=True)
     area = next((el for el in snap.elements if el.role == "AXTextArea"), None)
-    assert area is not None, observe.render_text(snap)[:1500]
+    assert area is not None and area.bounds is not None, rendered[:1500]
     center_x = area.bounds.x + area.bounds.width / 2
     center_y = area.bounds.y + area.bounds.height / 2
     buttons = [el for el in snap.elements if el.role == "AXButton"]
-    covering = [el for el in buttons if el.bounds is not None and _covers_point(el.bounds, center_x, center_y)]
-    assert not covering, observe.render_text(snap)[:1500]
+    covering = [
+        el for el in buttons
+        if el.bounds is not None and _covers_point(el.bounds, center_x, center_y)
+    ]
+    assert not covering, rendered[:1500]
     by_ref = {el.ref: el for el in snap.elements}
     ancestors = []
     parent = area.parent
@@ -11860,14 +11864,26 @@ def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, page_outside_tab: bool) 
         parent = by_ref[parent].parent
     for title in titles:
         matches = [el for el in buttons if el.title == title]
-        assert len(matches) == 1, (title, observe.render_text(snap)[:1500])
+        assert len(matches) == 1, (title, rendered[:1500])
         tab = matches[0]
-        assert tab.bounds is not None
-        assert tab.bounds.height <= 40, tab.bounds
-        assert tab.bounds.width <= 200, tab.bounds
-        assert tab.bounds.width * tab.bounds.height < area.bounds.width * area.bounds.height / 4
-        if page_outside_tab:
-            assert all(item.ref != tab.ref for item in ancestors), observe.render_text(snap)[:1500]
+        line = next(
+            item for item in rendered.splitlines()
+            if "button" in item and f'"{title}"' in item
+        )
+        if hidden:
+            assert tab.bounds is None, tab.bounds
+            assert tab.clickable is False
+            assert tab.actionable is False
+            assert "hidden" in line
+            assert "@" not in line
+            assert all(item.ref != tab.ref for item in ancestors), rendered[:1500]
+        else:
+            assert tab.bounds is not None
+            assert tab.clickable is True
+            assert "hidden" not in line
+            assert tab.bounds.height <= 40, tab.bounds
+            assert tab.bounds.width <= 200, tab.bounds
+            assert tab.bounds.width * tab.bounds.height < area.bounds.width * area.bounds.height / 4
     for ancestor in ancestors:
         if ancestor.role != "AXButton" or ancestor.bounds is None:
             continue
@@ -11875,7 +11891,7 @@ def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, page_outside_tab: bool) 
         assert not _covers_point(ancestor.bounds, center_x, center_y)
 
 
-def _wait_xfce_tabs(driver, titles: tuple[str, ...], *, page_outside_tab: bool, timeout_s: float = 20.0):
+def _wait_xfce_tabs(driver, titles: tuple[str, ...], *, hidden: bool, timeout_s: float = 20.0):
     from a11y_computer_use import observe
 
     deadline = time.monotonic() + timeout_s
@@ -11888,7 +11904,7 @@ def _wait_xfce_tabs(driver, titles: tuple[str, ...], *, page_outside_tab: bool, 
         else:
             last = observe.render_text(shot)[:1500]
             try:
-                _assert_xfce_tabs(shot, titles, page_outside_tab=page_outside_tab)
+                _assert_xfce_tabs(shot, titles, hidden=hidden)
             except AssertionError:
                 pass
             else:
@@ -11897,11 +11913,22 @@ def _wait_xfce_tabs(driver, titles: tuple[str, ...], *, page_outside_tab: bool, 
     raise AssertionError(last)
 
 
-def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
-    """One xfce4-terminal page is a small button named with the terminal title.
+def _pointer_xy() -> tuple[int, int]:
+    from Xlib import display as xdisplay
 
-    The hidden tab bar used to publish an unnamed button the size of the
-    terminal. The page content stays in the snapshot and is not that button.
+    opened = xdisplay.Display()
+    try:
+        point = opened.screen().root.query_pointer()
+        return int(point.root_x), int(point.root_y)
+    finally:
+        opened.close()
+
+
+def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
+    """One xfce4-terminal page is a hidden named tab, not a content-sized button.
+
+    The tab bar is not allocated. The tab keeps the terminal title, has no
+    bounds, and a ref click does not move the pointer.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -11915,7 +11942,17 @@ def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
         tmp_path,
     )
     try:
-        _wait_xfce_tabs(driver, (title,), page_outside_tab=True)
+        snap = _wait_xfce_tabs(driver, (title,), hidden=True)
+        tab = next(el for el in snap.elements if el.role == "AXButton" and el.title == title)
+        runtime = _runtime_for(tmp_path, driver, "xfce4-terminal")
+        runtime._current = snap
+        before = _pointer_xy()
+        result = runtime.click(tab.ref)
+        after = _pointer_xy()
+        assert after == before, (before, after, result)
+        assert result.outcome == "suspected_noop", (result, result.outcome, result.evidence)
+        assert result.evidence == "not_actionable"
+        assert "no click was sent" in result
     finally:
         _stop_group(proc)
         _kill_xfce4_terminal()
@@ -11944,7 +11981,7 @@ def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
         tmp_path,
     )
     try:
-        _wait_xfce_tabs(driver, (alpha, beta), page_outside_tab=False)
+        _wait_xfce_tabs(driver, (alpha, beta), hidden=False)
     finally:
         _stop_group(proc)
         _kill_xfce4_terminal()

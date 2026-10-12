@@ -740,7 +740,10 @@ _PAGE_GROUP_ROLES = ("AXGroup", "AXWebArea")
 
 
 def _element_area(el) -> int:
-    return el.bounds.width * el.bounds.height
+    bounds = el.bounds
+    if bounds is None:
+        return 0
+    return bounds.width * bounds.height
 
 
 def _scroll_reference_area(snap) -> int:
@@ -3722,7 +3725,7 @@ class Runtime:
         best: Element | None = None
         for el in snap.elements:
             b = el.bounds
-            if b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
+            if b is None or b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
                 continue
             if b.x <= point.x < b.x + b.width and b.y <= point.y < b.y + b.height:
                 if best is None or b.width * b.height < best.bounds.width * best.bounds.height:
@@ -4123,6 +4126,12 @@ class Runtime:
         from a11y_computer_use import capture
 
         bounds = element.bounds
+        if bounds is None:
+            raise ComputerUseError(
+                ErrorCode.NOT_VISIBLE,
+                f"{ref} is off-screen: the ref has no bounds",
+                detail={"ref": ref, "reason": "off_screen"},
+            )
         if bounds.width < 1 or bounds.height < 1:
             raise _not_visible(ref, "off_screen", bounds, "the ref has no on-screen size")
         display = self._display_for_bounds(bounds)
@@ -4385,10 +4394,16 @@ class Runtime:
         activated: list[Element] = []
         # Fallback content inside a canvas. A pointer click lands on the canvas.
         canvas_fallback: list[Element] = []
+        # A hidden notebook tab has a name and no box. A pointer click at an
+        # invented point would land on the page or the menu.
+        unbound: list[Element] = []
 
         def execute() -> None:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
+            if isinstance(target, Element) and target.bounds is None:
+                unbound.append(target)
+                return
             act: Target = target
             if isinstance(target, Element) and self._current is not None:
                 proxy = text_click_control(self._current.elements, target)
@@ -4453,6 +4468,18 @@ class Runtime:
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
+        if unbound:
+            el = unbound[0]
+            title = f" {el.title!r}" if el.title else ""
+            return self._conclude(
+                f"{el.ref} ({el.role}{title}) is hidden and has no bounds; no click was sent",
+                tool="click",
+                app=app,
+                before=before,
+                element=el,
+                had_ref=ref is not None,
+                verdict=("suspected_noop", "not_actionable"),
+            )
         control_note = ""
         if activated:
             control = activated[0]
@@ -5815,7 +5842,7 @@ class Runtime:
             the center has to be inside the window.
             """
             bounds = el.bounds
-            if bounds.width < 1 or bounds.height < 1:
+            if bounds is None or bounds.width < 1 or bounds.height < 1:
                 return False
             box = viewport_box(snap)
             if box is None:
@@ -5840,15 +5867,16 @@ class Runtime:
             already left the viewport, so a name in the tree is not a hit.
             """
             found = observe.find_elements(snap, text=text, role=role)
-            if not found:
+            located = [el for el in found if el.bounds is not None]
+            if not located:
                 return "missing"
-            if any(on_screen(el, snap) for el in found):
+            if any(on_screen(el, snap) for el in located):
                 return "visible"
             box = viewport_box(snap)
             if box is None:
                 return "visible"
             _left, top, _right, bottom = box
-            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in located)
             if center_y < top:
                 return "above"
             if center_y >= bottom:
