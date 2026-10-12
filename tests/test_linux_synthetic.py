@@ -1650,6 +1650,101 @@ def test_stale_find_frame_beside_the_page_clears_the_cache(monkeypatch) -> None:
     assert cleared == []
 
 
+def test_empty_untitled_chrome_frame_yields_the_named_page() -> None:
+    """An empty untitled Chrome frame is not the snapshot when a titled window exists.
+
+    Chrome keeps those frames beside the document. When one is active, the
+    walk is an untitled group with no rows, and scroll_to_find stops before
+    the wheel. The titled window is the root. A frame that already holds a
+    document stays, and the open find bar stays until it is latched.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=(), pid=5151):
+            self._name = name
+            self._role = role
+            self._children = list(children)
+            self._states = frozenset(states)
+            self._pid = pid
+            self._app = None
+
+        def get_name(self):
+            return self._name
+
+        def get_role_name(self):
+            return self._role
+
+        def get_child_count(self):
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(self._states)
+
+        def get_process_id(self):
+            return self._pid
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+    def application(*frames):
+        app = _Node("Google Chrome", role="application", children=list(frames))
+        for frame in frames:
+            frame._app = app
+        return app
+
+    def empty_frame(**states):
+        filler = _Node("", role="panel")
+        panel = _Node("", role="panel", children=[filler])
+        return _Node("", children=[panel], states=states.get("states", ("ACTIVE", "SHOWING")))
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    try:
+        empty = empty_frame()
+        page = _Node(
+            "cualong - Google Chrome",
+            states=("SHOWING",),
+            children=[_Node("cualong", role="document web")],
+        )
+        application(empty, page)
+        assert _atspi.chromium_snapshot_root(empty) is page
+        assert _atspi.chromium_snapshot_root(page) is page
+
+        document = _Node("", children=[_Node("body", role="document web")])
+        other = _Node("Other - Google Chrome", states=("SHOWING",))
+        application(document, other)
+        assert _atspi.chromium_snapshot_root(document) is document
+
+        only = empty_frame()
+        application(only)
+        assert _atspi.chromium_snapshot_root(only) is only
+
+        bar = _Node("Find in page", states=("ACTIVE", "SHOWING"))
+        page = _Node("cualong - Google Chrome", states=("SHOWING",))
+        empty = empty_frame(states=("SHOWING",))
+        application(empty, bar, page)
+        assert _atspi.chromium_snapshot_root(bar) is bar
+
+        _atspi._BROWSER_BAR_PIDS.add(5151)
+        assert _atspi.chromium_snapshot_root(bar) is page
+        assert _atspi.chromium_snapshot_root(empty) is page
+    finally:
+        _atspi._BROWSER_BAR_PIDS.clear()
+        _atspi._BROWSER_BAR_CLEARED.clear()
+        _atspi._BROWSER_BAR_OPEN.clear()
+
+
 def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
     """Find-in-page parks the content root above the viewport.
 
