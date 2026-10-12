@@ -151,7 +151,9 @@ def test_choose_file_arguments_require_an_absolute_existing_file(tmp_path) -> No
 def test_entered_path_rejects_a_longer_read_back(tmp_path) -> None:
     path = str(tmp_path / "picked.txt")
     assert entered_path(_confirmed(path), path) is True
-    assert entered_path(_confirmed("file://" + path), path) is True
+    # Path.as_uri() is file:///C:/... on Windows and file:///tmp/... on Linux.
+    # Pasting the native path onto "file://" is not a URI on Windows.
+    assert entered_path(_confirmed(tmp_path.joinpath("picked.txt").as_uri()), path) is True
     doubled = str(tmp_path) + path
     assert entered_path(_confirmed(doubled), path) is False
     assert entered_path(

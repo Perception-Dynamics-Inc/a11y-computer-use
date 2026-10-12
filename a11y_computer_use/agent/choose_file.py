@@ -15,7 +15,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
 
 from a11y_computer_use.schema import ComputerUseError
 
@@ -624,7 +624,21 @@ def _name_shown(text: str, path: str) -> bool:
 
 
 def _canonical(value: str) -> str:
+    """Local path for ``value``, including a ``file:`` URI of that path.
+
+    ``Path.as_uri()`` on Windows is ``file:///C:/...``. ``urlparse`` leaves
+    the drive inside the path as ``/C:/...``, and ``url2pathname`` turns that
+    back into ``C:\\...``. A URI that puts the drive in the host
+    (``file://C:/...``) is joined the same way.
+    """
     text = str(value or "").strip().replace("\r", "").replace("\n", "")
-    if text.lower().startswith("file://"):
-        text = unquote(urlparse(text).path or "")
+    if text.lower().startswith("file:"):
+        from urllib.request import url2pathname
+
+        parsed = urlparse(text)
+        path = parsed.path or ""
+        host = parsed.netloc
+        if len(host) == 2 and host[1] == ":":
+            path = "/" + host + path
+        text = url2pathname(path)
     return os.path.normcase(os.path.normpath(text))
