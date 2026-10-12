@@ -2313,7 +2313,16 @@ def test_enable_a11y_status_opt_out(monkeypatch) -> None:
 def test_atspi_events_gate(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi_events
     monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    monkeypatch.setattr(_atspi_events.sys, "platform", "linux")
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: True)
+    assert _atspi_events.enabled() is True
+    monkeypatch.setattr(_atspi_events, "typelib_imports", lambda: False)
     assert _atspi_events.enabled() is False
+    monkeypatch.setattr(_atspi_events.sys, "platform", "darwin")
+    assert _atspi_events.enabled() is False
+    for off in ("0", "false", "no", "off", "FALSE"):
+        monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", off)
+        assert _atspi_events.enabled() is False
     monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "1")
     assert _atspi_events.enabled() is True
 
@@ -2321,9 +2330,9 @@ def test_atspi_events_gate(monkeypatch) -> None:
 def test_linux_driver_run_inline_when_events_disabled(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi_events  # noqa: F401
     from a11y_computer_use.drivers.linux import LinuxDriver
-    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     d = LinuxDriver()
-    assert d._run(lambda: 42) == 42  # default path runs inline, no thread/gi needed
+    assert d._run(lambda: 42) == 42  # opt-out runs inline, no event thread
 
 
 # --- XTEST pointer positioning (the coordinate/vision fallback) ---------------

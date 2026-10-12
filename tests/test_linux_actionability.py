@@ -84,10 +84,10 @@ def test_event_names_include_state_children_bounds_and_focus() -> None:
     assert "focus:" in names
 
 
-def test_listener_stays_off_without_a_display_and_the_cache_flag_stays_opt_in(monkeypatch) -> None:
-    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+def test_listener_stays_off_without_a_display(monkeypatch) -> None:
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     assert _atspi_events.enabled() is False
     assert _atspi_events.ensure_started() is False
     assert _actionable.FALLBACK_POLL_S <= 0.1
@@ -393,7 +393,7 @@ def test_snapshot_root_drops_cached_children_only_while_listening(monkeypatch) -
 def test_linux_wait_for_does_not_treat_a_checker_hit_as_actionable(monkeypatch) -> None:
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     target = _element()

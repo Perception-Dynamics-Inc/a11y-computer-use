@@ -1,4 +1,4 @@
-"""AT-SPI event thread. Linux-only.
+"""AT-SPI event thread. On by default on Linux when the typelib imports.
 
 libatspi keeps a full client-side cache of each accessible (role, name, states,
 attributes, parent, children) but only *serves reads from it* when a GLib main
@@ -14,10 +14,12 @@ stays single-threaded. Once the loop is running, the driver routes AT-SPI calls
 through here. A call that is already on the event thread runs inline, so a
 snapshot submitted from the caller cannot deadlock on a nested submit.
 
-``enabled()`` is still the opt-in that routes every driver call through the
-cache thread from the first operation (``A11Y_COMPUTER_USE_ATSPI_EVENTS`` set
-to a non-empty value). Actionability waits call ``ensure_started`` themselves,
-so on a Linux display the listener is on without that variable. The standing
+On Linux, ``enabled()`` is true when the variable is unset and the AT-SPI
+typelib imports. ``0``, ``false``, ``no``, and ``off`` force the inline path.
+Any other value turns the thread on. Other platforms stay inline when the
+variable is unset, so constructing a Linux driver there does not start it.
+Actionability waits call ``ensure_started`` themselves, so on a Linux display
+the listener is on even when the variable forces the inline path. The standing
 registrations are ``object:state-changed``, ``object:children-changed``,
 ``object:bounds-changed``, and ``focus:``, plus the text, name, document, and
 window events the cache path already watched.
@@ -52,13 +54,41 @@ _events_cv = threading.Condition()
 _seq = 0
 
 
-def enabled() -> bool:
-    """True when the cache thread is opted in via ``A11Y_COMPUTER_USE_ATSPI_EVENTS``.
+_OFF = frozenset({"0", "false", "no", "off"})
+_typelib_ok: bool | None = None
 
-    Any non-empty value is on, including ``"0"``. An unset variable is off.
+
+def typelib_imports() -> bool:
+    """True when PyGObject can import ``Atspi`` 2.0. Does not start a main loop."""
+    global _typelib_ok
+    if _typelib_ok is not None:
+        return _typelib_ok
+    if not sys.platform.startswith("linux"):
+        _typelib_ok = False
+        return False
+    try:
+        import gi
+
+        gi.require_version("Atspi", "2.0")
+        from gi.repository import Atspi  # noqa: F401
+    except Exception:
+        _typelib_ok = False
+        return False
+    _typelib_ok = True
+    return True
+
+
+def enabled() -> bool:
+    """True when libatspi calls should run on the event thread.
+
+    Unset on Linux is on when the typelib imports. ``0``, ``false``, ``no``,
+    and ``off`` are off. Any other set value is on, including off Linux.
     Actionability waits do not use this flag; they call `ensure_started`.
     """
-    return bool(os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS"))
+    raw = os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS")
+    if raw is None:
+        return sys.platform.startswith("linux") and typelib_imports()
+    return raw.strip().lower() not in _OFF
 
 
 def event_names() -> tuple[str, ...]:
