@@ -68,7 +68,7 @@ from a11y_computer_use.agent.trace import (
     summarize_args,
     truncate_observation,
 )
-from a11y_computer_use.schema import ComputerUseError, Snapshot
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Snapshot
 
 _REPLAN = (
     "The screen is stuck: this snapshot has already repeated. "
@@ -104,10 +104,14 @@ refused, or needs a human, later calls in that turn do not run.
 
 Use element refs from the latest observation. Prefer set_value and select for
 fields and options. click, double_click, right_click, middle_click,
-triple_click, left_click, type, key, scroll, app, window, menu, wait, and
-crop are available. find(text, role) searches the tracked app. expand(ref)
-opens a collapsed menu, tree, or section and lists that subtree.
-scroll_to_find scrolls until a name or role is on screen. When a node is
+triple_click, left_click, type, key, scroll, app, window, menu, wait,
+crop, and choose_file are available. find(text, role) searches the tracked app.
+expand(ref) opens a collapsed menu, tree, or section and lists that subtree.
+scroll_to_find scrolls until a name or role is on screen. In a file chooser,
+always use choose_file; never navigate folders. choose_file presses Ctrl+L,
+types the absolute path once, presses Return, and succeeds only when the
+dialog has closed and the file name is shown. If that cannot be verified,
+the action failed. When a node is
 collapsed or the observation says it has more children, call expand, find,
 or scroll_to_find before a pixel click. crop(ref) returns a PNG of that
 element's on-screen bounds (optional padding and scale). When an OCR engine
@@ -1259,6 +1263,8 @@ class Agent:
         self._crop_block = None
         if action.name == "expand":
             return self._invoke_expand(action)
+        if action.name == "choose_file":
+            return self._invoke_choose_file(action)
         try:
             tool, params = to_runtime_call(action, self._app_name())
             raw = self._run_bounded(
@@ -1351,6 +1357,95 @@ class Agent:
             listed = f"error: {type(exc).__name__}: {exc}"
         verb = "expanded" if opened else "listed"
         return self._fence_tool_text(f"{verb} {ref}\n{listed}"), None, None
+
+    def _invoke_choose_file(self, action: Action) -> tuple[str, str | None, outcome.ActionResult | None]:
+        """Ctrl+L, type the path, Return, and require the dialog to close.
+
+        The desktop ``file_dialog`` tool is not called. A result that is not
+        confirmed is a typed failure, including when the screen changed but
+        the file was not shown.
+        """
+        from a11y_computer_use.agent.choose_file import ChooseIO, perform_choose_file
+        from a11y_computer_use.server import ActionRefused, error_text
+
+        path = str(action.args.get("path") or "")
+        apps: list[str] = []
+        focused = self._focused_app()
+        if focused:
+            apps.append(focused)
+
+        def tool(name: str, params: dict) -> object:
+            return self._run_bounded(
+                lambda: self.runtime.call_tool(name, params, confirm=self._safety_confirm),  # type: ignore[union-attr]
+                where="tool",
+                action=name,
+            )
+
+        def windows() -> list[dict] | None:
+            from a11y_computer_use.agent.choose_file import parse_window_list
+
+            try:
+                raw = tool("window", {"action": "list"})
+            except (ComputerUseError, ActionRefused, ValueError, OSError, TypeError):
+                return None
+            return parse_window_list(raw)
+
+        def focus(window_id: int) -> None:
+            try:
+                tool("window", {"action": "focus", "window_id": int(window_id)})
+            except (ComputerUseError, ActionRefused, ValueError, OSError, TypeError):
+                return
+
+        def key(chord: str) -> object:
+            return tool("key", {"chord": chord})
+
+        def type_text(text: str) -> object:
+            return tool("type", {"text": text})
+
+        def set_value(ref: str, value: str) -> object:
+            return tool("set_value", {"ref": ref, "value": value})
+
+        def snapshot(app: str):
+            try:
+                self._run_bounded(
+                    lambda: self.runtime.desktop_snapshot(app, scope="app", mode="full"),  # type: ignore[union-attr]
+                    where="observe",
+                )
+            except (ComputerUseError, ActionRefused, ValueError, OSError, TypeError):
+                return None
+            snap = getattr(self.runtime, "_current", None)
+            return snap if isinstance(snap, Snapshot) else None
+
+        io = ChooseIO(
+            windows=windows,
+            focus=focus,
+            key=key,
+            type_text=type_text,
+            set_value=set_value,
+            snapshot=snapshot,
+        )
+        try:
+            result = perform_choose_file(io, path, apps=apps, timeout_s=2.0)
+        except _Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - an unexpected miss is a failure, not a choice
+            text = self._fence_tool_text(f"choose_file_unverifiable: {type(exc).__name__}: {exc}")
+            marker = outcome.ActionResult(text, outcome="refused", next=(), evidence=text)
+            return "", text, marker
+        if result.ok:
+            marker = outcome.ActionResult(
+                result.message, outcome="confirmed", evidence=result.evidence,
+            )
+            return self._fence_tool_text(result.message), None, marker
+        detail = dict(result.detail)
+        detail["reason"] = result.reason or "choose_file_unverifiable"
+        detail["outcome"] = "refused"
+        exc = ComputerUseError(ErrorCode.UNSUPPORTED, result.message, detail=detail)
+        text = self._fence_tool_text(error_text(exc))
+        marker = outcome.refused_result(
+            text=text, code=exc.code.value, message=exc.message, detail=exc.detail,
+        )
+        return "", text, marker
 
     def _note_sought(self, action: Action, snap: Snapshot | None) -> None:
         """Remember the name and role the model just asked for.
@@ -3100,7 +3195,7 @@ def forced_method(
     focus. A missing ref stays the click. ``crop`` stays a crop. When no
     same-intent method remains, the model's action is returned unchanged.
     """
-    if action.name in {"crop", "find", "expand", "scroll_to_find"}:
+    if action.name in {"crop", "find", "expand", "scroll_to_find", "choose_file"}:
         return action, None
     if level <= 0:
         return action, None
@@ -4560,6 +4655,8 @@ def _action_key(action: Action) -> tuple:
         return (name, str(target), "" if text is None else str(text))
     if name == "menu":
         return ("menu", str(args.get("path") or ""), str(args.get("action") or "press"))
+    if name == "choose_file":
+        return ("choose_file", str(args.get("path") or ""), str(args.get("action") or "open"))
     target = args.get("ref") or args.get("name") or args.get("path") or args.get("action") or ""
     if name == "click" and not target and args.get("x") is not None and args.get("y") is not None:
         target = f"{args.get('x')},{args.get('y')},{args.get('display_id', '')}"

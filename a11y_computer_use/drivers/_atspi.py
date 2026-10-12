@@ -3718,6 +3718,10 @@ _CHROME_REWRITE_NAMES = frozenset({"Address and search bar", "Find"})
 # document again and blows the short-page scroll budget.
 _BROWSER_BAR_PIDS: set[int] = set()
 _BROWSER_BAR_CLEARED: set[int] = set()
+# Pids whose find bar or omnibox is still the same opening. A later snapshot
+# of that opening must not schedule another cache clear: clearing on every
+# read walks an empty document and blows the scroll budget.
+_BROWSER_BAR_OPEN: set[int] = set()
 
 
 def snapshot_shows_browser_bar(elements) -> bool:
@@ -3742,18 +3746,38 @@ def snapshot_shows_browser_bar(elements) -> bool:
 
 
 def note_browser_bar(root, elements) -> None:
-    """Remember that ``root``'s process showed a find bar or omnibox popup."""
-    if root is None or not snapshot_shows_browser_bar(elements):
+    """Remember that ``root``'s process showed a find bar or omnibox popup.
+
+    The first snapshot of an opening schedules one cache clear. Further
+    snapshots of that same opening do not. The next opening, after the bar
+    has been absent, schedules a clear again.
+    """
+    if root is None:
+        return
+    showing = snapshot_shows_browser_bar(elements)
+    if not showing:
+        if not _BROWSER_BAR_OPEN:
+            return
+        try:
+            pid = pid_of(root)
+        except Exception:
+            return
+        if pid:
+            _BROWSER_BAR_OPEN.discard(int(pid))
         return
     try:
         pid = pid_of(root)
     except Exception:
         return
-    if pid:
-        pid = int(pid)
-        _BROWSER_BAR_PIDS.add(pid)
-        # The bar is on screen again. The cache from the last clear is stale.
-        _BROWSER_BAR_CLEARED.discard(pid)
+    if not pid:
+        return
+    pid = int(pid)
+    if pid in _BROWSER_BAR_OPEN:
+        return
+    _BROWSER_BAR_PIDS.add(pid)
+    # The bar is on screen again. The cache from the last clear is stale.
+    _BROWSER_BAR_CLEARED.discard(pid)
+    _BROWSER_BAR_OPEN.add(pid)
 
 
 def _browser_bar_latched(root) -> bool:
@@ -3791,6 +3815,38 @@ def note_focused_find_bar(app: str | None) -> None:
         pid = int(pid)
         _BROWSER_BAR_PIDS.add(pid)
         _BROWSER_BAR_CLEARED.discard(pid)
+
+
+def latch_chromium_find(app: str) -> bool:
+    """Record Chrome's pid so the next snapshot drops the find-bar cache.
+
+    ``scroll_to_find`` closes the bar before a snapshot can see the Find
+    field, so the focus latch misses. The next walk is then an empty
+    document or the find frame. True when a Chrome pid was recorded.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    try:
+        if not _chromium_app(root):
+            return False
+    except Exception:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    pid = int(pid)
+    _BROWSER_BAR_PIDS.add(pid)
+    _BROWSER_BAR_CLEARED.discard(pid)
+    # This opening is already handled. A snapshot that still shows the
+    # closing bar must not schedule a second clear.
+    _BROWSER_BAR_OPEN.add(pid)
+    return True
 
 
 def _is_browser_bar_frame(node) -> bool:

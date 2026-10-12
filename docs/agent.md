@@ -471,7 +471,7 @@ text starts with `409`. This does not add or remove tools on
 ## Actions
 
 `click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `find`,
-`expand`, `scroll_to_find`, `app`
+`expand`, `scroll_to_find`, `choose_file`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
 
@@ -488,6 +488,19 @@ children, including children that do not fit on screen. The following
 ended, so a later listed name cannot skip the hole in front of it. Use these
 before a coordinate click when the observation names a collapsed node or
 `… N more` children.
+
+`choose_file` takes an absolute `path` and an optional `action` of `open`
+(the default) or `save`. The file chooser is already open (GTK, Qt, or
+Chrome). The macro presses Ctrl+L, types that path once, and presses Return.
+When the location entry is in the tree and the typed text is not the path,
+one `set_value` writes it. Return is not pressed until the entry reads the
+path back. The call succeeds only when the dialog has closed and the file
+name shows outside the dialog. A dialog that stays open, a dialog that
+closes without the file, and a check that cannot be read are failures, not
+success. `open` requires the file to exist. `save` requires a file name and
+the file need not exist yet. In a file chooser, always use `choose_file`;
+never navigate folders. This is an agent action. It does not call the
+desktop `file_dialog` tool, which stays unsupported on Linux.
 
 `shell` and `python` are added to the model's tool list only when the agent
 is constructed with `allow_exec=True` or the CLI is passed `--allow-exec`.
