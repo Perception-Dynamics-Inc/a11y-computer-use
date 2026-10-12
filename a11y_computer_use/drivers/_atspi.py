@@ -11583,6 +11583,126 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
     return None
 
 
+def list_scrolls_with_document(container) -> bool:
+    """True when a Chromium list is body content and the document scrolls.
+
+    A short table can be shorter than the screen and still longer than
+    the window. Its box is the content, not a scrollport. After the
+    document moves, the top sits above the page or the bottom still runs
+    past it, and the box stays no taller than the screen. A fixed-height
+    overflow list sits inside the document. A list taller than the screen
+    keeps the list wheel. No document edges means the caller keeps the
+    list's own bar.
+    """
+    if container is None or _role_name(container) not in _LIST_ROLES:
+        return False
+    if not _chromium_app(container):
+        return False
+    if _overflow_ancestor_edges(container) is not None:
+        return False
+    pos, size = _extents(container)
+    if pos is None or size is None or float(size[1]) < 4:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh:
+        return False
+    page = _page_edges(container)
+    if page is None:
+        return False
+    top = float(pos[1])
+    bottom = top + float(size[1])
+    if bottom > page[3] + 8:
+        return True
+    return top < page[1] - 8
+
+
+def _page_node(container):
+    """The document accessible that contains ``container``, or None."""
+    node = _parent_of(container)
+    seen: set[int] = set()
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        if _role_name(node) in _PAGE_ANCESTOR_ROLES:
+            pos, size = _extents(node)
+            if pos is None or size is None or size[1] < 4 or size[0] < 1:
+                return None
+            return node
+        node = _parent_of(node)
+    return None
+
+
+def scroll_container_kind(container) -> str:
+    """How ``container`` scrolls: ``document``, ``overflow``, or ``viewport``.
+
+    ``document`` is body content: a document ancestor is the scroll
+    container, not the list. ``overflow`` is a shorter wrapper around the
+    list. ``viewport`` is a list that is its own scrollport. The document
+    is not assumed for every table.
+    """
+    if container is None:
+        return "viewport"
+    if _overflow_ancestor_edges(container) is not None:
+        return "overflow"
+    if list_scrolls_with_document(container):
+        return "document"
+    return "viewport"
+
+
+def scroll_container(acc):
+    """The scrollable ancestor of ``acc``.
+
+    Returns ``(node, kind)``. ``kind`` is ``document``, ``overflow``, or
+    ``viewport``. The node is the document when the target is body content,
+    and the list when an overflow wrapper or the list itself scrolls.
+    ``(None, None)`` when ``acc`` is not inside a Chromium list or document.
+    """
+    if acc is None:
+        return None, None
+    if _role_name(acc) in _PAGE_ANCESTOR_ROLES and _chromium_app(acc):
+        return acc, "document"
+    container = list_container(acc)
+    if container is None:
+        container = list_with_overflow_ancestor(acc)
+    if container is None:
+        return None, None
+    kind = scroll_container_kind(container)
+    if kind == "document":
+        page = _page_node(container)
+        return (page if page is not None else container), kind
+    return container, kind
+
+
+def scroll_offset(acc) -> float | None:
+    """Vertical scroll offset of the container that scrolls ``acc``.
+
+    The current value of that container's vertical bar. None when no bar
+    can be read, so a caller cannot claim the page was unchanged.
+    """
+    if acc is None:
+        return None
+    node, _kind = scroll_container(acc)
+    if node is None:
+        node = acc
+    seen: set[int] = set()
+    current = node
+    for _ in range(8):
+        if current is None or id(current) in seen:
+            return None
+        seen.add(id(current))
+        bar = _viewport_vertical_bar(current)
+        if bar is not None:
+            found = _bar_range(bar)
+            if found is not None:
+                return float(found[0])
+        role = _role_name(current)
+        if role in ("frame", "window", "application"):
+            return None
+        current = _parent_of(current)
+    return None
+
+
 def overflow_ancestor_box(container) -> tuple[int, int, int, int] | None:
     """``(x, y, width, height)`` of the overflow wrapper, or None.
 

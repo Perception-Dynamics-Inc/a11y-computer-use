@@ -7185,6 +7185,192 @@ def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> Non
         _stop(proc)
 
 
+def test_linux_chrome_document_scroll_to_find_item_180_is_quick(tmp_path) -> None:
+    """A body-scroll document finds ITEM-180 in a few viewport steps, quickly.
+
+    Live Chrome, not a synthetic list. Two hundred 28px rows in a list on
+    the document, opened at the top. ``scroll_to_find`` has to report the
+    row while it is on screen, and the whole search has to finish well
+    under the 10s a per-step clock-wait used to take. About six seconds,
+    with the bound at seven so a busy runner still fails a regression to
+    the old clock. Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the document scroll timing test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        f'<li role="listitem">ITEM-{i:03d} scroll-row</li>' for i in range(1, 201)
+    )
+    page = tmp_path / "scroll340.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>scroll340</title>"
+        "<style>body{margin:8px;font:16px sans-serif}"
+        "li{height:28px;line-height:28px}</style>"
+        f'<ul role="list" aria-label="Rows">{rows}</ul>'
+    )
+    profile = tmp_path / "chrome-scroll340-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the document"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = _titles(shot)
+                if any(title.startswith("ITEM-001") for title in titles) and not any(
+                    title.startswith("ITEM-180") for title in titles
+                ):
+                    ready = True
+                    break
+            time.sleep(0.3)
+        assert ready, "Chrome did not show the top of the document without ITEM-180"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        started = time.monotonic()
+        found = runtime.scroll_to_find(
+            "chrome", text="ITEM-180", direction="down", max_scrolls=15,
+        )
+        elapsed = time.monotonic() - started
+        assert "ITEM-180" in found, found
+        assert "not found" not in found, found
+        assert "found after 0" not in found, found
+        assert elapsed < 7.0, f"ITEM-180 took {elapsed:.2f}s: {found.splitlines()[0]}"
+        shown = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
+        assert any(title.startswith("ITEM-180") for title in shown), sorted(
+            title for title in shown if title.startswith("ITEM-")
+        )
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_chrome_short_page_scroll_to_find_stops_at_the_end(tmp_path) -> None:
+    """A short ticket table stops at the end with not-found, quickly.
+
+    Live Chrome, not a synthetic list. Twenty-five rows and a Next link.
+    The table fits on a tall screen and still runs past the window, so the
+    last rows start below the fold. ``4711`` is not on the page.
+    ``scroll_to_find`` has to bring the last row and Next onto the screen
+    and return not found. It must not raise page_unchanged, and it must
+    finish well under the minute a stuck list-scroll used to take. Skips
+    when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the short-page scroll test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        "<tr>"
+        f"<td>{4000 + i}</td><td>Ticket {i}</td><td>owner {i}</td><td>open</td>"
+        "</tr>"
+        for i in range(1, 26)
+    )
+    page = tmp_path / "tickets346.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>tickets</title>"
+        "<style>body{margin:8px;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td,th{padding:4px 8px}</style>"
+        "<h1>Tickets</h1>"
+        "<table><caption>Tickets</caption>"
+        "<tr><th>id</th><th>title</th><th>owner</th><th>status</th></tr>"
+        f"{rows}</table><p><a href='#next'>Next</a></p>"
+    )
+    profile = tmp_path / "chrome-tickets346-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the ticket table"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = _titles(shot)
+                if "4001" in titles and "4025" not in titles:
+                    ready = shot
+                    break
+            time.sleep(0.3)
+        assert ready is not None, "Chrome did not show the top of the ticket table"
+        table = next(el for el in ready.elements if el.role == "AXTable")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = ready
+        started = time.monotonic()
+        found = runtime.scroll_to_find(
+            "chrome", text="4711", role="cell", direction="down", max_scrolls=30,
+            ref=table.ref,
+        )
+        elapsed = time.monotonic() - started
+        assert found.startswith("not found after"), found
+        assert "page_unchanged" not in found, found
+        assert elapsed < 12.0, f"short page took {elapsed:.2f}s: {found.splitlines()[0]}"
+        shown = driver.snapshot(Scope.WINDOW, "chrome")
+        windows = [
+            el for el in shown.elements
+            if el.role == "AXWindow" and el.bounds.width > 40 and el.bounds.height > 40
+        ]
+        assert windows, "no window in the snapshot after the search"
+        win = max(windows, key=lambda el: el.bounds.width * el.bounds.height)
+
+        def on_screen(title: str) -> bool:
+            for el in shown.elements:
+                if el.title != title or el.bounds.width < 1 or el.bounds.height < 1:
+                    continue
+                cx = el.bounds.x + el.bounds.width / 2
+                cy = el.bounds.y + el.bounds.height / 2
+                if (
+                    win.bounds.x <= cx < win.bounds.x + win.bounds.width
+                    and win.bounds.y <= cy < win.bounds.y + win.bounds.height
+                ):
+                    return True
+            return False
+
+        assert on_screen("4025"), "the last row never reached the window"
+        assert on_screen("Next"), "Next never reached the window"
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> None:
     """Scroll a long overflow list to the bottom, then find a row above it.
 
@@ -7252,6 +7438,7 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
         for _pass in range(3):
             down = runtime.scroll_to_find(
                 "chrome", text="ITEM-120", direction="down", max_scrolls=30,
+                budget_s=120,
             )
             assert "ITEM-120" in down, down
             assert "not found" not in down, down
@@ -7263,7 +7450,9 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
             assert not any(title.startswith("ITEM-020") for title in bottom), sorted(
                 title for title in bottom if title.startswith("ITEM-")
             )
-            up = runtime.scroll_to_find("chrome", text="ITEM-020", max_scrolls=30)
+            up = runtime.scroll_to_find(
+                "chrome", text="ITEM-020", max_scrolls=30, budget_s=120,
+            )
             assert "ITEM-020" in up, up
             assert "not found" not in up, up
             assert "found after 0" not in up, up
@@ -7284,7 +7473,8 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
     its ``edit 300`` button must see it, and the click has to land.
     Four passes in one Chrome process. Each pass after the first reloads
     the page so the search starts at the top again. Skips when no Chrome
-    binary is on PATH.
+    binary is on PATH. ``--password-store=basic`` keeps a keyring prompt
+    from taking the wheel.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -7317,6 +7507,7 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
             f"--user-data-dir={profile}", "--window-size=1000,700",
             page.resolve().as_uri(),
         ],
@@ -7355,6 +7546,7 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                 wait_at_top(30)
             found = runtime.scroll_to_find(
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
+                budget_s=90,
             )
             assert "ROW-0300" in found, found
             assert "not found" not in found, found
