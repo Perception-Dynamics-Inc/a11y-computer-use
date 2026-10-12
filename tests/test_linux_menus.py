@@ -798,6 +798,191 @@ def test_menu_state_without_a_bus_does_not_raise(monkeypatch) -> None:
     assert "python3-gi" in exc.value.detail["hint"]
 
 
+class _ENode(Acc):
+    """Chromium menu node. ``get_parent`` is the menu bar for a bar button."""
+
+    def __init__(self, role, name="", children=(), states=None, log=None, on_press=None):
+        super().__init__(role, name, children, states)
+        self.parent = None
+        self.log = [] if log is None else log
+        self.on_press = on_press
+        for child in self.children:
+            if hasattr(child, "parent"):
+                child.parent = self
+
+    def get_parent(self):
+        return self.parent
+
+    def get_action_iface(self):
+        return self
+
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, _index):
+        return "click"
+
+    def get_key_binding(self, _index):
+        return self.key
+
+    def do_action(self, _index):
+        self.log.append(self.name)
+        self.pressed.append("click")
+        if self.on_press is not None:
+            self.on_press(self)
+        return True
+
+
+def _electron(menus: dict[str, list[str]]) -> tuple[Acc, list[str]]:
+    """Application menu bar of push buttons. Each press opens a separate window.
+
+    The popup is ``window > menu bar > menu > menu item``, which is the
+    Chromium shape. Item names keep their accelerator text.
+    """
+    log: list[str] = []
+    app = _ENode("application", "electron", log=log)
+    buttons = []
+    for title, items in menus.items():
+        def open_menu(_node, title=title, items=items):
+            if any(child.name == title for child in app.children):
+                return
+            rows = [
+                _ENode("menu item", name, states={"sensitive", "enabled", "showing"}, log=log)
+                for name in items
+            ]
+            menu = _ENode("menu", "", rows, states={"showing"})
+            popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+            window = _ENode("window", title, [popup_bar], states={"showing"})
+            app.children.append(window)
+            window.parent = app
+
+        buttons.append(_ENode(
+            "push button", title,
+            states={"sensitive", "enabled", "showing"},
+            log=log, on_press=open_menu,
+        ))
+    bar = _ENode("menu bar", "", buttons, states={"showing"})
+    frame = _ENode("frame", "Notes", [bar], states={"active", "showing"})
+    app.children = [frame]
+    frame.parent = app
+    return app, log
+
+
+def test_electron_menu_bar_buttons_open_a_separate_popup() -> None:
+    """Synthetic Chromium menu. Not a live Electron.
+
+    Top-level entries are push buttons, so they used to list ``submenu``
+    false and ``File > New Note`` failed with ``'File' has no submenu``.
+    The item's accessible name includes the accelerator. ``New Note`` matches
+    ``New Note Ctrl+N``, and the full string still matches too.
+    """
+    menus = {
+        "File": ["New Note Ctrl+N", "Show Dialog Ctrl+D", "Quit"],
+        "Edit": ["Select All Ctrl+A"],
+        "View": ["Toggle Panel", "Fullscreen F11"],
+    }
+    app, log = _electron(menus)
+    listed = _linux_menus.menu_items(app, None)
+    assert [(row["title"], row["submenu"]) for row in listed] == [
+        ("File", True), ("Edit", True), ("View", True),
+    ]
+    assert log == []
+    rows = _linux_menus.menu_items(app, "File", settle=lambda _s: None)
+    assert [row["title"] for row in rows] == ["New Note Ctrl+N", "Show Dialog Ctrl+D", "Quit"]
+    assert all(row["submenu"] is False for row in rows)
+
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None) == "New Note Ctrl+N"
+    assert log == ["File", "New Note Ctrl+N"]
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > New Note Ctrl+N", settle=lambda _s: None) == "New Note Ctrl+N"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "Edit > Select All", settle=lambda _s: None) == "Select All Ctrl+A"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "View > Fullscreen", settle=lambda _s: None) == "Fullscreen F11"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "View > Toggle Panel", settle=lambda _s: None) == "Toggle Panel"
+    app, log = _electron(menus)
+    assert _linux_menus.menu_press(app, "File > show", settle=lambda _s: None) == "Show Dialog Ctrl+D"
+    app, _log = _electron(menus)
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "File > Missing", settle=lambda _s: None, dismiss=lambda: None,
+        )
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "New Note Ctrl+N" in exc.value.detail["available"]
+
+
+def test_exact_menu_title_wins_over_a_shared_accelerator_stem() -> None:
+    """``New Note`` is the item with that title, not ``New Note Ctrl+Shift+N``.
+
+    ``Save`` matches ``Save Ctrl+S`` and does not also match
+    ``Save As Ctrl+Shift+S``. Two items that both strip to the same title
+    stay ambiguous. Synthetic menu, not a live Electron.
+    """
+    app, log = _electron({"File": ["New Note", "New Note Ctrl+Shift+N"]})
+    assert _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None) == "New Note"
+    assert log == ["File", "New Note"]
+    app, log = _electron({"File": ["New Note", "New Note Ctrl+Shift+N"]})
+    assert _linux_menus.menu_press(
+        app, "File > New Note Ctrl+Shift+N", settle=lambda _s: None,
+    ) == "New Note Ctrl+Shift+N"
+
+    app, log = _electron({"File": ["Save Ctrl+S", "Save As Ctrl+Shift+S"]})
+    assert _linux_menus.menu_press(app, "File > Save", settle=lambda _s: None) == "Save Ctrl+S"
+    app, log = _electron({"File": ["Save Ctrl+S", "Save As Ctrl+Shift+S"]})
+    assert _linux_menus.menu_press(app, "File > Save As", settle=lambda _s: None) == "Save As Ctrl+Shift+S"
+
+    app, _log = _electron({"File": ["New Note Ctrl+N", "New Note Ctrl+Shift+N"]})
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(app, "File > New Note", settle=lambda _s: None, dismiss=lambda: None)
+    assert exc.value.code is ErrorCode.APP_NOT_FOUND
+    assert "New Note Ctrl+N" in str(exc.value)
+
+
+def test_electron_menu_item_submenu_opens_the_next_popup() -> None:
+    """A menu item with HAS_POPUP opens another window. Not a live Electron."""
+    log: list[str] = []
+    app = _ENode("application", "electron", log=log)
+    notes = _ENode("menu item", "notes.txt", states={"sensitive", "enabled", "showing"}, log=log)
+
+    def open_recent(_node):
+        if any(child.name == "recent-popup" for child in app.children):
+            return
+        menu = _ENode("menu", "", [notes], states={"showing"})
+        popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+        window = _ENode("window", "recent-popup", [popup_bar], states={"showing"})
+        app.children.append(window)
+        window.parent = app
+
+    recent = _ENode(
+        "menu item", "Recent",
+        states={"sensitive", "enabled", "showing", "has_popup"},
+        log=log, on_press=open_recent,
+    )
+
+    def open_file(_node):
+        if any(child.name == "file-popup" for child in app.children):
+            return
+        menu = _ENode("menu", "", [recent], states={"showing"})
+        popup_bar = _ENode("menu bar", "", [menu], states={"showing"})
+        window = _ENode("window", "file-popup", [popup_bar], states={"showing"})
+        app.children.append(window)
+        window.parent = app
+
+    file_btn = _ENode(
+        "push button", "File",
+        states={"sensitive", "enabled", "showing"},
+        log=log, on_press=open_file,
+    )
+    bar = _ENode("menu bar", "", [file_btn], states={"showing"})
+    frame = _ENode("frame", "Notes", [bar], states={"active", "showing"})
+    app.children = [frame]
+    frame.parent = app
+    assert _linux_menus.menu_press(app, "File > Recent > notes.txt", settle=lambda _s: None) == "notes.txt"
+    assert log == ["File", "Recent", "notes.txt"]
+
+
 def test_file_dialog_names_the_linux_limit() -> None:
     with pytest.raises(ComputerUseError) as exc:
         LinuxDriver().file_dialog("open", "/tmp/notes.txt", "mousepad")

@@ -783,6 +783,156 @@ def test_gtk_combo_popup_stays_under_the_combo(monkeypatch) -> None:
     assert "collapsed" in observe.render_text(collapsed)
 
 
+def _gtk_popup_menu(names, *, showing=True, selected=None, role="menu", title=""):
+    """Fake menu. ``showing`` marks the menu and its items SHOWING."""
+    states = {"ENABLED", "SENSITIVE"}
+    if showing:
+        states |= {"SHOWING", "VISIBLE"}
+    items = []
+    for name in names:
+        item_states = {"ENABLED", "SENSITIVE", "VISIBLE"}
+        if showing:
+            item_states.add("SHOWING")
+        if name == selected:
+            item_states.add("SELECTED")
+        items.append(_Node(
+            "menu item", name, states=item_states, actions=["click"],
+            x=40, y=80, w=160, h=24,
+        ))
+    return _Node(
+        role, title, states=states, children=items,
+        x=40, y=80, w=160, h=24 * max(len(names), 1),
+    )
+
+
+def _stamp_gtk(nodes) -> None:
+    for node in nodes:
+        node.toolkit = "gtk"
+
+
+def test_separate_gtk_combo_popup_is_not_listed_twice(monkeypatch) -> None:
+    """The same open options are not listed again as an application menu.
+
+    The combo keeps a SHOWING menu. A second menu under the application,
+    and an untitled window whose own menu is not parented to the combo,
+    repeat those titles. Both are the popup. A context menu and a named
+    File menu stay. These nodes are fakes. A Chromium menu is not a GTK
+    combo popup.
+    """
+    from a11y_computer_use.schema import Scope
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    sizes = ("Very Small", "Smaller", "Small", "Normal", "Large", "Larger", "Very Large")
+    nested = _gtk_popup_menu(sizes, selected="Large")
+    duplicate = _gtk_popup_menu(sizes, selected="Large")
+    context = _gtk_popup_menu(("Cut", "Copy", "Paste"))
+    file_menu = _gtk_popup_menu(("New", "Open"), title="File")
+    combo = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[nested], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    dialog = _Node(
+        "dialog", "Application Finder", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[combo], x=20, y=20, w=420, h=320,
+    )
+    frame = _Node(
+        "frame", "Application Finder", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=640, h=480,
+    )
+    app = _Node(
+        "application", "xfce4-appfinder",
+        children=[frame, dialog, duplicate, context, file_menu],
+    )
+    _stamp_gtk([
+        nested, duplicate, context, file_menu, combo, dialog, frame, app,
+        *nested.children, *duplicate.children, *context.children, *file_menu.children,
+    ])
+    assert _atspi._combo_owning_popup(duplicate) is combo
+    assert _atspi._combo_owning_popup(context) is None
+    assert _atspi._combo_owning_popup(file_menu) is None
+    snap = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="xfce4-appfinder", pid=None,
+        geometry=_screen(),
+    )
+    titles = [el.title for el in snap.elements if el.role == "AXMenuItem"]
+    assert titles.count("Very Small") == 1
+    assert titles.count("Very Large") == 1
+    assert [title for title in titles if title in {"Cut", "Copy", "Paste", "New", "Open"}] == [
+        "Cut", "Copy", "Paste", "New", "Open",
+    ]
+    by_ref = {el.ref: el for el in snap.elements}
+    small = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "Very Small")
+    box = next(el for el in snap.elements if el.role == "AXComboBox")
+    ancestor = small
+    while ancestor.parent is not None and ancestor.ref != box.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == box.ref
+
+    popup_items = _gtk_popup_menu(sizes, selected="Large")
+    popup_menu = popup_items
+    window = _Node(
+        "window", "", states={"SHOWING", "VISIBLE", "ACTIVE", "ENABLED"},
+        children=[popup_menu], x=40, y=80, w=180, h=200,
+    )
+    owned = _gtk_popup_menu(sizes, selected="Large")
+    other = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[owned], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    prefs = _Node(
+        "dialog", "Preferences", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[other], x=20, y=20, w=420, h=320,
+    )
+    editor = _Node(
+        "frame", "Editor", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=640, h=480,
+    )
+    mousepad = _Node("application", "mousepad", children=[editor, prefs, window])
+    _stamp_gtk([
+        popup_menu, window, owned, other, prefs, editor, mousepad,
+        *popup_menu.children, *owned.children,
+    ])
+    assert popup_menu.parent is window
+    assert _atspi._combo_owning_popup(window) is other
+    picked = _atspi._preferred_window(
+        mousepad.children, lambda frame: "ACTIVE" in frame.states,
+    )
+    assert picked is prefs
+    whole = observe.build_snapshot(
+        mousepad, ATSPIAccessor(), scope=Scope.APP, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in whole.elements if el.role == "AXMenuItem" and el.title == "Large"].count(
+        "Large"
+    ) == 1
+    assert not any(el.role == "AXWindow" and not el.title for el in whole.elements)
+
+    chrome_menu = _gtk_popup_menu(sizes, selected="Large")
+    chrome_nested = _gtk_popup_menu(sizes, selected="Large")
+    chrome_combo = _Node(
+        "combo box", "Large", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[chrome_nested], actions=["press"], x=40, y=40, w=160, h=34,
+    )
+    chrome_frame = _Node(
+        "frame", "Chrome", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[chrome_combo], x=10, y=10, w=640, h=480,
+    )
+    chrome = _Node(
+        "application", "Google Chrome", children=[chrome_frame, chrome_menu],
+    )
+    for node in (
+        chrome_menu, chrome_nested, chrome_combo, chrome_frame, chrome,
+        *chrome_menu.children, *chrome_nested.children,
+    ):
+        node.toolkit = "chrome"
+    assert _atspi._combo_owning_popup(chrome_menu) is None
+    chrome_snap = observe.build_snapshot(
+        chrome, ATSPIAccessor(), scope=Scope.APP, app="Google Chrome", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in chrome_snap.elements if el.role == "AXMenuItem"].count("Very Small") == 2
+
+
 def test_gtk_combo_option_click_closes_the_popup(monkeypatch) -> None:
     """A ref click on a GTK option collapses the combo and sends no Escape.
 

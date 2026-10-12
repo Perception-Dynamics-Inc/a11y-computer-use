@@ -24,6 +24,7 @@ from a11y_computer_use.schema import (
     Display,
     Element,
     ErrorCode,
+    Point,
     Scope,
     Snapshot,
 )
@@ -1213,3 +1214,153 @@ def test_confirmed_outcome_verifies_without_a_digest_change(tmp_path) -> None:
     assert agent._hints == {}
     assert result.status == "success"
     assert result.step_log[0].verified is True
+
+
+def _welcome_tree(*, expanded: bool = False, dialog: bool = True, cover: bool = True):
+    """A Search button and a welcome dialog that can sit over its center.
+
+    The button center is (100, 94). A covering dialog owns 30 lines, so the
+    dialog and those lines are 31 nodes.
+    """
+    search = _element(
+        "search", "AXButton", "Search (Ctrl+Shift+F)", parent="main",
+        path=("AXWindow", "AXButton"), clickable=True, expanded=expanded,
+        bounds=Bounds(0, 40, 80, 120, 28),
+    )
+    elements = [
+        _element(
+            "main", "AXWindow", "Visual Studio Code", path=("AXWindow",),
+            bounds=Bounds(0, 0, 0, 800, 600),
+        ),
+        search,
+        _element(
+            "page", "AXGroup", "Editor", parent="main", path=("AXWindow", "AXGroup"),
+            bounds=Bounds(0, 0, 120, 800, 480),
+        ),
+    ]
+    if dialog:
+        box = Bounds(0, 20, 40, 400, 300) if cover else Bounds(0, 500, 500, 80, 40)
+        elements.append(_element(
+            "welcome", "AXDialog", "Welcome", parent="main",
+            path=("AXWindow", "AXDialog"), bounds=box,
+        ))
+        for index in range(30):
+            elements.append(_element(
+                f"d{index}", "AXStaticText", f"line {index}", parent="welcome",
+                path=("AXWindow", "AXDialog", "AXStaticText"),
+                bounds=Bounds(0, 30, 50 + index, 200, 12),
+            ))
+    return elements
+
+
+def _snap(elements: list[Element]) -> Snapshot:
+    return Snapshot("snap", Scope.WINDOW, APP, 1, 0.0, (), tuple(elements))
+
+
+def test_occluded_click_effect_names_the_covering_dialog() -> None:
+    """Closing a dialog that covers Search is not a change to Search.
+
+    A dialog that does not contain the center, a target that expands, and a
+    button inside the dialog are ordinary effects.
+    """
+    covered = _welcome_tree()
+    search = next(item for item in covered if item.ref == "search")
+    opened = _welcome_tree(dialog=False)
+    assert outcome.occluded_click_effect(_snap(covered), _snap(opened), search) == (
+        "covered by 'Welcome'"
+    )
+    expanded = _welcome_tree(expanded=True, dialog=False)
+    assert outcome.occluded_click_effect(_snap(covered), _snap(expanded), search) is None
+    aside = _welcome_tree(cover=False)
+    assert outcome.occluded_click_effect(_snap(aside), _snap(opened), search) is None
+    assert outcome.occluded_click_effect(_snap(opened), _snap(covered), search) is None
+
+    dismiss = _element(
+        "dismiss", "AXButton", "Dismiss", parent="welcome",
+        path=("AXWindow", "AXDialog", "AXButton"), clickable=True,
+        bounds=Bounds(0, 40, 60, 80, 24),
+    )
+    before = _welcome_tree() + [dismiss]
+    assert outcome.occluded_click_effect(_snap(before), _snap(opened), dismiss) is None
+
+    untitled = _welcome_tree()
+    blank = next(item for item in untitled if item.ref == "welcome")
+    untitled = [dataclasses.replace(blank, title="") if item.ref == "welcome" else item for item in untitled]
+    assert outcome.occluded_click_effect(_snap(untitled), _snap(opened), search) == "covered by dialog"
+
+
+def test_covered_ref_click_is_not_clicked_and_the_point_stays(tmp_path) -> None:
+    """The pointer still hits Search. The welcome dialog is what changed.
+
+    An explicit x/y click is the same point. A button inside the dialog, a
+    button the dialog does not cover, and a Search click that expands Search
+    stay clicks.
+    """
+    driver = TreeDriver()
+    driver.name = "linux"
+    driver.elements = _welcome_tree()
+    sent: list = []
+
+    def without_welcome(elements: list[Element]) -> list[Element]:
+        return [
+            item for item in elements
+            if item.ref not in {"welcome", "dismiss"} and item.parent != "welcome"
+        ]
+
+    def click(target, **kwargs) -> None:
+        del kwargs
+        sent.append(target)
+        ref = getattr(target, "ref", None)
+        if ref == "search":
+            driver.elements = without_welcome(driver.elements)
+            if getattr(driver, "expand_search", False):
+                driver._replace("search", expanded=True)
+        elif ref == "dismiss" or getattr(target, "x", None) == 100:
+            driver.elements = without_welcome(driver.elements)
+
+    driver.click = click  # type: ignore[method-assign]
+    driver.press_element = lambda element: False  # type: ignore[method-assign]
+    runtime = _runtime(tmp_path, driver)
+    covered = runtime.click("search", verify=True)
+    assert covered.outcome == "suspected_noop"
+    assert covered.evidence == "covered by 'Welcome'"
+    assert not str(covered).startswith("clicked")
+    assert "did not reach the target" in covered
+    assert "+0 -31 ~0" in covered
+    assert sent[0].ref == "search"
+    assert (sent[0].bounds.x, sent[0].bounds.y, sent[0].bounds.width, sent[0].bounds.height) == (
+        40, 80, 120, 28,
+    )
+
+    driver.elements = _welcome_tree() + [
+        _element(
+            "dismiss", "AXButton", "Dismiss", parent="welcome",
+            path=("AXWindow", "AXDialog", "AXButton"), clickable=True,
+            bounds=Bounds(0, 40, 60, 80, 24),
+        ),
+    ]
+    runtime.desktop_snapshot(APP)
+    dismissed = runtime.click("dismiss")
+    assert str(dismissed).startswith("clicked dismiss")
+    assert dismissed.outcome == "confirmed"
+    assert sent[-1].ref == "dismiss"
+
+    driver.elements = _welcome_tree(cover=False)
+    runtime.desktop_snapshot(APP)
+    aside = runtime.click("search")
+    assert str(aside).startswith("clicked search")
+    assert aside.outcome == "confirmed"
+
+    driver.elements = _welcome_tree()
+    driver.expand_search = True
+    runtime.desktop_snapshot(APP)
+    reached = runtime.click("search")
+    assert str(reached).startswith("clicked search")
+    assert reached.outcome == "confirmed"
+    driver.expand_search = False
+
+    driver.elements = _welcome_tree()
+    runtime.desktop_snapshot(APP)
+    point = runtime.click(x=100, y=94)
+    assert str(point).startswith("clicked (100, 94)")
+    assert sent[-1] == Point(display_id=0, x=100, y=94)

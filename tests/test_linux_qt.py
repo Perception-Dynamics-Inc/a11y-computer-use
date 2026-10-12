@@ -723,3 +723,173 @@ def test_unnamed_gtk_combo_value_is_displayed_text_or_a_selected_cell(atspi) -> 
     tree_raw = _read(tree_combo)
     assert tree_raw.title == "Orientation"
     assert tree_raw.value == "Portrait"
+
+
+def test_hidden_window_is_omitted_and_a_showing_window_stays(atspi) -> None:
+    """A nested frame that is not showing and not visible leaves the snapshot.
+
+    FeatherPad keeps a Replace dialog in the tree as a frame named
+    Replacement. Its state set is only ENABLED, and its box sits on the
+    parent window, so the pruner would list it. SHOWING or VISIBLE keeps
+    the window. An empty state set is not hidden. A button that is not
+    showing is not a window and is still returned. The hidden frame's
+    children are not walked.
+    """
+    secret = _Node(
+        "push button", "Secret",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Qt", x=4, y=4, w=40, h=16,
+    )
+    label = _Node(
+        "label", "Replace with:", states={"ENABLED"}, toolkit="Qt",
+        x=0, y=0, w=80, h=16,
+    )
+    hidden = _Node(
+        "frame", "Replacement", states={"ENABLED"}, children=[label, secret],
+        toolkit="Qt", x=0, y=0, w=100, h=30,
+    )
+    tool_button = _Node(
+        "push button", "Inside tools",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Qt", x=410, y=50, w=80, h=24,
+    )
+    tools = _Node(
+        "window", "Tools",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, children=[tool_button],
+        toolkit="Qt", x=400, y=40, w=180, h=80,
+    )
+    parked = _Node(
+        "frame", "Parked", states={"VISIBLE", "ENABLED"},
+        toolkit="Qt", x=20, y=400, w=80, h=40,
+    )
+    find = _Node(
+        "dialog", "Find", states={"SHOWING", "ENABLED"},
+        toolkit="Qt", x=120, y=400, w=80, h=40,
+    )
+    about = _Node(
+        "alert", "About", states={"ENABLED"},
+        toolkit="Qt", x=220, y=400, w=80, h=40,
+    )
+    unset = _Node(
+        "frame", "Unset", states=(),
+        toolkit="Qt", x=320, y=400, w=80, h=40,
+    )
+    buried = _Node(
+        "push button", "Buried", states={"ENABLED"}, actions=["press"],
+        toolkit="Qt", x=10, y=300, w=60, h=24,
+    )
+    document = _Node(
+        "text", "Document", text="hello",
+        states={"SHOWING", "VISIBLE", "EDITABLE"},
+        toolkit="Qt", x=10, y=40, w=360, h=200,
+    )
+    frame = _Node(
+        "frame", "FeatherPad",
+        states={"SHOWING", "VISIBLE", "ENABLED", "ACTIVE"},
+        children=[document, buried, hidden, tools, parked, find, about, unset],
+        toolkit="Qt", x=0, y=0, w=800, h=600,
+    )
+    sibling = _Node(
+        "frame", "Replacement", states={"ENABLED"},
+        toolkit="Qt", x=0, y=0, w=100, h=30,
+    )
+    app = _Node(
+        "application", "featherpad", children=[frame, sibling], toolkit="Qt",
+    )
+
+    kids = list(ATSPIAccessor().children(frame))
+    assert hidden not in kids
+    assert about not in kids
+    assert tools in kids and parked in kids and find in kids and unset in kids
+    assert document in kids and buried in kids
+    app_kids = list(ATSPIAccessor().children(app))
+    assert frame in app_kids
+    assert sibling not in app_kids
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    geometry = (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=geometry,
+    )
+    titles = [el.title for el in snap.elements]
+    assert "Replacement" not in titles
+    assert "Replace with:" not in titles
+    assert "Secret" not in titles
+    assert "About" not in titles
+    assert "Tools" in titles
+    assert "Parked" in titles
+    assert "Find" in titles
+    assert "Unset" in titles
+    assert "Buried" in titles
+    rendered = observe.render_text(snap)
+    assert 'window "Replacement"' not in rendered
+    assert 'window "Tools"' in rendered
+    whole = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="featherpad", pid=None,
+        geometry=geometry,
+    )
+    assert not any(el.title == "Replacement" for el in whole.elements)
+    assert any(el.title == "Tools" for el in whole.elements)
+
+
+def test_hidden_frame_that_wraps_a_showing_document_stays(atspi) -> None:
+    """A Firefox content frame with no SHOWING state still holds the page.
+
+    The outer window is SHOWING. The frame under it reports only ENABLED,
+    and the showing document web is inside that frame. Dropping the frame
+    would omit the page. A sibling dialog that is not showing, and that
+    does not wrap a document, is still omitted.
+    """
+    button = _Node(
+        "push button", "Div button",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"],
+        toolkit="Gecko", x=20, y=80, w=80, h=24,
+    )
+    document = _Node(
+        "document web", "cuapara",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, children=[button],
+        toolkit="Gecko", x=0, y=60, w=800, h=500,
+    )
+    content = _Node(
+        "frame", "content", states={"ENABLED"}, children=[document],
+        toolkit="Gecko", x=0, y=40, w=800, h=540,
+    )
+    notice = _Node(
+        "label", "Update", states={"ENABLED"}, toolkit="Gecko",
+        x=8, y=8, w=80, h=16,
+    )
+    hidden_dialog = _Node(
+        "dialog", "Hidden notice", states={"ENABLED"}, children=[notice],
+        toolkit="Gecko", x=200, y=200, w=120, h=40,
+    )
+    chrome = _Node(
+        "frame", "cuapara — Mozilla Firefox",
+        states={"SHOWING", "VISIBLE", "ENABLED", "ACTIVE"},
+        children=[content, hidden_dialog],
+        toolkit="Gecko", x=0, y=0, w=900, h=700,
+    )
+    app = _Node("application", "firefox", children=[chrome], toolkit="Gecko")
+
+    kids = list(ATSPIAccessor().children(chrome))
+    assert content in kids
+    assert hidden_dialog not in kids
+    assert document in list(ATSPIAccessor().children(content))
+
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    geometry = (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+    snap = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="firefox", pid=None,
+        geometry=geometry,
+    )
+    titles = [el.title for el in snap.elements]
+    assert "Div button" in titles
+    assert "cuapara" in titles
+    assert "Hidden notice" not in titles
+    assert "Update" not in titles

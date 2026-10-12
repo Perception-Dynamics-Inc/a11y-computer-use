@@ -3923,3 +3923,379 @@ def test_run_body_accepts_temperature_and_seed():
         _parse_run_body({"goal": "ping", "model": "openai:gpt-4.1", "temperature": -1})
     with pytest.raises(ValueError, match="seed"):
         _parse_run_body({"goal": "ping", "model": "openai:gpt-4.1", "seed": True})
+
+
+def _joined(messages) -> str:
+    parts: list[str] = []
+    for message in messages:
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _verify_rows(trace) -> list[dict]:
+    path = trace / "trajectory.jsonl"
+    rows = []
+    if not path.is_file():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("kind") == "verify_finish":
+            rows.append(row)
+    return rows
+
+
+_ROOMY = {"max_replans": 20, "stuck_steps": 40, "stuck_time_s": 600, "max_retries": 0}
+
+
+def test_each_task_class_has_step_and_time_caps():
+    """The baseline is 40 steps and 160s. Desktop multi-file is 300s."""
+    from a11y_computer_use.agent.budget import (
+        TASK_CLASS_CAPS,
+        caps_for,
+        classify_goal,
+        known_task_classes,
+    )
+
+    assert known_task_classes() == tuple(TASK_CLASS_CAPS)
+    for name in known_task_classes():
+        caps = caps_for(name)
+        assert caps.task_class == name
+        assert caps.max_steps >= 1
+        assert caps.max_time_s > 0
+    assert (caps_for("browser").max_steps, caps_for("browser").max_time_s) == (40, 160.0)
+    assert (caps_for("desktop").max_steps, caps_for("desktop").max_time_s) == (40, 160.0)
+    multi = caps_for("desktop-multi-file")
+    assert multi.task_class == "desktop_multi_file"
+    assert multi.max_time_s == 300.0
+    assert multi.max_steps == 40 * 300 // 160
+    assert caps_for("file_dialog").task_class == "file_chooser"
+    assert classify_goal("Copy each file from Documents into the Backup folder") == "desktop_multi_file"
+    assert classify_goal("In Chrome, expand the infobox table") == "browser_table"
+    assert classify_goal("In Chrome, scroll to the next page") == "browser_scroll"
+    assert classify_goal("Open the file chooser and pick notes.txt") == "file_chooser"
+    assert classify_goal("Click the green button drawn on the canvas") == "canvas"
+    assert classify_goal("In Chrome, click Save") == "browser"
+    assert classify_goal("confirm Save is visible") == "desktop"
+    with pytest.raises(ValueError, match="task_class"):
+        caps_for("nope")
+
+
+def test_task_class_sets_caps_unless_the_caller_overrides(tmp_path):
+    runtime = FakeRuntime(window())
+    agent = Agent(
+        ScriptedModel([]), runtime=runtime, trace_dir=tmp_path, task_class="desktop_multi_file",
+    )
+    assert agent.task_class == "desktop_multi_file"
+    assert agent.max_steps == 75
+    assert agent.max_time_s == 300.0
+    plain = Agent(ScriptedModel([]), runtime=runtime, trace_dir=tmp_path / "plain")
+    assert plain.task_class is None
+    assert plain.max_steps == 50
+    assert plain.max_time_s == 900.0
+    over = Agent(
+        ScriptedModel([]),
+        runtime=runtime,
+        trace_dir=tmp_path / "over",
+        task_class="desktop_multi_file",
+        max_steps=4,
+        max_time_s=12,
+    )
+    assert over.max_steps == 4
+    assert over.max_time_s == 12.0
+    with pytest.raises(ValueError, match="task_class"):
+        Agent(ScriptedModel([]), runtime=runtime, trace_dir=tmp_path / "bad", task_class="nope")
+
+
+def test_auto_class_uses_the_goal_and_not_a_click_target(tmp_path):
+    """auto picks a budget from the wording. It does not click a goal word."""
+    elements = window(
+        el("e2", "AXButton", "Archive", parent="e1", clickable=True),
+        el("e3", "AXButton", "Save", parent="e1", clickable=True),
+    )
+    runtime = FakeRuntime(elements)
+    agent = Agent(
+        ScriptedModel([turn(done("held", [{"element": {"role": "AXButton", "name": "Save"}}]))]),
+        runtime=runtime,
+        trace_dir=tmp_path,
+        task_class="auto",
+        on_event=lambda _event: None,
+    )
+    assert agent.max_steps == 50
+    result = agent.run("Copy each file from Documents into the Backup folder. Do not click Archive.")
+    assert agent.task_class == "desktop_multi_file"
+    assert agent.max_steps == 75
+    assert agent.max_time_s == 300.0
+    assert result.status == "success"
+    assert result.reason == "done"
+    assert runtime.calls == []
+    budget = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") == "budget"
+    ]
+    assert budget[0]["task_class"] == "desktop_multi_file"
+    assert budget[0]["max_time_s"] == 300.0
+    assert budget[0]["max_steps"] == 75
+
+
+def test_class_cap_still_stops_on_the_stuck_budget(tmp_path):
+    """The 300s class cap does not wait out max_time when the subgoal is stuck."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    started = time.perf_counter()
+    result, _events, runtime, agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        elements,
+        runtime=FakeRuntime(elements),
+        trace_dir=tmp_path,
+        task_class="desktop_multi_file",
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert agent.max_time_s == 300.0
+    assert result.status == "stuck", result
+    assert result.reason and result.reason.startswith("stuck:")
+    assert "max_time" not in result.reason
+    assert result.evidence["switches"] == ["keyboard", "vision", "replan"]
+    assert len(runtime.calls) == 4
+    assert time.perf_counter() - started < 30
+
+
+def test_verify_finish_turn_reports_done_before_the_step_cap(tmp_path):
+    """At 90 percent of the steps, one turn can finish a task that already holds."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    def script(messages):
+        if "final verify-and-finish turn" in _joined(messages):
+            return turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))
+        return turn(ToolCall("click", {"ref": "e2"}))
+
+    result, events, runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        trace_dir=tmp_path,
+        max_steps=10,
+        max_time_s=600,
+        **_ROOMY,
+    )
+    assert result.status == "success", result
+    assert result.reason == "done"
+    assert result.answer == "saved"
+    assert result.steps == 10
+    assert len(runtime.calls) == 9
+    rows = _verify_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["limit"] == "steps"
+    assert rows[0]["steps"] == 9
+    assert rows[0]["fraction"] == 0.9
+    assert any(event.type == "verify_finish" for event in events)
+
+
+def test_an_early_done_does_not_wait_for_the_verify_turn(tmp_path):
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    result, events, _runtime, _agent = run(
+        ScriptedModel([turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))]),
+        elements,
+        trace_dir=tmp_path,
+        max_steps=10,
+    )
+    assert result.status == "success"
+    assert result.reason == "done"
+    assert result.steps == 1
+    assert _verify_rows(tmp_path) == []
+    assert not any(event.type == "verify_finish" for event in events)
+
+
+def test_failed_verify_finish_is_not_reported_as_done(tmp_path):
+    """A failed check on the final turn stops. A later passing done is not reached."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    calls = {"n": 0}
+
+    def script(messages):
+        if "final verify-and-finish turn" not in _joined(messages):
+            return turn(ToolCall("click", {"ref": "e2"}))
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return turn(done("nope", [{"element": {"role": "AXButton", "name": "Missing"}}]))
+        return turn(done("yes", [{"element": {"role": "AXButton", "name": "Save"}}]))
+
+    result, _events, _runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        trace_dir=tmp_path,
+        max_steps=10,
+        max_time_s=600,
+        **_ROOMY,
+    )
+    assert result.status == "failed", result
+    assert result.reason and result.reason.startswith("verify_failed:")
+    assert result.reason != "done"
+    assert result.answer == ""
+    assert calls["n"] == 1
+    assert result.step_log[-1].action == "done"
+    assert result.step_log[-1].verified is False
+    assert result.step_log[-1].error == "evidence_failed"
+    from a11y_computer_use.agent.cli import exit_code
+
+    assert exit_code(result) == 1
+
+
+def test_verify_finish_triggers_on_the_time_budget(tmp_path, monkeypatch):
+    """A fake clock crosses 90 percent of max_time between steps, before the hard cap."""
+    import a11y_computer_use.agent.core as core_mod
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.now = 0.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = _Clock()
+    monkeypatch.setattr(core_mod.time, "perf_counter", clock)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+
+    def script(messages):
+        if "final verify-and-finish turn" in _joined(messages):
+            return turn(done("saved", [{"window_title_contains": "Demo"}]))
+        clock.now += 1
+        return turn(ToolCall("click", {"ref": "e2"}))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        trace_dir=tmp_path,
+        max_steps=40,
+        max_time_s=10,
+        **_ROOMY,
+    )
+    assert result.status == "success", result
+    assert result.reason == "done"
+    assert result.reason != "max_time"
+    rows = _verify_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["limit"] == "time"
+    assert rows[0]["fraction"] == 0.9
+    assert rows[0]["elapsed_s"] == 9.0
+    assert len(runtime.calls) == 9
+
+
+def test_verify_turn_does_not_click_a_goal_word_or_change_the_action(tmp_path):
+    """The final turn keeps a missing ref and does not turn a key or type into something else."""
+    elements = window(
+        el("e2", "AXButton", "Archive", parent="e1", clickable=True),
+        el("e3", "AXButton", "Save draft", parent="e1", clickable=True),
+        el("e25", "AXTextField", "Note", parent="e1", editable=True, value=""),
+    )
+    goal_clicks = {"n": 0}
+
+    def missing(messages):
+        if "final verify-and-finish turn" in _joined(messages):
+            goal_clicks["n"] += 1
+            return turn(ToolCall("click", {"ref": "e990"}))
+        return turn(ToolCall("click", {"ref": "e3"}))
+
+    runtime = FakeRuntime(elements)
+    agent = Agent(
+        ScriptedModel(missing),
+        runtime=runtime,
+        trace_dir=tmp_path / "click",
+        max_steps=10,
+        max_time_s=600,
+        **_ROOMY,
+    )
+    result = agent.run("Click the Save draft button. Do not click Archive.")
+    assert goal_clicks["n"] >= 1
+    assert result.reason != "done"
+    assert any(call[1].get("ref") == "e990" for call in runtime.calls)
+    assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+    missed = next(step for step in result.step_log if step.args.get("ref") == "e990")
+    assert missed.action == "click"
+    assert missed.target.get("name") != "Archive"
+
+    def keyed(messages):
+        if "final verify-and-finish turn" in _joined(messages):
+            return turn(ToolCall("key", {"chord": "Escape"}))
+        return turn(ToolCall("click", {"ref": "e3"}))
+
+    keys = FakeRuntime(elements)
+    key_result, _events, keys, _agent = run(
+        ScriptedModel(keyed),
+        elements,
+        runtime=keys,
+        trace_dir=tmp_path / "key",
+        max_steps=12,
+        max_time_s=600,
+        **_ROOMY,
+    )
+    assert key_result.reason != "done"
+    assert ("key", {"chord": "Escape"}) in keys.calls
+    assert all(call[1].get("chord") != "Return" for call in keys.calls)
+
+    def typed(messages):
+        if "final verify-and-finish turn" in _joined(messages):
+            return turn(ToolCall("type", {"ref": "e25", "text": "Rent"}))
+        return turn(ToolCall("click", {"ref": "e3"}))
+
+    typed_runtime = FakeRuntime(elements)
+    typed_result, _events, typed_runtime, _agent = run(
+        ScriptedModel(typed),
+        elements,
+        runtime=typed_runtime,
+        trace_dir=tmp_path / "type",
+        max_steps=12,
+        max_time_s=600,
+        **_ROOMY,
+    )
+    assert typed_result.reason != "done"
+    assert any(call[0] == "type" and call[1].get("text") == "Rent" for call in typed_runtime.calls)
+    assert all(call[0] != "click" or call[1].get("ref") != "e25" for call in typed_runtime.calls)
+
+
+def test_run_limits_accept_a_task_class(tmp_path):
+    from a11y_computer_use.agent.service import RunRecord, RunStore, _parse_run_body
+
+    _goal, model, display, limits, allow_exec, allow_payments, domains, blocked = _parse_run_body({
+        "goal": "Copy each file into the Backup folder",
+        "model": "scripted:turns.json",
+        "limits": {"task_class": "desktop-multi-file"},
+    })
+    assert limits["task_class"] == "desktop_multi_file"
+    assert limits["max_steps_explicit"] is False
+    assert limits["max_time_explicit"] is False
+    with pytest.raises(ValueError, match="task_class"):
+        _parse_run_body({
+            "goal": "ping",
+            "model": "scripted:turns.json",
+            "limits": {"task_class": "nope"},
+        })
+    store = RunStore(
+        runtime_factory=lambda: FakeRuntime(window()),
+        trace_root=tmp_path / "traces",
+    )
+    record = RunRecord(id="1", display_key="default", trace_dir=tmp_path / "run", started=0.0)
+    record.trace_dir.mkdir()
+    agent = store._make_agent(
+        record, model, display, limits, allow_exec, allow_payments, domains, blocked,
+    )
+    assert agent.task_class == "desktop_multi_file"
+    assert agent.max_steps == 75
+    assert agent.max_time_s == 300.0
+
+    _goal, model, display, tight, allow_exec, allow_payments, domains, blocked = _parse_run_body({
+        "goal": "Copy each file into the Backup folder",
+        "model": "scripted:turns.json",
+        "limits": {"task_class": "desktop_multi_file", "max_steps": 4},
+    })
+    tight_agent = store._make_agent(
+        record, model, display, tight, allow_exec, allow_payments, domains, blocked,
+    )
+    assert tight_agent.max_steps == 4
+    assert tight_agent.max_time_s == 300.0

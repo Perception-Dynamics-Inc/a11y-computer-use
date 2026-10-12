@@ -2427,6 +2427,33 @@ def _refine_web_role(role: str, attrs: dict) -> str:
     return role
 
 
+def _entry_is_multiline(node, attrs: dict) -> bool:
+    """True when an AT-SPI ``entry`` is a multi-line ``<textarea>``.
+
+    Chromium exposes ``<input>`` and ``<textarea>`` as role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE``, or the ``multiline``
+    attribute. A contenteditable ``role=textbox`` with ``aria-multiline``
+    is also an entry and can carry ``STATE_MULTI_LINE``. That editor stays
+    a text field: its tag is not ``textarea``.
+    """
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    if tag and tag != "textarea":
+        return False
+    roles = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if "textbox" in roles and tag != "textarea":
+        return False
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    flag = attrs.get("multiline")
+    if isinstance(flag, bool):
+        return flag
+    return str(flag or "").strip().lower() in {"true", "1", "yes"}
+
+
 def _stable_id(acc, attrs: dict | None = None) -> str | None:
     """A layout-independent id for ``acc``: the AT-SPI ``accessible-id``, else a
     web element's DOM id from the object attributes (Chromium exposes 'id').
@@ -2622,6 +2649,10 @@ class ATSPIAccessor:
         if role_str == "text" and _state_has(node, "SINGLE_LINE") and not _state_has(node, "MULTI_LINE"):
             role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
+        # Chromium maps <input> and <textarea> both to entry. MULTI_LINE,
+        # or a multiline attribute, is the textarea.
+        if role_str == "entry" and _entry_is_multiline(node, attrs):
+            role = "AXTextArea"
         role = _refine_web_role(role, attrs)
         role = _opaque_surface_role(role, role_str, attrs)
         # A custom role=spinbutton is an AT-SPI spin button, which this map
@@ -2675,6 +2706,10 @@ class ATSPIAccessor:
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
                 checked = flag == "true"
+        # A Gecko contenteditable is a section with STATE_EDITABLE and a text
+        # interface. That is a text control: textarea when it is multi-line.
+        # Chromium's roleless contenteditable stays a group.
+        role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
         # Groups skip the value probe. A div is a section, and its text is
         # the inline sentence; reading that one string is what find matches.
         # A file chooser is a dialog, but its name is the title. Probing Value
@@ -2682,6 +2717,14 @@ class ATSPIAccessor:
         value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
             node, role, role_str,
         )
+        if (
+            role_str == "section"
+            and role in {"AXTextField", "AXTextArea"}
+            and not isinstance(value, str)
+        ):
+            # An empty contenteditable can publish a Value double. The text
+            # interface is the value. A number is not that text.
+            value = _div_inline_sentence(node, role_str, attrs)
         if value is None:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
@@ -2871,8 +2914,9 @@ class ATSPIAccessor:
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
         if role == "application":
-            # The combo menu is already a child of the combo. The extra
-            # top-level window would list those same items a second time.
+            # The combo menu is already a child of the combo. A top-level
+            # window or a second menu for that same popup would list the
+            # items again.
             kids = [child for child in kids if _combo_owning_popup(child) is None]
         if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
             return []
@@ -3942,26 +3986,184 @@ def _window_is_only_browser_chrome(root) -> bool:
     return chrome
 
 
+def _showing_menu_labels(menu):
+    """Ordered item names of an unnamed open menu, or None.
+
+    A named menu is an application menu. Open means the menu or one of its
+    items is SHOWING. A closed model is not this menu.
+    """
+    if menu is None:
+        return None
+    try:
+        if _role_name(menu) not in {"menu", "popup menu"}:
+            return None
+        if _node_name(menu):
+            return None
+        menu_showing = _state_has(menu, "SHOWING")
+    except Exception:
+        return None
+    count = _child_count(menu)
+    if count < 0:
+        count = 0
+    labels = []
+    item_showing = False
+    for index in range(min(int(count), 64)):
+        child = _child_at(menu, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu item", "check menu item", "radio menu item"}:
+            continue
+        if _state_has(child, "SHOWING"):
+            item_showing = True
+        labels.append(_node_name(child))
+    if not labels or not any(labels) or not (menu_showing or item_showing):
+        return None
+    return tuple(labels)
+
+
+def _popup_item_labels(node):
+    """Item names of an unnamed showing popup, or None.
+
+    A window counts when it holds one such menu. A second menu is a menu
+    bar tear-off, not a combo popup. A named window or menu is not one.
+    """
+    if node is None or _node_name(node):
+        return None
+    role = _role_name(node)
+    if role in {"menu", "popup menu"}:
+        return _showing_menu_labels(node)
+    if role != "window":
+        return None
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    labels = None
+    for index in range(min(int(count), 4)):
+        child = _child_at(node, index)
+        child_labels = _showing_menu_labels(child)
+        if child_labels is None:
+            continue
+        if labels is not None:
+            return None
+        labels = child_labels
+    return labels
+
+
+def _application_ancestor(node):
+    """The application that contains ``node``, or None."""
+    current = node
+    for _ in range(20):
+        if current is None:
+            return None
+        if _role_name(current) == "application":
+            return current
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return _call_first(current, ("get_application", "getApplication"))
+        current = parent
+    return None
+
+
+def _open_gtk_combo_menus(application):
+    """``(combo, item names)`` for each GTK combo whose menu is open.
+
+    Tables, documents, and menus are not descended into. A combo's menu is
+    read from the combo itself.
+    """
+    found = []
+    stack = [application]
+    seen: set[int] = set()
+    # Keep each wrapper alive. ``id()`` is reused after a PyGObject proxy is freed.
+    held: list[object] = []
+    steps = 0
+    skip = {
+        "table", "tree table", "tree", "list", "list box",
+        "document web", "document frame", "menu bar", "menu", "popup menu",
+    }
+    while stack and steps < 250:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        held.append(node)
+        steps += 1
+        role = _role_name(node)
+        if role == "combo box" and _gtk_combo(node):
+            count = _child_count(node)
+            if count < 0:
+                count = 0
+            for index in range(min(int(count), 8)):
+                labels = _showing_menu_labels(_child_at(node, index))
+                if labels is not None:
+                    found.append((node, labels))
+                    break
+            continue
+        if role in skip:
+            continue
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 30)):
+            child = _child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return found
+
+
+def _combo_with_same_open_menu(window):
+    """The GTK combo whose open menu lists the same items as ``window``, or None.
+
+    Used when the popup's parent is the application or the popup window, so
+    the parent walk never reaches the combo. The item names have to match
+    the combo's open menu exactly. A context menu with different items
+    stays. Chromium, Firefox, and Qt are not matched.
+    """
+    try:
+        if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
+            return None
+        labels = _popup_item_labels(window)
+        if labels is None:
+            return None
+        app = _application_ancestor(window)
+        if app is None or app is window:
+            return None
+        for combo, item_labels in _open_gtk_combo_menus(app):
+            if item_labels == labels:
+                return combo
+    except Exception:
+        return None
+    return None
+
+
 def _combo_owning_popup(window):
     """The GTK combo whose menu this top-level popup is showing, or None.
 
     GtkComboBox puts the open menu in its own window and marks that window
     ACTIVE. The menu's parent is still the combo, so the options are already
-    under the combo. A named frame, a dialog, a menu-bar menu, and a
-    Chromium or Qt popup are not this window.
+    under the combo. GTK also exposes that same popup as its own menu under
+    the application. When that menu's parent is not the combo, the SHOWING
+    item names still identify it. A named frame, a dialog, a menu-bar menu,
+    a context menu with different items, and a Chromium or Qt popup are not
+    this window.
     """
     if window is None:
         return None
     try:
         role = _role_name(window)
-        if role not in {"window", "popup menu"}:
+        if role not in {"window", "popup menu", "menu"}:
             return None
         if role == "window" and _node_name(window):
+            return None
+        if role == "menu" and _node_name(window):
             return None
         if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
             return None
     except Exception:
         return None
+    if role == "menu":
+        # A context menu can be parented to the combo it was opened on.
+        # Item names, not that parent, decide whether this is the combo popup.
+        return _combo_with_same_open_menu(window)
     starts = []
     if role == "popup menu":
         starts.append(window)
@@ -3990,7 +4192,9 @@ def _combo_owning_popup(window):
             }:
                 break
             node = parent
-    return None
+    # The popup menu is a different object, parented to the application or
+    # to this window, so the walk above never reaches the combo.
+    return _combo_with_same_open_menu(window)
 
 
 def _frame_containing(node, frames):
@@ -12088,6 +12292,145 @@ def _replace_drawing_paragraph(acc, text: str) -> bool:
     return _confirm_text(acc, text)
 
 
+def _attribute_multiline(attrs: dict | None) -> bool:
+    """True when ``multiline`` or ``aria-multiline`` is true.
+
+    A false or absent attribute is not multi-line. One true key is enough
+    when the other key is false. ``STATE_MULTI_LINE`` is checked by the caller.
+    """
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _has_text_interface(acc) -> bool:
+    """True when ``acc`` exposes AT-SPI Text or EditableText."""
+    if acc is None:
+        return False
+    if _editable_iface(acc) is not None:
+        return True
+    count = _safe(lambda: _atspi().Text.get_character_count(acc))
+    return isinstance(count, int) and not isinstance(count, bool)
+
+
+def _gecko_contenteditable(acc) -> bool:
+    """True for a Firefox contenteditable that is not an entry.
+
+    Gecko exposes ``<div contenteditable>`` as a section with
+    ``STATE_EDITABLE`` and a text interface. An input, a textarea, a
+    paragraph, and a select are not this node. Chromium's roleless
+    contenteditable stays on its own path.
+    """
+    if acc is None or not _gecko_app(acc):
+        return False
+    if _role_name(acc) != "section":
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return False
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return False
+    if _state_has(acc, "READ_ONLY") or not _state_has(acc, "EDITABLE"):
+        return False
+    return _has_text_interface(acc)
+
+
+def _gecko_contenteditable_role(node, role: str, role_str: str, attrs: dict, state_editable: bool) -> str:
+    """Text role for an editable Gecko contenteditable, else ``role``.
+
+    ``STATE_EDITABLE`` plus a text interface is the editor. ``MULTI_LINE``,
+    or a multiline attribute, is a textarea. A single-line editor is a text
+    field. A section that is not editable, or that has no text interface,
+    stays ``role``. Chromium is unchanged.
+    """
+    if role_str != "section" or not state_editable or node is None:
+        return role
+    if not _gecko_app(node):
+        return role
+    tag = str((attrs or {}).get("tag") or "").lower()
+    xml = set(str((attrs or {}).get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return role
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return role
+    if _state_has(node, "READ_ONLY") or not _has_text_interface(node):
+        return role
+    if _state_has(node, "MULTI_LINE") or _attribute_multiline(attrs):
+        return "AXTextArea"
+    return "AXTextField"
+
+
+def _wait_until_content_blank(acc) -> bool:
+    """Poll until the readable contenteditable text is blank."""
+    for attempt in range(16):
+        if _content_is_blank(acc):
+            return True
+        if attempt + 1 < 16:
+            time.sleep(0.05)
+    return False
+
+
+def _replace_gecko_contenteditable_by_keys(acc, text: str, original: str | None) -> bool:
+    """Replace a Firefox contenteditable with the focused typing path.
+
+    ``grab_focus`` runs first. A later read has to show keyboard focus on
+    this node or a descendant before any chord or character is sent. A miss
+    raises ``focus_lost`` and types nothing. The new string is typed only
+    after the field is blank, through the same ``_type_into_target`` path
+    ``type(ref)`` uses. Success is the readable text, where one trailing
+    newline is the empty ``<br>``. A failed type puts ``original`` back.
+    """
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _shown_matches(acc, text):
+        return True
+    if not _content_is_blank(acc):
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
+        if not _wait_until_content_blank(acc):
+            _restore_text(acc, original)
+            return False
+    if text == "":
+        return _content_is_blank(acc) or _shown_matches(acc, "")
+    _type_into_target(acc, text)
+    if _confirm_text_landed(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
+def _set_gecko_contenteditable(acc, text: str) -> bool:
+    """Replace a Firefox contenteditable and require the read-back.
+
+    EditableText is tried first and is not trusted: Firefox can return
+    success and leave the DOM unchanged. The read-back is the readable
+    text, including one trailing newline. When that read is not ``text``,
+    the fallback is ``_replace_gecko_contenteditable_by_keys``. No Text
+    selection is made: selecting a section can select the page.
+    """
+    if _shown_matches(acc, text):
+        return True
+    original = _readable_text(acc)
+    eti = _editable_iface(acc)
+    if eti is not None:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        if _confirm_text_landed(acc, text):
+            return True
+    return _replace_gecko_contenteditable_by_keys(acc, text, original)
+
+
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -12112,7 +12455,11 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     embedded NUL, so the text alone can match while the widget is longer.
     On Firefox, when EditableText returns success and the snapshot read is
     still not ``text``, the field is focused and the value is typed, and
-    success is still that read-back. Chromium and GTK keep the previous
+    success is still that read-back. A Firefox contenteditable section is
+    not cleared through Text selection. EditableText is tried, then the
+    readable text has to match, including one trailing newline. Otherwise
+    focus is confirmed and the same key path ``type(ref)`` uses replaces
+    the text. Unconfirmed focus types nothing. Chromium and GTK keep the previous
     tail: keys are sent only when the snapshot read is already empty,
     because focusing a Chrome number input can make an empty field read
     back as 0. When the snapshot read is left blank and the new text cannot
@@ -12148,6 +12495,8 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
         return _clear_contenteditable(acc)
+    if _gecko_contenteditable(acc):
+        return _set_gecko_contenteditable(acc, text)
     eti = _editable_iface(acc)
     if eti is None:
         if _chromium_contenteditable(acc):
@@ -13273,6 +13622,78 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
     return painted
 
 
+_TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
+
+
+def _window_lacks_showing_and_visible(node) -> bool:
+    """True when ``node`` reported states and none of them are on screen.
+
+    An empty or missing state set is false: a node that never reported
+    states is not treated as hidden.
+    """
+    sset = _call_first(node, ("get_state_set",))
+    if sset is None:
+        return False
+    names = getattr(sset, "names", None)
+    if isinstance(names, (set, frozenset, list, tuple)):
+        folded = {str(item).upper() for item in names}
+        if not folded:
+            return False
+        return "SHOWING" not in folded and "VISIBLE" not in folded
+    return not _state_has(node, "SHOWING") and not _state_has(node, "VISIBLE")
+
+
+def _wraps_showing_browser_document(node, depth: int = 0) -> bool:
+    """True when a frame still holds the page the user can see.
+
+    Firefox parents the showing ``document web`` under a frame whose own
+    state set is only ENABLED. That frame is the page. A hidden dialog
+    whose children are ordinary controls is not. The walk is bounded and
+    uses the raw child list, so it does not call back into the filter.
+    """
+    if node is None or depth > 5:
+        return False
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return False
+    for index in range(min(count, 12)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if (
+            role in {"document web", "internal frame", "document frame"}
+            and _state_has(child, "SHOWING")
+        ):
+            return True
+        if _wraps_showing_browser_document(child, depth + 1):
+            return True
+    return False
+
+
+def _hidden_window(node) -> bool:
+    """True for a frame, window, or dialog that is not on screen.
+
+    FeatherPad keeps its Replace dialog in the tree as a frame named
+    Replacement. The state set is only ENABLED, and the box is a strip at
+    the parent origin, so bounds alone would keep it. A window that is
+    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
+    node that never reported states is not treated as hidden. Other roles
+    are not this case. A frame that still wraps a SHOWING browser document
+    stays, because that document is the page.
+    """
+    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
+        return False
+    if not _window_lacks_showing_and_visible(node):
+        return False
+    return not _wraps_showing_browser_document(node)
+
+
+def _without_hidden_windows(kids: list) -> list:
+    """Drop nested frames and windows that are not showing and not visible."""
+    return [child for child in kids if not _hidden_window(child)]
+
+
 def _with_table_body(node, kids: list) -> list:
     """Append a GTK table's body cells when the children are only headers.
 
@@ -13280,7 +13701,13 @@ def _with_table_body(node, kids: list) -> list:
     column headers. ``Table.get_n_rows`` is the file rows. Cells already
     present as children are not added again. A table that already exposes
     row children is unchanged, and a table with no rows stays header-only.
+
+    Every ordinary snapshot walk returns through here, so a hidden frame
+    (FeatherPad's Replace dialog) is removed before the table check. A
+    showing or visible window is kept. A control that is not a window is
+    kept even when it is not showing.
     """
+    kids = _without_hidden_windows(kids)
     if _role_name(node) not in {"table", "tree table"}:
         return kids
     rows = _call_first(node, ("get_n_rows",), default=None)
@@ -13313,6 +13740,32 @@ def _is_scroll_bar(acc) -> bool:
 
 def _node_name(acc) -> str:
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
+
+
+def top_window_title(acc) -> str:
+    """Name of the outermost frame, window, or dialog above ``acc``.
+
+    Chrome's window title is that name. The page title is a prefix of it.
+    An empty string means no frame name was readable.
+    """
+    if acc is None:
+        return ""
+    node = acc
+    seen: set[int] = set()
+    title = ""
+    for _ in range(24):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"frame", "window", "dialog"}:
+            name = _node_name(node)
+            if name:
+                title = name
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    return title
 
 
 def _is_list_marker(name: str) -> bool:
