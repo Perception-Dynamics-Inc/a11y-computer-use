@@ -1274,6 +1274,147 @@ def test_linux_scrolled_gtk_tree_rows_stay_in_the_snapshot(tmp_path) -> None:
             end.kill()
 
 
+_LARGE_TREE_APP = "culargetree"
+
+_GTK_LARGE_TREE = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("culargetree")
+    ROWS = 10000
+    store = Gtk.ListStore(str, str, int)
+    for index in range(ROWS):
+        store.append(["ROW-%05d" % index, "payload-%d" % index, index])
+    win = Gtk.Window(title="culargetree")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    # The header must not contain a ROW- id. A label that mentions one
+    # is a different bug.
+    header = Gtk.Label(label="Clean ListStore with %d rows (no row ids in this label)" % ROWS)
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Payload", "Index")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    probe = Gtk.Label(label="row=")
+    probe.get_accessible().set_name("RowProbe")
+    def on_select(selection):
+        model, iterator = selection.get_selected()
+        text = model.get_value(iterator, 0) if iterator is not None else ""
+        probe.set_text("row=%s" % text)
+    tree.get_selection().connect("changed", on_select)
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.add(tree)
+    box.pack_start(header, False, False, 4)
+    box.pack_start(scrolled, True, True, 0)
+    box.pack_start(probe, False, False, 0)
+    win.add(box)
+    win.set_default_size(700, 600)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_large_tree(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "culargetree.py"
+    script.write_text(_GTK_LARGE_TREE)
+    return subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_large_tree(driver, timeout_s: float = 20.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, _LARGE_TREE_APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            numbers = _tree_row_numbers(last)
+            if 0 in numbers and len(set(numbers)) > 6:
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_find_reaches_offscreen_cells_in_a_10k_gtk_tree(tmp_path) -> None:
+    """Live GTK3 TreeView, 10k rows. Not a synthetic tree.
+
+    The opening snapshot lists the painted page only. ``find`` still names
+    ROW-05000 and ROW-09999. A cell that stays off screen has no bounds and
+    is marked off-screen. A cell the bar scrolls into view has a real box
+    on the display, not a sentinel and not an invented origin.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _LARGE_TREE_APP, "python3")
+    proc = _launch_large_tree(tmp_path)
+    try:
+        snap = _wait_large_tree(driver)
+        assert snap is not None, "the 10k tree never listed its on-screen rows"
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 5000 not in numbers
+        assert 9999 not in numbers
+        for text in ("ROW-05000", "ROW-09999"):
+            found = runtime.find(_LARGE_TREE_APP, text=text)
+            assert "no elements match" not in found, found
+            assert text in found, found
+            shot = runtime._current
+            cells = [el for el in shot.elements if el.title == text]
+            assert cells, found
+            cell = cells[0]
+            assert cell.role in {"AXCell", "AXRow"}, (cell.role, found)
+            if cell.bounds is None:
+                assert "off-screen" in found, found
+                continue
+            assert "off-screen" not in found, found
+            assert cell.bounds.width > 1 and cell.bounds.height > 1
+            assert 0 <= cell.bounds.x < 4000
+            assert 0 <= cell.bounds.y < 4000
+            assert cell.bounds.x > -1_000_000
+            clicked = runtime.click(cell.ref)
+            assert "clicked" in clicked, clicked
+            assert "no click was sent" not in clicked, clicked
+            deadline = time.monotonic() + 3
+            probe = ""
+            while time.monotonic() < deadline:
+                shot = driver.snapshot(Scope.WINDOW, _LARGE_TREE_APP)
+                runtime._current = shot
+                probe = next(
+                    (
+                        f"{el.title} {el.value or ''}"
+                        for el in shot.elements
+                        if "row=" in f"{el.title} {el.value or ''}"
+                    ),
+                    "",
+                )
+                selected = any(el.title == text and el.selected for el in shot.elements)
+                if f"row={text}" in probe or selected:
+                    break
+                time.sleep(0.2)
+            assert f"row={text}" in probe or any(
+                el.title == text and el.selected for el in shot.elements
+            ), probe
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def _chrome_binary() -> str | None:
     import shutil
 
