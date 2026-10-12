@@ -10301,6 +10301,268 @@ def row_toggle_committed(before: tuple[bool | None, bool | None], acc) -> bool:
     return _row_toggle_committed(before, target)
 
 
+_FOLDER_VIEW_ROLES = frozenset({"page tab", "page tab list"})
+_PATH_ENTRY_ROLES = frozenset({"entry", "text", "editable text", "combo box", "combo-box"})
+_PATH_BUTTON_ROLES = frozenset({"push button", "toggle button"})
+_PATH_COMMANDS = frozenset({
+    "back", "forward", "home", "open parent", "up", "reload", "search",
+    "search for files...", "recent", "menubar", "undo", "redo",
+    "zoom out", "zoom in", "normal size", "icon view", "list view",
+    "compact view", "split view", "open terminal here",
+})
+_FOLDER_LOCATION_WAIT_S = 1.2
+
+
+def _raw_action_names(acc) -> list[str]:
+    """AT-SPI action names, lowercased, in the order the toolkit lists them."""
+    action = _action_iface(acc)
+    if action is None:
+        return []
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    names = []
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw:
+            names.append(raw)
+    return names
+
+
+def do_named_action(acc, name: str) -> bool:
+    """Perform the action named ``name``. False when the row has no such action.
+
+    This does not perform an earlier expand or edit action. ``do_press``
+    would, and that is not this row's activation.
+    """
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    wanted = (name or "").lower()
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw == wanted:
+            return bool(_call_first(action, ("do_action", "doAction"), index, default=False))
+    return False
+
+
+def _pathish(text: str) -> bool:
+    value = (text or "").strip()
+    return value.startswith("/") or value.startswith("~") or value.startswith("file://")
+
+
+def _hold_new(node, visited: list) -> bool:
+    """True when ``node`` is new. The list keeps that accessible alive.
+
+    An ``id()`` set does not. AT-SPI drops a wrapper once nothing references
+    it, and the next child can be born at that same address. The walk then
+    treats the new child as already seen and never reads it. Thunar's
+    location entry is several panels under a toolbar of empty panels, so it
+    is one of those later children.
+    """
+    if node is None or any(node is item for item in visited):
+        return False
+    visited.append(node)
+    return True
+
+
+def _toolbars_under(frame) -> list:
+    """Toolbars under ``frame``, without walking the folder's table.
+
+    The menu bar's toolbar is not always the one that holds the location.
+    """
+    found = []
+    queue = [frame]
+    seen = 0
+    visited: list = []
+    while queue and seen < 80 and len(found) < 4:
+        node = queue.pop(0)
+        if not _hold_new(node, visited):
+            continue
+        seen += 1
+        role = _role_name(node)
+        if role == "tool bar" and node is not frame:
+            found.append(node)
+            continue
+        if role in _LIST_ROLES and node is not frame:
+            continue
+        count = _raw_child_count(node)
+        for index in range(min(max(count, 0), 32)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    return found
+
+
+def _place_in_toolbar(toolbar) -> tuple[str, str] | None:
+    """``(text, kind)`` from one toolbar, or None when it has no location.
+
+    The location entry sits several panels under the toolbar. A path-bar
+    crumb is a checked button that is not Back, Home, or a view switch.
+    """
+    entry = None
+    crumbs: list[str] = []
+    queue = [toolbar]
+    seen = 0
+    visited: list = []
+    while queue and seen < 80 and entry is None:
+        node = queue.pop(0)
+        if not _hold_new(node, visited):
+            continue
+        seen += 1
+        role = "" if node is toolbar else _role_name(node)
+        if node is not toolbar:
+            if role in _PATH_ENTRY_ROLES:
+                text = (_node_plain_text(node) or "").strip()
+                if _pathish(text):
+                    entry = text
+                    break
+            if role in _PATH_BUTTON_ROLES:
+                name = _node_name(node).strip()
+                if name and name.casefold() not in _PATH_COMMANDS and _state_has(node, "CHECKED"):
+                    crumbs.append(name)
+            if role in _LIST_ROLES:
+                continue
+        count = _raw_child_count(node)
+        for index in range(min(max(count, 0), 32)):
+            child = _child_at(node, index)
+            if child is not None:
+                queue.append(child)
+    if entry:
+        return entry, "location"
+    if crumbs:
+        return " / ".join(crumbs), "path bar"
+    return None
+
+
+def folder_place(acc) -> tuple[str, str] | None:
+    """``(text, kind)`` for the location entry or the path bar.
+
+    ``kind`` is ``location`` or ``path bar``. A path entry wins over path
+    buttons. Back, Home, and the view switches are not crumbs. None when
+    the window has neither.
+    """
+    frame = _frame_ancestor(acc)
+    if frame is None:
+        return None
+    path = None
+    for bar in _toolbars_under(frame):
+        reading = _place_in_toolbar(bar)
+        if reading is None:
+            continue
+        if reading[1] == "location":
+            return reading
+        if path is None:
+            path = reading
+    return path
+
+
+def folder_location(acc) -> str | None:
+    """Text of the location entry or path bar, or None."""
+    place = folder_place(acc)
+    if place is None:
+        return None
+    return place[0]
+
+
+def _inside_folder_view(acc) -> bool:
+    """True when ``acc`` sits in the folder view's tab, not the side pane."""
+    node = acc
+    for _ in range(16):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role in _FOLDER_VIEW_ROLES:
+            return True
+        if role in {"split pane", "frame", "application"}:
+            return False
+        node = _parent_of(node)
+    return False
+
+
+def _in_side_pane(acc) -> bool:
+    """True when a split pane contains ``acc`` above the folder view's tab."""
+    node = acc
+    for _ in range(16):
+        if node is None:
+            return False
+        role = _role_name(node)
+        if role in _FOLDER_VIEW_ROLES:
+            return False
+        if role == "split pane":
+            return True
+        if role in {"frame", "application"}:
+            return False
+        node = _parent_of(node)
+    return False
+
+
+def navigating_folder_row(acc) -> bool:
+    """A side-pane row, or a tree or list row, that opens a folder.
+
+    The folder view sits in a tab. A single click there selects the file.
+    The side pane is the table, tree, or list in the split pane outside
+    that tab, and the window has a location entry or a path bar. A tree or
+    list outside the tab is the same kind of row when that bar is present.
+    A table with no location bar is not one of these rows: selecting it is
+    the click.
+    """
+    parent, _index, target = _selection_parent(acc)
+    if parent is None or target is None or _inside_folder_view(acc):
+        return False
+    parent_role = _role_name(parent)
+    if _in_side_pane(acc):
+        if parent_role not in _LIST_ROLES:
+            return False
+    elif parent_role not in {"tree", "tree table", "list", "list box"}:
+        return False
+    return folder_location(acc) is not None
+
+
+def navigation_gesture(acc) -> str | None:
+    """How this row opens a folder, or None when a click only selects.
+
+    ``pointer`` is a real click at the row. A GTK shortcut cell lists
+    expand, edit, then activate; that activate action reports success and
+    leaves the folder where it was, and Return on the selected row does
+    too, so neither is the row's activation. ``activate`` is a tree or list
+    row whose own action is activate, with no expand or edit ahead of it.
+    ``return`` is a row that has no box and no activate action, where
+    Return on the selected row is the activation.
+    """
+    if not navigating_folder_row(acc):
+        return None
+    names = _raw_action_names(acc)
+    if "expand or contract" in names or "edit" in names:
+        return "pointer"
+    if "activate" in names:
+        return "activate"
+    try:
+        origin, size = _extents(acc)
+    except Exception:
+        origin, size = None, None
+    if origin is None or size is None or size[0] <= 0 or size[1] <= 0:
+        return "return"
+    return "pointer"
+
+
+def folder_navigation_verdict(acc, before: str) -> tuple[str, str]:
+    """Confirm a folder row only when the location or path bar changes.
+
+    ``before`` is ``folder_location`` from before the click. A row that
+    only becomes selected keeps the previous folder, and that click is
+    partial.
+    """
+    deadline = time.monotonic() + _FOLDER_LOCATION_WAIT_S
+    while True:
+        place = folder_place(acc)
+        if place is not None and place[0] != before:
+            kind = "path bar" if place[1] == "path bar" else "location"
+            return "confirmed", f"the {kind} changed"
+        if time.monotonic() >= deadline:
+            return "partial", "the row was selected but the location did not change"
+        time.sleep(0.05)
+
+
 def select_contained_row(acc) -> bool | None:
     """Select a row or cell inside a Selection container.
 

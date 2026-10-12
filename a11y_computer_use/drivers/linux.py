@@ -1792,6 +1792,15 @@ class LinuxDriver:
                 f"{element.ref} ({element.role}) click did not change the selection",
                 detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
             )
+        # A side pane, or a tree or list row that opens a folder, is not
+        # selected into place. Selection only highlights the row. The row's
+        # own activation is a pointer click, or activate, or Return when
+        # that is the action that opens the folder. The outcome checks the
+        # location or path bar afterwards.
+        gesture = self._run(lambda: _atspi.navigation_gesture(handle))
+        if gesture:
+            self._open_folder_row(element, handle, gesture)
+            return True
         # Read the toggle before the click action. Chrome publishes EXPANDED
         # a beat after doAction("click") returns, and the selection does not
         # move on a treeitem that has no aria-selected. A center click would
@@ -1842,6 +1851,34 @@ class LinuxDriver:
             f"{element.ref} ({element.role}) click did not change the selection",
             detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
         )
+
+    def _open_folder_row(self, element: Element, handle, gesture: str) -> None:
+        """Open a side-pane or navigating row by that row's own activation.
+
+        A pointer click is the single click that opens a shortcut cell.
+        ``activate`` runs only when that action is the row's activation, not
+        the expand or edit action ahead of it. Return is sent only when the
+        row has no box and no activate action. The caller checks that the
+        location or path bar changed.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        if gesture == "activate":
+            self._run(lambda: _atspi.do_named_action(handle, "activate"))
+            return
+        if gesture == "return":
+            self._run(lambda: _atspi.select_contained_row(handle))
+            self._run(lambda: _atspi.grab_focus(handle))
+            if _on_wayland():
+                raise _wayland_input_error("click")
+            from a11y_computer_use.drivers import _linux_input
+
+            _linux_input.press_chord("Return")
+            return
+        bounds = element.bounds
+        if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+            return
+        self.click(element)
 
     def scroll_into_view(self, element: Element) -> bool:
         from a11y_computer_use import observe

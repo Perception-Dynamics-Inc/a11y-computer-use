@@ -4292,6 +4292,11 @@ class Runtime:
             self.driver.click(act, button=parsed_button, count=count, modifiers=mods)
 
         address = self._sheet_address_for_click(target, x, y)
+        # Read the folder location before the click. A side-pane selection
+        # changes the row and leaves this text where it was.
+        nav_before = None
+        if isinstance(target, Element):
+            nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
         control_note = ""
         if activated:
@@ -4304,6 +4309,8 @@ class Runtime:
         verdict = None
         if isinstance(target, Element) and not activated:
             verdict = self._paragraph_click_verdict(target)
+            if verdict is None and nav_before is not None:
+                verdict = self._folder_navigation_verdict(target, nav_before)
             if verdict is None:
                 verdict = self._opaque_click_verdict(target)
         if verdict is None and address and not activated:
@@ -4404,6 +4411,60 @@ class Runtime:
 
         def read():
             return _atspi.paragraph_click_verdict(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _navigating_row_location(self, element: Element) -> str | None:
+        """The folder location before a click that should open a place.
+
+        None when this row only selects, or the driver is not Linux. The
+        text is the location entry or the path bar.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            if not _atspi.navigating_folder_row(handle):
+                return None
+            return _atspi.folder_location(handle)
+
+        try:
+            if callable(runner):
+                return runner(read)
+            return read()
+        except Exception:
+            return None
+
+    def _folder_navigation_verdict(self, element: Element, before: str) -> tuple[str, str] | None:
+        """Location check for a side-pane or navigating row. None off Linux.
+
+        Confirmed only when the location entry or the path bar changed.
+        A row that was only selected is partial.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        if handle is None:
+            return None
+        runner = getattr(self.driver, "_run", None)
+
+        def read():
+            return _atspi.folder_navigation_verdict(handle, before)
 
         try:
             if callable(runner):
@@ -7867,6 +7928,12 @@ def build_server(
         a pointer click at the element's center. When that click does not
         enter text editing, a double-click follows. It is confirmed only
         when a focused editable paragraph or the caret is inside the frame.
+        A click on a file-manager side pane, or on a tree or list row whose
+        activation opens a folder, is that row's own activation: a pointer
+        click at the row, or the activate action, or Return on the selected
+        row, only when that is how the row opens. It is confirmed only when
+        the location entry or the path bar changed. A row that was only
+        selected is partial.
         A click aimed at
         a Calc cell is confirmed only when the selected cell address, the
         Name Box, is that cell. A different cell is partial.         A click on a

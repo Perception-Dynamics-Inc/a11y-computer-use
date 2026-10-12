@@ -10949,3 +10949,117 @@ def test_linux_ref_from_a_quit_editor_does_not_write_the_relaunched_file(tmp_pat
         assert "other document plus" in str(body), body
     finally:
         _stop_group(proc2)
+
+
+def _kill_thunar() -> None:
+    """Stop Thunar by comm. A Python command line that mentions the name is left alone."""
+    comms = {"thunar"}
+    for _ in range(15):
+        alive = False
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                    comm = fh.read().strip()
+            except OSError:
+                continue
+            if comm not in comms:
+                continue
+            alive = True
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+            except OSError:
+                pass
+        if not alive:
+            return
+        time.sleep(0.2)
+
+
+def _location_value(snap) -> str | None:
+    for el in snap.elements:
+        if el.role == "AXTextField" and isinstance(el.value, str) and el.value.startswith("/"):
+            return el.value
+    return None
+
+
+def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
+    """Live Thunar. A ref click on a side-pane place opens that place.
+
+    Selection alone leaves the folder where it was and is not confirmed.
+    The click is a pointer click at the row. The location entry changes
+    from the home folder to ``/``.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v thunar"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    if not binary:
+        pytest.skip("thunar is not installed")
+    subprocess.run(
+        ["xfconf-query", "-c", "thunar", "-p", "/last-location-bar", "-n", "-t", "string", "-s", "ThunarLocationEntry"],
+        check=False, capture_output=True,
+    )
+    subprocess.run(
+        ["xfconf-query", "-c", "thunar", "-p", "/last-view", "-n", "-t", "string", "-s", "ThunarIconView"],
+        check=False, capture_output=True,
+    )
+    _kill_thunar()
+    time.sleep(0.3)
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [binary, os.path.expanduser("~")],
+        env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 25
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "thunar")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:1500]
+                home = _location_value(shot)
+                if home and home.startswith("/home/") and "File System" in last:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Thunar did not expose the side pane\n{last}"
+        runtime = _runtime_for(tmp_path, driver, "thunar")
+        runtime.desktop_snapshot("thunar")
+        current = runtime._current
+        assert current is not None
+        before = _location_value(current)
+        assert before and before.startswith("/home/"), before
+        place = next(
+            (el for el in current.elements if el.role == "AXCell" and el.title == "File System"),
+            None,
+        )
+        assert place is not None, observe.render_text(current)[:1500]
+        clicked = runtime.click(place.ref)
+        assert clicked.outcome == "confirmed", (clicked, clicked.evidence)
+        assert "changed" in clicked.evidence, clicked.evidence
+        runtime.desktop_snapshot("thunar")
+        current = runtime._current
+        assert current is not None
+        after = _location_value(current)
+        assert after is not None, observe.render_text(current)[:1500]
+        assert after != before, (before, after)
+        assert after.rstrip("/") in {"", "/"} or after == "/", (before, after)
+    finally:
+        _stop_group(proc)
+        _kill_thunar()
