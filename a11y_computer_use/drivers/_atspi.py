@@ -13,7 +13,9 @@ defensive — AT-SPI is a D-Bus protocol with no batch read, so any single call
 can be slow or fail cross-process, and a flaky read must degrade to a sane
 default, not crash the walk. (The batch/prefetch weakness AT-SPI has vs UIA's
 `CacheRequest` / AX's multi-attribute reads is why we cap the fetched children:
-see `_MAX_CHILDREN_FETCH`. A subtree cache/diff is the perf follow-up.)
+see `_MAX_CHILDREN_FETCH`. Duplicate stable getters inside one
+`LinuxDriver._run` are reused by `read_cache`; a mutator drops that cache.
+A subtree cache/diff across calls is still the follow-up.)
 
 Linux-only; imported lazily by `drivers/linux.py`.
 """
@@ -564,14 +566,234 @@ def enable_a11y_status() -> bool:
         return False
 
 
+class _ReadCacheState:
+    """Successful getter results for one ``read_cache`` block on this thread."""
+
+    __slots__ = ("store", "pinned")
+
+    def __init__(self) -> None:
+        # id(obj) -> {(method name, args): value}. The object itself is pinned
+        # so a freed proxy cannot reuse the id while the entry is live.
+        self.store: dict[int, dict[tuple, object]] = {}
+        self.pinned: dict[int, object] = {}
+
+
+_read_cache_local = threading.local()
+
+
+def _read_cache_stack() -> list[_ReadCacheState]:
+    stack = getattr(_read_cache_local, "stack", None)
+    if stack is None:
+        stack = []
+        _read_cache_local.stack = stack
+    return stack
+
+
+@contextmanager
+def read_cache():
+    """Reuse successful stable getter results until this block exits.
+
+    The cache is per thread. An inner block sees an outer hit, and a
+    mutator drops every block on this thread. ``get_name`` is never
+    cached: a root probe retries an empty name. A child count of -1 is
+    not cached: that value is a failed read the walk revives.
+    ``get_state_set`` is never cached: a pointer click or Escape changes
+    SELECTED and EXPANDED inside the same call, and those inputs are not
+    AT-SPI mutators. An attribute dict that carries ``valuetext`` or an
+    ``aria-*`` state is not cached either: typing into a date segment
+    updates ``valuetext`` while the same call is still polling.
+    """
+    stack = _read_cache_stack()
+    stack.append(_ReadCacheState())
+    try:
+        yield
+    finally:
+        stack.pop()
+
+
+def _drop_read_cache() -> None:
+    """Forget cached getters on this thread. Called before a mutator runs."""
+    for state in _read_cache_stack():
+        state.store.clear()
+        state.pinned.clear()
+
+
+def _cache_key(name: str, args: tuple) -> tuple | None:
+    key = (name, args)
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
+def _lookup_read_cache(obj, key: tuple):
+    oid = id(obj)
+    for state in reversed(_read_cache_stack()):
+        slot = state.store.get(oid)
+        if slot is not None and key in slot:
+            found = slot[key]
+            return dict(found) if isinstance(found, dict) else found
+    return _CACHE_MISS
+
+
+def _store_read_cache(obj, key: tuple, result) -> None:
+    stack = _read_cache_stack()
+    if not stack:
+        return
+    state = stack[-1]
+    state.pinned[id(obj)] = obj
+    slot = state.store.setdefault(id(obj), {})
+    slot[key] = dict(result) if isinstance(result, dict) else result
+
+
+class _CacheMiss:
+    """Sentinel: a missing cache entry is distinct from a cached None."""
+
+
+_CACHE_MISS = _CacheMiss()
+
+
+def _nonempty_str(value) -> bool:
+    return isinstance(value, str) and value != ""
+
+
+def _any_str(value) -> bool:
+    return isinstance(value, str)
+
+
+def _nonneg_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _positive_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _present(value) -> bool:
+    return value is not None
+
+
+# These change when the user types or clicks, and the same driver call
+# polls them until the new value is visible. Caching the dict freezes
+# the first read.
+_VOLATILE_ATTRIBUTES = frozenset({
+    "valuetext",
+    "aria-valuetext",
+    "aria-valuenow",
+    "aria-expanded",
+    "aria-selected",
+    "aria-checked",
+    "aria-pressed",
+})
+
+
+def _attribute_keys(value) -> set[str] | None:
+    try:
+        keys = value.keys()
+    except Exception:
+        return None
+    try:
+        return {str(key).lower() for key in keys}
+    except Exception:
+        return None
+
+
+def _attributes(value) -> bool:
+    if isinstance(value, dict) or (
+        value is not None and hasattr(value, "keys") and hasattr(value, "get")
+    ):
+        keys = _attribute_keys(value)
+        return keys is not None and not (keys & _VOLATILE_ATTRIBUTES)
+    return False
+
+
+# Stable for the length of one driver call. Names, descriptions, extents,
+# text, and state sets are read again: they change without a method we
+# can see here, or a caller retries an empty result. A cached state set
+# kept a combo EXPANDED after Escape and a Qt cell unselected after the
+# pointer click that selected it. Attribute dicts are cached only when
+# they have no valuetext or aria state key.
+_CACHEABLE = {
+    "get_role_name": _nonempty_str,
+    "get_action_name": _any_str,
+    "get_n_actions": _nonneg_int,
+    "get_nActions": _nonneg_int,
+    "get_attributes": _attributes,
+    "get_component_iface": _present,
+    "get_component": _present,
+    "get_action_iface": _present,
+    "get_action": _present,
+    "get_accessible_id": _nonempty_str,
+    "get_toolkit_name": _nonempty_str,
+    "getToolkitName": _nonempty_str,
+    "get_process_id": _positive_int,
+    "get_child_at_index": _present,
+    "getChildAtIndex": _present,
+    "get_child_count": _nonneg_int,
+    "get_childCount": _nonneg_int,
+}
+
+_MUTATORS = frozenset({
+    "clear_cache", "clearCache",
+    "set_text_contents", "setTextContents",
+    "insert_text", "insertText",
+    "set_current_value", "setCurrentValue",
+    "scroll_to", "scrollTo",
+    "do_action", "doAction",
+    "grab_focus", "grabFocus",
+    "select_child", "selectChild",
+    "set_caret_offset", "setCaretOffset",
+    "delete_text", "deleteText",
+})
+
+
+def _is_mutator(name: str) -> bool:
+    if name in _MUTATORS:
+        return True
+    return name.replace("_", "").lower().startswith("deselect")
+
+
 def _call_first(obj, names, *args, default=None):
     """Call the first method in ``names`` that exists on ``obj`` (binding-version
-    tolerant — atspi2 renamed a few getters across releases)."""
+    tolerant — atspi2 renamed a few getters across releases).
+
+    Inside ``read_cache``, a successful stable getter is remembered for
+    this object and these arguments. A mutator drops that memory first.
+    """
+    if obj is None:
+        return default
     for name in names:
         method = getattr(obj, name, None)
-        if method is not None:
+        if method is None:
+            continue
+        if _is_mutator(name):
+            _drop_read_cache()
             return _safe(lambda m=method: m(*args), default)
+        key = _cache_key(name, args)
+        if key is not None and _read_cache_stack():
+            cached = _lookup_read_cache(obj, key)
+            if cached is not _CACHE_MISS:
+                _reply_local.last_failed = False
+                _reply_local.last_elapsed = 0.0
+                return cached
+        result = _safe(lambda m=method: m(*args), default)
+        if (
+            key is not None
+            and _read_cache_stack()
+            and not getattr(_reply_local, "last_failed", False)
+        ):
+            accept = _CACHEABLE.get(name)
+            if accept is not None and accept(result):
+                _store_read_cache(obj, key, result)
+        return result
     return default
+
+
+def _move_caret(atspi_mod, acc, offset):
+    """Move the caret and drop cached getters; the tree may have changed."""
+    _drop_read_cache()
+    return _safe(lambda: atspi_mod.Text.set_caret_offset(acc, int(offset)))
 
 
 # ---------------------------------------------------------------------------
@@ -5558,7 +5780,7 @@ def place_paragraph_caret(acc, x: int, y: int) -> bool:
     offset = count
     if isinstance(point, int) and not isinstance(point, bool) and 0 <= point <= count:
         offset = point
-    wrote = _safe(lambda: Atspi.Text.set_caret_offset(acc, int(offset)))
+    wrote = _move_caret(Atspi, acc, offset)
     caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
     if isinstance(caret, int) and not isinstance(caret, bool) and caret >= 0:
         return True
@@ -7693,7 +7915,7 @@ def place_drawing_caret_at_end(acc, *, ignore_focus: bool = False) -> None:
     count = _safe(lambda: Atspi.Text.get_n_selections(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
         return
-    _safe(lambda: Atspi.Text.set_caret_offset(acc, len(text)))
+    _move_caret(Atspi, acc, len(text))
 
 
 def focus_drawing_text(acc) -> bool:
@@ -14807,6 +15029,8 @@ def _value_call(names: tuple[str, ...], acc, *args):
     for name in names:
         method = getattr(value_iface, name, None)
         if method is not None:
+            if name.startswith("set"):
+                _drop_read_cache()
             return _safe(lambda m=method: m(acc, *args))
     return None
 
