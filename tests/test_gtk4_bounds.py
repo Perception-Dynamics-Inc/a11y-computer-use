@@ -7,7 +7,7 @@ that collapsed point. Synthetic nodes and fake X windows; no live GTK.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import builtins
 from types import SimpleNamespace as _NS
 
 import pytest
@@ -302,22 +302,33 @@ def _element(bounds: Bounds, role: str = "AXButton") -> Element:
     return Element("e12", role, "7", None, bounds, "snap-gtk4", clickable=True)
 
 
-@contextmanager
-def _held(_modifiers=()):
-    """Stand-in for ``_linux_input.held``, which imports Xlib even with no modifiers."""
-    yield
-
-
 def _stub_click(monkeypatch) -> list[tuple[int, int]]:
-    """Record the pointer click and do not open an X display."""
+    """Record the pointer click. ``held`` stays real and must not open X."""
     clicks: list[tuple[int, int]] = []
 
     def click(x, y, *_args, **_kwargs):
         clicks.append((int(x), int(y)))
 
     monkeypatch.setattr("a11y_computer_use.drivers._linux_input.click", click)
-    monkeypatch.setattr("a11y_computer_use.drivers._linux_input.held", _held)
     return clicks
+
+
+def test_plain_hold_does_not_import_xlib(monkeypatch) -> None:
+    """No modifiers: held does not import Xlib. Not a live display."""
+    from a11y_computer_use.drivers import _linux_input
+
+    real = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "Xlib" or str(name).startswith("Xlib."):
+            raise ModuleNotFoundError(name)
+        return real(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with _linux_input.held(()):
+        pass
+    with _linux_input.held(None):
+        pass
 
 
 def test_unrecovered_gtk4_click_uses_the_action_and_not_the_origin(monkeypatch) -> None:
