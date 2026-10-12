@@ -902,6 +902,63 @@ def _frame_accessible_name(node) -> str:
     return str(_call_first(frame, ("get_name",), default="") or "").strip()
 
 
+# GIMP action buttons append modifier help to the tooltip:
+# ``tooltip + "\n<b>" + modifier + "</b> " + ext``. GTK strips the markup
+# and leaves two spaces between the modifier and the rest of the line
+# (``Shift  Create new layers with last used values``). A single space
+# (``Shift the layer``) is a sentence, not that help.
+_MODIFIER_HINT_LINE = re.compile(
+    r"(?i)^(?:shift|ctrl|control|alt|super|meta|primary)"
+    r"(?:\+(?:shift|ctrl|control|alt|super|meta|primary))*"
+    r"[ \t]{2,}\S"
+)
+
+
+def _modifier_hint_body(text: str) -> tuple[str, str] | None:
+    """``(primary line, hint lines)`` when every extra line is modifier help.
+
+    None when ``text`` is a single line, the first line is empty, or any
+    extra line is not the GIMP modifier pattern. Plug-in blurbs such as
+    ``Align Visible Layers...\\nThis plug-in only works...`` stay whole.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = raw.split("\n")
+    label = lines[0].strip()
+    if not label:
+        return None
+    hints = [line.strip() for line in lines[1:] if line.strip()]
+    if not hints or any(_MODIFIER_HINT_LINE.match(line) is None for line in hints):
+        return None
+    return label, "\n".join(hints)
+
+
+def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
+    """Keep the visible label as the name and the modifier lines as the description.
+
+    GIMP leaves the accessible name empty and puts the whole tooltip,
+    including Shift/Ctrl lines, in the description. The snapshot uses the
+    description when the name is empty, so the button's name becomes those
+    lines. The first line is the label drawn on the button. The rest is
+    modifier help and stays on the description, which the snapshot does not
+    render. A name that already contains the same lines is split the same
+    way. Anything that is not that pattern is unchanged.
+    """
+    split = _modifier_hint_body(name)
+    if split is not None:
+        label, hints = split
+        if not str(description).strip():
+            return label, hints
+        return label, description
+    if str(name).strip():
+        return name, description
+    split = _modifier_hint_body(description)
+    if split is None:
+        return name, description
+    return split
+
+
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -2825,6 +2882,7 @@ class ATSPIAccessor:
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
+        name, description = _split_modifier_hints(str(name), str(description))
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
