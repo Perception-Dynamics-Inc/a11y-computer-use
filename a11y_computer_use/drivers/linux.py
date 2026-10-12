@@ -1305,14 +1305,22 @@ class LinuxDriver:
         comm from app list is the fallback, which is how ``LibreOffice``
         becomes ``soffice.bin``.
         """
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _actionable, _atspi
 
-        root = self._run(lambda name=app: _atspi.find_root(name, scope))
+        def lookup(name: str):
+            root = _atspi.find_root(name, scope)
+            # The listener turns the child cache on for the process. Drop it
+            # before the walk so a page that was never cached is still read.
+            if root is not None:
+                _actionable.refresh_cached_tree(root)
+            return root
+
+        root = self._run(lambda name=app: lookup(name))
         if root is not None:
             return app, root
         resolved = _resolved_app(app)
         if resolved != app:
-            root = self._run(lambda name=resolved: _atspi.find_root(name, scope))
+            root = self._run(lambda name=resolved: lookup(name))
             return resolved, root
         return app, None
 
@@ -1356,9 +1364,15 @@ class LinuxDriver:
         the failure instead of an empty success.
         """
         from a11y_computer_use import observe
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _actionable, _atspi
 
-        found = self._run(_atspi.desktop_application_roots)
+        def _roots():
+            found = _atspi.desktop_application_roots()
+            for _name, root in found.ready:
+                _actionable.refresh_cached_tree(root)
+            return found
+
+        found = self._run(_roots)
         if not found.ready:
             if found.silent:
                 raise ComputerUseError(

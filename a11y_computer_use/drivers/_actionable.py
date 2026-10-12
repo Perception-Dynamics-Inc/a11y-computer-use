@@ -447,6 +447,24 @@ def _is_self_or_descendant(target: object, hit: object) -> bool:
     return False
 
 
+def refresh_cached_tree(root: object) -> None:
+    """Drop cached children on ``root`` while the event loop is running.
+
+    ``Atspi.event_main`` makes libatspi answer ``get_child_at_index`` from
+    its cache. A Chromium document often never enters that cache, so a
+    snapshot after a wait would omit the page. Clearing this node and its
+    ancestors forces the next walk to read the bus. With the listener off
+    the cache is not trusted and this does nothing.
+    """
+    if root is None:
+        return
+    from a11y_computer_use.drivers import _atspi, _atspi_events
+
+    if not _atspi_events.listening():
+        return
+    _atspi._invalidate_tree_cache(root)
+
+
 def read_target(target: Element) -> Observation:
     """Probe the accessible the snapshot stored for ``target``."""
     from a11y_computer_use import observe

@@ -12268,6 +12268,10 @@ def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
         assert info.value.detail["enabled"] is False
 
         covered = next(el for el in snap.elements if el.title == "Covered" and el.role == "AXButton")
+        box = covered.bounds
+        assert box is not None and box.width > 0 and box.height > 0
+        # An undecorated window keeps the client origin on the button. A
+        # decorated move lands the client below the title bar, past this button.
         cover_script = tmp_path / "cuacover120.py"
         cover_script.write_text(textwrap.dedent(
             f"""
@@ -12276,9 +12280,10 @@ def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
             from gi.repository import GLib, Gtk
             GLib.set_prgname("cuacover120")
             win = Gtk.Window(title="cuacover120")
-            win.set_default_size({max(covered.bounds.width, 80) + 40}, {max(covered.bounds.height, 30) + 40})
-            win.move({covered.bounds.x}, {covered.bounds.y})
+            win.set_decorated(False)
             win.set_keep_above(True)
+            win.set_default_size({box.width + 80}, {box.height + 80})
+            win.move({box.x - 20}, {box.y - 20})
             win.add(Gtk.Label(label="cover"))
             win.connect("destroy", Gtk.main_quit)
             win.show_all()
@@ -12289,6 +12294,10 @@ def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
         cover = subprocess.Popen(
             [sys.executable, str(cover_script)], env=env, start_new_session=True,
         )
+        from a11y_computer_use.drivers import _linux_system
+
+        center_x = box.x + box.width // 2
+        center_y = box.y + box.height // 2
         seen = time.monotonic() + 8
         while time.monotonic() < seen:
             try:
@@ -12297,11 +12306,15 @@ def test_linux_gtk_actionable_wait_names_the_failed_check(tmp_path) -> None:
                 if exc.code is not ErrorCode.APP_NOT_FOUND:
                     raise
                 top = None
-            if top is not None and top.elements:
+            if (
+                top is not None
+                and top.elements
+                and _linux_system.pid_at_point(center_x, center_y) == cover.pid
+            ):
                 break
             time.sleep(0.2)
         else:
-            raise AssertionError("the covering window did not appear on the bus")
+            raise AssertionError("the covering window did not become the top window at the button")
         with pytest.raises(ComputerUseError) as covered_info:
             driver.wait_for(
                 covered, condition=WaitCondition.ACTIONABLE, timeout_s=1.0, checker=checker(snap),
@@ -12326,7 +12339,6 @@ def test_linux_chrome_actionable_wait_names_enabled(tmp_path) -> None:
     Late loses ``disabled``. The wait returns it only when the accessible
     read passes. Stuck stays disabled, so a passing checker is not success.
     """
-    from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
     from a11y_computer_use.schema import WaitCondition
 

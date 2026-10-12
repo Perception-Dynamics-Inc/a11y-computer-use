@@ -251,6 +251,46 @@ def test_exists_and_gone_return_only_the_checker_element() -> None:
         )
 
 
+def test_refresh_cached_tree_is_a_noop_until_the_listener_is_up(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi
+
+    dropped: list[object] = []
+    monkeypatch.setattr(_atspi, "_invalidate_tree_cache", lambda root: dropped.append(root))
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    _actionable.refresh_cached_tree("root")
+    _actionable.refresh_cached_tree(None)
+    assert dropped == []
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    _actionable.refresh_cached_tree("root")
+    assert dropped == ["root"]
+
+
+def test_snapshot_root_drops_cached_children_only_while_listening(monkeypatch) -> None:
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+    from a11y_computer_use.schema import Scope
+
+    driver = LinuxDriver()
+    dropped: list[object] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda name, scope: "the-root")
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+
+    def refresh(root: object) -> None:
+        if _atspi_events.listening():
+            dropped.append(root)
+
+    monkeypatch.setattr(_actionable, "refresh_cached_tree", refresh)
+    assert driver._root_for_snapshot("chrome", Scope.WINDOW) == ("chrome", "the-root")
+    assert dropped == []
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    assert driver._root_for_snapshot("chrome", Scope.WINDOW) == ("chrome", "the-root")
+    assert dropped == ["the-root"]
+
+
 def test_linux_wait_for_does_not_treat_a_checker_hit_as_actionable(monkeypatch) -> None:
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
