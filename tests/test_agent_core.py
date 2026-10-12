@@ -3390,6 +3390,207 @@ def test_look_again_forty_screen_pixels_does_not_open_a_second_look(tmp_path, mo
     assert notes[0]["geometry"]["full_screen"] is False
 
 
+def test_second_look_confirms_only_inside_a_small_radius(tmp_path, monkeypatch):
+    """The full-screen look confirms a near point and does not move a far one.
+
+    Eight screen pixels confirms the model's point. Nine is unconfirmed.
+    Neither result replaces ``x`` and ``y``, including onto a control that
+    contains only the verifier's pixel.
+    """
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.agent.core import _LOOK_CONFIRM_PX, _second_look_decision
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+
+    assert _LOOK_CONFIRM_PX == 8
+    assert _second_look_decision(0) == "accept"
+    assert _second_look_decision(8) == "accept"
+    assert _second_look_decision(8.01) == "unconfirmed"
+    assert _second_look_decision(24) == "unconfirmed"
+
+    _silence_ocr(monkeypatch)
+    point = {"x": 800, "y": 500, "display_id": 0}
+    # Covers the +8 and +9 verifier pixels and not the model's point.
+    neighbour = el(
+        "e9", "AXButton", "Neighbour", parent="e1", clickable=True,
+        bounds=Bounds(0, 804, 492, 20, 16),
+    )
+
+    def run_offset(offset: int, trace):
+        elements = window(
+            el("e2", "AXButton", "Save", parent="e1", clickable=True),
+            neighbour,
+        )
+        runtime = _runtime_with_png(elements)
+        runtime.png = _solid_png(1600, 1000)
+
+        def ground(png, instruction):
+            with Image.open(io.BytesIO(png)) as image:
+                size = image.size
+            mx, my = _proposed_pixel(instruction)
+            dx = 100 if size == (1280, 800) else offset
+            return GroundingHit(mx + dx, my)
+
+        stub = ScriptedGrounding(ground)
+        result, _events, runtime, _agent = run(
+            ScriptedModel([
+                turn(ToolCall("click", dict(point))),
+                turn(done("kept", [{"window_title_contains": "Demo"}])),
+            ]),
+            elements,
+            runtime=runtime,
+            trace_dir=trace,
+            grounding=stub,
+            max_retries=0,
+        )
+        assert result.status == "success", result
+        assert len(stub.seen) == 2
+        assert runtime.calls == [("click", point)]
+        assert all(call[1].get("ref") != "e9" for call in runtime.calls)
+        return _look_rows(trace)
+
+    confirmed = run_offset(8, tmp_path / "near")
+    assert [note["decision"] for note in confirmed] == ["disagree", "accept"]
+    assert confirmed[1]["distance"] == 8
+    assert confirmed[1]["refined"] == {"x": 800, "y": 500}
+    assert confirmed[1]["geometry"]["full_screen"] is True
+    assert confirmed[1]["snap"].get("ref") != "e9"
+
+    refused = run_offset(9, tmp_path / "far")
+    assert [note["decision"] for note in refused] == ["disagree", "unconfirmed"]
+    assert refused[1]["distance"] == 9
+    assert refused[1]["refined"] == {"x": 809, "y": 500}
+    assert refused[1]["snap"] == {"type": "none"}
+    assert refused[1]["geometry"]["full_screen"] is True
+
+
+def test_second_look_on_dense_cells_does_not_move_the_click(tmp_path, monkeypatch):
+    """A second look on a neighbour cell is unconfirmed. The model's point stays.
+
+    Twenty-four cells, six by four. The verifier's full-screen point is 24
+    screen pixels to the right, inside the next cell when there is one.
+    Moving that point scored 16/24. The click that is sent is the centre
+    the model named, for every cell, and it is not rewritten to a ref.
+    """
+    import io
+
+    from PIL import Image
+
+    from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
+    from a11y_computer_use.outcome import ActionResult
+
+    _silence_ocr(monkeypatch)
+    cells = []
+    centres = []
+    for row in range(4):
+        for col in range(6):
+            x = 790 + col * 20
+            y = 492 + row * 16
+            cells.append(el(
+                f"c{col}r{row}", "AXCell", f"R{row}C{col}", parent="e1", clickable=True,
+                bounds=Bounds(0, x, y, 20, 16),
+            ))
+            centres.append({"x": x + 10, "y": y + 8, "display_id": 0})
+    assert len(cells) == 24
+    elements = window(*cells)
+    runtime = _runtime_with_png(elements)
+    runtime.png = _solid_png(1600, 1000)
+
+    def call_tool(name, params, confirm=None):
+        del confirm
+        runtime.calls.append((name, dict(params)))
+        runtime.elements[0] = dataclasses.replace(
+            runtime.elements[0], title=f"Demo {len(runtime.calls)}",
+        )
+        return ActionResult("clicked", outcome="confirmed", evidence="landed")
+
+    runtime.call_tool = call_tool
+
+    def ground(png, instruction):
+        with Image.open(io.BytesIO(png)) as image:
+            size = image.size
+        mx, my = _proposed_pixel(instruction)
+        dx = 100 if size == (1280, 800) else 24
+        return GroundingHit(mx + dx, my)
+
+    stub = ScriptedGrounding(ground)
+    issued = {"n": 0}
+
+    def script(_messages):
+        if issued["n"] >= len(centres):
+            return turn(done("kept", [{"window_title_contains": "Demo"}]))
+        point = centres[issued["n"]]
+        issued["n"] += 1
+        return turn(ToolCall("double_click", dict(point)))
+
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        grounding=stub,
+        max_retries=0,
+        max_steps=30,
+        stuck_steps=30,
+    )
+    assert result.status == "success", result
+    assert issued["n"] == 24
+    assert len(runtime.calls) == 24
+    for centre, call in zip(centres, runtime.calls, strict=True):
+        assert call[0] == "click"
+        assert call[1]["x"] == centre["x"]
+        assert call[1]["y"] == centre["y"]
+        assert call[1]["display_id"] == 0
+        assert call[1].get("count") == 2
+        assert "ref" not in call[1]
+    notes = _look_rows(tmp_path)
+    full = [note for note in notes if note.get("geometry", {}).get("full_screen")]
+    assert len(full) == 24
+    assert {note["decision"] for note in full} == {"unconfirmed"}
+    assert {note["snap"]["type"] for note in full} == {"none"}
+    assert all(note["distance"] == 24 for note in full)
+
+
+def test_vision_grounding_stays_off_by_default(tmp_path, monkeypatch):
+    """No grounding model is built unless the caller passes one."""
+    import a11y_computer_use.agent.grounding as grounding_mod
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("vision grounding stays off unless the caller passes a model")
+
+    monkeypatch.setattr(grounding_mod, "HoloLocalGrounding", explode)
+    _silence_ocr(monkeypatch)
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = _runtime_with_png(elements)
+
+    def script(messages):
+        content = messages[-1].content
+        text = content if isinstance(content, str) else str(
+            content[0].get("text") if isinstance(content, list) and content else ""
+        )
+        if "proposed image pixel" in text:
+            return ModelTurn(text='{"decision":"accept"}', calls=[])
+        if not runtime.calls:
+            return turn(ToolCall("click", {"x": 100, "y": 100, "display_id": 0}))
+        return turn(done("kept", [{"window_title_contains": "Demo"}]))
+
+    result, _events, runtime, agent = run(
+        ScriptedModel(script),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_retries=0,
+    )
+    assert agent.grounding is None
+    assert result.status == "success", result
+    assert runtime.calls == [("click", {"x": 100, "y": 100, "display_id": 0})]
+    note = _look_rows(tmp_path)[0]
+    assert note["verifier"] == "model"
+    assert note["decision"] == "accept"
+
+
 def test_look_again_snaps_a_word_inside_a_line_not_the_line_center(tmp_path, monkeypatch):
     """A wide OCR line is split into words. The recorded snap is the word, not the click."""
     import a11y_computer_use.ocr as ocr_mod
