@@ -5750,10 +5750,13 @@ class Runtime:
                         "the pinned scroll ref belongs to a different app; re-observe the requested app",
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
-                anchor_now = (
-                    self.driver.resolve_ref(pinned[0], ref, live=snap)
-                    if pinned is not None else _scroll_anchor(snap)
-                )
+                if pinned is not None:
+                    try:
+                        anchor_now = snap.element(ref)
+                    except KeyError:
+                        anchor_now = None
+                else:
+                    anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
                 if issued > 0 and time.monotonic() >= deadline:
