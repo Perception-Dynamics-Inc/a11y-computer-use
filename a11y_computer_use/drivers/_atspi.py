@@ -2281,24 +2281,30 @@ def _refine_web_role(role: str, attrs: dict) -> str:
 
 
 def _entry_is_multiline(node, attrs: dict) -> bool:
-    """True when an AT-SPI ``entry`` is multi-line text.
+    """True when an AT-SPI ``entry`` is a multi-line ``<textarea>``.
 
     Chromium exposes ``<input>`` and ``<textarea>`` as role ``entry``.
-    The textarea carries ``STATE_MULTI_LINE``. A bridge that publishes the
-    same fact as ``multiline`` or ``aria-multiline`` is the same control.
-    A single-line input is not.
+    The textarea carries ``STATE_MULTI_LINE``, or the ``multiline``
+    attribute. A contenteditable ``role=textbox`` with ``aria-multiline``
+    is also an entry and can carry ``STATE_MULTI_LINE``. That editor stays
+    a text field: its tag is not ``textarea``.
     """
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip().lower()
+    if tag and tag != "textarea":
+        return False
+    roles = {
+        part.strip().lower()
+        for part in str(attrs.get("xml-roles") or "").split()
+        if part.strip()
+    }
+    if "textbox" in roles and tag != "textarea":
+        return False
     if _state_has(node, "MULTI_LINE"):
         return True
-    for key in ("multiline", "aria-multiline"):
-        flag = attrs.get(key)
-        if isinstance(flag, bool):
-            if flag:
-                return True
-            continue
-        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
-            return True
-    return False
+    flag = attrs.get("multiline")
+    if isinstance(flag, bool):
+        return flag
+    return str(flag or "").strip().lower() in {"true", "1", "yes"}
 
 
 def _stable_id(acc, attrs: dict | None = None) -> str | None:

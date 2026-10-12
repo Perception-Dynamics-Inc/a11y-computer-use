@@ -1182,9 +1182,10 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
 def test_chromium_textarea_entry_is_multi_line_text(monkeypatch) -> None:
     """Chromium exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
 
-    A single-line ``<input>`` stays a text field. ``multiline`` and
-    ``aria-multiline`` are the same fact when the state is absent. The
-    snapshot word is ``textarea``. Not a live Chrome or Electron.
+    A single-line ``<input>`` stays a text field. The ``multiline`` attribute
+    is the same fact when the state is absent. A contenteditable
+    ``role=textbox`` with ``aria-multiline`` stays a text field. The snapshot
+    word for the textarea is ``textarea``. Not a live Chrome or Electron.
     """
     monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
@@ -1218,14 +1219,19 @@ def test_chromium_textarea_entry_is_multi_line_text(monkeypatch) -> None:
     area = read({"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, {"tag": "textarea"})
     single = read({"SINGLE_LINE", "EDITABLE"}, {"tag": "input"})
     by_attr = read({"EDITABLE"}, {"multiline": "true"})
-    by_aria = read({"EDITABLE"}, {"aria-multiline": "true"})
     by_bool = read({"EDITABLE"}, {"multiline": True})
+    rich = read(
+        {"MULTI_LINE", "EDITABLE"},
+        {"tag": "div", "xml-roles": "textbox", "aria-multiline": "true"},
+    )
+    aria_only = read({"EDITABLE"}, {"aria-multiline": "true"})
     off = read({"EDITABLE"}, {"multiline": "false", "aria-multiline": "false"})
     assert area.role == "AXTextArea"
     assert single.role == "AXTextField"
     assert by_attr.role == "AXTextArea"
-    assert by_aria.role == "AXTextArea"
     assert by_bool.role == "AXTextArea"
+    assert rich.role == "AXTextField"
+    assert aria_only.role == "AXTextField"
     assert off.role == "AXTextField"
 
     snap = build_snapshot(
