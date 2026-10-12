@@ -7185,6 +7185,86 @@ def test_linux_chrome_long_page_scroll_to_find_and_pixel_scroll(tmp_path) -> Non
         _stop(proc)
 
 
+def test_linux_chrome_document_scroll_to_find_item_180_is_quick(tmp_path) -> None:
+    """A body-scroll document finds ITEM-180 in a few viewport steps, quickly.
+
+    Live Chrome, not a synthetic list. Two hundred 28px rows in a list on
+    the document, opened at the top. ``scroll_to_find`` has to report the
+    row while it is on screen, and the whole search has to finish well
+    under the 10s a per-step clock-wait used to take. Eight seconds is
+    loose for a viewport step and tight for that clock. Skips when no
+    Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the document scroll timing test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        f'<li role="listitem">ITEM-{i:03d} scroll-row</li>' for i in range(1, 201)
+    )
+    page = tmp_path / "scroll340.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>scroll340</title>"
+        "<style>body{margin:8px;font:16px sans-serif}"
+        "li{height:28px;line-height:28px}</style>"
+        f'<ul role="list" aria-label="Rows">{rows}</ul>'
+    )
+    profile = tmp_path / "chrome-scroll340-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the document"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = _titles(shot)
+                if any(title.startswith("ITEM-001") for title in titles) and not any(
+                    title.startswith("ITEM-180") for title in titles
+                ):
+                    ready = True
+                    break
+            time.sleep(0.3)
+        assert ready, "Chrome did not show the top of the document without ITEM-180"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        started = time.monotonic()
+        found = runtime.scroll_to_find(
+            "chrome", text="ITEM-180", direction="down", max_scrolls=15,
+        )
+        elapsed = time.monotonic() - started
+        assert "ITEM-180" in found, found
+        assert "not found" not in found, found
+        assert "found after 0" not in found, found
+        assert elapsed < 8.0, f"ITEM-180 took {elapsed:.2f}s: {found.splitlines()[0]}"
+        shown = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
+        assert any(title.startswith("ITEM-180") for title in shown), sorted(
+            title for title in shown if title.startswith("ITEM-")
+        )
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> None:
     """Scroll a long overflow list to the bottom, then find a row above it.
 
@@ -7284,7 +7364,8 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
     its ``edit 300`` button must see it, and the click has to land.
     Four passes in one Chrome process. Each pass after the first reloads
     the page so the search starts at the top again. Skips when no Chrome
-    binary is on PATH.
+    binary is on PATH. ``--password-store=basic`` keeps a keyring prompt
+    from taking the wheel.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -7317,6 +7398,7 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
         [
             binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
             "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
             f"--user-data-dir={profile}", "--window-size=1000,700",
             page.resolve().as_uri(),
         ],

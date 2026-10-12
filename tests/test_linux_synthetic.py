@@ -2349,9 +2349,9 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     monkeypatch.setattr(_atspi, "list_with_overflow_ancestor", lambda _handle: None)
     monkeypatch.setattr(_atspi, "_chromium_app", lambda _handle: True)
     script = [tuple(f"ROW-{i:04d}" for i in range(1, 9))]
-    # The burst settles on a one-row move. The first read sets the last
-    # advance; two more identical reads end the wait.
-    script.extend((tuple(f"ROW-{i:04d}" for i in range(2, 10)),) * 3)
+    # The burst settles on a one-row move. The wait holds that reading
+    # across the polls that cover the burst's landing time, then tops up.
+    script.extend((tuple(f"ROW-{i:04d}" for i in range(2, 10)),) * 8)
     for head in range(3, 7):
         script.append(tuple(f"ROW-{i:04d}" for i in range(head, head + 8)))
     index = {"i": 0}
@@ -2364,18 +2364,20 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
     monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
     presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
-    # Five in the burst, then one notch per missing row until the head is ROW-0006.
-    assert len(presses) == 9, len(presses)
+    # Four in the burst (the fifth notch is the gap past the viewport),
+    # then one notch per missing row until the head has moved by that many.
+    assert len(presses) == 7, len(presses)
 
 
 def test_chromium_document_scroll_keeps_a_viewport_burst(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """A five-line burst that clears the on-screen names is not followed by more notches.
+    """A viewport burst that clears the on-screen names is not followed by more notches.
 
     Synthetic names, not a live Chrome. The head leaving the sample is the
-    viewport step 0.4.62 took in one call. Stopping at the first notch, and
-    waiting for the tree after it, is the four-row two-second regression.
+    viewport step. The burst is four notches: the fifth lands past the rows
+    that were on screen. Stopping at the first notch, and waiting for the
+    tree after it, is the four-row two-second regression.
     """
     events, _display = xtest_recorder
     sleeps = {"n": 0}
@@ -2406,9 +2408,73 @@ def test_chromium_document_scroll_keeps_a_viewport_burst(
     monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
     presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
-    assert len(presses) == 5, len(presses)
+    assert len(presses) == 4, len(presses)
     assert reads["n"] == 2
     assert sleeps["n"] == 0
+
+
+def test_document_scroll_marker_is_the_rows_not_the_window_buttons(fake_atspi) -> None:
+    """A titled list under the document is not the scroll marker.
+
+    The list's name and the frame's Minimize/Maximize/Close names do not
+    move when the page scrolls. Waiting on them runs out the 0.9s clock
+    on every step. The marker is the on-screen row text. A row parked
+    above the viewport is not part of it. The climb stops at the frame.
+    """
+    from a11y_computer_use.drivers.linux import _name_source, _showing_names
+
+    frame = _Acc("frame", name="scroll340", width=1000, height=700)
+    buttons = [
+        _Acc("push button", name=label, width=20, height=20)
+        for label in ("Minimize", "Maximize", "Close")
+    ]
+    parked = _Acc("list item", name="ITEM-000 scroll-row", width=400, height=20)
+    parked.component._rect.y = -40
+    rows = [
+        _Acc("list item", name=f"ITEM-{i:03d} scroll-row", width=400, height=28)
+        for i in range(1, 9)
+    ]
+    listing = _Acc("list", name="Rows", width=400, height=800)
+    _adopt(listing, parked, *rows)
+    infobar = _Acc("push button", name="Close this view", width=80, height=20)
+    document = _Acc("document web", name="scroll340", width=900, height=600)
+    _adopt(document, infobar, listing)
+    _adopt(frame, *buttons, document)
+    cell = rows[0]
+
+    assert _showing_names(document) == tuple(f"ITEM-{i:03d} scroll-row" for i in range(1, 7))
+    source, names = _name_source(lambda fn: fn(), cell)
+    assert source is listing
+    assert names[0] == "ITEM-001 scroll-row"
+    assert "Minimize" not in names
+    assert "Rows" not in names
+    assert "Close this view" not in _showing_names(document)
+    frame_source, frame_names = _name_source(lambda fn: fn(), document)
+    assert frame_source is document
+    assert "Minimize" not in frame_names
+
+
+def test_document_scroll_marker_is_one_name_per_table_row(fake_atspi) -> None:
+    """A table row contributes its first cell, not every cell.
+
+    Six names were two rows (the id, the value, and the button). A two-row
+    twitch then parted the whole sample, the burst returned, and the next
+    burst jumped over the row ``scroll_to_find`` was hunting.
+    """
+    from a11y_computer_use.drivers.linux import _showing_names
+
+    table = _Acc("table", name="", width=400, height=800)
+    built = []
+    for i in range(1, 9):
+        row = _Acc("table row", name="", width=400, height=22)
+        cells = [
+            _Acc("table cell", name=label, width=80, height=22)
+            for label in (f"ROW-{i:04d}", f"val {i}", f"edit {i}")
+        ]
+        _adopt(row, *cells)
+        built.append(row)
+    _adopt(table, *built)
+    assert _showing_names(table) == tuple(f"ROW-{i:04d}" for i in range(1, 7))
 
 
 def test_lines_scroll_is_one_wheel_notch_per_unit(xtest_recorder, monkeypatch) -> None:

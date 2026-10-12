@@ -563,53 +563,199 @@ def _on_screen_name(node) -> str | None:
     return name
 
 
+# A document's own name, and a list's accessible name, do not move when the
+# page scrolls. The rows inside do. The browser frame's buttons do not.
+_SCROLL_DESCEND_ROLES = frozenset({
+    "document web", "document frame", "internal frame", "scroll pane",
+    "list", "table", "tree", "tree table", "panel", "grouping", "section",
+    "landmark", "filler", "form", "scroll view", "viewport", "layered pane",
+})
+_SCROLL_FRAME_ROLES = frozenset({
+    "frame", "window", "application", "desktop frame", "menu bar",
+})
+_ROW_LIST_ROLES = frozenset({"list", "table", "tree", "tree table"})
+# One name per row. A table cell's siblings (the value, the button) are not
+# extra rows: six of those filled the sample after two rows, so a two-row
+# twitch looked like the viewport and the next burst jumped over the target.
+_ROW_ROLES = frozenset({
+    "table row", "row", "list item", "tree item", "list box item",
+})
+
+
+def _above_viewport(node) -> bool:
+    """True when ``node``'s box sits entirely above the screen."""
+    from a11y_computer_use.drivers import _atspi
+
+    _name, pos, size = None, *_atspi._extents(node)
+    if pos is None:
+        return False
+    top = int(pos[1])
+    height = int(size[1]) if size is not None else 0
+    return top + max(height, 0) < 0
+
+
+def _first_visible_row(node, count: int) -> int:
+    """Index of the first child that is not parked above the viewport.
+
+    List children stay in order, including the rows already scrolled off
+    the top. A binary search finds that boundary. Reading only the first
+    80 dropped the head once the page had moved past them.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    lo, hi = 0, max(0, count - 1)
+    first = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        child = _atspi._child_at(node, mid)
+        if child is not None and _above_viewport(child):
+            first = mid + 1
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return min(first, max(0, count - 1))
+
+
+def _row_label(node) -> str | None:
+    """The row's own name, or the first cell's, not every cell in the row."""
+    from a11y_computer_use.drivers import _atspi
+
+    def accept(name: str | None) -> str | None:
+        if name and not _atspi._is_list_marker(name):
+            return name
+        return None
+
+    own = accept(_on_screen_name(node))
+    if own:
+        return own
+    count = _atspi._raw_child_count(node)
+    count = count if isinstance(count, int) and count > 0 else 0
+    for index in range(min(count, 4)):
+        child = _atspi._child_at(node, index)
+        if child is None:
+            continue
+        label = accept(_on_screen_name(child))
+        if label:
+            return label
+        nested = _atspi._raw_child_count(child)
+        nested = nested if isinstance(nested, int) and nested > 0 else 0
+        for inner in range(min(nested, 2)):
+            text = _atspi._child_at(child, inner)
+            if text is None:
+                continue
+            label = accept(_on_screen_name(text))
+            if label:
+                return label
+    return None
+
+
+def _scan_row_children(node, role: str, name: str, count: int, depth: int, walk, found: list[str], limit: int) -> None:
+    """On-screen rows of a list, starting at the first visible child."""
+    from a11y_computer_use.drivers import _atspi
+
+    del role, name
+    index = _first_visible_row(node, count) if count > limit else 0
+    examined = 0
+    while index < count and examined < limit * 4 and len(found) < limit:
+        child = _atspi._child_at(node, index)
+        examined += 1
+        if child is not None:
+            walk(child, depth + 1)
+        index += 1
+
+
 def _showing_names(handle, limit: int = 6) -> tuple[str, ...]:
-    """On-screen names under ``handle``.
+    """On-screen row names under ``handle``.
 
     Chrome's document keeps the old static texts for a fraction of a second
-    after the wheel. The marker is the names at or below the top of the
-    screen, not the rows the scroll has already parked above it. The root's
-    own title stays, so the row names are what change.
+    after the wheel. The marker is the row names at or below the top of the
+    screen, not the rows the scroll has already parked above it, and not the
+    list's own name. A titled list (``aria-label``) used to be the whole
+    sample, so the wait never saw the rows move and ran out the clock.
+    Window buttons are not rows. A bullet marker is not a row. A table
+    contributes one name per row, the first cell, so the sample is six
+    rows and not two.
     """
     from a11y_computer_use.drivers import _atspi
 
     found: list[str] = []
-    own = _on_screen_name(handle)
-    if own:
-        found.append(own)
-    count = _atspi._raw_child_count(handle)
-    count = count if isinstance(count, int) and count > 0 else 0
-    for index in range(min(count, 100)):
-        if len(found) >= limit:
-            break
-        child = _atspi._child_at(handle, index)
-        if child is None:
-            continue
-        name = _on_screen_name(child)
-        if name:
-            found.append(name)
-            continue
-        # A row is often an unnamed group whose text is the one child.
-        nested = _atspi._raw_child_count(child)
-        nested = nested if isinstance(nested, int) and nested > 0 else 0
-        for inner in range(min(nested, 4)):
-            text = _atspi._child_at(child, inner)
-            if text is None:
-                continue
-            name = _on_screen_name(text)
-            if name:
+
+    def walk(node, depth: int) -> None:
+        if node is None or len(found) >= limit or depth > 8:
+            return
+        role = _atspi._role_name(node)
+        if role in _ROW_ROLES:
+            label = _row_label(node)
+            if label:
+                found.append(label)
+            return
+        name = _on_screen_name(node)
+        descend = (
+            depth == 0
+            or role in _SCROLL_DESCEND_ROLES
+            or not name
+        )
+        if not descend:
+            if name and not _atspi._is_list_marker(name):
                 found.append(name)
-                break
+            return
+        count = _atspi._raw_child_count(node)
+        count = count if isinstance(count, int) and count > 0 else 0
+        if role in _ROW_LIST_ROLES and count > 0:
+            _scan_row_children(node, role, name or "", count, depth, walk, found, limit)
+            return
+        # A document's list is the marker. The file infobar is a sibling
+        # and its names do not move. Walk the list first.
+        span = min(count, 24)
+        children = []
+        for index in range(span):
+            child = _atspi._child_at(node, index)
+            if child is not None:
+                children.append(child)
+        lists = [child for child in children if _atspi._role_name(child) in _ROW_LIST_ROLES]
+        others = [child for child in children if child not in lists]
+        before = len(found)
+        for child in lists:
+            if len(found) >= limit:
+                return
+            walk(child, depth + 1)
+        if lists and len(found) > before:
+            return
+        for child in others:
+            if len(found) >= limit:
+                return
+            walk(child, depth + 1)
+        if (
+            depth and len(found) == before and count == 0
+            and name and not _atspi._is_list_marker(name)
+        ):
+            found.append(name)
+
+    walk(handle, 0)
     return tuple(found)
 
 
+def _refresh_shown_names(run, handle) -> tuple[str, ...]:
+    """On-screen row names after dropping libatspi's child cache.
+
+    The cache answers ``get_child_at_index`` with the pre-wheel rows. A
+    poll that does not clear it waits out the deadline on names that
+    cannot change.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    run(lambda node=handle: _atspi._invalidate_tree_cache(node))
+    return run(lambda node=handle: _showing_names(node))
+
+
 def _settle_shown_names(run, handle) -> None:
-    """Wait until a live Chromium document's on-screen names leave the pre-scroll set.
+    """Wait until a live Chromium document's on-screen rows leave the pre-scroll set.
 
     The wheel returns before AT-SPI does. A search that snapshots immediately
     still sees the old rows and scrolls again, so the target goes by between
-    reads. A test double has no GObject pointer and is not waited on. Give
-    up at 0.9s; a tree that never changes is not spun on.
+    reads. A test double has no GObject pointer and is not waited on. The
+    read is the rows, and it returns when those names change. Give up at
+    0.9s; a tree that never changes is not spun on.
     """
     from a11y_computer_use.drivers import _atspi
 
@@ -627,7 +773,7 @@ def _settle_shown_names(run, handle) -> None:
     while time.monotonic() < deadline:
         time.sleep(0.05)
         try:
-            after = run(lambda: _showing_names(handle))
+            after = _refresh_shown_names(run, handle)
         except Exception:
             return
         if after and after != before:
@@ -665,6 +811,17 @@ def _shown_name_advance(before: tuple[str, ...], after: tuple[str, ...], sign: i
     return sign * len(before)
 
 
+def _row_marker(names: tuple[str, ...]) -> bool:
+    """True when ``names`` includes a content row, not only window chrome.
+
+    Row labels on the pages this wait is for carry a digit (``ITEM-001``,
+    ``TICKET-0040``, ``ROW-0300``). The list's accessible name and the file
+    infobar do not. A sample of only those does not show whether the page
+    moved.
+    """
+    return any(any(ch.isdigit() for ch in name) for name in names)
+
+
 def _names_parted(before: tuple[str, ...], after: tuple[str, ...]) -> bool:
     """True when the new head has left the old sample.
 
@@ -680,20 +837,29 @@ def _names_parted(before: tuple[str, ...], after: tuple[str, ...]) -> bool:
 
 
 def _name_source(run, handle):
-    """A node whose on-screen names still describe the document after a wheel.
+    """A node whose on-screen row names still describe the document after a wheel.
 
     The anchor is often one cell. That cell leaves the tree as soon as the
     page moves, so its names cannot say whether the step was one row or a
-    whole viewport. An ancestor that lists several rows stays.
+    whole viewport. An ancestor that lists several rows stays. The browser
+    frame does not: its Minimize, Maximize, and Close names never move, and
+    waiting on them runs out the clock on every step.
     """
     from a11y_computer_use.drivers import _atspi
+
+    def blocked(node) -> bool:
+        try:
+            role = run(lambda acc=node: _atspi._role_name(acc))
+        except Exception:
+            return False
+        return role in _SCROLL_FRAME_ROLES
 
     source = handle
     try:
         before = run(lambda: _showing_names(handle))
     except Exception:
         return handle, ()
-    if len(before) >= 4:
+    if len(before) >= 4 or blocked(handle):
         return handle, before
     current = handle
     for _ in range(8):
@@ -701,7 +867,7 @@ def _name_source(run, handle):
             parent = run(lambda node=current: _atspi._parent_of(node))
         except Exception:
             break
-        if parent is None:
+        if parent is None or blocked(parent):
             break
         current = parent
         try:
@@ -722,8 +888,10 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
     bar. One notch moves several rows. Sending them one at a time, and
     stopping once the head had moved by about ``|dy|`` names, made each
     ``scroll_to_find`` step about four rows and about two seconds. The
-    step sends every requested notch together, which is about a viewport,
-    and returns as soon as the on-screen head shows that move.
+    step sends the requested notches together, which is about a viewport,
+    and returns as soon as the on-screen head shows that move. The last
+    notch of a five-notch request is not sent: on short rows it lands
+    past the rows that were on screen, and the next snapshot skips them.
 
     A burst can collapse into one row on a busy runner. When the head
     then settles still inside the old sample and short of ``|dy|`` names,
@@ -761,16 +929,22 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         return
 
     def measure() -> tuple[tuple[str, ...], int]:
-        after = run(lambda node=source: _showing_names(node))
+        after = _refresh_shown_names(run, source)
         return after, _shown_name_advance(before, after, sign)
 
+    # Five notches clear a viewport of tall rows and then a couple more
+    # of short ones, so the next snapshot starts below the previous tail
+    # and the row in that gap is never shown. Four notches stay inside
+    # the rows that were on screen.
+    burst = wanted - 1 if wanted >= 5 else wanted
     # The whole request goes out together. A tree that publishes that
     # viewport inside this window — the same 0.9s ``_settle_shown_names``
     # uses — is not given extra notches.
-    _linux_input.scroll(x, y, dx=dx, dy=dy)
+    _linux_input.scroll(x, y, dx=dx, dy=sign * burst)
     moved = 0
     changed = False
     stable = 0
+    polls = 0
     last: int | None = None
     after = before
     deadline = time.monotonic() + 0.9
@@ -779,8 +953,11 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
             after, nxt = measure()
         except Exception:
             return
-        if abs(nxt) >= wanted or _names_parted(before, after):
-            return
+        if abs(nxt) >= burst or _names_parted(before, after):
+            # A read that lost the rows (the list label, or the file
+            # infobar) is not the viewport landing. Keep polling.
+            if not (_row_marker(before) and not _row_marker(after)):
+                return
         moved = nxt
         if after != before:
             changed = True
@@ -789,7 +966,13 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         else:
             stable = 0
             last = moved
-        if stable >= 2 and changed:
+        # A one-row twitch can sit still for two polls while the rest of
+        # the burst is still arriving. Topping up then stacks another
+        # notch on a viewport and the next snapshot skips a band of rows.
+        # Eight polls is about 0.4s, long enough for the burst to land. A
+        # burst that is still short then is the collapsed step.
+        polls += 1
+        if stable >= 2 and changed and polls >= 8:
             break
         if time.monotonic() >= deadline:
             break
@@ -797,7 +980,7 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
     # No measurable move, or the head already left the sample. The burst
     # is the step. A short move still inside the old sample is the
     # collapsed burst: top it up.
-    if not (0 < abs(moved) < wanted) or _names_parted(before, after):
+    if not (0 < abs(moved) < burst) or _names_parted(before, after):
         return
     for _extra in range(wanted * 2):
         _linux_input.scroll(x, y, dy=sign)
@@ -807,7 +990,7 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
                 after, nxt = measure()
             except Exception:
                 return
-            if abs(nxt) >= wanted or _names_parted(before, after):
+            if abs(nxt) >= burst or _names_parted(before, after):
                 return
             if nxt != moved:
                 moved = nxt
