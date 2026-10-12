@@ -87,7 +87,9 @@ _DENSE_CONTAINER_ROLES = frozenset({"AXGrid", "AXTable", "AXOutline"})
 
 #: A Calc sheet is an AXTable whose children are titled with cell addresses.
 #: The dense cap of 12 keeps A1–L1 and elides B2. Calendars stay at 12.
-#: A visible sheet window is about 16 columns by 6 rows. A table or outline
+#: One band of that grid is at most this many cells. The Linux walker splits
+#: the on-screen window (more than the first six rows) into bands of this
+#: size so the walk cap does not drop the lower rows. A table or outline
 #: with at most MAX_CHILDREN children is not that grid: a Qt 4×3 table plus
 #: its headers is 19 nodes and keeps every cell.
 _SHEET_ADDRESS = re.compile(r"^[A-Z]{1,3}[1-9][0-9]*$")

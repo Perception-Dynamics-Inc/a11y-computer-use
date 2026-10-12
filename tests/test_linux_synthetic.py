@@ -1927,16 +1927,16 @@ class _States:
 
 
 class _Rect:
-    def __init__(self, width, height):
-        self.x = 0.0
-        self.y = 0.0
+    def __init__(self, width, height, x=0.0, y=0.0):
+        self.x = float(x)
+        self.y = float(y)
         self.width = width
         self.height = height
 
 
 class _Geom:
-    def __init__(self, width, height):
-        self._rect = _Rect(width, height)
+    def __init__(self, width, height, x=0.0, y=0.0):
+        self._rect = _Rect(width, height, x, y)
 
     def get_extents(self, _coord):
         return self._rect
@@ -7698,6 +7698,221 @@ def test_huge_calc_table_uses_accessible_at(fake_atspi) -> None:
         assert "ROW1" not in names
     finally:
         del fake_atspi.Table
+
+
+def _col_letters(index: int) -> str:
+    """0 → A, 15 → P, 26 → AA."""
+    number = index + 1
+    letters = []
+    while number:
+        number, rem = divmod(number - 1, 26)
+        letters.append(chr(ord("A") + rem))
+    return "".join(reversed(letters))
+
+
+class _Click:
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, _index):
+        return "click"
+
+
+def _calc_grid(
+    fake_atspi,
+    *,
+    origin_row: int = 0,
+    visible_rows: int = 29,
+    visible_cols: int = 16,
+    pitch_x: float = 60.0,
+    pitch_y: float = 20.0,
+    origin: tuple[float, float] = (80.0, 140.0),
+    hits: bool = False,
+):
+    """A million-row sheet whose painted box holds ``visible_rows`` × ``visible_cols``.
+
+    Cell ``(origin_row, 0)`` sits at the top of the box. Later rows step down
+    by ``pitch_y`` and leave the box. ``get_child_at_index`` is not a cell.
+    """
+    ox, oy = origin
+    width = visible_cols * pitch_x
+    height = visible_rows * pitch_y
+    calls: list[tuple[int, int]] = []
+    index_reads = {"n": 0}
+    hit_reads = {"n": 0}
+    cache: dict[tuple[int, int], _Acc] = {}
+
+    def cell(row: int, col: int) -> _Acc:
+        key = (row, col)
+        found = cache.get(key)
+        if found is not None:
+            return found
+        made = _Acc(
+            "table cell",
+            name=f"{_col_letters(col)}{row + 1}",
+            states=("ENABLED", "SENSITIVE", "FOCUSABLE"),
+            width=pitch_x,
+            height=pitch_y,
+        )
+        made.component = _Geom(
+            pitch_x, pitch_y, x=ox + col * pitch_x, y=oy + (row - origin_row) * pitch_y,
+        )
+        made.get_action_iface = lambda: _Click()
+        if row == origin_row + 10 and col == 0:
+            made.text = "Row10"
+        cache[key] = made
+        return made
+
+    table = _Acc("table", name="Sheet", width=width, height=height)
+    table.component = _Geom(width, height, x=ox, y=oy)
+    table.calls = calls
+    table.index_reads = index_reads
+    table.hit_reads = hit_reads
+
+    def child_count():
+        return 2147483647
+
+    def child_at(_index):
+        index_reads["n"] += 1
+        return _Acc("table cell", name="ROW1")
+
+    table.get_child_count = child_count
+    table.get_child_at_index = child_at
+
+    if hits:
+        class _Hits(_Geom):
+            def get_accessible_at_point(self, x, y, _coord):
+                hit_reads["n"] += 1
+                if x < ox or y < oy or x >= ox + width or y >= oy + height:
+                    return None
+                col = int((x - ox) // pitch_x)
+                row = origin_row + int((y - oy) // pitch_y)
+                return cell(row, col)
+
+        table.component = _Hits(width, height, x=ox, y=oy)
+
+    class _Table:
+        @staticmethod
+        def get_n_rows(_acc):
+            return 1048576
+
+        @staticmethod
+        def get_n_columns(_acc):
+            return 16384
+
+        @staticmethod
+        def get_accessible_at(_acc, row, col):
+            calls.append((int(row), int(col)))
+            if row < 0 or col < 0:
+                return None
+            return cell(row, col)
+
+    fake_atspi.Table = _Table
+    return table
+
+
+def _sheet_snapshot(table):
+    geometry = (
+        DisplayGeometry(display=Display(0, 1280, 800, 1.0, True), origin=(0.0, 0.0)),
+    )
+    return build_snapshot(
+        table, _atspi.ATSPIAccessor(), scope=Scope.WINDOW, app="soffice", pid=1, geometry=geometry,
+    )
+
+
+def test_huge_calc_sheet_lists_the_visible_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. The on-screen box is 29×16; row 7 and A29 stay in the snapshot.
+
+    Child count is INT_MAX. The first 96 row-major cells would be A1..P6.
+    Extents name the visible rows, so find sees A29 and the text in A11,
+    and the ref has a box. Probes stay far below the million-row sheet.
+    """
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi)
+    try:
+        cells = _atspi._sheet_window_cells(table)
+        names = {_atspi._node_name(cell) for cell in cells}
+        assert len(cells) == 29 * 16
+        assert {"A1", "B2", "A7", "A11", "P6", "A29", "P29"} <= names
+        assert "A30" not in names and "Q1" not in names and "ROW1" not in names
+        assert table.index_reads["n"] == 0
+        assert table.calls and max(row for row, _col in table.calls) < 200
+        assert len(table.calls) < 800
+
+        snap = _sheet_snapshot(table)
+        titles = {el.title for el in snap.elements}
+        assert "A29" in titles and "A11" in titles and "A7" in titles
+        assert "A30" not in titles and "ROW1" not in titles
+        row10 = observe.find_elements(snap, text="Row10")
+        assert any(el.title == "A11" and el.value == "Row10" for el in row10)
+        found = observe.find_elements(snap, text="A29")
+        assert len(found) == 1 and found[0].clickable
+        assert found[0].bounds is not None and found[0].bounds.width > 0 and found[0].bounds.height > 0
+        assert "A29" in observe.render_text(snap, mode="full")
+        assert "A29" in observe.render_text(snap, mode="interactive")
+        assert "Row10" in observe.render_text(snap, mode="full")
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_follows_a_scrolled_visible_band(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet scrolled so row 5001 is the first painted row."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, origin_row=5000)
+    try:
+        names = {_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)}
+        assert "A5001" in names and "A5029" in names and "B5002" in names
+        assert "A5000" not in names and "A5030" not in names and "ROW1" not in names
+        assert table.index_reads["n"] == 0
+        assert max(row for row, _col in table.calls) < 20000
+        assert not any(row > 100000 for row, _col in table.calls)
+        assert len(table.calls) < 800
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_hit_test_names_the_span_when_extents_do_not(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. Extent search is unavailable; hit-testing the box still lists A29."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr(_atspi, "_sheet_span_from_extents", lambda *_args, **_kwargs: None)
+    table = _calc_grid(fake_atspi, hits=True)
+    try:
+        names = {_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)}
+        assert table.hit_reads["n"] > 0
+        assert "A1" in names and "A7" in names and "A29" in names and "P29" in names
+        assert "A30" not in names and "ROW1" not in names
+        snap = _sheet_snapshot(table)
+        assert "A29" in {el.title for el in snap.elements}
+        assert observe.find_elements(snap, text="A11")
+    finally:
+        del fake_atspi.Table
+
+
+def test_huge_calc_sheet_with_a_short_visible_box_does_not_pad_to_96(fake_atspi, monkeypatch) -> None:
+    """Synthetic sheet. Three visible rows are not filled out to A1..P6."""
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    table = _calc_grid(fake_atspi, visible_rows=3, visible_cols=4)
+    try:
+        names = [_atspi._node_name(cell) for cell in _atspi._sheet_window_cells(table)]
+        assert len(names) == 12
+        assert set(names) == {
+            "A1", "B1", "C1", "D1",
+            "A2", "B2", "C2", "D2",
+            "A3", "B3", "C3", "D3",
+        }
+        assert table.index_reads["n"] == 0
+    finally:
+        del fake_atspi.Table
+
+
+def test_small_table_is_walked_by_child_index(fake_atspi) -> None:
+    """A short table keeps the children it already exposed. Not a sheet sample."""
+    first = _Acc("table cell", name="A1", width=20, height=16)
+    later = _Acc("table cell", name="A7", width=20, height=16)
+    table = _Acc("table", name="grid")
+    _adopt(table, first, later)
+    names = [kid.get_name() for kid in _atspi.ATSPIAccessor().children(table)]
+    assert names == ["A1", "A7"]
 
 
 def test_sheet_editor_paragraph_is_the_in_progress_text(fake_atspi, monkeypatch) -> None:
