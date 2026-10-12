@@ -254,7 +254,7 @@ than 40 pixels.
 ## CLI
 
 ```bash
-a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --stuck-steps 6 --stuck-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
+a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --stuck-steps 6 --stuck-time 120 --model-timeout 120 --temperature 0 --seed 0 --trace-dir /tmp/trace --json
 ```
 
 `--approve-policy deny` is the default: quit, close, send, delete, and
@@ -436,9 +436,10 @@ item carry `approval_id`, the action `name`, `args` with secrets redacted,
 `target` is `role`, `name`, `window`, `url` when the page has one, and
 `reason`. The name, window, URL, and argument `summary` are trimmed and
 fenced. Role and reason are not. `POST /runs` accepts `allow_payments`
-(default false). While it is false, a payment click finishes the run as
+(default false), and optional `temperature` and `seed` (defaults 0 and 0
+where the provider can send them). While `allow_payments` is false, a payment click finishes the run as
 `needs_human` and does not emit `approval_required`. The agent MCP
-`run_goal` takes the same flag, and `get_run`'s `pending_approvals` is the
+`run_goal` takes the same flag and the same `temperature` and `seed` fields, and `get_run`'s `pending_approvals` is the
 object `approve` answers. `approve: false`, a timeout, or a cancel denies
 the action. The agent is constructed with an approve hook, so the CLI
 `--auto-deny` default does not apply to these runs: a risky action waits
@@ -567,7 +568,10 @@ directory):
   the model (truncated with `…[truncated N chars]` when it is huge), model
   name, request metadata, response text and tool calls, the action that ran,
   result, error, `verified`, recovery notes, a screenshot path, `skipped`,
-  and `turn_stop`.
+  and `turn_stop`. The first line is `kind` `sampling`: the temperature and
+  seed that were sent, or `null` and a `notes` entry when that provider
+  cannot send the field. Each step repeats the same object under
+  `model.sampling`.
 - `steps.jsonl` — the same records as `step_log`.
 - `events.jsonl` — one line when a step starts (`kind` `step_started`,
   `index`, `action`), flushed before that step's tool call blocks.

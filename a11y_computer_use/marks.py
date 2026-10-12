@@ -69,7 +69,7 @@ def marks_for(snap, scaled, display_id: int) -> list[tuple[str, int, int, int, i
         if not (el.clickable or el.editable):
             continue
         b = el.bounds
-        if b.display_id != display_id:
+        if b is None or b.display_id != display_id:
             continue
         x, y = scaled.from_source(b.x, b.y)
         marks.append((el.ref, x, y, max(1, round(b.width * scaled.scale)),

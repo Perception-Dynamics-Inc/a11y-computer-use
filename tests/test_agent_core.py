@@ -215,9 +215,10 @@ def test_one_turn_runs_calls_one_at_a_time(tmp_path):
     finished = [event for event in events if event.type == "step_finished"]
     assert [event.data["turn_stop"] for event in finished] == [None, None, None]
     trajectory = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
-    assert [entry["turn_stop"] for entry in trajectory] == [None, None, None]
-    assert trajectory[0]["response"]["calls"][0]["name"] == "set_value"
-    assert len(trajectory[0]["response"]["calls"]) == 3
+    steps = [entry for entry in trajectory if "turn_stop" in entry]
+    assert [entry["turn_stop"] for entry in steps] == [None, None, None]
+    assert steps[0]["response"]["calls"][0]["name"] == "set_value"
+    assert len(steps[0]["response"]["calls"]) == 3
 
 
 def test_multi_action_stops_at_the_first_failure(tmp_path):
@@ -262,9 +263,10 @@ def test_multi_action_stops_at_the_first_failure(tmp_path):
     assert [item["name"] for item in finished.data["ran"]] == ["set_value", "click"]
     assert finished.data["skipped"][0]["name"] == "done"
     trajectory = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
-    assert trajectory[1]["turn_stop"] == "failure"
-    assert trajectory[1]["skipped"][0]["name"] == "done"
-    assert trajectory[1]["action"] == "click"
+    steps = [entry for entry in trajectory if "turn_stop" in entry]
+    assert steps[1]["turn_stop"] == "failure"
+    assert steps[1]["skipped"][0]["name"] == "done"
+    assert steps[1]["action"] == "click"
 
 
 def test_multi_action_stops_on_refusal_and_on_a_rejected_done(tmp_path):
@@ -3855,3 +3857,69 @@ def test_run_limits_accept_a_stuck_budget():
             "model": "scripted:turns.json",
             "limits": {"stuck_steps": 0},
         })
+
+
+def test_trace_records_sampling_and_a_skipped_provider(tmp_path):
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    result, _events, _runtime, _agent = run(
+        ScriptedModel([turn(done("saved", [{"element": {"role": "AXButton", "name": "Save"}}]))]),
+        elements,
+        trace_dir=tmp_path,
+    )
+    assert result.status == "success"
+    rows = [json.loads(line) for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()]
+    sampling = next(row for row in rows if row.get("kind") == "sampling")
+    assert sampling["model"] == "scripted"
+    assert sampling["temperature"] is None and sampling["seed"] is None
+    assert "scripted models do not sample" in sampling["notes"][0]
+    assert "scripted models do not sample" in sampling["notes"][1]
+    step = next(row for row in rows if row.get("action") == "done")
+    assert step["model"]["sampling"] == {
+        "temperature": None,
+        "seed": None,
+        "notes": sampling["notes"],
+    }
+
+    spec = tmp_path / "turns.json"
+    spec.write_text(json.dumps({
+        "calls": [{
+            "name": "done",
+            "args": {
+                "answer": "saved",
+                "conditions": [{"element": {"role": "AXButton", "name": "Save"}}],
+            },
+        }],
+    }), encoding="utf-8")
+    overridden = tmp_path / "overridden"
+    result, _events, _runtime, agent = run(
+        f"scripted:{spec}",
+        elements,
+        trace_dir=overridden,
+        temperature=0.25,
+        seed=11,
+    )
+    assert result.status == "success"
+    assert agent.temperature == 0.25 and agent.seed == 11
+    rows = [json.loads(line) for line in (overridden / "trajectory.jsonl").read_text().splitlines()]
+    sampling = next(row for row in rows if row.get("kind") == "sampling")
+    assert sampling["notes"] == [
+        "temperature 0.25 was not sent: scripted models do not sample",
+        "seed 11 was not sent: scripted models do not sample",
+    ]
+
+
+def test_run_body_accepts_temperature_and_seed():
+    from a11y_computer_use.agent.service import _parse_run_body
+
+    _goal, _model, _display, limits, *_rest = _parse_run_body({
+        "goal": "ping",
+        "model": "openai:gpt-4.1",
+        "temperature": 0.2,
+        "seed": 4.0,
+    })
+    assert limits["temperature"] == 0.2
+    assert limits["seed"] == 4
+    with pytest.raises(ValueError, match="temperature"):
+        _parse_run_body({"goal": "ping", "model": "openai:gpt-4.1", "temperature": -1})
+    with pytest.raises(ValueError, match="seed"):
+        _parse_run_body({"goal": "ping", "model": "openai:gpt-4.1", "seed": True})

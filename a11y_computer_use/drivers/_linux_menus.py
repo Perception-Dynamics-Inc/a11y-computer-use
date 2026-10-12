@@ -13,7 +13,9 @@ whose only action has an empty name (LibreOffice menu-bar entries) is opened
 with that action. An open menu is one whose item is ``SELECTED`` or whose
 popup is ``SHOWING``. Close sends Escape and succeeds only after that menu is
 gone. A shortcut is the accelerator in the AT-SPI binding: a tagged chord, or
-a bare key name such as F11, not the Alt mnemonic letter.
+a bare key name such as F11, not the Alt mnemonic letter. A binding whose accelerator
+field is empty (``a;<Alt>v:a;``, ``f;<Alt>f;``, ``_F;;``) has no shortcut;
+the underlined letter is ``mnemonic``.
 
 This module does not import ``gi``. Tests drive it with fake accessibles.
 ``file_dialog`` is not implemented here.
@@ -163,32 +165,8 @@ def _has_submenu(node: object) -> bool:
     return bool(entries_of(node))
 
 
-def shortcut_from_binding(raw: str | None) -> str | None:
-    """Render an AT-SPI key binding (``<Control>o``, ``<Primary><Shift>S``) as ``ctrl+o``.
-
-    GTK joins several fields with ``;``. The shape is mnemonic letter, then
-    the Alt mnemonic path, then the accelerator. Mousepad's New item is
-    ``n;<Alt>f:n;<Primary>n``: a tagged chord wins, so the shortcut is
-    ``ctrl+n``, not ``alt+f:n``. A colon marks that mnemonic sequence.
-
-    A bare accelerator has no tag. Fullscreen is ``f;<Alt>v:f;F11``, Contents
-    is ``c;<Alt>h:c;F1``, and Delete Selection is ``d;<Alt>e:d;Delete``. The
-    shortcut is that key name (``f11``, ``f1``, ``delete``). A single letter
-    is the mnemonic, so it loses to a longer bare name. With no longer name,
-    the letter remains (``n;37;4`` is ``n``). Digit-only segments are ignored.
-    """
-    if not raw or not str(raw).strip():
-        return None
-    parts = [part.strip() for part in str(raw).split(";") if part.strip()]
-    tagged = [part for part in parts if "<" in part]
-    chords = [part for part in tagged if ":" not in part]
-    chosen = chords[-1] if chords else None
-    if chosen is None:
-        plain = [part for part in parts if "<" not in part and ":" not in part and not part.isdigit()]
-        named = [part for part in plain if len(part) > 1]
-        chosen = (named[-1] if named else plain[-1]) if plain else None
-    if not chosen:
-        return None
+def _render_chord(chosen: str) -> str | None:
+    """One accelerator token (``<Primary>n``, ``F11``, ``Delete``) as ``ctrl+n``."""
     found: list[str] = []
 
     def repl(match: re.Match[str]) -> str:
@@ -206,10 +184,94 @@ def shortcut_from_binding(raw: str | None) -> str | None:
                 mapped = _MOD_TAGS.get(bit)
                 if mapped and mapped not in found:
                     found.append(mapped)
-    if not key:
+    if not key or key.isdigit():
         return None
     ordered = [name for name in _MOD_ORDER if name in found]
     return "+".join([*ordered, key])
+
+
+def _gtk_mnemonic_fields(raw: str) -> list[str] | None:
+    """GTK's ``mnemonic;alt-path;accelerator`` fields, keeping an empty accelerator.
+
+    ``n;37;4`` is a key name plus keycode digits, not this form. A tag, a
+    colon, or a leading underscore marks the GTK form. The accelerator is
+    the third field. ``f;<Alt>f;`` and ``_F;;`` leave it empty.
+    """
+    if ";" not in raw:
+        return None
+    fields = raw.split(";")
+    if not any("<" in part or ":" in part or part.strip().startswith("_") for part in fields):
+        return None
+    return fields
+
+
+def _lone_letter(rendered: str | None) -> bool:
+    return bool(rendered) and "+" not in rendered and len(rendered) == 1
+
+
+def shortcut_from_binding(raw: str | None) -> str | None:
+    """Render an AT-SPI key binding (``<Control>o``, ``<Primary><Shift>S``) as ``ctrl+o``.
+
+    GTK joins three fields with ``;``: the mnemonic, the Alt mnemonic path,
+    then the accelerator. Mousepad's New item is ``n;<Alt>f:n;<Primary>n``,
+    so the shortcut is ``ctrl+n``, not the Alt path. Statusbar is
+    ``a;<Alt>v:a;``: the accelerator field is empty, so there is no shortcut.
+    ``f;<Alt>f;`` and ``_F;;`` are the same. A lone letter in that field is
+    the mnemonic again, not an accelerator.
+
+    A binding with no semicolon is the accelerator itself (``<Primary>n``,
+    ``<Alt>F4``). A bare name is the accelerator when it is not the GTK
+    form: Fullscreen's third field is ``F11``. ``n;37;4`` has no mnemonic
+    tag, so the key name remains ``n``. Digit-only segments are ignored.
+    """
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw)
+    fields = _gtk_mnemonic_fields(text)
+    if fields is not None:
+        accel = fields[2].strip() if len(fields) >= 3 else ""
+        if not accel:
+            return None
+        rendered = _render_chord(accel)
+        if _lone_letter(rendered):
+            return None
+        return rendered
+    parts = [part.strip() for part in text.split(";") if part.strip()]
+    tagged = [part for part in parts if "<" in part]
+    chords = [part for part in tagged if ":" not in part]
+    chosen = chords[-1] if chords else None
+    if chosen is None:
+        plain = [part for part in parts if "<" not in part and ":" not in part and not part.isdigit()]
+        named = [part for part in plain if len(part) > 1]
+        chosen = (named[-1] if named else plain[-1]) if plain else None
+    if not chosen:
+        return None
+    return _render_chord(chosen)
+
+
+def mnemonic_from_binding(raw: str | None) -> str | None:
+    """The underlined mnemonic letter, or None when the binding has none.
+
+    ``f;<Alt>f;`` and ``<Alt>f;<Alt>f;`` are ``f``. ``_F;;`` is the label
+    form of the same letter. The Alt path is not the shortcut.
+    """
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    fields = _gtk_mnemonic_fields(text)
+    if fields is None:
+        if text.startswith("_") and len(text) >= 2 and text[1].isalpha():
+            return text[1].lower()
+        return None
+    first = fields[0].strip()
+    if len(first) == 1 and first.isalpha():
+        return first.lower()
+    if first.startswith("_") and len(first) >= 2 and first[1].isalpha():
+        return first[1].lower()
+    rendered = _render_chord(first)
+    if rendered is not None and rendered.startswith("alt+") and _lone_letter(rendered[4:]):
+        return rendered[-1]
+    return None
 
 
 def _key_binding(node: object) -> str:
@@ -241,12 +303,14 @@ def _checked(node: object) -> bool | None:
 
 
 def _describe(node: object) -> MenuItem:
+    binding = _key_binding(node)
     return MenuItem(
         title=_name(node),
         enabled=_enabled(node),
-        shortcut=shortcut_from_binding(_key_binding(node)),
+        shortcut=shortcut_from_binding(binding),
         submenu=_has_submenu(node),
         checked=_checked(node),
+        mnemonic=mnemonic_from_binding(binding),
     )
 
 
@@ -472,16 +536,10 @@ def _is_open(node: object) -> bool:
 def _mnemonic_letter(node: object) -> str:
     """The menu item's mnemonic letter, from the AT-SPI key binding.
 
-    GTK stores ``f;<Alt>f`` on a File menu. The first field is that letter.
-    A binding that does not start with a single letter has no mnemonic here.
+    GTK stores ``f;<Alt>f`` or ``<Alt>f;<Alt>f;`` on a File menu. ``_F;;`` is
+    the same letter from the label. A binding with no mnemonic letter is empty.
     """
-    raw = _key_binding(node)
-    if not raw:
-        return ""
-    first = str(raw).split(";", 1)[0].strip()
-    if len(first) == 1 and first.isalpha():
-        return first.lower()
-    return ""
+    return mnemonic_from_binding(_key_binding(node)) or ""
 
 
 def menu_mnemonic(app: object, letter: str) -> str | None:

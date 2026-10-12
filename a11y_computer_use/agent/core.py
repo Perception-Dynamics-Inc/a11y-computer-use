@@ -60,6 +60,7 @@ from a11y_computer_use.agent.models.base import (
     assistant_message,
     make_model,
 )
+from a11y_computer_use.agent.models.sampling import parse_seed, parse_temperature, sampling_trace
 from a11y_computer_use.agent.result import RunResult, StepRecord
 from a11y_computer_use.agent.trace import (
     Trace,
@@ -311,6 +312,10 @@ class Agent:
     order: keyboard, vision, re-plan. A switch never changes the action's
     effect and never rewrites an explicit ``x``/``y`` click. After every
     switch is used, the run stops with status ``stuck``.
+    ``temperature`` and ``seed`` override the sampling defaults (0 and 0)
+    when ``model`` is a spec string. A provider that cannot send one of them
+    leaves it off the request and records that in the trace. A `Model`
+    instance keeps the sampling it was built with.
     """
 
     def __init__(
@@ -339,6 +344,8 @@ class Agent:
         fence_untrusted: bool = True,
         allowed_domains: str | object | None = None,
         blocked_domains: str | object | None = None,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         self._model_spec = model
         self.display = display
@@ -380,6 +387,15 @@ class Agent:
         self.fence_untrusted = fence_untrusted
         self._domains_explicit = allowed_domains is not None or blocked_domains is not None
         self.domain_policy = DomainPolicy.resolve(allowed_domains, blocked_domains)
+        # None keeps the provider default (temperature 0, seed 0) where that
+        # provider can send the field. A Model instance already carries its
+        # own sampling, so an override next to one is refused.
+        if not isinstance(model, str) and (temperature is not None or seed is not None):
+            raise ValueError(
+                "temperature and seed apply to a model spec string; this model was already built"
+            )
+        self.temperature = None if temperature is None else parse_temperature(temperature)
+        self.seed = None if seed is None else parse_seed(seed)
         self._cancel = threading.Event()
         #: Set when a blocked driver call is abandoned at ``max_time``.
         #: Cooperative waits poll this through ``_agent_stop``. It is not a
@@ -609,8 +625,20 @@ class Agent:
             self.runtime._agent_interrupt = self._mark_signal_cancel  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 - a test double may refuse new attributes
             pass
-        self.model = make_model(self._model_spec)  # type: ignore[arg-type]
+        if isinstance(self._model_spec, str):
+            self.model = make_model(
+                self._model_spec,
+                temperature=self.temperature,
+                seed=self.seed,
+            )
+        else:
+            self.model = make_model(self._model_spec)  # type: ignore[arg-type]
         self.trace = Trace(self._trace_dir)
+        self.trace.append({
+            "kind": "sampling",
+            "model": getattr(self.model, "name", ""),
+            **sampling_trace(self.model),
+        })
         prompt = _SYSTEM + (_EXEC_SYSTEM if self.allow_exec else "")
         if _txt_output_goal(self._goal):
             prompt += _TXT_EDITOR_HINT
@@ -2599,6 +2627,7 @@ class Agent:
             "model": {
                 "name": getattr(self.model, "name", ""),
                 "supports_images": bool(getattr(self.model, "supports_images", False)),
+                "sampling": sampling_trace(self.model),
             },
             "request": {
                 "message_count": len(self._messages),
