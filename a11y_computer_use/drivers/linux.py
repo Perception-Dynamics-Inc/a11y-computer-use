@@ -1511,6 +1511,15 @@ class LinuxDriver:
                     walked, accessor, scope=scope, app=app, pid=watch.pid,
                     geometry=_atspi.primary_geometry(),
                 )
+                # A GTK table cell find could not scroll on screen. Attach
+                # it with the extents AT-SPI reported, which the pruner
+                # drops when they miss the display. No box is invented.
+                pending = list(accessor._offscreen_seek)
+                if pending:
+                    specs = []
+                    for cell, table in pending:
+                        specs.append((cell, accessor.read(cell), table))
+                    snap = observe.attach_offscreen_matches(snap, specs)
                 _atspi.note_browser_bar(walked, snap.elements)
                 return snap
 

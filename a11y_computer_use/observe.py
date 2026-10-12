@@ -1199,6 +1199,10 @@ def render_matches(
         note = _terminal_match_note(snap, el, text)
         if note:
             line += f" ({note})"
+        elif el.bounds is None:
+            # The toolkit exposed the node and did not give it an on-screen
+            # box. The line does not invent one.
+            line += " (off-screen)"
         lines.append("  " + line)
     return "\n".join(lines)
 
@@ -2738,6 +2742,65 @@ def touch_epoch(snapshot_id: str) -> None:
     for store in (_EPOCHS, _HANDLES, _FULL_VALUES):
         if snapshot_id in store:
             store.move_to_end(snapshot_id)
+
+
+def attach_offscreen_matches(
+    snap: Snapshot,
+    found: Sequence[tuple[object, RawNode, object | None]],
+) -> Snapshot:
+    """Append sought nodes that have no on-screen box.
+
+    ``found`` is ``(handle, raw, parent_handle)``. Bounds stay None. The
+    live handle is registered so a later read can still name the node. A
+    click is not given a rectangle. An empty list leaves ``snap`` as it was.
+    """
+    if not found:
+        return snap
+    handles = _HANDLES.get(snap.snapshot_id)
+    if handles is None:
+        return snap
+    by_handle = {id(handle): ref for ref, handle in handles.items()}
+    elements = list(snap.elements)
+    added = False
+    for cell, raw, table in found:
+        if cell is None or id(cell) in by_handle:
+            continue
+        parent_ref = by_handle.get(id(table)) if table is not None else None
+        parent = next((el for el in elements if el.ref == parent_ref), None) if parent_ref else None
+        ref = f"e{len(elements) + 1}"
+        clickable, editable, secure = _target_flags(raw)
+        value = None
+        if raw.value is not None and not secure:
+            value = _clip(str(raw.value), _MAX_VALUE_CHARS)
+        elements.append(
+            Element(
+                ref=ref,
+                role=raw.role,
+                title=str(raw.title or raw.description or ""),
+                value=value,
+                bounds=None,
+                snapshot_id=snap.snapshot_id,
+                parent=parent_ref,
+                path=(parent.path if parent is not None else ()) + (raw.role,),
+                enabled=raw.enabled,
+                focused=raw.focused,
+                clickable=clickable,
+                editable=editable,
+                secure=secure,
+                checked=raw.checked,
+                selected=raw.selected,
+                expanded=raw.expanded,
+                stable_id=raw.stable_id or None,
+                instance_id=(parent.instance_id if parent is not None else raw.instance_id),
+                document_id=(parent.document_id if parent is not None else raw.document_id),
+            )
+        )
+        handles[ref] = cell
+        by_handle[id(cell)] = ref
+        added = True
+    if not added:
+        return snap
+    return dataclasses.replace(snap, elements=tuple(elements))
 
 
 def ax_handle_for(snapshot_id: str, ref: str) -> object | None:

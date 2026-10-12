@@ -4074,8 +4074,9 @@ class Runtime:
         `observe.find_elements`. Gated + audited at READ, exactly like
         `desktop_snapshot`. On Linux, Chromium searches the whole document,
         including a table that starts below the viewport, and scrolls the
-        matching cell into that snapshot. A GTK table still seeks inside
-        its own walk. The ref is that on-screen cell."""
+        matching cell into that snapshot. A GTK table seeks through the
+        Table interface, including a row that is not on screen. A cell
+        that stays off screen is reported with no bounds."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:

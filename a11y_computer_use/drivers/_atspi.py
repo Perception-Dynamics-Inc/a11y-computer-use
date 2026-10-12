@@ -2561,7 +2561,9 @@ class ATSPIAccessor:
     A GTK table whose rows do not fit the child cap lists the cells that
     overlap the screen, grouped so the cap keeps that whole run. ``find``
     scrolls a named Table cell into the run when the name is not already
-    on screen. A short table and a Qt grid keep the walks they already had.
+    on screen. A cell the table still exposes that stays off screen is
+    remembered here and attached with no bounds. A short table and a Qt
+    grid keep the walks they already had.
     A Calc sheet lists the cells inside its on-screen box, banded so the
     child cap does not stop at the first six rows.
     """
@@ -2573,6 +2575,9 @@ class ATSPIAccessor:
         # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
         # snapshot, so listing the window does not scroll the tree.
         self._table_seek: str | None = None
+        # ``(cell, table)`` pairs ``find`` matched that are still off screen.
+        # Bounds are not invented for them; the snapshot attaches them as-is.
+        self._offscreen_seek: list[tuple[object, object]] = []
         # ``(cache key, start index, page size)`` set for one snapshot so
         # expand lists that node's next children instead of the visible band.
         self._expand_page: tuple | None = None
@@ -2883,7 +2888,9 @@ class ATSPIAccessor:
         # near the end of the child list), and a few hundred rows also
         # matches the Calc shortcut that only samples the first rows.
         # The on-screen span is what snapshot and scroll_to_find list.
-        painted = _gtk_table_rows_for_snapshot(node, self._table_seek)
+        painted = _gtk_table_rows_for_snapshot(
+            node, self._table_seek, self._offscreen_seek,
+        )
         if painted:
             for acc, pos, size in painted:
                 self._visible_bounds[id(acc)] = (pos, size)
@@ -13544,15 +13551,72 @@ def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) ->
     return _on_screen_item(cell, screen) is not None
 
 
-def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
-    """The Table cell named ``needle``, scrolled on screen. None when no cell matches."""
-    rows, cols = _plain_table_size(node)
-    if rows is None or cols is None:
+def _reveal_named_cell(cell, screen: tuple[int, int], row: int, rows: int):
+    """Scroll ``cell`` on screen when AT-SPI can. The same cell either way.
+
+    A cell that stays off screen is still the match. Its extents are left
+    alone, including the GTK off-screen sentinel.
+    """
+    if cell is None:
         return None
-    for row in range(min(rows, _GTK_SEEK_MAX_ROWS)):
-        for col in range(min(cols, _GTK_SEEK_MAX_COLS)):
+    if _on_screen_item(cell, screen) is None and rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    return cell
+
+
+def _seek_unshown_children(node, needle: str, screen: tuple[int, int]):
+    """A non-showing child whose name contains ``needle``.
+
+    Used when the Table interface exposes no cell. GTK still lists those
+    cells as children and parks them at the off-screen sentinel. On-screen
+    children are already in the painted span.
+    """
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    rows, cols = _plain_table_size(node)
+    if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
+        col_span = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 1
+        cap = min(count, rows * min(col_span, _GTK_SEEK_MAX_COLS) + 64)
+    else:
+        cap = min(count, _GTK_TABLE_MAX_ROWS)
+    total = rows if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else cap
+    for index in range(cap):
+        child = _child_at(node, index)
+        if child is None or _on_screen_item(child, screen) is not None:
+            continue
+        found = _seek_hit(child, needle)
+        if found is None:
+            continue
+        row = _row_at_child_index(node, index)
+        if row is None:
+            row = min(index, max(total - 1, 0))
+        return _reveal_named_cell(found, screen, row, total)
+    return None
+
+
+def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
+    """The Table cell named ``needle``. None when no cell matches.
+
+    The scan uses ``Table.get_accessible_at``, which addresses a row the
+    on-screen walk never visits. The row cap is the table's own size, not
+    the short seek window used for a document table. When that interface
+    exposes no cell, non-showing children are searched instead. A match is
+    scrolled on screen when AT-SPI can do it. A cell that stays off screen
+    is still returned, with whatever extents the toolkit reported.
+    """
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None or rows <= 0:
+        return _seek_unshown_children(node, needle, screen)
+    col_limit = min(cols, _GTK_SEEK_MAX_COLS)
+    saw_cell = False
+    for row in range(min(rows, _GTK_TABLE_MAX_ROWS)):
+        for col in range(col_limit):
             cell = _table_cell_at(node, row, col)
-            if cell is None or not _matches_seek(cell, needle):
+            if cell is None:
+                continue
+            saw_cell = True
+            if not _matches_seek(cell, needle):
                 continue
             if _on_screen_item(cell, screen) is None:
                 _bring_cell_on_screen(cell, screen, row, rows)
@@ -13560,7 +13624,9 @@ def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
                 if refreshed is not None:
                     cell = refreshed
             return cell
-    return None
+    if saw_cell:
+        return None
+    return _seek_unshown_children(node, needle, screen)
 
 
 def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
@@ -13595,12 +13661,16 @@ def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
     return out or None
 
 
-def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
+def _gtk_table_rows_for_snapshot(
+    node, seek: str | None, offscreen: list | None = None,
+) -> list | None:
     """On-screen cells of a large GTK table, or None to keep the index walk.
 
     ``seek`` is the ``find`` text. When no painted cell contains it, the
     matching Table cell is scrolled into view and the span is read again.
-    A snapshot with no seek does not move the tree.
+    A cell that stays off screen is appended to ``offscreen`` as
+    ``(cell, table)``. Its bounds are not replaced. A snapshot with no
+    seek does not move the tree and does not record those cells.
     """
     if not _gtk_row_table(node):
         return None
@@ -13619,6 +13689,8 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
                 item = _on_screen_item(match, screen)
                 if item is not None:
                     painted = [*painted, item]
+                elif offscreen is not None:
+                    offscreen.append((match, node))
     return painted
 
 

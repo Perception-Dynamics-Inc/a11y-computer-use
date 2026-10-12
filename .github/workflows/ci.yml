@@ -414,8 +414,14 @@ jobs:
           # Run 38272489843 listed [] and the step failed. Wait for the
           # window manager, then for the xmessage window, and keep the
           # openbox log when neither appears.
+          # Run 38286187392 set _NET_SUPPORTING_WM_CHECK and then listed []
+          # for the whole poll. The property can land before openbox adopts
+          # a client, and an xmessage started in that gap never joins
+          # _NET_CLIENT_LIST. setsid keeps the WM off the shell's process
+          # group. The message is started only after the check holds, and
+          # restarted if that process has already exited.
           xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
-            openbox >/tmp/openbox-pkg.log 2>&1 &
+            setsid openbox >/tmp/openbox-pkg.log 2>&1 < /dev/null &
             ready=0
             for _ in $(seq 1 40); do
               if xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
@@ -429,14 +435,28 @@ jobs:
               cat /tmp/openbox-pkg.log
               exit 1
             fi
-            xmessage -timeout 30 clean-install-window >/dev/null 2>&1 &
+            sleep 0.5
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+              echo "openbox log:"
+              cat /tmp/openbox-pkg.log
+              exit 1
+            fi
+            : > /tmp/xmessage-pkg.log
+            xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+            restarts=0
             for _ in $(seq 1 40); do
               if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
                 exit 0
+              fi
+              if ! pgrep -x xmessage >/dev/null 2>&1 && [ "$restarts" -lt 2 ]; then
+                restarts=$((restarts + 1))
+                xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
               fi
               sleep 0.25
             done
             echo "openbox log:"
             cat /tmp/openbox-pkg.log
+            echo "xmessage log:"
+            cat /tmp/xmessage-pkg.log
             exit 1
           '
