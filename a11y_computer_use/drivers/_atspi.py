@@ -13262,6 +13262,38 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
     return painted
 
 
+_TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
+
+
+def _hidden_window(node) -> bool:
+    """True for a frame, window, or dialog that is not on screen.
+
+    FeatherPad keeps its Replace dialog in the tree as a frame named
+    Replacement. The state set is only ENABLED, and the box is a strip at
+    the parent origin, so bounds alone would keep it. A window that is
+    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
+    node that never reported states is not treated as hidden. Other roles
+    are not this case.
+    """
+    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
+        return False
+    sset = _call_first(node, ("get_state_set",))
+    if sset is None:
+        return False
+    names = getattr(sset, "names", None)
+    if isinstance(names, (set, frozenset, list, tuple)):
+        folded = {str(item).upper() for item in names}
+        if not folded:
+            return False
+        return "SHOWING" not in folded and "VISIBLE" not in folded
+    return not _state_has(node, "SHOWING") and not _state_has(node, "VISIBLE")
+
+
+def _without_hidden_windows(kids: list) -> list:
+    """Drop nested frames and windows that are not showing and not visible."""
+    return [child for child in kids if not _hidden_window(child)]
+
+
 def _with_table_body(node, kids: list) -> list:
     """Append a GTK table's body cells when the children are only headers.
 
@@ -13269,7 +13301,13 @@ def _with_table_body(node, kids: list) -> list:
     column headers. ``Table.get_n_rows`` is the file rows. Cells already
     present as children are not added again. A table that already exposes
     row children is unchanged, and a table with no rows stays header-only.
+
+    Every ordinary snapshot walk returns through here, so a hidden frame
+    (FeatherPad's Replace dialog) is removed before the table check. A
+    showing or visible window is kept. A control that is not a window is
+    kept even when it is not showing.
     """
+    kids = _without_hidden_windows(kids)
     if _role_name(node) not in {"table", "tree table"}:
         return kids
     rows = _call_first(node, ("get_n_rows",), default=None)
