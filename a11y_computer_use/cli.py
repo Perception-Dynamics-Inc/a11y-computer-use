@@ -101,7 +101,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     snapshot.add_argument(
         "--scope", choices=("window", "app"), default="window",
-        help="frontmost window only, or all windows (default: window)",
+        help="showing windows of the app, active first (default: window)",
     )
     snapshot.add_argument(
         "--mode", choices=("full", "interactive"), default="full",
@@ -166,7 +166,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bench_desktop.add_argument("--app", help="bundle id / app name / tab id to observe "
                                "(default: the driver's frontmost app)")
     bench_desktop.add_argument("--scope", choices=("window", "app"), default="window",
-                               help="frontmost window only, or all windows (default: window)")
+                               help="showing windows of the app, active first (default: window)")
     bench_desktop.add_argument("--rounds", type=int, default=3, help="observations to measure")
     bench_desktop.add_argument("--json", action="store_true", help="print the report as JSON")
     bench_desktop.set_defaults(handler=_cmd_bench_desktop)

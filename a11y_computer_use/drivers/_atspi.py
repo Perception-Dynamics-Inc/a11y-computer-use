@@ -4510,6 +4510,126 @@ def find_root(app: str, scope) -> object | None:
         return picked if picked is not None else app_acc
 
 
+# Top-level windows a named-app snapshot lists. Menus, popups, and tooltips
+# are not windows: they belong to the frame that owns them.
+_TOPLEVEL_ROLES = frozenset({
+    "frame", "window", "dialog", "alert", "file chooser", "color chooser",
+})
+
+
+def _application_of(node):
+    """The AT-SPI application that owns ``node``, or None."""
+    if node is None:
+        return None
+    if _role_name(node) == "application":
+        return node
+    app = _call_first(node, ("get_application", "getApplication"))
+    if app is not None and _role_name(app) == "application":
+        return app
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and _role_name(parent) == "application":
+        return parent
+    return None
+
+
+def _toplevel_of(node):
+    """The showing-window ancestor of ``node``, or None at the application."""
+    current = node
+    for _ in range(32):
+        if current is None:
+            return None
+        role = _role_name(current)
+        if role in _TOPLEVEL_ROLES:
+            return current
+        if role == "application":
+            return None
+        current = _call_first(current, ("get_parent", "getParent"))
+    return None
+
+
+def showing_toplevels(node) -> list:
+    """Showing top-level windows of ``node``'s application, active first.
+
+    One showing window is that window alone, so a single-window snapshot
+    stays one tree. A window that is not SHOWING (minimized) is left out, as
+    are menus and tooltips. A GTK combo's popup window is left out too: its
+    items already sit under the combo, and listing it would replace the
+    frame that owns the combo. When several windows are ACTIVE, the first in
+    child order leads and the rest keep that order.
+    """
+    if node is None:
+        return []
+    app = _application_of(node)
+    if app is None:
+        return [node]
+    count = _child_count(app)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    frames = []
+    for index in range(int(count)):
+        child = _child_at(app, index)
+        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+            continue
+        if not _state_has(child, "SHOWING"):
+            continue
+        if _combo_owning_popup(child) is not None:
+            continue
+        frames.append(child)
+    if len(frames) <= 1:
+        return frames or [node]
+    active = [frame for frame in frames if _state_has(frame, "ACTIVE")]
+    head = active[:1]
+    if not head and _role_name(node) in _TOPLEVEL_ROLES and _state_has(node, "SHOWING"):
+        # find_root already chose this window. Lead with it when AT-SPI has
+        # not marked any frame ACTIVE.
+        chosen = _frame_cache_key(node)
+        head = [frame for frame in frames if _frame_cache_key(frame) == chosen][:1]
+    head_keys = {_frame_cache_key(frame) for frame in head}
+    return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
+
+
+def snapshot_window_list(node) -> list:
+    """Showing windows to snapshot, active first.
+
+    A find bar, an omnibox popup, and Chrome's empty cached frame are
+    showing siblings of the page. They are not windows. Merging one of
+    them is the untitled group with no rows that stops ``scroll_to_find``
+    before the wheel. A GTK dialog stays in the list. One real window is
+    a one-item list, so the snapshot stays a single tree.
+    """
+    if node is None:
+        return []
+    chrome = _chromium_app(node)
+    frames = []
+    for item in showing_toplevels(node):
+        if _is_browser_bar_frame(item):
+            continue
+        if chrome and _sparse_untitled_chrome_frame(item):
+            continue
+        frames.append(item)
+    return frames or [node]
+
+
+def toplevel_raise_target(node):
+    """``(active, title, pid, extents)`` for the window that owns ``node``.
+
+    None when ``node`` is not inside a top-level window. ``active`` is
+    STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
+    screen pixels, or None when the window has no box. The caller raises the
+    matching X window before it acts, and leaves an already active window
+    alone.
+    """
+    top = _toplevel_of(node)
+    if top is None:
+        return None
+    title = str(_call_first(top, ("get_name", "getName"), default="") or "")
+    position, size = _extents(top)
+    extents = None
+    if position is not None and size is not None:
+        extents = (float(position[0]), float(position[1]), float(size[0]), float(size[1]))
+    return (_state_has(top, "ACTIVE"), title, pid_of(top), extents)
+
+
 def desktop_application_roots() -> DesktopApplications:
     """Every application under the AT-SPI desktop.
 
@@ -14753,13 +14873,15 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
 def list_scrolls_with_document(container) -> bool:
     """True when a Chromium list is body content and the document scrolls.
 
-    A short table can be shorter than the screen and still longer than
-    the window. Its box is the content, not a scrollport. After the
-    document moves, the top sits above the page or the bottom still runs
-    past it, and the box stays no taller than the screen. A fixed-height
-    overflow list sits inside the document. A list taller than the screen
-    keeps the list wheel. No document edges means the caller keeps the
-    list's own bar.
+    A short table can be a little taller than an 800px screen and still
+    be body content. Its box is not a scrollport. After the document
+    moves, the top sits above the page or the bottom still runs past it.
+    The list bar does not move that table, and a wheel judged as a
+    scrollport then reports the page unchanged and the search turns
+    around before the last row. A list more than twice the screen is a
+    virtualized viewport and keeps the list wheel. A fixed-height
+    overflow list sits inside the document. No document edges means the
+    caller keeps the list's own bar.
     """
     if container is None or _role_name(container) not in _LIST_ROLES:
         return False
@@ -14770,17 +14892,17 @@ def list_scrolls_with_document(container) -> bool:
     pos, size = _extents(container)
     if pos is None or size is None or float(size[1]) < 4:
         return False
-    _sw, sh = _screen_size()
-    if sh > 0 and float(size[1]) > sh:
-        return False
     page = _page_edges(container)
     if page is None:
         return False
     top = float(pos[1])
     bottom = top + float(size[1])
-    if bottom > page[3] + 8:
-        return True
-    return top < page[1] - 8
+    if bottom <= page[3] + 8 and top >= page[1] - 8:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh * 2:
+        return False
+    return True
 
 
 def _page_node(container):

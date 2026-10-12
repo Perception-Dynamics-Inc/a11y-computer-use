@@ -6510,16 +6510,30 @@ class Runtime:
                     for el in shot.elements
                 )
 
+            def pinned_anchor(shot: Snapshot) -> Element | None:
+                """The pinned container in ``shot``.
+
+                A ref string is the slot in one snapshot. After the document
+                moves, that slot can be a cell. The unchanged-row check
+                follows the table that was pinned, using the fresh bounds.
+                The wheel still resolves once through the driver, so a
+                search records one resolution per scroll.
+                """
+                try:
+                    return observe.rematch_ref(pinned[0], ref, shot)
+                except (KeyError, ComputerUseError):
+                    try:
+                        return shot.element(ref)
+                    except KeyError:
+                        return None
+
             def ready_anchor() -> Element | None:
                 """The page anchor after Ctrl+F, when that frame is back."""
                 fresh = self._current
                 if fresh is None:
                     return None
                 if pinned is not None:
-                    try:
-                        found_anchor = fresh.element(ref)
-                    except KeyError:
-                        found_anchor = None
+                    found_anchor = pinned_anchor(fresh)
                 else:
                     found_anchor = _scroll_anchor(fresh)
                 if found_anchor is None or page_frame_missing(fresh, found_anchor):
@@ -6536,10 +6550,7 @@ class Runtime:
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
                 if pinned is not None:
-                    try:
-                        anchor_now = snap.element(ref)
-                    except KeyError:
-                        anchor_now = None
+                    anchor_now = pinned_anchor(snap)
                 else:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
@@ -8542,8 +8553,11 @@ def build_server(
         latest snapshot: act on them promptly and re-observe after the UI
         changes (a stale_ref error means the tree moved). A ref from a process
         that has since quit is stale_ref with reason app_restarted and is not
-        applied to the new process. scope='window'
-        covers the frontmost window, 'app' all windows.
+        applied to the new process. scope='window' covers the frontmost
+        window. On Linux it also includes every other showing top-level
+        window of that app: the active window is first and its root line is
+        marked (active), and a ref in another window raises that window
+        before the action. scope='app' is the application tree.
 
         mode='full' (default) returns the complete pruned tree. mode='interactive'
         returns the same snapshot cut down to what you can act on (buttons,
@@ -8555,8 +8569,10 @@ def build_server(
         ONLY what changed since your last snapshot of this app (added / removed /
         changed elements), rendered in the view you last asked for; use it to
         re-observe after an action, and read '(no change)' as 'the action had no
-        visible effect'. budget=N caps the reply at about N tokens (the tail is
-        replaced by a marker counting the omitted elements). include_bounds=true
+        visible effect'. budget=N caps the reply at about N tokens. One window
+        replaces the tail with a marker counting the omitted element lines.
+        Several windows share that budget, and a window past its share ends
+        with '… N more'. include_bounds=true
         prints geometry on every line. Tier 'read' for the scoped app. Needs the
         Accessibility permission (see `a11y_computer_use doctor`)."""
         return await run(runtime.desktop_snapshot, app, scope, mode, budget, include_bounds)

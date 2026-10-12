@@ -786,6 +786,58 @@ def windows() -> list[dict]:
     return rows
 
 
+def window_id_for_toplevel(*, title: str, pid: int | None, extents) -> int | None:
+    """X id of the on-screen window that owns an AT-SPI top-level window.
+
+    An exact title within the same pid wins. Several windows with that title,
+    or a window with no title, match the box that overlaps ``extents`` the
+    most. ``extents`` is ``(x, y, width, height)`` in screen pixels. The X
+    client box sits inside the frame, so the match is overlap, not equality.
+    None when nothing on screen matches: the caller still runs the action.
+    """
+    rows = [row for row in windows() if row.get("on_screen") and row.get("bounds")]
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        owned = [row for row in rows if int(row.get("pid") or 0) == int(pid)]
+        if owned:
+            rows = owned
+    titled = (title or "").strip()
+    if titled:
+        named = [row for row in rows if (row.get("title") or "") == titled]
+        if len(named) == 1:
+            return int(named[0]["window_id"])
+        if len(named) > 1:
+            picked = _window_overlapping(named, extents)
+            if picked is not None:
+                return picked
+    return _window_overlapping(rows, extents)
+
+
+def _window_overlapping(rows: list[dict], extents) -> int | None:
+    """Window id whose client box overlaps ``extents`` the most, or None."""
+    if not extents or len(extents) != 4:
+        return None
+    ax, ay, aw, ah = (float(part) for part in extents)
+    if aw <= 0 or ah <= 0:
+        return None
+    best = None
+    best_area = 0.0
+    for row in rows:
+        bounds = row.get("bounds") or {}
+        try:
+            bx = float(bounds["x"])
+            by = float(bounds["y"])
+            bw = float(bounds["width"])
+            bh = float(bounds["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        overlap_w = min(ax + aw, bx + bw) - max(ax, bx)
+        overlap_h = min(ay + ah, by + bh) - max(ay, by)
+        area = max(overlap_w, 0.0) * max(overlap_h, 0.0)
+        if area > best_area:
+            best, best_area = int(row["window_id"]), area
+    return best
+
+
 def _window_rows(d) -> list[dict]:
     rows: list[dict] = []
     for win in _managed_windows(d):

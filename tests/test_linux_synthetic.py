@@ -6152,6 +6152,16 @@ def test_short_table_past_the_document_wheels_the_page(
     assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
     assert called["wheel"] == 2
     assert called["nudge"] == 0
+    # Live Chrome on an 800px screen publishes this 25-row table at about
+    # 857px. That is still the document. A list more than twice the screen
+    # stays a viewport.
+    hit.y, hit.height = 120, 857
+    assert _atspi.scroll_container_kind(listing) == "document"
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 3
+    assert called["nudge"] == 0
+    hit.height = 1601
+    assert _atspi.scroll_container_kind(listing) == "viewport"
 
 
 def test_content_height_line_scroll_does_not_write_the_scroll_bar(
@@ -11354,3 +11364,142 @@ def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> 
     titles = [el.title for el in driver.snapshot(Scope.WINDOW, "qtprobe").elements]
     assert "R0" in titles
     assert "R11" in titles
+
+
+class _WindowNode:
+    """AT-SPI stand-in for showing_toplevels. No bus."""
+
+    def __init__(self, role, name="", states=(), children=()):
+        self.role = role
+        self.name = name
+        self.states = set(states)
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+    def get_application(self):
+        node = self
+        while node.parent is not None:
+            node = node.parent
+        return node
+
+    def get_state_set(self):
+        return _NS(names=set(self.states))
+
+
+def test_showing_toplevels_lists_showing_windows_active_first() -> None:
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    hidden = _WindowNode("frame", "Minimized")
+    menu = _WindowNode("menu", "File", states={"SHOWING"})
+    _WindowNode("application", "mousepad", children=[dialog, editor, hidden, menu])
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Editor", "Preferences"]
+    only = _WindowNode(
+        "application", "solo",
+        children=[_WindowNode("frame", "Only", states={"SHOWING", "ACTIVE"})],
+    )
+    assert [node.name for node in _atspi.showing_toplevels(only)] == ["Only"]
+
+
+def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
+    dialog = _WindowNode("dialog", "Form", states={"SHOWING"})
+    popup = _WindowNode("window", "", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "app", children=[popup, dialog])
+
+    def owns(node):
+        return node if node is popup else None
+
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", owns)
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
+
+
+def test_snapshot_window_list_skips_chrome_cache_frames() -> None:
+    """A find bar and an empty cached frame are not sibling windows.
+
+    Chrome keeps both beside the page, and both are SHOWING. Listing them
+    made the snapshot an untitled group with no rows, so scroll_to_find
+    stopped before the wheel. The named page is the only window. A GTK
+    dialog beside its editor stays.
+    """
+    filler = _WindowNode("panel", "")
+    panel = _WindowNode("panel", "", children=[filler])
+    empty = _WindowNode("frame", "", states={"SHOWING", "ACTIVE"}, children=[panel])
+    page = _WindowNode("frame", "rowtable - Google Chrome", states={"SHOWING"})
+    bar = _WindowNode("frame", "Find in page", states={"SHOWING"})
+    _WindowNode("application", "Google Chrome", children=[empty, bar, page])
+    assert [node.name for node in _atspi.snapshot_window_list(empty)] == [
+        "rowtable - Google Chrome",
+    ]
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "mousepad", children=[dialog, editor])
+    assert [node.name for node in _atspi.snapshot_window_list(dialog)] == [
+        "Editor", "Preferences",
+    ]
+
+
+def test_raise_skips_a_window_that_is_already_the_ewmh_active_one(monkeypatch) -> None:
+    driver = LinuxDriver()
+    raised: list[int] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _atspi, "toplevel_raise_target",
+        lambda node: (False, "cuatypeform", 9, (10.0, 20.0, 800.0, 600.0)),
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.window_id_for_toplevel",
+        lambda **_kwargs: 42,
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 42, "app": "chrome", "pid": 9, "title": "cuatypeform"},
+    )
+    monkeypatch.setattr(driver, "raise_window", raised.append)
+    driver._raise_handle_window(object())
+    assert raised == []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 7, "app": "mousepad", "pid": 3, "title": "Editor"},
+    )
+    driver._raise_handle_window(object())
+    assert raised == [42]
+
+
+def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    rows = [
+        {"window_id": 1, "title": "Editor", "pid": 9, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 2, "title": "Preferences", "pid": 9, "on_screen": True,
+         "bounds": {"x": 420, "y": 40, "width": 280, "height": 200}},
+        {"window_id": 3, "title": "Editor", "pid": 4, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 4, "title": "Hidden", "pid": 9, "on_screen": False, "bounds": None},
+    ]
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows)
+    assert _linux_system.window_id_for_toplevel(
+        title="Preferences", pid=9, extents=(430, 50, 100, 80),
+    ) == 2
+    assert _linux_system.window_id_for_toplevel(
+        title="", pid=9, extents=(10, 10, 100, 80),
+    ) == 1
+    assert _linux_system.window_id_for_toplevel(
+        title="Missing", pid=9, extents=None,
+    ) is None

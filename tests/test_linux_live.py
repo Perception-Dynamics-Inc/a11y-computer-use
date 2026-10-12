@@ -4418,6 +4418,125 @@ def test_short_gtk_drag_drops_onto_the_row_above(tmp_path) -> None:
         _stop(proc)
 
 
+def test_linux_snapshot_lists_a_non_raised_dialog_and_click_raises_it(tmp_path) -> None:
+    """A showing sibling dialog is in the snapshot while the main window is active.
+
+    Clicking a control in that dialog by ref raises the dialog and runs the control.
+    """
+    from a11y_computer_use import observe, safety
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    subprocess.run(["pkill", "-f", "cuawindual.py"], check=False)
+    script = tmp_path / "cuawindual.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        GLib.set_prgname("cuawindual")
+        win = Gtk.Window(title="cuawinmain")
+        win.set_default_size(420, 240)
+        win.move(80, 80)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        entry = Gtk.Entry()
+        main = Gtk.Button(label="Main only")
+        main.connect("clicked", lambda _b: entry.set_text("MAIN"))
+        box.pack_start(main, False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        win.add(box)
+        dlg = Gtk.Dialog(title="cuawindlg", transient_for=win, modal=False)
+        dlg.set_modal(False)
+        dlg.set_default_size(320, 180)
+        dlg.move(520, 120)
+        area = dlg.get_content_area()
+        label = Gtk.Label(label="idle")
+        apply = Gtk.Button(label="Dialog apply")
+        apply.connect("clicked", lambda _b: label.set_text("APPLIED"))
+        area.pack_start(apply, False, False, 0)
+        area.pack_start(label, False, False, 0)
+        dlg.show_all()
+        win.show_all()
+        win.connect("destroy", Gtk.main_quit)
+
+        def _focus_main():
+            win.present()
+            return False
+
+        GLib.idle_add(_focus_main)
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"cuawindual exited {proc.returncode} before the dialog was exposed")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuawindual")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                active = driver.active_window() or {}
+                if (
+                    "Main only" in last
+                    and "Dialog apply" in last
+                    and active.get("title") == "cuawinmain"
+                    and "(active)" in last
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.3)
+        assert snap is not None, last[:1600]
+        text = observe.render_text(snap)
+        assert text.index("cuawinmain") < text.index("Dialog apply"), text[:1600]
+        assert any("(active)" in ln and "cuawinmain" in ln for ln in text.splitlines()), text[:1600]
+        button = next(
+            el for el in snap.elements if el.title == "Dialog apply" and el.clickable
+        )
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        store.set_tier("cuawindual", safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != "cuawindual":
+            store.set_tier(front, safety.Tier.FULL)
+        from a11y_computer_use import server
+
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        runtime._current = snap
+        clicked = runtime.click(button.ref)
+        assert str(clicked).startswith("clicked"), clicked
+        deadline = time.monotonic() + 6
+        shown = ""
+        active_title = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "cuawindual")
+            shown = observe.render_text(shot)
+            active_title = (driver.active_window() or {}).get("title") or ""
+            if "APPLIED" in shown and active_title == "cuawindlg":
+                break
+            time.sleep(0.25)
+        assert "APPLIED" in shown, shown[:1600]
+        assert active_title == "cuawindlg", active_title
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+
+
 def _key_target_source(name: str, initial: str) -> str:
     return textwrap.dedent(
         f"""
@@ -5242,12 +5361,12 @@ _GTK_TWO = textwrap.dedent(
 def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
     """Two GTK windows in one process. Beta is in front.
 
-    set_value on Field A writes the text. A window-scope snapshot does not
-    contain that field, which used to make the outcome unverifiable. The ref
-    came from find(scope='app'), and that read-back matches, so the outcome
-    is confirmed. This is not the covered-window case: nothing is on top of
-    Alpha, and a read-back that did not match would not be confirmed.
+    The window snapshot lists both windows, Beta first. set_value on Field A
+    writes that field and is confirmed. The ref came from find(scope='app').
+    This is not the covered-window case: nothing is on top of Alpha, and a
+    read-back that did not match would not be confirmed.
     """
+    from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
@@ -5277,9 +5396,12 @@ def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
         assert any(el.title == "Field B" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
-        assert not any(el.title == "Field A" for el in front.elements), [
+        assert any(el.title == "Field A" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
+        text = observe.render_text(front)
+        assert text.index("Beta Window") < text.index("Alpha Window"), text[:1200]
+        assert any("(active)" in line and "Beta Window" in line for line in text.splitlines()), text[:1200]
         runtime = _runtime_for(tmp_path, driver, _TWO_APP, "python3")
         runtime.find(_TWO_APP, text="Field A", scope="app")
         current = runtime._current
