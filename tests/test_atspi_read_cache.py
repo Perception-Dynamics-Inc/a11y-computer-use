@@ -242,14 +242,14 @@ def test_value_setter_drops_the_cache(monkeypatch) -> None:
 def test_move_caret_drops_the_cache() -> None:
     moved: list[int] = []
 
-    class Text:
+    class CaretText:
         @staticmethod
         def set_caret_offset(acc, offset):
             moved.append(offset)
             return True
 
     class FakeAtspi:
-        Text = Text
+        Text = CaretText
 
     node = _Node()
     with _atspi.read_cache():
@@ -263,7 +263,7 @@ def test_move_caret_drops_the_cache() -> None:
 def test_linux_driver_run_caches_duplicate_getters(monkeypatch) -> None:
     from a11y_computer_use.drivers.linux import LinuxDriver
 
-    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
+    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     node = _Node()
 
     def work():
