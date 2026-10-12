@@ -2739,6 +2739,7 @@ class Runtime:
         key_focus: bool = False,
         focus_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
+        cover_click: bool = False,
     ) -> tuple[str, str]:
         drawing = self._drawing_type_verdict(app, requested)
         if drawing is not None:
@@ -2862,6 +2863,19 @@ class Runtime:
         )
         if focus_note and judged == "confirmed" and evidence == "the accessibility state changed":
             evidence = focus_note
+        # A ref click is still delivered at the target's center. When that
+        # point is covered, the tree change belongs to the cover. The target
+        # itself did not change, so this is not confirmation.
+        if (
+            cover_click
+            and judged == "confirmed"
+            and element is not None
+            and before is not None
+            and after is not None
+        ):
+            cover = outcome.occluded_click_effect(before["snap"], after, element)
+            if cover:
+                return "suspected_noop", cover
         return judged, evidence
 
     def _key_focus_probe(self, app: str | None) -> tuple | None:
@@ -2975,12 +2989,14 @@ class Runtime:
         key_focus: bool = False,
         focus_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
+        cover_click: bool = False,
     ) -> outcome.ActionResult:
         """Attach outcome, next, and evidence. ``text`` is the existing sentence."""
         if verdict is None:
             judged, evidence = self._judge_mutation(
                 app, before, element, requested, bounds=bounds, previous=previous,
                 key_focus=key_focus, focus_before=focus_before, selection=selection,
+                cover_click=cover_click,
             )
         else:
             judged, evidence = verdict
@@ -4693,7 +4709,25 @@ class Runtime:
             element=judged_element,
             had_ref=ref is not None,
             verdict=verdict,
+            cover_click=isinstance(target, Element) and not activated and ref is not None,
         )
+        # The pointer still hit the target's center. A cover that changed
+        # while the target did not is not a click on the target.
+        if (
+            isinstance(result, outcome.ActionResult)
+            and result.outcome == "suspected_noop"
+            and result.evidence.startswith("covered by ")
+            and isinstance(target, Element)
+            and not activated
+        ):
+            msg = (
+                f"{self._label(ref, target)} did not reach the target; "
+                f"{result.evidence}{''.join(menu_note)}"
+            )
+            text = f"{msg}\n\neffect: {effect}" if effect else msg
+            result = outcome.ActionResult(
+                text, outcome=result.outcome, next=result.next, evidence=result.evidence,
+            )
         # The text ref has no action of its own. "clicked" is only true when
         # the control it stands for actually changed.
         if activated and result.outcome == "suspected_noop":
@@ -8635,7 +8669,11 @@ def build_server(
         Name Box, is that cell. A different cell is partial.         A click on a
         canvas or an unnamed image is unverifiable: accessibility cannot
         see those pixels, so a tree change is not confirmation. The evidence
-        says to verify with crop or a screenshot. A control nested inside a
+        says to verify with crop or a screenshot. A ref whose center is
+        inside another window, dialog, sheet, or popup is still clicked at
+        that center. When the only change is that cover and the target
+        itself does not change, the result does not say clicked: outcome is
+        suspected_noop and the evidence names the cover. A control nested inside a
         canvas is fallback content and is not painted: it is activated by
         its accessible action or a DOM click on that node, not by a pointer
         click, which would land on the canvas. When that activation cannot

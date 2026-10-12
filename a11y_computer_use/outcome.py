@@ -365,6 +365,152 @@ def relevant_state_changed(before: object, after: object, target: object | None 
     return _page_rows(before, before_target) != _page_rows(after, after_target)
 
 
+# A dialog, sheet, menu, or second window that can sit over a control.
+# The target's own ancestor window is not one of these.
+_OCCLUDER_ROLES = frozenset({
+    "AXWindow", "AXDialog", "AXSheet", "AXDrawer", "AXPopover", "AXMenu",
+})
+
+
+def _center_of(element: object):
+    bounds = getattr(element, "bounds", None)
+    if bounds is None:
+        return None
+    width = getattr(bounds, "width", 0)
+    height = getattr(bounds, "height", 0)
+    if not isinstance(width, int) or not isinstance(height, int):
+        return None
+    if isinstance(width, bool) or isinstance(height, bool) or width <= 0 or height <= 0:
+        return None
+    center = getattr(bounds, "center", None)
+    return center
+
+
+def _contains_center(bounds: object, center: object) -> bool:
+    """True when ``center`` lies in ``bounds``. A missing box does not cover it."""
+    if bounds is None or center is None:
+        return False
+    if getattr(bounds, "display_id", None) != getattr(center, "display_id", None):
+        return False
+    width = getattr(bounds, "width", 0)
+    height = getattr(bounds, "height", 0)
+    if isinstance(width, bool) or isinstance(height, bool):
+        return False
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return False
+    x = getattr(bounds, "x", None)
+    y = getattr(bounds, "y", None)
+    if not isinstance(x, int) or not isinstance(y, int) or isinstance(x, bool) or isinstance(y, bool):
+        return False
+    return x <= center.x < x + width and y <= center.y < y + height
+
+
+def _ancestor_refs(snap: object, target: object) -> set:
+    by_ref = _by_ref(snap)
+    found: set = set()
+    parent = getattr(target, "parent", None)
+    current = by_ref.get(parent) if parent else None
+    while current is not None:
+        ref = getattr(current, "ref", None)
+        if not ref or ref in found:
+            break
+        found.add(ref)
+        parent = getattr(current, "parent", None)
+        current = by_ref.get(parent) if parent else None
+    return found
+
+
+def _covering_box(snap: object, node: object, center: object):
+    """Smallest real box in ``node``'s subtree that contains ``center``, or None."""
+    best = None
+    best_area = None
+    for el in _subtree(snap, node):
+        bounds = getattr(el, "bounds", None)
+        if not _contains_center(bounds, center):
+            continue
+        area = bounds.width * bounds.height
+        if best_area is None or area < best_area:
+            best = bounds
+            best_area = area
+    return best
+
+
+def _cover_label(element: object) -> str:
+    title = str(getattr(element, "title", "") or "").strip()
+    if title:
+        return repr(title)
+    role = str(getattr(element, "role", "") or "window")
+    if role.startswith("AX"):
+        role = role[2:]
+    return role.lower() or "window"
+
+
+class _ElementView:
+    """Snapshot-shaped object whose ``elements`` are a subset of another read."""
+
+    __slots__ = ("elements",)
+
+    def __init__(self, elements) -> None:
+        self.elements = tuple(elements)
+
+
+def _without_refs(snap: object, refs: set) -> _ElementView:
+    return _ElementView(
+        el for el in _snap_elements(snap) if getattr(el, "ref", None) not in refs
+    )
+
+
+def _cover_rows(snap: object, cover: object) -> tuple:
+    return tuple(sorted((_page_row(el) for el in _subtree(snap, cover)), key=_sort_key))
+
+
+def occluded_click_effect(before: object, after: object, target: object) -> str | None:
+    """Evidence when a click changed a cover and left the target alone.
+
+    None when the target disappeared, its own state changed, or anything
+    outside the cover changed. A window that appears only after the click
+    is not a cover. The point is the target's center. A cover is a dialog,
+    sheet, drawer, popover, menu, or other window that is not an ancestor
+    of the target, and one of its published boxes contains that center.
+    The smallest such box is the cover on top. This does not move the click.
+    """
+    center = _center_of(target)
+    if center is None:
+        return None
+    before_target = _match_control(target, before)
+    after_target = _match_control(target, after)
+    if before_target is None or after_target is None:
+        return None
+    if _relevant_target_state(before_target) != _relevant_target_state(after_target):
+        return None
+    ancestors = _ancestor_refs(before, before_target)
+    candidates = []
+    for el in _snap_elements(before):
+        if getattr(el, "role", "") not in _OCCLUDER_ROLES:
+            continue
+        ref = getattr(el, "ref", None)
+        if not ref or ref in ancestors or ref == getattr(before_target, "ref", None):
+            continue
+        box = _covering_box(before, el, center)
+        if box is None:
+            continue
+        candidates.append((box.width * box.height, str(ref), el))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    cover = candidates[0][2]
+    after_cover = _match_control(cover, after)
+    if after_cover is not None and _cover_rows(before, cover) == _cover_rows(after, after_cover):
+        return None
+    hidden = {getattr(el, "ref", None) for el in _subtree(before, cover)}
+    if after_cover is not None:
+        hidden.update(getattr(el, "ref", None) for el in _subtree(after, after_cover))
+    hidden.discard(None)
+    if relevant_state_changed(_without_refs(before, hidden), _without_refs(after, hidden), target):
+        return None
+    return f"covered by {_cover_label(cover)}"
+
+
 # Text the user is editing, plus a spreadsheet cell. A tab strip or toolbar
 # around that text is not part of this record: Mousepad's document lives
 # under a tab group, which the page fingerprint skips.
