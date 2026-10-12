@@ -2370,6 +2370,74 @@ def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkey
     assert scrolls == [5, 5]
 
 
+def test_scroll_to_find_stops_once_a_short_document_table_is_on_screen(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The table starts below the window. One wheel brings its box inside.
+    The missing id is not on the page. Page Down is not a second search:
+    those snapshots are what pushed the live short page past 12s.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+    phase = {"n": 0}
+
+    def shot() -> Snapshot:
+        tall = phase["n"] == 0
+        table_height = 900 if tall else 500
+        table_y = 80 if tall else 40
+        els = [
+            Element(ref="win", role="AXWindow", title="tickets", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+            Element(ref="table", role="AXTable", title="Tickets", value=None,
+                    bounds=Bounds(0, 20, table_y, 400, table_height), snapshot_id="s"),
+            Element(ref="a", role="AXCell", title="4001", value=None,
+                    bounds=Bounds(0, 24, table_y + 40, 80, 22), snapshot_id="s"),
+            Element(ref="last", role="AXCell", title="4025", value=None,
+                    bounds=Bounds(0, 24, table_y + table_height - 30, 80, 22), snapshot_id="s"),
+            Element(ref="next", role="AXLink", title="Next", value=None,
+                    bounds=Bounds(0, 24, table_y + table_height - 8, 40, 18), snapshot_id="s"),
+        ]
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot()
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            phase["n"] += 1
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+        def scroll_offset(self, _element):
+            return float(phase["n"])
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
+    assert out.startswith("not found after 1 scroll")
+    assert "page_unchanged" not in out
+    assert "pagedown" not in chords
+    assert scrolls == [5]
+
+
 def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome table.
 
