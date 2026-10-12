@@ -141,6 +141,19 @@ as an image part, asks for `{"x","y"}` on a 0..1000 grid, and scales that
 point onto the image. It loads bfloat16 when that dtype runs, otherwise
 float16, stops generation on `}` with `max_new_tokens` 14 and the
 tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored.
+A `+cpu` torch and the default PyPI torchvision wheel are different builds.
+Importing that wheel raises `RuntimeError: operator torchvision::nms does not exist`.
+The `[holo]` extra lists `torch`, `torchvision`, and `transformers`, and pip
+cannot choose a wheel index from that extra. Install torch and torchvision
+from the same index before the extra. For a CPU torch:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+```
+
+`HoloLocalGrounding.ground` turns that import or load failure into
+`GroundingUnavailable` and includes this command. It does not download a
+CUDA wheel.
 
 When the model clicks a ref that is not in the snapshot, the loop resolves
 that click only from the model's own call, before the payment, send, and
@@ -587,8 +600,11 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - the Holo parser scaling a 0..1000 `{"x","y"}` reply onto image pixels,
   the chat template and the processor both receiving the image, and torch
   threads staying at most 4 (`tests/test_grounding.py`). A processor load
-  that fails because torchvision is missing names that package. Those tests
-  mock the stack. They do not download weights.
+  that fails because torchvision is missing names that package. An import
+  or a processor load that raises `RuntimeError: operator torchvision::nms
+  does not exist` is `GroundingUnavailable` and names the CPU index
+  (`pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision`).
+  Those tests mock the stack. They do not download weights.
 - click resolution (`tests/test_vision_order.py`): a missing ref is not
   chosen from the goal, including "Do not click Archive"; an explicit
   `x`/`y` stays on that point, including a `double_click` that must not

@@ -15,6 +15,7 @@ from a11y_computer_use.agent.grounding import (
     HOLO_MODEL_ID,
     GroundingUnavailable,
     HoloLocalGrounding,
+    _CPU_TORCH_INSTALL,
     _package_named_by,
     _torch_stack,
     parse_grounding_text,
@@ -108,7 +109,66 @@ def test_processor_load_keeps_an_unrelated_error(monkeypatch) -> None:
     _install_stack(monkeypatch, _Torch(), _ModelCls(), _ProcessorCls())
     with pytest.raises(GroundingUnavailable, match="truncated") as raised:
         HoloLocalGrounding().ground(_png(8, 8), "icon")
-    assert "missing package" not in str(raised.value)
+    message = str(raised.value)
+    assert "missing package" not in message
+    assert "download.pytorch.org" not in message
+
+
+def test_torchvision_nms_runtime_error_on_import_is_grounding_unavailable(monkeypatch) -> None:
+    """A +cpu torch plus the PyPI torchvision wheel raises this at import."""
+    def fake_import(name: str) -> object:
+        if name == "torchvision":
+            raise RuntimeError("operator torchvision::nms does not exist")
+        return object()
+
+    monkeypatch.setattr("a11y_computer_use.agent.grounding._try_import", fake_import)
+    with pytest.raises(GroundingUnavailable) as raised:
+        _torch_stack()
+    message = str(raised.value)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "torchvision::nms" in message
+    assert "same build" in message
+    assert "same index" in message
+    assert _CPU_TORCH_INSTALL in message
+    assert "not installed" not in message
+
+
+def test_processor_load_nms_runtime_error_names_the_cpu_index(monkeypatch) -> None:
+    class _BrokenProcessor:
+        def from_pretrained(self, model_id: str) -> None:
+            del model_id
+            raise RuntimeError("operator torchvision::nms does not exist")
+
+    _install_stack(monkeypatch, _Torch(), _ModelCls(), _BrokenProcessor())
+    with pytest.raises(GroundingUnavailable) as raised:
+        HoloLocalGrounding().ground(_png(8, 8), "the green SUBMIT button")
+    message = str(raised.value)
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert "could not load torchvision" in message
+    assert "torchvision::nms" in message
+    assert _CPU_TORCH_INSTALL in message
+    assert "not installed" not in message
+
+
+def test_import_oserror_from_torchvision_names_the_cpu_index(monkeypatch) -> None:
+    def fake_import(name: str) -> object:
+        if name == "torchvision":
+            raise OSError("undefined symbol in libtorchvision")
+        return object()
+
+    monkeypatch.setattr("a11y_computer_use.agent.grounding._try_import", fake_import)
+    with pytest.raises(GroundingUnavailable) as raised:
+        _torch_stack()
+    message = str(raised.value)
+    assert isinstance(raised.value.__cause__, OSError)
+    assert "same build" in message
+    assert _CPU_TORCH_INSTALL in message
+    assert "not installed" not in message
+
+
+def test_cpu_torch_install_command_is_documented() -> None:
+    text = (Path(__file__).resolve().parents[1] / "docs" / "agent.md").read_text()
+    assert _CPU_TORCH_INSTALL in text
 
 
 def test_holo_ground_reports_a_missing_local_stack(monkeypatch) -> None:
@@ -371,8 +431,8 @@ def test_holo_extra_pins_transformers_and_vendors_no_weights() -> None:
     assert "torch" in extra
     assert "torchvision" in extra
     assert "transformers>=5.6,<5.20" in extra
-    # CPU torch (for example 2.14.1+cpu) satisfies torchvision's torch
-    # requirement. The extra does not point at a CUDA wheel index.
+    # A PEP 621 extra cannot select a wheel index. A +cpu torch needs
+    # torchvision from that same index; the extra does not embed a URL.
     assert all("cuda" not in dep.lower() and "://" not in dep for dep in extra)
     root = Path(__file__).resolve().parents[1]
     weights = [
