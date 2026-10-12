@@ -13454,6 +13454,78 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
     return painted
 
 
+_TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
+
+
+def _window_lacks_showing_and_visible(node) -> bool:
+    """True when ``node`` reported states and none of them are on screen.
+
+    An empty or missing state set is false: a node that never reported
+    states is not treated as hidden.
+    """
+    sset = _call_first(node, ("get_state_set",))
+    if sset is None:
+        return False
+    names = getattr(sset, "names", None)
+    if isinstance(names, (set, frozenset, list, tuple)):
+        folded = {str(item).upper() for item in names}
+        if not folded:
+            return False
+        return "SHOWING" not in folded and "VISIBLE" not in folded
+    return not _state_has(node, "SHOWING") and not _state_has(node, "VISIBLE")
+
+
+def _wraps_showing_browser_document(node, depth: int = 0) -> bool:
+    """True when a frame still holds the page the user can see.
+
+    Firefox parents the showing ``document web`` under a frame whose own
+    state set is only ENABLED. That frame is the page. A hidden dialog
+    whose children are ordinary controls is not. The walk is bounded and
+    uses the raw child list, so it does not call back into the filter.
+    """
+    if node is None or depth > 5:
+        return False
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return False
+    for index in range(min(count, 12)):
+        child = _child_at(node, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if (
+            role in {"document web", "internal frame", "document frame"}
+            and _state_has(child, "SHOWING")
+        ):
+            return True
+        if _wraps_showing_browser_document(child, depth + 1):
+            return True
+    return False
+
+
+def _hidden_window(node) -> bool:
+    """True for a frame, window, or dialog that is not on screen.
+
+    FeatherPad keeps its Replace dialog in the tree as a frame named
+    Replacement. The state set is only ENABLED, and the box is a strip at
+    the parent origin, so bounds alone would keep it. A window that is
+    SHOWING or VISIBLE stays. An empty or missing state set stays too: a
+    node that never reported states is not treated as hidden. Other roles
+    are not this case. A frame that still wraps a SHOWING browser document
+    stays, because that document is the page.
+    """
+    if node is None or _role_name(node) not in _TOP_LEVEL_WINDOW_ROLES:
+        return False
+    if not _window_lacks_showing_and_visible(node):
+        return False
+    return not _wraps_showing_browser_document(node)
+
+
+def _without_hidden_windows(kids: list) -> list:
+    """Drop nested frames and windows that are not showing and not visible."""
+    return [child for child in kids if not _hidden_window(child)]
+
+
 def _with_table_body(node, kids: list) -> list:
     """Append a GTK table's body cells when the children are only headers.
 
@@ -13461,7 +13533,13 @@ def _with_table_body(node, kids: list) -> list:
     column headers. ``Table.get_n_rows`` is the file rows. Cells already
     present as children are not added again. A table that already exposes
     row children is unchanged, and a table with no rows stays header-only.
+
+    Every ordinary snapshot walk returns through here, so a hidden frame
+    (FeatherPad's Replace dialog) is removed before the table check. A
+    showing or visible window is kept. A control that is not a window is
+    kept even when it is not showing.
     """
+    kids = _without_hidden_windows(kids)
     if _role_name(node) not in {"table", "tree table"}:
         return kids
     rows = _call_first(node, ("get_n_rows",), default=None)
