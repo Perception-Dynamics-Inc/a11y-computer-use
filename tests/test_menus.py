@@ -438,7 +438,7 @@ def test_alert_and_dialog_roles_are_dialogs() -> None:
 
     assert _atspi._ROLE["dialog"] == "AXDialog"
     assert _atspi._ROLE["alert"] == "AXDialog"
-    assert _atspi._ROLE["file chooser"] == "AXWindow"
+    assert _atspi._ROLE["file chooser"] == "AXDialog"
     assert _atspi._ROLE["color chooser"] == "AXWindow"
 
 

@@ -78,7 +78,10 @@ _ROLE = {
     "window": "AXWindow",
     "dialog": "AXDialog",
     "alert": "AXDialog",
-    "file chooser": "AXWindow",
+    # ATSPI_ROLE_FILE_CHOOSER is a dialog (Ristretto Open, GTK FileChooserDialog).
+    # AXWindow rendered it as a document window. The name is the title; the
+    # Value interface is not the chosen path, so the value probe stays off.
+    "file chooser": "AXDialog",
     "color chooser": "AXWindow",
     "menu item": "AXMenuItem",
     "menu bar": "AXMenuBar",
@@ -2207,7 +2210,11 @@ class ATSPIAccessor:
                 checked = flag == "true"
         # Groups skip the value probe. A div is a section, and its text is
         # the inline sentence; reading that one string is what find matches.
-        value = None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str)
+        # A file chooser is a dialog, but its name is the title. Probing Value
+        # used to be skipped when the role was a window.
+        value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
+            node, role, role_str,
+        )
         if value is None:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:

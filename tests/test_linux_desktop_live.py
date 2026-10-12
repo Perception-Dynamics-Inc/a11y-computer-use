@@ -786,3 +786,68 @@ def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 child.kill()
+
+
+_FILE_CHOOSER_SRC = r"""
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+GLib.set_prgname("cuafilechooser")
+dialog = Gtk.FileChooserDialog(title="Open image", action=Gtk.FileChooserAction.OPEN)
+dialog.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+dialog.add_button("_Open", Gtk.ResponseType.ACCEPT)
+dialog.set_default_size(640, 420)
+dialog.move(80, 60)
+dialog.connect("destroy", Gtk.main_quit)
+dialog.show_all()
+Gtk.main()
+"""
+
+
+def _stop_proc(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@requires_desktop
+def test_gtk_file_chooser_snapshots_as_dialog(tmp_path) -> None:
+    """A GTK file chooser is a dialog in the snapshot, including the nested widget."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    script = tmp_path / "cuafilechooser.py"
+    script.write_text(_FILE_CHOOSER_SRC)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+    try:
+        def shot():
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuafilechooser")
+            except Exception:
+                return None
+            if any(el.title == "Open image" for el in snap.elements):
+                return snap
+            return None
+
+        snap = _until(shot, timeout=15)
+        assert snap is not None, "the GTK file chooser did not appear"
+        titled = [el for el in snap.elements if el.title in {"Open image", "File Chooser Widget"}]
+        assert titled, [(el.role, el.title) for el in snap.elements]
+        assert all(el.role == "AXDialog" for el in titled), [(el.role, el.title) for el in titled]
+        rendered = observe.render_text(snap, mode="full")
+        assert 'dialog "Open image"' in rendered
+        assert 'window "Open image"' not in rendered
+        if any(el.title == "File Chooser Widget" for el in snap.elements):
+            assert 'dialog "File Chooser Widget"' in rendered
+            assert 'window "File Chooser Widget"' not in rendered
+        assert any(el.role == "AXButton" and el.title in {"Cancel", "Open"} for el in snap.elements), rendered
+    finally:
+        _stop_proc(proc)
