@@ -5480,9 +5480,12 @@ class Runtime:
         The search stops when ``budget_s`` seconds have elapsed (15 by
         default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). The note
         names the scroll container, its scroll position, and the last rows
-        on screen. A paginated or virtualized table is stepped with Ctrl+F
-        and Page Down before the wheel. ``page_unchanged`` is used only
-        when that container's scroll offset was read and did not move.
+        on screen. A document or a table is tried with Ctrl+F first. A
+        paginated or virtualized table that already fits in the window
+        then steps with Page Down. A table that still runs past the
+        window keeps the wheel, so the last rows can come on screen.
+        ``page_unchanged`` is used only when that container's scroll
+        offset was read and did not move.
 
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
@@ -5664,15 +5667,23 @@ class Runtime:
                 return tuple(names)
 
             def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
-                """A paginated or virtualized table, which steps by a page.
+                """A paginated or virtualized table that already fits the window.
 
-                A Next link is pagination. A table that fits in the window
-                and has its own bar is virtualized. A body-scroll list is
-                neither, and keeps the wheel.
+                A Next link is pagination when the table does not run past
+                the window. A table that fits and has its own bar is
+                virtualized. A table that still extends below the window
+                is a document scroll: the wheel brings the last rows up.
+                A body-scroll list is neither, and keeps the wheel.
                 """
                 if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
                     return False
                 if not callable(getattr(self.driver, "key_chord", None)):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                _left, top, _right, bottom = box
+                if anchor.bounds.y + anchor.bounds.height > bottom + 8:
                     return False
                 for el in shot.elements:
                     title = (el.title or "").strip().casefold()
@@ -5680,14 +5691,39 @@ class Runtime:
                         return True
                 if not any(el.role == "AXScrollBar" for el in shot.elements):
                     return False
-                box = viewport_box(shot)
-                if box is None:
-                    return False
-                _left, top, _right, bottom = box
                 if anchor.bounds.height >= (bottom - top) - 8:
                     return False
                 visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
                 return visible <= 80
+
+            def wants_in_page_find(shot: Snapshot, anchor: Element | None) -> bool:
+                """Ctrl+F once before the wheel, for a document or a table.
+
+                An overflow list shorter than the window keeps the wheel,
+                including the walk back to an early row. A tall list, the
+                document group, or a viewport-sized scroll area is body
+                content, and find lands the row without a step per viewport.
+                """
+                if not text or "\n" in text or len(text) > 80 or anchor is None:
+                    return False
+                if not callable(getattr(self.driver, "key_chord", None)):
+                    return False
+                if not callable(getattr(self.driver, "type_text", None)):
+                    return False
+                if anchor.role in ("AXTable", "AXGrid", "AXOutline"):
+                    return True
+                if document_anchor(anchor):
+                    return True
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                _left, top, _right, bottom = box
+                window_h = bottom - top
+                if anchor.role == "AXList":
+                    return anchor.bounds.height > window_h + 8
+                if anchor.role == "AXScrollArea":
+                    return anchor.bounds.height > window_h * 0.7
+                return False
 
             def read_offset(anchor: Element | None) -> str:
                 fn = getattr(self.driver, "scroll_offset", None)
@@ -5719,24 +5755,31 @@ class Runtime:
                 )
 
             def try_in_page_find(anchor: Element) -> str | None:
-                """Ctrl+F once. The match is returned only when a later snapshot shows it."""
+                """Ctrl+F once. The match is returned only when a later snapshot shows it.
+
+                Escape closes the find bar before that snapshot, so the ref
+                is the page. A miss does not count as a scroll.
+                """
                 if not text or "\n" in text or len(text) > 80:
                     return None
                 if not callable(getattr(self.driver, "type_text", None)):
                     return None
-                kind, verified = "missing", None
                 try:
                     self.driver.key_chord("ctrl+f")
                     self.driver.type_text(text)
                     self.driver.key_chord("Return")
                     time.sleep(0.2)
-                    kind, verified = confirming_snapshot(issued)
                 except Exception:
-                    kind, verified = "missing", None
+                    try:
+                        self.driver.key_chord("Escape")
+                    except Exception:
+                        pass
+                    return None
                 try:
                     self.driver.key_chord("Escape")
                 except Exception:
                     pass
+                kind, verified = confirming_snapshot(issued + 1)
                 if kind == "found":
                     return verified
                 return None
@@ -5897,6 +5940,11 @@ class Runtime:
                 if seen_document and document_anchor(anchor):
                     wheel = 1 if step > 0 else -1
                 last_anchor = anchor
+                if not find_tried and wants_in_page_find(snap, anchor):
+                    find_tried = True
+                    found = try_in_page_find(anchor)
+                    if found:
+                        return found
                 if page_mode and prefers_page_step(snap, anchor):
                     if not find_tried:
                         find_tried = True
@@ -8072,8 +8120,10 @@ def build_server(
         matching ref(s) or a not-found note. The search stops at budget_s
         seconds (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S) and
         reports the container, its scroll position, and the last rows seen.
-        A paginated or virtualized table is searched with Ctrl+F and Page
-        Down before the wheel. page_unchanged is raised only when that
+        A document or a table is searched with Ctrl+F first. A paginated
+        or virtualized table that already fits in the window then uses
+        Page Down before the wheel. A table that still runs past the
+        window keeps the wheel. page_unchanged is raised only when that
         container's scroll offset was read and did not move. The ref is from a snapshot taken
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll

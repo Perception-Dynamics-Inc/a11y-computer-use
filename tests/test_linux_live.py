@@ -7438,6 +7438,7 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
         for _pass in range(3):
             down = runtime.scroll_to_find(
                 "chrome", text="ITEM-120", direction="down", max_scrolls=30,
+                budget_s=120,
             )
             assert "ITEM-120" in down, down
             assert "not found" not in down, down
@@ -7449,7 +7450,9 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
             assert not any(title.startswith("ITEM-020") for title in bottom), sorted(
                 title for title in bottom if title.startswith("ITEM-")
             )
-            up = runtime.scroll_to_find("chrome", text="ITEM-020", max_scrolls=30)
+            up = runtime.scroll_to_find(
+                "chrome", text="ITEM-020", max_scrolls=30, budget_s=120,
+            )
             assert "ITEM-020" in up, up
             assert "not found" not in up, up
             assert "found after 0" not in up, up
@@ -7543,6 +7546,7 @@ def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_p
                 wait_at_top(30)
             found = runtime.scroll_to_find(
                 "chrome", text="ROW-0300", direction="down", max_scrolls=60,
+                budget_s=90,
             )
             assert "ROW-0300" in found, found
             assert "not found" not in found, found

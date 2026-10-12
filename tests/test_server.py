@@ -1858,6 +1858,136 @@ def test_scroll_to_find_pages_a_table_before_the_wheel(monkeypatch) -> None:
     assert scrolls == []
 
 
+def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    A body-scroll document tries Ctrl+F before the wheel. The row is
+    returned only after the find bar is closed and a later snapshot
+    still shows it inside the window. No wheel is sent.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    def shot(found: bool) -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="rows", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 700), snapshot_id="s"),
+            Element(ref="page", role="AXGroup", title="Rows", value=None,
+                    bounds=Bounds(0, 0, 40, 900, 640), snapshot_id="s"),
+            Element(ref="a", role="AXListItem", title="ITEM-001 scroll-row", value=None,
+                    bounds=Bounds(0, 20, 80, 400, 28), snapshot_id="s"),
+        ]
+        if found:
+            els.append(Element(
+                ref="hit", role="AXListItem", title="ITEM-180 scroll-row", value=None,
+                bounds=Bounds(0, 20, 200, 400, 28), snapshot_id="s",
+            ))
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 700, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        found = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot(_D.found)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+            if chord == "Return":
+                _D.found = True
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-180", max_scrolls=15, budget_s=15)
+    assert "ITEM-180" in out
+    assert "found after 1 scroll" in out
+    assert "found after 0" not in out
+    assert chords[:3] == ["ctrl+f", "type:ITEM-180", "Return"]
+    assert "Escape" in chords
+    assert scrolls == []
+
+
+def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    A Next link under a table that still runs past the window is the
+    next page, not a reason to Page Down in place. The wheel moves the
+    document. The missing row is not found, and page_unchanged is not
+    reported.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    def shot() -> Snapshot:
+        els = [
+            Element(ref="win", role="AXWindow", title="tickets", value=None,
+                    bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+            Element(ref="table", role="AXTable", title="Tickets", value=None,
+                    bounds=Bounds(0, 20, 80, 400, 900), snapshot_id="s"),
+            Element(ref="a", role="AXCell", title="4001", value=None,
+                    bounds=Bounds(0, 24, 120, 80, 22), snapshot_id="s"),
+            Element(ref="next", role="AXLink", title="Next", value=None,
+                    bounds=Bounds(0, 24, 1000, 40, 18), snapshot_id="s"),
+        ]
+        return Snapshot(
+            snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+            displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+        )
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return shot()
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+        def scroll_offset(self, _element):
+            return 0
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="cell", max_scrolls=30, budget_s=15)
+    assert out.startswith("not found after")
+    assert "page_unchanged" not in out
+    assert "pagedown" not in chords
+    assert "ctrl+f" in chords
+    assert scrolls == [5, 5]
+
+
 def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome table.
 
