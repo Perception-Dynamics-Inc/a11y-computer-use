@@ -4406,7 +4406,9 @@ def showing_toplevels(node) -> list:
 
     One showing window is that window alone, so a single-window snapshot
     stays one tree. A window that is not SHOWING (minimized) is left out, as
-    are menus and tooltips. When several windows are ACTIVE, the first in
+    are menus and tooltips. A GTK combo's popup window is left out too: its
+    items already sit under the combo, and listing it would replace the
+    frame that owns the combo. When several windows are ACTIVE, the first in
     child order leads and the rest keep that order.
     """
     if node is None:
@@ -4423,6 +4425,8 @@ def showing_toplevels(node) -> list:
         if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
             continue
         if not _state_has(child, "SHOWING"):
+            continue
+        if _combo_owning_popup(child) is not None:
             continue
         frames.append(child)
     if len(frames) <= 1:

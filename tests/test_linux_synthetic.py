@@ -11126,6 +11126,18 @@ def test_showing_toplevels_lists_showing_windows_active_first() -> None:
     assert [node.name for node in _atspi.showing_toplevels(only)] == ["Only"]
 
 
+def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
+    dialog = _WindowNode("dialog", "Form", states={"SHOWING"})
+    popup = _WindowNode("window", "", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "app", children=[popup, dialog])
+
+    def owns(node):
+        return node if node is popup else None
+
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", owns)
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
+
+
 def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     from a11y_computer_use.drivers import _linux_system
 
