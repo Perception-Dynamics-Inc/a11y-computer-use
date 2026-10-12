@@ -1099,11 +1099,12 @@ def test_agent_clicks_a_canvas_target_behind_a_toolbar(tmp_path, isolated_home, 
 
 @requires_display
 def test_agent_look_again_refines_an_off_target_canvas_click(tmp_path, isolated_home, pages) -> None:
-    """A point a few pixels off the red square is refined onto it.
+    """A point a few pixels off the red square is not moved onto it.
 
     The scripted model asks for a miss. ``ScriptedGrounding`` returns the
-    marked pixel shifted back by that same distance, in the crop's own
-    pixels, and the page records ``canvas-hit``.
+    marked pixel shifted back by that same distance. The trajectory records
+    that suggestion. The click that is sent is the model's point, and the
+    page records ``canvas-miss``.
     """
     import io
     import re
@@ -1168,12 +1169,15 @@ def test_agent_look_again_refines_an_off_target_canvas_click(tmp_path, isolated_
         grounding=stub,
     )
     assert result.status == "success", result
-    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-hit"
+    assert _eval(browser, "document.getElementById('result').textContent") == "canvas-miss"
     assert len(stub.seen) == 1
     rows = [json.loads(line) for line in (trace / "trajectory.jsonl").read_text().splitlines()]
     notes = [row for row in rows if row.get("kind") == "look_again"]
     assert notes and notes[0]["decision"] == "refine"
     assert notes[0]["snap"]["type"] != "ref"
+    clicks = [row for row in rows if row.get("action") == "click"]
+    assert clicks and clicks[0]["args"]["x"] == int(point["x"]) + offset
+    assert clicks[0]["args"]["y"] == int(point["y"])
     _assert_trace(result, trace)
 
 

@@ -1,6 +1,7 @@
-"""Hermetic checks for tree, then an OCR word, then Holo.
+"""Hermetic checks for click resolution and OCR word boxes.
 
-No weights are downloaded. OCR and the grounding model are stubs.
+The agent does not choose a click from the goal. OCR and the grounding
+model are stubs. No weights are downloaded.
 """
 
 from __future__ import annotations
@@ -148,7 +149,7 @@ def _run(goal: str, elements, calls, **kwargs):
     runtime = kwargs.pop("runtime", None) or FakeRuntime(elements)
     events: list = []
     agent = Agent(
-        ScriptedModel(calls if callable(calls) else [calls]),
+        ScriptedModel(calls if callable(calls) or isinstance(calls, list) else [calls]),
         runtime=runtime,
         on_event=events.append,
         trace_dir=kwargs.pop("trace_dir", None),
@@ -158,20 +159,236 @@ def _run(goal: str, elements, calls, **kwargs):
     return result, runtime
 
 
-def test_tree_match_clicks_the_ref_and_does_not_call_ocr(monkeypatch) -> None:
+def test_goal_text_does_not_click_archive(monkeypatch) -> None:
+    """'Do not click Archive' is not a target. A missing ref stays missing."""
     def fail_ocr(*_args, **_kwargs):
-        raise AssertionError("OCR runs only after the tree misses")
+        raise AssertionError("goal text must not start OCR")
 
     monkeypatch.setattr(ocr, "ocr", fail_ocr)
-    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    elements = window(
+        el("e2", "AXButton", "Archive", parent="e1", clickable=True),
+        el("e3", "AXButton", "Save draft", parent="e1", clickable=True),
+        el("e4", "AXButton", "Chrome", parent="e1", clickable=True),
+        el("e5", "AXStaticText", "Draft", parent="e1"),
+    )
     result, runtime = _run(
-        'press "Save"',
+        "Click the Save draft button in Chrome. Do not click Archive.",
         elements,
-        turn(ToolCall("click", {"ref": "e999"})),
+        turn(ToolCall("click", {"ref": "e990"}), text="click the Archive button"),
         max_steps=1,
     )
-    assert runtime.calls == [("click", {"ref": "e2"})]
-    assert result.steps == 1
+    assert runtime.calls == [("click", {"ref": "e990"})]
+    assert result.step_log[0].args.get("ref") == "e990"
+    assert result.step_log[0].target.get("name") != "Archive"
+
+
+def test_explicit_canvas_point_is_not_rewritten_to_chrome(monkeypatch) -> None:
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("an x/y click must not start OCR")
+
+    class _Ground:
+        def ground(self, png, instruction):
+            del png, instruction
+            raise AssertionError("an x/y click must not call Holo")
+
+    monkeypatch.setattr(ocr, "ocr", fail_ocr)
+    elements = window(
+        el("e18", "AXButton", "Chrome", parent="e1", clickable=True),
+        el("e2", "AXButton", "SUBMIT", parent="e1", clickable=True),
+        el("e3", "canvas", "pad", parent="e1", bounds=Bounds(0, 400, 80, 400, 300)),
+    )
+    point = {"x": 532, "y": 205, "display_id": 0}
+    _result, runtime = _run(
+        "In the Chrome window, click the green SUBMIT button drawn on the canvas.",
+        elements,
+        turn(ToolCall("click", point)),
+        grounding=_Ground(),
+        max_steps=1,
+        look_again=False,
+    )
+    assert runtime.calls == [("click", point)]
+
+
+def test_ref_plus_point_is_invalid_arguments() -> None:
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    result, runtime = _run(
+        "Click Save.",
+        elements,
+        turn(ToolCall("click", {"ref": "e2", "x": 10, "y": 20})),
+        max_steps=1,
+    )
+    assert runtime.calls == []
+    error = result.step_log[0].error or ""
+    assert error.startswith("invalid_arguments: click:")
+    assert "ref and x/y" in error
+
+
+def test_missing_ref_resolves_only_from_its_last_known_name(tmp_path) -> None:
+    """The stale ref's own name is the target. A goal word is not."""
+    save = el("e2", "AXButton", "Save draft", parent="e1", clickable=True)
+    ping = el("e4", "AXButton", "Ping", parent="e1", clickable=True)
+    archive = el("e3", "AXButton", "Archive", parent="e1", clickable=True)
+    runtime = FakeRuntime(window(save, ping, archive))
+
+    def on_call(name, params, rt):
+        if name == "click" and params.get("ref") == "e4":
+            rt.elements = [
+                item for item in rt.elements if item.ref != "e2"
+            ]
+            rt.elements.append(el("e5", "AXButton", "Save draft", parent="e1", clickable=True))
+
+    runtime.on_call = on_call
+    result, runtime = _run(
+        "Click the Save draft button in Chrome. Do not click Archive.",
+        runtime.elements,
+        [
+            turn(ToolCall("click", {"ref": "e4"})),
+            turn(ToolCall("click", {"ref": "e2"})),
+        ],
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=2,
+    )
+    assert runtime.calls == [
+        ("click", {"ref": "e4"}),
+        ("click", {"ref": "e5"}),
+    ]
+    assert all(call[1].get("ref") != "e3" for call in runtime.calls)
+    note = "resolved e2 from last-known AXButton 'Save draft' to e5"
+    assert note in (result.step_log[1].result or "")
+    rows = [
+        __import__("json").loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+    ]
+    click = next(row for row in rows if row.get("action") == "click" and row["args"].get("ref") == "e5")
+    assert click["requested"] == {"name": "click", "args": {"ref": "e2"}}
+    assert click["resolved_from"] == note
+
+
+def test_b5_and_d3_coordinate_clicks_stay_on_their_points(monkeypatch) -> None:
+    """Benchmark-style x/y clicks are not rewritten onto a goal word."""
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("an x/y click must not start OCR")
+
+    monkeypatch.setattr(ocr, "ocr", fail_ocr)
+    elements = window(
+        el("e2", "AXButton", "B5", parent="e1", clickable=True),
+        el("e3", "AXButton", "Chrome", parent="e1", clickable=True),
+        el("e4", "AXButton", "Archive", parent="e1", clickable=True),
+        el("e5", "AXStaticText", "D3", parent="e1"),
+    )
+    b5 = {"x": 640, "y": 360, "display_id": 0}
+    _result, runtime = _run(
+        "Open the B5 total in Chrome.",
+        elements,
+        turn(ToolCall("click", b5)),
+        max_steps=1,
+        look_again=False,
+    )
+    assert runtime.calls == [("click", b5)]
+
+    d3 = {"x": 120, "y": 88, "display_id": 0}
+    _result, runtime = _run(
+        "Set D3. Do not click Archive.",
+        elements,
+        turn(ToolCall("click", d3)),
+        max_steps=1,
+        look_again=False,
+    )
+    assert runtime.calls == [("click", d3)]
+
+
+def test_double_click_point_is_not_rewritten_to_upload(monkeypatch) -> None:
+    """B5's x/y double-click stays on that point. Upload in the goal is not the target.
+
+    The same point rule covers right_click and the other pointer gestures,
+    and a scroll at x/y. A name the loop does not know is an error, not a
+    click on Upload.
+    """
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("an x/y double-click must not start OCR")
+
+    monkeypatch.setattr(ocr, "ocr", fail_ocr)
+    elements = window(
+        el("e2", "AXButton", "Upload", parent="e1", clickable=True),
+        el("e3", "AXButton", "B5", parent="e1", clickable=True),
+        el("e4", "AXButton", "Chrome", parent="e1", clickable=True),
+    )
+    point = {"x": 640, "y": 360, "display_id": 0}
+    goal = "Open the B5 total in Chrome. Do not click Upload."
+    gestures = {
+        "double_click": {"button": "left", "count": 2},
+        "right_click": {"button": "right", "count": 1},
+        "middle_click": {"button": "middle", "count": 1},
+        "triple_click": {"button": "left", "count": 3},
+        "left_click": {"button": "left", "count": 1},
+    }
+    for name, gesture in gestures.items():
+        _result, runtime = _run(
+            goal,
+            elements,
+            turn(ToolCall(name, {**point, "button": "right", "count": 1})),
+            max_steps=1,
+            look_again=False,
+        )
+        assert runtime.calls == [("click", {**point, **gesture})], name
+        assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+
+    _result, runtime = _run(
+        goal,
+        elements,
+        turn(ToolCall("scroll", {**point, "dy": -3})),
+        max_steps=1,
+        look_again=False,
+    )
+    assert runtime.calls == [("scroll", {**point, "dx": 0, "dy": -3})]
+    assert all(call[0] != "click" for call in runtime.calls)
+
+    for name in ("drag", "hover", "mouse_move"):
+        result, runtime = _run(
+            goal,
+            elements,
+            turn(ToolCall(name, point)),
+            max_steps=1,
+            look_again=False,
+        )
+        assert runtime.calls == [], name
+        assert result.step_log[0].error == f"unknown action {name!r}"
+
+    rejected, runtime = _run(
+        goal,
+        elements,
+        turn(ToolCall("double_click", {"ref": "e2", "x": 640, "y": 360})),
+        max_steps=1,
+    )
+    assert runtime.calls == []
+    error = rejected.step_log[0].error or ""
+    assert error.startswith("invalid_arguments: double_click:")
+    assert "ref and x/y" in error
+
+
+def test_pointer_gestures_still_stop_for_payment_and_send() -> None:
+    """A double-click on Pay now and a right-click on Send use the click gates."""
+    pay = window(el("e2", "AXButton", "Pay now", parent="e1", clickable=True))
+    stopped, runtime = _run(
+        "finish the form",
+        pay,
+        turn(ToolCall("double_click", {"ref": "e2"})),
+        max_steps=1,
+    )
+    assert stopped.status == "needs_human", stopped
+    assert stopped.needs_human["kind"] == "payment"
+    assert runtime.calls == []
+
+    send = window(el("e2", "AXButton", "Send", parent="e1", clickable=True))
+    refused, runtime = _run(
+        "finish the form",
+        send,
+        turn(ToolCall("right_click", {"ref": "e2"})),
+        max_steps=2,
+    )
+    assert runtime.calls == []
+    assert any("approval_denied" in (step.error or "") for step in refused.step_log)
 
 
 def test_existing_ref_is_not_rewritten(monkeypatch) -> None:
@@ -192,27 +409,17 @@ def test_existing_ref_is_not_rewritten(monkeypatch) -> None:
     assert runtime.calls[0] == ("click", {"ref": "e2"})
 
 
-def test_ocr_word_is_clicked_and_holo_is_not_called(monkeypatch) -> None:
-    called: list[str] = []
-
+def test_a_goal_word_does_not_call_holo(monkeypatch) -> None:
     def fake_ocr(_image, **_kwargs):
-        return [{
-            "text": "Saved Messages",
-            "bounds": {"display_id": 0, "x": 10, "y": 8, "width": 114, "height": 16},
-            "words": [
-                _word("Saved", 10, 8, 40, 16),
-                _word("Messages", 54, 8, 70, 16),
-            ],
-        }]
+        raise AssertionError("a missing ref with no last-known name does not OCR")
 
     class _Ground:
         def ground(self, png, instruction):
             del png, instruction
-            called.append("holo")
-            raise AssertionError("Holo runs only when OCR finds no word")
+            raise AssertionError("a missing ref is not grounded from the goal")
 
     monkeypatch.setattr(ocr, "ocr", fake_ocr)
-    elements = window(el("e2", "AXButton", "Other", parent="e1", clickable=True))
+    elements = window(el("e2", "AXButton", "Messages", parent="e1", clickable=True))
     _result, runtime = _run(
         'open "Messages"',
         elements,
@@ -220,143 +427,82 @@ def test_ocr_word_is_clicked_and_holo_is_not_called(monkeypatch) -> None:
         grounding=_Ground(),
         max_steps=1,
     )
-    assert called == []
-    assert runtime.calls == [("click", {"x": 54 + 35, "y": 8 + 8, "display_id": 0})]
+    assert runtime.calls == [("click", {"ref": "e999"})]
 
 
-def test_a_line_box_is_not_the_click_so_holo_runs(monkeypatch) -> None:
-    seen: list[tuple] = []
-
-    def fake_ocr(_image, **_kwargs):
-        return [{
-            "text": "Saved Messages",
-            "bounds": {"display_id": 0, "x": 10, "y": 8, "width": 400, "height": 16},
-        }]
-
-    class _Ground:
-        def ground(self, png, instruction):
-            seen.append((png, instruction))
-            return type("Hit", (), {"x": 15, "y": 12})()
-
-    monkeypatch.setattr(ocr, "ocr", fake_ocr)
-    elements = window(el("e2", "opaque_region", "", parent="e1", bounds=Bounds(0, 0, 0, 400, 300)))
-    _result, runtime = _run(
-        'open "Messages"',
+def test_ambiguous_and_inexact_names_are_errors() -> None:
+    elements = window(
+        el("e2", "AXButton", "Save", parent="e1", clickable=True),
+        el("e3", "AXButton", "Save", parent="e1", clickable=True),
+        el("e4", "AXButton", "Archive now", parent="e1", clickable=True),
+    )
+    ambiguous, runtime = _run(
+        "Do not click Archive.",
         elements,
-        turn(ToolCall("click", {"ref": "e999"})),
-        grounding=_Ground(),
+        turn(ToolCall("click", {"label": "Save"})),
         max_steps=1,
     )
-    assert seen and seen[0][1] == 'open "Messages"'
-    assert runtime.calls == [("click", {"x": 15, "y": 12, "display_id": 0})]
-
-
-def test_model_point_is_kept_when_ocr_misses_and_holo_is_not_called(monkeypatch) -> None:
-    def fake_ocr(_image, **_kwargs):
-        return [{
-            "text": "Ready",
-            "words": [_word("Ready", 1, 1, 20, 10)],
-        }]
-
-    class _Ground:
-        def ground(self, png, instruction):
-            del png, instruction
-            raise AssertionError("a planner point is not replaced by Holo")
-
-    monkeypatch.setattr(ocr, "ocr", fake_ocr)
-    elements = window(el("e2", "AXButton", "Ready", parent="e1", clickable=True))
-    _result, runtime = _run(
-        "Click the red square drawn inside the canvas.",
-        elements,
-        turn(ToolCall("click", {"x": 220, "y": 120, "display_id": 0})),
-        grounding=_Ground(),
-        max_steps=1,
-    )
-    assert runtime.calls == [("click", {"x": 220, "y": 120, "display_id": 0})]
-
-
-def test_holo_snaps_only_into_a_small_tree_or_word_box(monkeypatch) -> None:
-    def no_text(_image, **_kwargs):
-        return []
-
-    class _Ground:
-        def ground(self, png, instruction):
-            del png, instruction
-            return {"x": 15, "y": 15}
-
-    monkeypatch.setattr(ocr, "ocr", no_text)
-    small = el(
-        "e2", "AXButton", "Mark", parent="e1", clickable=True,
-        bounds=Bounds(0, 10, 10, 40, 20),
-    )
-    _result, runtime = _run(
-        "choose the icon",
-        window(small),
-        turn(ToolCall("click", {"ref": "e999"})),
-        grounding=_Ground(),
-        max_steps=1,
-    )
-    assert runtime.calls == [("click", {"x": 30, "y": 20, "display_id": 0})]
-
-    wide = el(
-        "e2", "AXButton", "Banner", parent="e1", clickable=True,
-        bounds=Bounds(0, 0, 0, 400, 30),
-    )
-    _result, runtime = _run(
-        "choose the icon",
-        window(wide),
-        turn(ToolCall("click", {"ref": "e999"})),
-        grounding=_Ground(),
-        max_steps=1,
-    )
-    assert runtime.calls == [("click", {"x": 15, "y": 15, "display_id": 0})]
-
-
-def test_holo_point_is_mapped_with_the_screenshot_scale(monkeypatch) -> None:
-    def no_text(_image, **_kwargs):
-        return []
-
-    class _Image:
-        png = PNG
-        width = 100
-        height = 50
-        source_width = 200
-        source_height = 100
-
-        def to_source(self, x: int, y: int) -> tuple[int, int]:
-            return x * 2, y * 2
-
-    class _Ground:
-        def ground(self, png, instruction):
-            assert png == PNG
-            assert instruction == "choose the icon"
-            return {"x": 10, "y": 5}
-
-    monkeypatch.setattr(ocr, "ocr", no_text)
-    runtime = FakeRuntime(window(el("e2", "AXButton", "Other", parent="e1", clickable=True)))
-    runtime.screenshot = lambda **_kwargs: ("display 3: 100x50 px image", _Image())  # type: ignore[method-assign]
-    _result, runtime = _run(
-        "choose the icon",
-        runtime.elements,
-        turn(ToolCall("click", {"ref": "e999"})),
-        runtime=runtime,
-        grounding=_Ground(),
-        max_steps=1,
-    )
-    assert runtime.calls == [("click", {"x": 20, "y": 10, "display_id": 3})]
-
-
-def test_tree_payment_label_stops_before_the_click_is_sent() -> None:
-    pay = el(
-        "e2", "AXButton", "Pay now", parent="e1", clickable=True,
-        bounds=Bounds(0, 100, 200, 80, 40),
-    )
-    result, runtime = _run(
-        'press "Pay now"',
-        window(pay),
-        turn(ToolCall("click", {"ref": "e999"})),
-        max_steps=1,
-    )
-    assert result.status == "needs_human", result
-    assert result.needs_human["kind"] == "payment"
     assert runtime.calls == []
+    assert "2 elements have the exact name 'Save'" in (ambiguous.step_log[0].error or "")
+
+    missing, runtime = _run(
+        "Do not click Archive.",
+        elements,
+        turn(ToolCall("click", {"label": "Archive"})),
+        max_steps=1,
+    )
+    assert runtime.calls == []
+    assert "no element has the exact name 'Archive'" in (missing.step_log[0].error or "")
+
+
+def test_resolved_payment_and_send_still_stop(tmp_path) -> None:
+    pay = el("e2", "AXButton", "Pay now", parent="e1", clickable=True)
+    other = el("e4", "AXButton", "Ping", parent="e1", clickable=True)
+    runtime = FakeRuntime(window(pay, other))
+
+    def swap_pay(name, params, rt):
+        if name == "click" and params.get("ref") == "e4":
+            rt.elements = [item for item in rt.elements if item.ref != "e2"]
+            rt.elements.append(el("e9", "AXButton", "Pay now", parent="e1", clickable=True))
+
+    runtime.on_call = swap_pay
+    stopped, runtime = _run(
+        "finish the form",
+        runtime.elements,
+        [
+            turn(ToolCall("click", {"ref": "e4"})),
+            turn(ToolCall("click", {"ref": "e2"})),
+        ],
+        runtime=runtime,
+        max_steps=2,
+    )
+    assert stopped.status == "needs_human", stopped
+    assert stopped.needs_human["kind"] == "payment"
+    assert "resolved e2 from last-known AXButton 'Pay now' to e9" in stopped.reason
+    assert [call for call in runtime.calls if call[1].get("ref") == "e9"] == []
+
+    send = el("e2", "AXButton", "Send", parent="e1", clickable=True)
+    ping = el("e4", "AXButton", "Ping", parent="e1", clickable=True)
+    runtime = FakeRuntime(window(send, ping))
+
+    def swap_send(name, params, rt):
+        if name == "click" and params.get("ref") == "e4":
+            rt.elements = [item for item in rt.elements if item.ref != "e2"]
+            rt.elements.append(el("e9", "AXButton", "Send", parent="e1", clickable=True))
+
+    runtime.on_call = swap_send
+    refused, runtime = _run(
+        "finish the form",
+        runtime.elements,
+        [
+            turn(ToolCall("click", {"ref": "e4"})),
+            turn(ToolCall("click", {"ref": "e2"})),
+            turn(ToolCall("done", {"answer": "held", "conditions": [{"window_title_contains": "Demo"}]})),
+        ],
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=3,
+    )
+    assert [call for call in runtime.calls if call[1].get("ref") == "e9"] == []
+    assert any("resolved e2 from last-known AXButton 'Send' to e9" in (step.result or "") for step in refused.step_log)
+    assert any("approval_denied" in (step.error or "") for step in refused.step_log)

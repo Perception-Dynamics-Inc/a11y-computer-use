@@ -143,33 +143,36 @@ float16, stops generation on `}` with `max_new_tokens` 14 and the
 tokenizer EOS id, and caps torch at 4 threads. Weights are not vendored.
 
 When the model clicks a ref that is not in the snapshot, the loop resolves
-the click in this order before the payment and approval gates, so the click
-that runs is the one those gates see:
+that click only from the model's own call, before the payment, send, and
+confirm gates, so those gates see the resolved target:
 
-1. The accessibility tree. An enabled element whose title is a label in the
-   goal (or in the model's turn text) is clicked by that ref. Window, group,
-   and opaque roles are not candidates.
-2. OCR text match. RapidOCR runs on the screenshot. When a line matches a
-   label, the click is the center of the word box on that line. A RapidOCR
-   line box, and any box whose text contains whitespace, is not a click
-   target. `words` on the span are the input boxes; the span bounds are the
-   line union.
-3. Holo, only when step 2 finds no word and the click did not already
-   include `x` and `y`. The caller must have passed `grounding`. A point
-   snaps to a tree element box or a word box only when that box is at most
-   200 by 40 pixels; otherwise the raw point is used. Icons with no text
-   take this step.
+- An explicit `label`, with no `ref` and no `x`/`y`, matches an enabled
+  control whose title is that exact name (case-insensitive, internal
+  whitespace collapsed). One match becomes that ref. Zero matches, or more
+  than one, is an error and nothing is clicked. A shorter or longer title
+  is not a match.
+- A missing `ref` matches an enabled control with the same role and the
+  same exact name that ref had the last time it was in a snapshot. One
+  match becomes that ref, and the step records `resolved_from` plus the
+  same sentence on the tool result. Zero matches, or more than one, is a
+  `stale_ref` error. A ref that was never seen is left as that click so
+  the runtime can report `stale_ref`. The goal, the turn text, and a
+  negative clause are not names.
 
-A ref that is already in the tree is not rewritten. A click that already
-has `x` and `y` stays on that point when OCR does not match, so the
-planner's coordinate is not replaced by Holo. Worker threads
+A ref that is already in the tree is not rewritten. A click with `x` and
+`y` and no `ref` is that coordinate click. It is not moved onto a tree
+element, an OCR word, or a point from Holo. `double_click`, `right_click`,
+`middle_click`, `triple_click`, and `left_click` use the same rules. The
+name sets the button and count (`double_click` is a left click with count
+2, `right_click` is the right button). An `x`/`y` on any of them stays on
+that point. `scroll` at `x`/`y` stays that scroll. A name the loop does not
+know is an error and is not turned into a click on a word from the goal.
+`click` (and each of those gestures) with both a `ref` and `x` or `y` is
+`invalid_arguments` and is not sent. Worker threads
 (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and
 `torch.set_num_threads` when torch is already imported) are capped at 4
-before OCR and before Holo. A pool already set lower is not raised. Torch
-is not imported by this step. The 11 October 2026 local eval of this order
-measured 42 of 47 targets with OCR then Holo, and 29 of 47 with Holo alone.
-Look-again is a later check on the coordinate click this order returns. It
-is not part of this loop. A model with
+before fallback OCR and before a grounding suggestion. A pool already set
+lower is not raised. Torch is not imported by this step. A model with
 `supports_images` false stops as `needs_human` with `kind` `unsupported`
 instead of continuing without the picture. A runtime with no `crop` method
 still receives the window screenshot.
@@ -179,12 +182,13 @@ Before a coordinate click is sent, the loop looks again. It crops a 640 by
 image, and shows that crop at 2× (an unclipped crop is a 1280 by 800 PNG
 whose screen bounds stay 640 by 400). A magenta crosshair marks the point.
 The verifier accepts it or returns a better point in the crop. A reply that
-is not a point counts as accept, and the original point stays. When the
-verifier's point is more than 40 screen pixels from the proposed point, the
-loop does not click that point. It looks again once at the full screenshot,
-at 1×, and the click is that second point. A distance of 40 does not open
-the full-screen look. If the full-screen verifier is unavailable, the
-original point is clicked. When `grounding` is set, that local model is the
+is not a point counts as accept. The click that is sent is still the
+model's `x` and `y`. Look-again does not move that point, does not snap it
+to a ref, and does not snap it to an OCR word. When the verifier's point is
+more than 40 screen pixels from the proposed point, the loop records
+`disagree` and looks again once at the full screenshot, at 1×. That second
+point is recorded and is not the click. A distance of 40 does not open the
+full-screen look. When `grounding` is set, that local model is the
 verifier (`HoloLocalGrounding` or a test `ScriptedGrounding`). Otherwise the
 verifier is one short image turn on the main model, with no tools. The check
 does not call a hosted or paid grounding service. `Agent(..., look_again=False)`, or
@@ -192,22 +196,21 @@ does not call a hosted or paid grounding service. `Agent(..., look_again=False)`
 A model with `supports_images` false and no grounding model skips it too,
 and the trajectory records `skipped` `no_image_support`. A screenshot that
 cannot be decoded is the same kind of skip (`no_screenshot`); the original
-click still goes through the approval gate. After the verifier answers, a
-point inside an accessibility-tree element that is not a window, group, or
-canvas is clicked by that ref. A point inside a word-level OCR box from
-`a11y_computer_use.ocr` (`words=True`) is clicked at that word's center.
-RapidOCR line boxes are not snap targets: only `word_results` is used, and
-a span that still contains whitespace is split by character count. A missing
-OCR engine does not fail the click. RapidOCR's ONNX intra-op and inter-op
-thread counts are 4, and `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and
-`OPENBLAS_NUM_THREADS` are capped at 4. The marked crop, the decision
-(`accept`, `refine`, `unavailable`, `skipped`, or `disagree`), the distance,
-and the snap are lines in `trajectory.jsonl` (`kind` `look_again`) and on
-the step. A disagreement records the crop, then a second line for the
-full-screen look; the step keeps the last one. The click that is actually
-sent, including a snapped ref, still uses the approval gate, the payment
-stop, and typed outcomes. One crop check per coordinate click, plus the
-full-screen look only when that check disagrees by more than 40 pixels.
+click still goes through the approval gate. The recorded snap names a tree
+element or a word box under the verifier's point when one is there. It is
+not applied. RapidOCR line boxes are not snap targets: only `word_results`
+is used, and a span that still contains whitespace is split by character
+count. A missing OCR engine does not fail the click. RapidOCR's ONNX
+intra-op and inter-op thread counts are 4, and `OMP_NUM_THREADS`,
+`MKL_NUM_THREADS`, and `OPENBLAS_NUM_THREADS` are capped at 4. The marked
+crop, the decision (`accept`, `refine`, `unavailable`, `skipped`, or
+`disagree`), the distance, and the snap are lines in `trajectory.jsonl`
+(`kind` `look_again`) and on the step. A disagreement records the crop,
+then a second line for the full-screen look; the step keeps the last one.
+The coordinate click already passed the approval gate, the payment stop,
+and typed outcomes as the model's point. One crop check per coordinate
+click, plus the full-screen look only when that check disagrees by more
+than 40 pixels.
 
 ## CLI
 
@@ -586,11 +589,16 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   threads staying at most 4 (`tests/test_grounding.py`). A processor load
   that fails because torchvision is missing names that package. Those tests
   mock the stack. They do not download weights.
-- the click order tree, then an OCR word, then Holo
-  (`tests/test_vision_order.py`): a line box is not a target, an OCR match
-  does not call Holo, a model `x`/`y` is kept when OCR misses, a Holo point
-  snaps only into a box at most 200 by 40, and worker threads stay at or
-  under 4. No weights are downloaded.
+- click resolution (`tests/test_vision_order.py`): a missing ref is not
+  chosen from the goal, including "Do not click Archive"; an explicit
+  `x`/`y` stays on that point, including a `double_click` that must not
+  move onto a control named Upload; `right_click`, `middle_click`,
+  `triple_click`, `left_click`, and `scroll` at `x`/`y` stay on that point;
+  `ref` together with `x`/`y` is `invalid_arguments`; a missing ref resolves
+  only to the same role and exact name it last had; an ambiguous or inexact
+  name is an error. Word boxes, the 200 by 40 snap helper, and the thread
+  cap of 4 are still checked. No weights are downloaded. The 11 October
+  2026 figures of 42 of 47 and 29 of 47 are not a measurement of this resolver.
 - `crop` returning an image block on the tool message, and a failed crop
   staying a crop (no coordinate click, no Escape)
 - untrusted fences: wrapping, escaping a forged closing tag, and the
@@ -664,8 +672,8 @@ Not in this change:
   `HoloLocalGrounding` loads only when the caller constructs it. The
   `[holo]` extra is not installed by the test run.
   Look-again is the later check described above: a 640 by 400 crop at 2×
-  before a coordinate click is sent. The click order returns a ref or a
-  coordinate click so that check can run on the coordinate.
+  before a coordinate click is sent. It verifies or records a different
+  point. It does not replace the model's `x`/`y` with another element.
 
 `crop` is on the MCP server and in the reference loop's observation tools.
 `a11y-computer-use agent` still uses the reference loop.

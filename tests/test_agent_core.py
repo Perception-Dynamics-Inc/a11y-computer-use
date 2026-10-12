@@ -2613,7 +2613,7 @@ def test_validate_action_rejects_unknown_fields() -> None:
     assert validate_action(Action("type", {"text": "hi", "ref": "e1"})) is None
     assert validate_action(Action("click", {"x": 1, "y": 2, "_source_ref": "e2"})) == (
         "invalid_arguments: click: unknown field '_source_ref'; "
-        "expected button, count, display_id, ref, x, y"
+        "expected button, count, display_id, label, ref, x, y"
     )
     for schema in tool_schemas(allow_exec=True):
         assert schema["parameters"]["additionalProperties"] is False
@@ -2906,7 +2906,7 @@ def test_look_again_accepts_the_marked_point(tmp_path, monkeypatch):
 
 
 def test_look_again_refines_a_point_with_the_main_model(tmp_path, monkeypatch):
-    """No grounding model: one short image turn may move the point."""
+    """No grounding model: one short image turn may suggest a point. The click stays."""
     _silence_ocr(monkeypatch)
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = _runtime_with_png(elements)
@@ -2935,7 +2935,7 @@ def test_look_again_refines_a_point_with_the_main_model(tmp_path, monkeypatch):
     )
     assert result.status == "success", result
     assert verifies["n"] == 1
-    assert runtime.calls[0] == ("click", {"x": 105, "y": 100, "display_id": 0})
+    assert runtime.calls[0] == ("click", {"x": 100, "y": 100, "display_id": 0})
     note = _look_rows(tmp_path)[0]
     assert note["decision"] == "refine"
     assert note["verifier"] == "model"
@@ -2944,7 +2944,7 @@ def test_look_again_refines_a_point_with_the_main_model(tmp_path, monkeypatch):
 
 
 def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypatch):
-    """The refined point inside Save is a ref click, and Pay now still stops."""
+    """A point inside Save is not rewritten to that ref. Pay now is not substituted in."""
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
     from a11y_computer_use.outcome import ActionResult
 
@@ -2976,7 +2976,7 @@ def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypa
     )
     assert result.status == "success", result
     assert len(stub.seen) == 1
-    assert runtime.calls == [("click", {"ref": "e2"})]
+    assert runtime.calls == [("click", {"x": 100, "y": 100, "display_id": 0})]
     assert result.step_log[0].verified is True
     note = _look_rows(tmp_path)[0]
     assert note["decision"] == "accept"
@@ -3000,10 +3000,11 @@ def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypa
         trace_dir=tmp_path / "pay",
         grounding=pay_stub,
         max_retries=0,
+        max_steps=1,
     )
-    assert stopped.status == "needs_human", stopped
-    assert stopped.needs_human["kind"] == "payment"
-    assert pay_runtime.calls == []
+    assert stopped.status != "needs_human"
+    assert stopped.needs_human is None
+    assert pay_runtime.calls == [("click", {"x": 100, "y": 100, "display_id": 0})]
     assert len(pay_stub.seen) == 1
     pay_note = _look_rows(tmp_path / "pay")[0]
     assert pay_note["snap"]["type"] == "ref"
@@ -3011,7 +3012,7 @@ def test_look_again_snaps_a_point_inside_a_control_to_its_ref(tmp_path, monkeypa
 
 
 def test_look_again_snaps_a_point_to_an_ocr_word_center(tmp_path, monkeypatch):
-    """A point inside a word box, and not a control, clicks that word's center."""
+    """A word under the point is recorded. The coordinate click is not moved."""
     import a11y_computer_use.ocr as ocr_mod
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
 
@@ -3039,7 +3040,7 @@ def test_look_again_snaps_a_point_to_an_ocr_word_center(tmp_path, monkeypatch):
     )
     assert result.status == "success", result
     assert len(stub.seen) == 1
-    assert runtime.calls[0] == ("click", {"x": 110, "y": 100, "display_id": 0})
+    assert runtime.calls[0] == ("click", {"x": 100, "y": 100, "display_id": 0})
     note = _look_rows(tmp_path)[0]
     assert note["decision"] == "accept"
     assert note["snap"]["type"] == "ocr"
@@ -3200,9 +3201,10 @@ def test_look_again_zoom_requests_a_640_by_400_native_crop(tmp_path, monkeypatch
 
 
 def test_look_again_disagreement_over_40px_uses_the_full_screen(tmp_path, monkeypatch):
-    """A crop point more than 40 screen pixels away is not clicked.
+    """A crop point more than 40 screen pixels away is not the click.
 
-    The second verifier sees the full screenshot. Its point is the click.
+    The second verifier sees the full screenshot. Its point is recorded.
+    The click stays on the model's coordinates.
     """
     import io
 
@@ -3262,7 +3264,7 @@ def test_look_again_disagreement_over_40px_uses_the_full_screen(tmp_path, monkey
 
 
 def test_look_again_forty_screen_pixels_does_not_open_a_second_look(tmp_path, monkeypatch):
-    """Exactly 40 screen pixels is still the crop point, not a full-screen retry."""
+    """Exactly 40 screen pixels is recorded and does not move the click."""
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
 
     _silence_ocr(monkeypatch)
@@ -3288,7 +3290,7 @@ def test_look_again_forty_screen_pixels_does_not_open_a_second_look(tmp_path, mo
     )
     assert result.status == "success", result
     assert len(stub.seen) == 1
-    assert runtime.calls[0] == ("click", {"x": 840, "y": 500, "display_id": 0})
+    assert runtime.calls[0] == ("click", {"x": 800, "y": 500, "display_id": 0})
     notes = _look_rows(tmp_path)
     assert len(notes) == 1
     assert notes[0]["decision"] == "refine"
@@ -3297,7 +3299,7 @@ def test_look_again_forty_screen_pixels_does_not_open_a_second_look(tmp_path, mo
 
 
 def test_look_again_snaps_a_word_inside_a_line_not_the_line_center(tmp_path, monkeypatch):
-    """A wide OCR line is split into words. The click is the word, not the line."""
+    """A wide OCR line is split into words. The recorded snap is the word, not the click."""
     import a11y_computer_use.ocr as ocr_mod
     from a11y_computer_use.agent.grounding import GroundingHit, ScriptedGrounding
 
@@ -3324,7 +3326,7 @@ def test_look_again_snaps_a_word_inside_a_line_not_the_line_center(tmp_path, mon
         max_retries=0,
     )
     assert result.status == "success", result
-    assert runtime.calls[0] == ("click", {"x": 120, "y": 100, "display_id": 0})
+    assert runtime.calls[0] == ("click", {"x": 100, "y": 100, "display_id": 0})
     note = _look_rows(tmp_path)[0]
     assert note["snap"]["type"] == "ocr"
     assert note["snap"]["x"] == 120
