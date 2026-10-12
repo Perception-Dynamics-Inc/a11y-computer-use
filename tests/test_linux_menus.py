@@ -247,20 +247,30 @@ def test_libreoffice_menu_bar_presses_its_single_unnamed_action() -> None:
     assert uppercase.pressed == ["click"]
 
 
-def test_unnamed_action_is_not_pressed_outside_a_single_menu() -> None:
-    """The empty-action fallback is role menu and exactly one action."""
+def test_one_action_runs_whatever_its_name_and_a_named_press_still_wins() -> None:
+    """Exactly one action is index 0, including an empty name on a menu item.
+
+    A named press still wins when another action is present. Two actions and
+    no named press stay a refusal.
+    """
     leaf = Acc("menu item", "Outline", states=("sensitive", "enabled"), actions=("",))
     view = _menu("View", leaf)
     bar = Acc("menu bar", "", [view])
     leaf_app = Acc("application", "soffice", [Acc("frame", "Impress", [bar], states={"active"})])
-    with pytest.raises(ComputerUseError) as leaf_exc:
-        _linux_menus.menu_press(
-            leaf_app, "View > Outline", settle=lambda _s: None, dismiss=lambda: None,
-        )
-    assert leaf_exc.value.detail["reason"] == "press_failed"
-    assert leaf_exc.value.detail["level"] == 1
-    assert leaf.pressed == []
+    assert _linux_menus.menu_press(
+        leaf_app, "View > Outline", settle=lambda _s: None, dismiss=lambda: None,
+    ) == "Outline"
+    assert leaf.pressed == [""]
     assert view.pressed == ["click"]
+
+    weird = Acc("menu item", "Outline", states=("sensitive", "enabled"), actions=("expand",))
+    weird_view = _menu("View", weird)
+    weird_bar = Acc("menu bar", "", [weird_view])
+    weird_app = Acc("application", "soffice", [Acc("frame", "Impress", [weird_bar], states={"active"})])
+    assert _linux_menus.menu_press(
+        weird_app, "View > Outline", settle=lambda _s: None, dismiss=lambda: None,
+    ) == "Outline"
+    assert weird.pressed == ["expand"]
 
     ambiguous = Acc(
         "menu", "View", [_item("Outline")],
@@ -272,7 +282,9 @@ def test_unnamed_action_is_not_pressed_outside_a_single_menu() -> None:
         [Acc("frame", "Impress", [ambiguous_bar], states={"active"})],
     )
     with pytest.raises(ComputerUseError) as menu_exc:
-        _linux_menus.menu_press(ambiguous_app, "View", settle=lambda _s: None)
+        _linux_menus.menu_press(
+            ambiguous_app, "View", settle=lambda _s: None, dismiss=lambda: None,
+        )
     assert menu_exc.value.detail["reason"] == "press_failed"
     assert menu_exc.value.detail["level"] == 0
     assert ambiguous.pressed == []
@@ -288,6 +300,47 @@ def test_unnamed_action_is_not_pressed_outside_a_single_menu() -> None:
     )
     assert _linux_menus.menu_press(named_app, "Format", settle=lambda _s: None) == "Format"
     assert named.pressed == ["click"]
+
+
+def test_a_press_that_does_not_open_the_submenu_is_an_error() -> None:
+    """A true action that leaves the menu empty and unselected did not open it."""
+    from a11y_computer_use.drivers._atspi import dispatch_menu_leaf
+
+    view = Acc("menu", "View", states=("sensitive", "enabled"), actions=("",))
+    bar = Acc("menu bar", "", [view])
+    app = Acc("application", "soffice", [Acc("frame", "Impress", [bar], states={"active"})])
+    with pytest.raises(ComputerUseError) as exc:
+        _linux_menus.menu_press(
+            app, "View", settle=lambda _s: None, dismiss=lambda: None,
+            dispatch=dispatch_menu_leaf,
+        )
+    assert exc.value.code is ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "submenu_not_open"
+    assert exc.value.detail["level"] == 0
+    assert "View" in exc.value.message
+    assert view.pressed == [""]
+
+    class _Fill(_Action):
+        def do_action(self, index):
+            assert index == 0
+            self.node.pressed.append(self.node.actions[index])
+            self.node.children = [_item("Normal"), _item("Outline")]
+            self.node.states.add("selected")
+            return True
+
+    opened = Acc("menu", "View", states=("sensitive", "enabled"), actions=("",))
+    opened.get_action_iface = lambda: _Fill(opened)  # type: ignore[method-assign]
+    opened_bar = Acc("menu bar", "", [opened])
+    opened_app = Acc(
+        "application", "soffice",
+        [Acc("frame", "Impress", [opened_bar], states={"active"})],
+    )
+    assert _linux_menus.menu_press(
+        opened_app, "View", settle=lambda _s: None, dispatch=dispatch_menu_leaf,
+    ) == "View"
+    assert opened.pressed == [""]
+    assert _linux_menus.menu_state(opened_app) == {"open": True, "path": ["View"]}
+    assert [row["title"] for row in _linux_menus.menu_items(opened_app, "View")] == ["Normal", "Outline"]
 
 
 def test_classify_leaf_press_treats_a_timeout_as_dispatched() -> None:

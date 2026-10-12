@@ -179,7 +179,8 @@ jobs:
       # the pointer checks, and xclip for the clipboard. libreoffice-calc and
       # libreoffice-gtk3 are the Calc cell test. libreoffice-writer is the
       # Writer paragraph click and the Writer table-cell set_value test.
-      # libreoffice-impress is the Impress title ref-click test.
+      # libreoffice-impress is the Impress title ref-click test and the
+      # Impress View menu-path test.
       # python3-pyqt6 is the
       # Qt fixture for the live line-edit, combo, and value test. The fixture
       # also accepts PySide6 and PyQt5. This job installs PyQt6: Ubuntu 24.04's

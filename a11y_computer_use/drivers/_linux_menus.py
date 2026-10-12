@@ -8,11 +8,12 @@ prefixes still go through `menus.match_title`.
 
 Listing reads the tree and does not press when the rows are already there. A
 menu that is empty until it is shown is opened and then closed. Pressing opens
-each level and activates the leaf with the item's ``click`` action. A menu
-whose only action has an empty name (LibreOffice menu-bar entries) is opened
-with that action. An open menu is one whose item is ``SELECTED`` or whose
-popup is ``SHOWING``. Close sends Escape and succeeds only after that menu is
-gone. A shortcut is the accelerator in the AT-SPI binding: a tagged chord, or
+each level and activates the leaf. A named press, click, or activate is used
+when the item has one. An item with exactly one action is activated even when
+that name is empty, which is how LibreOffice menu-bar entries open. A submenu
+press is an error when the menu does not open. An open menu is one whose item
+is ``SELECTED`` or whose popup is ``SHOWING``, or whose rows are present after
+the press. Close sends Escape and succeeds only after that menu is gone. A shortcut is the accelerator in the AT-SPI binding: a tagged chord, or
 a bare key name such as F11, not the Alt mnemonic letter.
 
 This module does not import ``gi``. Tests drive it with fake accessibles.
@@ -293,11 +294,10 @@ def _invoke_press(node: object) -> bool:
     and the elapsed time to tell a timeout from a real refusal.
 
     A named press action (``click``, ``press``, and the rest of
-    `_PRESS_ACTIONS`) wins. LibreOffice menu-bar entries are role ``menu``
-    and publish exactly one action whose name is the empty string.
-    ``do_action(0)`` on that node opens the menu. A single unnamed action
-    on any other role is not pressed, and a menu with more than one action
-    is not guessed.
+    `_PRESS_ACTIONS`) wins when the item has one. Otherwise an item with
+    exactly one action is run at index 0, whatever that action is named.
+    LibreOffice menu-bar entries are that case: one action whose name is
+    empty. Two or more actions and no named press are not guessed.
     """
     getter = None
     for name in ("get_action_iface", "get_action"):
@@ -317,14 +317,17 @@ def _invoke_press(node: object) -> bool:
         total = int(count_method() or 0)
     except (TypeError, ValueError):
         return False
+    named: int | None = None
+    sole: int | None = None
     for index in range(total):
-        if _action_name(action, index) not in _PRESS_ACTIONS:
-            continue
-        return _do_action(action, index)
-    # LibreOffice: role menu, one action, name "". Items inside still use click.
-    if total == 1 and _role(node) == "menu" and _action_name(action, 0) == "":
-        return _do_action(action, 0)
-    return False
+        if _action_name(action, index) in _PRESS_ACTIONS and named is None:
+            named = index
+        if total == 1:
+            sole = index
+    chosen = named if named is not None else sole
+    if chosen is None:
+        return False
+    return _do_action(action, chosen)
 
 
 def _press(node: object) -> bool:
@@ -469,6 +472,40 @@ def _is_open(node: object) -> bool:
     )
 
 
+def _submenu_opened(node: object) -> bool:
+    """True when a press left this menu showing its rows.
+
+    LibreOffice fills the rows when its single action runs and marks the bar
+    entry SELECTED. GTK often already has the rows before the press. Either
+    one counts. The bar label's own SHOWING does not.
+    """
+    return _is_open(node) or bool(entries_of(node))
+
+
+def _require_submenu(node: object, title: str, path: str, depth: int, settle) -> None:
+    """The action returned. A submenu that stays closed is not a successful press.
+
+    Rows are what the next path component is matched against, so a menu that
+    marks itself selected and then fills its rows is given a short beat to
+    publish those rows. Selected or showing with no rows still counts once
+    that beat is over: the menu did open.
+    """
+    settle(menus.MENU_OPEN_SETTLE_S)
+    if entries_of(node):
+        return
+    for _ in range(8):
+        if entries_of(node):
+            return
+        settle(0.05)
+    if _submenu_opened(node):
+        return
+    raise ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        f"the app did not open {title!r}",
+        detail={"path": path, "reason": "submenu_not_open", "level": depth},
+    )
+
+
 def _mnemonic_letter(node: object) -> str:
     """The menu item's mnemonic letter, from the AT-SPI key binding.
 
@@ -583,7 +620,7 @@ def _open_branch(app: object, path: str, settle) -> object:
                 )
             if top is None:
                 top = node
-            settle(menus.MENU_OPEN_SETTLE_S)
+            _require_submenu(node, title, path, depth, settle)
             container = node
     except Exception:
         if top is not None:
@@ -605,7 +642,8 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
     ``ok``, ``dispatched``, or ``refused``. A modal dialog's D-Bus reply is
     ``dispatched``, not a refusal. ``await_dialog(app, dispatched=...)``
     then waits for that window on the connection used for reads. Parent
-    menus stay on the synchronous press.
+    menus stay on the synchronous press. A component that has a submenu is
+    an error when that menu does not open after the action.
     """
     settle = settle or _settle
     dismiss = dismiss or _dismiss_menu
@@ -629,6 +667,13 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                     "hint": "Pressing the menu-bar entry again does not end GTK menu tracking.",
                 },
             )
+
+    def ensure_open(node: object, title: str, depth: int) -> None:
+        try:
+            _require_submenu(node, title, path, depth, settle)
+        except ComputerUseError:
+            abandon()
+            raise
 
     for depth, wanted in enumerate(components):
         try:
@@ -660,6 +705,8 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                     f"the app refused to press {title!r}",
                     detail={"path": path, "reason": "press_failed", "level": depth},
                 )
+            if _has_submenu(node):
+                ensure_open(node, title, depth)
             if await_dialog is not None:
                 await_dialog(app, dispatched=(outcome == "dispatched"))
             return title
@@ -671,9 +718,11 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
                 detail={"path": path, "reason": "press_failed", "level": depth},
             )
         if last:
+            if _has_submenu(node):
+                ensure_open(node, title, depth)
             return title
+        ensure_open(node, title, depth)
         opened.append(node)
-        settle(menus.MENU_OPEN_SETTLE_S)
         container = node
     raise AssertionError("unreachable")  # pragma: no cover
 

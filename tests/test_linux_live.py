@@ -6076,6 +6076,101 @@ def test_linux_writer_document_multiline_set_value_is_confirmed(tmp_path) -> Non
         _kill_libreoffice()
 
 
+def test_linux_libreoffice_menu_path_opens_writer_text_and_impress_view(tmp_path) -> None:
+    """Live. Writer Format > Text and Impress View open by menu path.
+
+    A LibreOffice menu-bar entry exposes one AT-SPI action whose name is
+    empty. The path press runs that action and the submenu is open
+    afterwards. Writer and Impress have to be installed; this does not
+    skip when either component is missing.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-writer is not installed"
+    assert os.path.isfile("/usr/lib/libreoffice/program/swriter"), "libreoffice-writer is not installed"
+    assert os.path.isfile("/usr/lib/libreoffice/program/simpress"), "libreoffice-impress is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+
+    def launch(factory: str, profile_name: str) -> subprocess.Popen:
+        profile = tmp_path / profile_name
+        _writer_profile(profile)
+        env = os.environ.copy()
+        env["SAL_USE_VCLPLUGIN"] = "gtk3"
+        env["GTK_MODULES"] = "gail:atk-bridge"
+        env["NO_AT_BRIDGE"] = "0"
+        return subprocess.Popen(
+            [
+                binary, "--nologo", "--norestore", "--nolockcheck",
+                f"-env:UserInstallation=file://{profile}", factory,
+            ],
+            env=env, start_new_session=True,
+        )
+
+    def wait_menu(title: str) -> list[str]:
+        deadline = time.monotonic() + 90
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            last = observe.render_text(shot)[:800]
+            if "Tip of the Day" in last:
+                time.sleep(0.4)
+                continue
+            try:
+                rows = driver.menu_items("soffice", None)
+            except ComputerUseError as exc:
+                last = exc.message
+                time.sleep(0.4)
+                continue
+            titles = [str(row.get("title") or "") for row in rows]
+            if title in titles:
+                return titles
+            last = ", ".join(titles) or last
+            time.sleep(0.4)
+        raise AssertionError(f"{title} was not on the menu bar\n{last}")
+
+    proc = launch("private:factory/swriter", "writer-menu")
+    try:
+        bar = wait_menu("Format")
+        assert "Format" in bar, bar
+        opened = driver.menu_press("soffice", "Format > Text")
+        assert opened == "Text", opened
+        state = driver.menu_state("soffice")
+        assert state.get("open") is True, state
+        assert state.get("path") == ["Format", "Text"], state
+        names = [str(row["title"]) for row in driver.menu_items("soffice", "Format > Text")]
+        assert "UPPERCASE" in names, names
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+    time.sleep(0.4)
+    proc = launch("private:factory/simpress", "impress-menu")
+    try:
+        bar = wait_menu("View")
+        assert "View" in bar, bar
+        opened = driver.menu_press("soffice", "View")
+        assert opened == "View", opened
+        state = driver.menu_state("soffice")
+        assert state.get("open") is True, state
+        assert state.get("path") == ["View"], state
+        names = [str(row["title"]) for row in driver.menu_items("soffice", "View")]
+        assert "Outline" in names or "Normal" in names, names
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_writer_txt_export_breaks_match_and_a_bom_is_evidence(tmp_path, monkeypatch) -> None:
     """Live Writer. A Text export's breaks satisfy contains, and a BOM is flagged.
 
