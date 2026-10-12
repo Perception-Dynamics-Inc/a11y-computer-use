@@ -696,9 +696,14 @@ def test_linux_drag_keeps_one_libreoffice_delta(monkeypatch) -> None:
 
 def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -> None:
     class _Acc:
-        role = "paragraph"
-        caret = -1
-        n = 31
+        def __init__(self, role="paragraph", parent=None, name="soffice"):
+            self.role = role
+            self.parent = parent
+            self.name = name
+            self.caret = -1
+            self.n = 31
+            self.states: set[str] = set()
+            self.children: list = []
 
         def get_role_name(self):
             return self.role
@@ -707,9 +712,19 @@ def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -
             return self
 
         def get_name(self):
-            return "soffice"
+            return self.name
 
-    acc = _Acc()
+        def get_parent(self):
+            return self.parent
+
+        def get_child_count(self):
+            return len(self.children)
+
+        def get_child_at_index(self, index):
+            return self.children[index]
+
+    document = _Acc("document text")
+    acc = _Acc(parent=document)
 
     class _Text:
         @staticmethod
@@ -744,6 +759,167 @@ def test_place_paragraph_caret_uses_the_end_when_the_point_misses(monkeypatch) -
     acc.role = "push button"
     assert _atspi.place_paragraph_caret(acc, 10, 10) is False
     assert _atspi.paragraph_click_verdict(acc) is None
+    slide = _Acc("document presentation")
+    shape = _Acc("shape", parent=slide)
+    title = _Acc(parent=shape)
+    title.children = []
+    shape.children = [title]
+    assert _atspi.is_libreoffice_text_paragraph(title) is False
+    assert _atspi.is_libreoffice_shape_text(title) is True
+    assert _atspi.place_paragraph_caret(title, 10, 10) is False
+    assert _atspi.paragraph_click_verdict(title) == (
+        "partial", "the text frame is not in text edit",
+    )
+    title.states = {"FOCUSED", "EDITABLE"}
+    monkeypatch.setattr(_atspi, "_state_has", lambda node, name: name in getattr(node, "states", ()))
+    assert _atspi.paragraph_click_verdict(title) == (
+        "confirmed", "a focused editable paragraph is inside the text frame",
+    )
+    title.states = {"FOCUSED"}
+    title.caret = 4
+    assert _atspi.paragraph_click_verdict(title) == (
+        "confirmed", "the caret is inside the text frame",
+    )
+    title.states = set()
+    title.caret = 4
+    assert _atspi.paragraph_click_verdict(title) == (
+        "partial", "the text frame is not in text edit",
+    )
+    drawing = _Acc("document drawing")
+    frame = _Acc("text frame", parent=drawing)
+    assert _atspi.is_libreoffice_shape_text(frame) is True
+    named = _Acc("panel", parent=slide, name="Text Frame ")
+    named.get_application = lambda: slide
+    assert _atspi.is_libreoffice_shape_text(named) is True
+    page = _Acc("panel", parent=slide, name="PageShape: Slide 1")
+    page.get_application = lambda: slide
+    assert _atspi.is_libreoffice_shape_text(page) is False
+    writer = _Acc(parent=document)
+    assert _atspi.is_libreoffice_text_paragraph(writer) is True
+
+
+def test_impress_title_click_uses_the_pointer_and_not_the_writer_caret(monkeypatch) -> None:
+    """An Impress paragraph click is a center pointer click, then a double-click.
+
+    The Writer caret shortcut must not run. A single click that does not
+    enter text edit is followed by a double-click at the same center. When
+    the first click already enters edit, the double-click is not sent.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _linux_input
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    handle = object()
+    clicks: list[tuple] = []
+    noted: list[tuple[int, int]] = []
+    editing = {"ready": False}
+
+    def pointer_click(x, y, *, button="left", count=1):
+        clicks.append((x, y, button, count))
+        if count >= 2:
+            editing["ready"] = True
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(_linux_input, "click", pointer_click)
+    monkeypatch.setattr(_atspi, "is_libreoffice_shape_text", lambda acc: acc is handle)
+    monkeypatch.setattr(
+        _atspi, "place_paragraph_caret",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("writer caret")),
+    )
+    monkeypatch.setattr(_atspi, "shape_text_editing", lambda acc: editing["ready"] and acc is handle)
+    monkeypatch.setattr(_atspi, "is_libreoffice_text_paragraph", lambda acc: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(LinuxDriver, "_pointer", lambda self, x, y: (int(x), int(y)))
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", lambda self, x, y: noted.append((int(x), int(y))))
+    element = Element(
+        "e4", "AXStaticText", "Paragraph: 0 Alpha Slide Title", "Alpha Slide Title",
+        Bounds(0, 100, 200, 80, 40), "snap-imp", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e4": handle})
+    assert driver.press_element(element) is False
+    driver.click(element)
+    assert clicks == [(140, 220, "left", 1), (140, 220, "left", 2)]
+    assert noted == [(140, 220)]
+    assert driver._focused_editable is handle
+
+    clicks.clear()
+    noted.clear()
+    editing["ready"] = True
+    driver._focused_editable = None
+    driver.click(element)
+    assert clicks == [(140, 220, "left", 1)]
+    assert driver._focused_editable is handle
+
+
+def test_type_text_impress_reads_the_title_when_the_document_text_is_empty(
+    fake_atspi, monkeypatch,
+) -> None:
+    """The presentation stays focused and its text stays empty.
+
+    The title paragraph is where the keys land. A read of the document
+    would be ``""`` and report text_mismatch after the title already holds
+    the characters. The type confirms from that paragraph. A paragraph
+    that never changes is a mismatch showing the title, not the empty
+    document.
+    """
+    app = _Acc("application", name="soffice.bin")
+    slide = _Acc(
+        "document presentation",
+        name="deck - LibreOffice Presentation",
+        states=("FOCUSED", "EDITABLE"),
+    )
+    slide.text = ""
+    slide.get_application = lambda: app
+    page = _Acc("panel", name="PageShape: Slide 1")
+    frame = _Acc("panel", name="Text Frame ")
+    title = _Acc(
+        "paragraph", name="Paragraph: 0",
+        states=("FOCUSED", "EDITABLE", "SHOWING"),
+    )
+    title.text = "Alpha Slide Title"
+    title.caret = 17
+    _adopt(frame, title)
+    _adopt(slide, page, frame)
+    reads = {"n": 0}
+    real_get_text = fake_atspi.Text.get_text
+
+    def get_text(acc, start, end):
+        if acc is title:
+            reads["n"] += 1
+            acc.text = "Alpha Slide Title" if reads["n"] < 3 else "Alpha Slide Title K1"
+        return real_get_text(acc, start, end)
+
+    monkeypatch.setattr(fake_atspi.Text, "get_text", staticmethod(get_text))
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_TYPE_SETTLE_POLLS", 4)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_atspi, "focused_text", lambda _app: "")
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: False)
+    monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _app, **_kwargs: (slide, False))
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: None)
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text(" K1") == 3
+    assert reads["n"] >= 3
+    assert title.text == "Alpha Slide Title K1"
+
+    reads["n"] = 0
+
+    def stuck(acc, start, end):
+        if acc is title:
+            acc.text = "Alpha Slide Title"
+        return real_get_text(acc, start, end)
+
+    monkeypatch.setattr(fake_atspi.Text, "get_text", staticmethod(stuck))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text(" K1")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "Alpha Slide Title"
 
 
 def test_hollow_page_tab_keeps_the_document_below_it() -> None:

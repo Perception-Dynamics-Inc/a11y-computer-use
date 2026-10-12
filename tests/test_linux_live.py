@@ -5455,6 +5455,122 @@ def test_linux_writer_paragraph_click_lands_in_that_paragraph(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def _impress_odp(path) -> None:
+    """A one-slide presentation whose title is ``Alpha Slide Title``."""
+    import zipfile
+
+    mimetype = b"application/vnd.oasis.opendocument.presentation"
+    manifest = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">
+ <manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="application/vnd.oasis.opendocument.presentation"/>
+ <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>
+"""
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3">
+ <office:body>
+  <office:presentation>
+   <draw:page draw:name="page1">
+    <draw:frame presentation:class="title" svg:width="22cm" svg:height="3.5cm" svg:x="2.5cm" svg:y="1.5cm">
+     <draw:text-box>
+      <text:p>Alpha Slide Title</text:p>
+     </draw:text-box>
+    </draw:frame>
+   </draw:page>
+  </office:presentation>
+ </office:body>
+</office:document-content>
+"""
+    styles = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" office:version="1.3">
+ <office:styles/>
+</office:document-styles>
+"""
+    with zipfile.ZipFile(path, "w") as archive:
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        archive.writestr(info, mimetype)
+        archive.writestr("META-INF/manifest.xml", manifest)
+        archive.writestr("content.xml", content)
+        archive.writestr("styles.xml", styles)
+
+
+def test_linux_impress_title_click_then_type_lands_in_the_title(tmp_path) -> None:
+    """Live Impress. A ref click on the title enters text edit, then type lands.
+
+    The Writer caret shortcut used to report the click and leave the slide
+    view focused, so End and the next type missed the title. The click is a
+    pointer click at the title's center. The outcome is confirmed only when
+    the frame is in text edit. End then type appends to the title.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    deck = tmp_path / "deck.odp"
+    _impress_odp(deck)
+    profile = tmp_path / "impress-profile"
+    _writer_profile(profile)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--impress", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(deck),
+        ],
+        env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:1200]
+                if _paragraph(shot, "Alpha Slide Title") is not None and "Tip of the Day" not in last:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Impress did not expose the title\n{last}"
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        title = _paragraph(current, "Alpha Slide Title")
+        assert title is not None, observe.render_text(current)[:1200]
+        clicked = runtime.click(title.ref)
+        assert clicked.outcome == "confirmed", (clicked, clicked.evidence)
+        assert "text frame" in clicked.evidence, clicked.evidence
+        runtime.key("End")
+        typed = runtime.type_text(" K1")
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        rendered = observe.render_text(current)
+        landed = _paragraph(current, "K1")
+        assert landed is not None, (typed, typed.evidence, rendered[:1200])
+        assert "Alpha Slide Title" in (landed.value or ""), (landed.value, rendered[:1200])
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def _dark_rows(png: bytes) -> list[int]:
     """Rows in a crop that contain the paragraph's ink.
 

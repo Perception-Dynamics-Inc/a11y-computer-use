@@ -1673,9 +1673,12 @@ class LinuxDriver:
         if handle is None:
             return False
         self._refuse_hidden(element, handle)
-        # A paragraph's activating action does not place the caret. The click
-        # path does, and confirming that click checks the caret afterwards.
+        # A Writer paragraph's action does not place the caret, and an
+        # Impress or Draw shape's action does not enter text edit. The click
+        # path does, and the outcome checks that result afterwards.
         if self._run(lambda: _atspi.is_libreoffice_text_paragraph(handle)):
+            return False
+        if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
@@ -2008,10 +2011,22 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
         x, y = _point_of(target)
+        # A plain left click on an Impress or Draw shape or text frame is a
+        # pointer click at the element's center. A single click that does
+        # not enter text edit is followed by a double-click. Writer text
+        # stays on the caret shortcut below. A crop uses the published
+        # point as the pixel rectangle.
+        if (
+            handle is not None
+            and button is MouseButton.LEFT
+            and not modifiers
+            and self._run(lambda: _atspi.is_libreoffice_shape_text(handle))
+        ):
+            self._click_shape_text(handle, x, y, count)
+            return None
         # A plain left single-click on a Writer paragraph places the caret
         # in that paragraph. A double-click uses the published point, shifted
-        # onto the hit-test on LibreOffice 24.2. A crop uses the published
-        # point as the pixel rectangle.
+        # onto the hit-test on LibreOffice 24.2.
         if (
             handle is not None
             and button is MouseButton.LEFT
@@ -2034,6 +2049,39 @@ class LinuxDriver:
         ) == ("confirmed", "the caret is in the target paragraph"):
             self._focused_editable = handle
         return None
+
+    def _click_shape_text(self, handle, x: int, y: int, count: int) -> None:
+        """Click the center of an Impress or Draw text frame, then enter edit.
+
+        The published center is shifted the same way a coordinate click is.
+        One click is enough when the frame starts editing. Otherwise a
+        double-click follows. The following type is aimed at this frame
+        only after that edit is visible.
+        """
+        from a11y_computer_use.drivers import _linux_input
+
+        px, py = self._pointer(x, y)
+        clicks = max(1, int(count))
+        _linux_input.click(px, py, count=clicks)
+        if clicks == 1 and not self._shape_text_ready(handle):
+            _linux_input.click(px, py, count=2)
+        self._note_pointer(x, y)
+        if self._shape_text_ready(handle):
+            self._focused_editable = handle
+
+    def _shape_text_ready(self, handle) -> bool:
+        """True once the frame shows a focused paragraph or a caret."""
+        from a11y_computer_use.drivers import _atspi
+
+        deadline = time.monotonic() + 0.6
+        while True:
+            try:
+                ready = bool(self._run(lambda: _atspi.shape_text_editing(handle)))
+            except Exception:
+                ready = False
+            if ready or time.monotonic() >= deadline:
+                return ready
+            time.sleep(0.05)
 
     def hover(self, target: Target, *, dry_run: bool = False) -> object:
         """Move the pointer onto ``target`` and deliver a hover. No button."""
@@ -2765,8 +2813,14 @@ class LinuxDriver:
         # A Writer document's own text is empty. The paragraphs are the
         # read-back, taken before the keys so a later line is not missed.
         writer_before = None
+        # Impress and Draw keep the document focused. Its text stays empty
+        # while the paragraph inside the text frame holds the characters.
+        # That paragraph is the read-back, captured before the keys.
+        shape_before = None
         if app_id and location is None and bar_before is None and _atspi.libreoffice_app(app_id):
             writer_before = self._run(lambda: _atspi.writer_type_before(app_id))
+            if writer_before is None:
+                shape_before = self._run(lambda: _atspi.focused_shape_edit_text(app_id))
         # A contenteditable selection has to be read before the keys replace
         # it. The expected result is that range replaced, not the old text
         # with the typed string appended.
@@ -2886,6 +2940,14 @@ class LinuxDriver:
                     lambda: _atspi.poll_focused_writer_type(app_id, writer_before, text)
                 )
                 if _atspi._writer_typed_visible(writer_before, shown, text):
+                    return len(text)
+                if shown is not None:
+                    after = shown
+            elif shape_before is not None:
+                shown = self._run(
+                    lambda: _atspi.poll_focused_shape_type(app_id, shape_before, text)
+                )
+                if _atspi._typed_visible(shape_before, shown, text):
                     return len(text)
                 if shown is not None:
                     after = shown
