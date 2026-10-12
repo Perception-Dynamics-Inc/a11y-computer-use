@@ -23,7 +23,7 @@ from a11y_computer_use.agent.models import (
     assistant_message,
     make_model,
 )
-from a11y_computer_use.agent.models.command import command_argv
+from a11y_computer_use.agent.models.command import command_argv, is_codex_argv
 
 _SCRIPT = """\
 import json, sys
@@ -272,3 +272,77 @@ def test_assistant_message_copies_gemini_thought_signature():
     assert message.content[0] == {"type": "text", "text": "both"}
     assert message.content[1]["thought_signature"] == "sig-1"
     assert "thought_signature" not in message.content[2]
+
+
+def test_scripted_model_skips_sampling_and_records_the_request():
+    model = ScriptedModel([ModelTurn(calls=[], text="ok")])
+    assert model.sampling.temperature is None
+    assert model.sampling.seed is None
+    notes = model.sampling.trace()["notes"]
+    assert notes == [
+        "temperature 0 was not sent: scripted models do not sample",
+        "seed 0 was not sent: scripted models do not sample",
+    ]
+    overridden = ScriptedModel([ModelTurn(calls=[], text="ok")], temperature=0.25, seed=11)
+    assert overridden.complete([], []).text == "ok"
+    assert overridden.sampling.trace()["notes"] == [
+        "temperature 0.25 was not sent: scripted models do not sample",
+        "seed 11 was not sent: scripted models do not sample",
+    ]
+    with pytest.raises(ModelError, match="temperature"):
+        ScriptedModel([ModelTurn(calls=[])], temperature=-1)
+    with pytest.raises(ModelError, match="seed"):
+        ScriptedModel([ModelTurn(calls=[])], seed=True)
+    with pytest.raises(ModelError, match="seed"):
+        ScriptedModel([ModelTurn(calls=[])], seed=1.5)
+    with pytest.raises(ModelError, match="already built"):
+        make_model(model, temperature=0.2)
+
+
+def test_command_protocol_does_not_carry_sampling(tmp_path: Path):
+    script = tmp_path / "echo.py"
+    script.write_text(
+        "import json, sys\n"
+        "req = json.load(sys.stdin)\n"
+        "json.dump({'text': 'ok', 'calls': [], 'raw': {'keys': sorted(req)}}, sys.stdout)\n",
+        encoding="utf-8",
+    )
+    model = CommandModel([sys.executable, str(script)], temperature=0.4, seed=3)
+    turn = model.complete([Message("user", "go")], [], timeout=5)
+    assert turn.raw == {"keys": ["messages", "tools"]}
+    assert model.sampling.temperature is None and model.sampling.seed is None
+    assert "command protocol has no temperature field" in model.sampling.notes[0]
+    assert "command protocol has no seed field" in model.sampling.notes[1]
+    assert not is_codex_argv(model.argv)
+
+
+def test_codex_command_does_not_invent_sampling_flags(monkeypatch: pytest.MonkeyPatch):
+    import subprocess
+
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"text": "ok", "calls": []}', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    model = make_model("command:codex exec --skip-git-repo-check", temperature=0, seed=7)
+    assert model.name == "codex"
+    assert model.argv == ["codex", "exec", "--skip-git-repo-check"]
+    turn = model.complete([Message("user", "go")], [], timeout=5)
+    assert turn.text == "ok"
+    assert captured["argv"] == ["codex", "exec", "--skip-git-repo-check"]
+    payload = json.loads(captured["input"])
+    assert set(payload) == {"messages", "tools"}
+    trace = model.sampling.trace()
+    assert trace["temperature"] is None and trace["seed"] is None
+    assert trace["notes"] == [
+        "temperature 0 was not sent: the Codex CLI has no temperature flag and config.toml has no temperature key",
+        "seed 7 was not sent: the Codex CLI has no seed flag and config.toml has no seed key",
+    ]
+
+    windows = CommandModel([r"C:\Tools\Codex.EXE", "exec"], temperature=0.2, seed=1)
+    assert windows.sampling.notes[0].startswith("temperature 0.2 was not sent: the Codex CLI")
+    assert is_codex_argv(["/usr/local/bin/codex"])
+    assert not is_codex_argv([sys.executable, "codex.py"])

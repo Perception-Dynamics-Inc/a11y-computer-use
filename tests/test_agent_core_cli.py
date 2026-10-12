@@ -465,6 +465,23 @@ def test_stuck_budget_flags_reach_the_agent(tmp_path):
     assert agent.stuck_time_s == 15.0
 
 
+def test_temperature_and_seed_flags_reach_the_agent(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    custom = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}",
+        "--temperature", "0.2",
+        "--seed", "7",
+    ])
+    assert cli.build_agent(default).temperature is None
+    assert cli.build_agent(default).seed is None
+    agent = cli.build_agent(custom)
+    assert agent.temperature == 0.2
+    assert agent.seed == 7
+
+
 def test_model_timeout_flag_defaults_to_120_and_is_configurable(tmp_path):
     script = tmp_path / "turns.json"
     script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
