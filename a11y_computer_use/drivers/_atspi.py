@@ -2651,6 +2651,12 @@ class ATSPIAccessor:
         # input and a date segment stay on the text-field mapping.
         if _aria_spinbutton(node, role_str, attrs):
             role = "AXSpinButton"
+        # `_entry_is_multiline` already mapped a tagged <textarea>. A Gecko
+        # entry that check left as a text field is still a textarea when it
+        # carries MULTI_LINE, multiline, or aria-multiline. A single-line
+        # input stays a text field. Chromium entries are not matched here.
+        if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
+            role = "AXTextArea"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -13860,6 +13866,39 @@ def _chromium_app(acc) -> bool:
         return True
     name = (_call_first(app, ("get_name", "getName"), default="") or "").lower()
     return "chrom" in name
+
+
+def _reports_multiline(node, attrs: dict) -> bool:
+    """True when ``node`` publishes multi-line text.
+
+    ``STATE_MULTI_LINE`` is the AT-SPI fact. ``multiline`` and
+    ``aria-multiline`` are the same fact when a bridge publishes them as
+    attributes. A false or absent attribute is not multi-line. A true
+    attribute is, even when the other key is false.
+    """
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _gecko_multiline_entry(node, attrs: dict) -> bool:
+    """True for a Firefox ``entry`` that is a ``<textarea>``.
+
+    Gecko exposes ``<input>`` and ``<textarea>`` as AT-SPI role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE`` or a multiline attribute.
+    A single-line input does not. Chromium and GTK are not this check.
+    """
+    if not _reports_multiline(node, attrs):
+        return False
+    return _gecko_app(node)
 
 
 def _gecko_app(acc) -> bool:

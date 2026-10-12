@@ -1699,6 +1699,77 @@ def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monke
     assert paragraph.text == "idle"
 
 
+def test_gecko_textarea_entry_is_multi_line_text(monkeypatch) -> None:
+    """Gecko exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
+
+    A single-line ``<input>`` stays a text field. ``multiline`` and
+    ``aria-multiline`` are the same fact when the state is absent. A false
+    attribute is not a textarea. Chromium is not this mapping. The snapshot
+    word is ``textarea``. Not a live Firefox.
+    """
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    def read(node: _Tagged):
+        return _atspi.ATSPIAccessor().read(node)
+
+    area = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, "textarea", "Gecko", "Firefox",
+    )
+    single = _Tagged(
+        "entry", "Name", "initial-name",
+        {"SINGLE_LINE", "EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    by_attr = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_attr.attrs["multiline"] = "true"
+    by_aria = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_aria.attrs["aria-multiline"] = "true"
+    by_bool = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_bool.attrs["multiline"] = True
+    off = _Tagged(
+        "entry", "Name", "initial-name", {"EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    off.attrs["multiline"] = "false"
+    off.attrs["aria-multiline"] = False
+    one_true = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    one_true.attrs["multiline"] = False
+    one_true.attrs["aria-multiline"] = "yes"
+    chrome = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE"}, "textarea", "Chromium", "Google Chrome",
+    )
+    assert _atspi._gecko_multiline_entry(chrome, chrome.get_attributes()) is False
+
+    assert read(area).role == "AXTextArea"
+    assert read(single).role == "AXTextField"
+    assert read(by_attr).role == "AXTextArea"
+    assert read(by_aria).role == "AXTextArea"
+    assert read(by_bool).role == "AXTextArea"
+    assert read(off).role == "AXTextField"
+    assert read(one_true).role == "AXTextArea"
+
+    snap = build_snapshot(
+        (read(area), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textarea "Notes"' in observe.render_text(snap)
+    single_snap = build_snapshot(
+        (read(single), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Name"' in observe.render_text(single_snap)
+
+
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
     """Live ``section#react-page`` exposes exactly click and showContextMenu.
 
