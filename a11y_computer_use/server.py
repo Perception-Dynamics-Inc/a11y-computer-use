@@ -3529,6 +3529,9 @@ class Runtime:
             wins = self._app_windows(bundle)
             if wins:  # one window's own pixels: nothing covering it gets in (#12)
                 window_id, bounds = wins[0]
+            elif self._linux_listed_windows_miss_the_display(bundle):
+                # The union of an off-screen window is not this app's pixels.
+                bounds = None
             if bounds is None:
                 raise ComputerUseError(
                     ErrorCode.UNSUPPORTED,
@@ -3629,10 +3632,91 @@ class Runtime:
         y1 = max(r.y + r.height for r in same)
         return Bounds(display_id=did, x=x0, y=y0, width=x1 - x0, height=y1 - y0)
 
+    def _linux_bounds_on_display(self, bounds: Bounds) -> bool | None:
+        """Whether ``bounds`` meets a Linux display.
+
+        None when this driver is not Linux, or when the display list cannot
+        be read. False only when a matching display is known and the rect
+        misses it.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return None
+        displays = getattr(self.driver, "displays", None)
+        if not callable(displays):
+            return None
+        try:
+            found = tuple(displays() or ())
+        except Exception:
+            return None
+        chosen = None
+        for display in found:
+            try:
+                if int(display.display_id) == int(bounds.display_id):
+                    chosen = display
+                    break
+            except (TypeError, ValueError, AttributeError):
+                continue
+        if chosen is None:
+            return None
+        try:
+            width = int(chosen.width)
+            height = int(chosen.height)
+        except (TypeError, ValueError, AttributeError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        if bounds.width <= 0 or bounds.height <= 0:
+            return False
+        if bounds.x + bounds.width <= 0 or bounds.y + bounds.height <= 0:
+            return False
+        if bounds.x >= width or bounds.y >= height:
+            return False
+        return True
+
+    def _linux_listed_windows_miss_the_display(self, bundle: str) -> bool:
+        """True when this Linux app is listed and every rect misses the display.
+
+        A failed window list is False, so a snapshot crop is left in place.
+        A minimized window has no rect and counts as missing the display.
+        """
+        if getattr(self.driver, "name", None) != "linux":
+            return False
+        try:
+            rows = self.driver.windows()
+        except (ComputerUseError, NotImplementedError, OSError, AttributeError):
+            return False
+        matched = False
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            owner = str(row.get("bundle") or row.get("app") or "")
+            if owner != bundle and owner.lower() not in bundle.lower():
+                continue
+            matched = True
+            raw = row.get("bounds")
+            if not isinstance(raw, dict):
+                continue
+            try:
+                rect = Bounds(
+                    int(raw.get("display_id", 0)), int(raw["x"]), int(raw["y"]),
+                    int(raw["width"]), int(raw["height"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if self._linux_bounds_on_display(rect) is not False:
+                return False
+        return matched
+
     def _app_windows(self, bundle: str) -> list[tuple[int, Bounds]]:
         """(window_id, bounds) of ``bundle``'s ordinary windows on this Space,
         front to back, from the driver's window list. Empty when none or when
-        the driver has no window ids."""
+        the driver has no window ids.
+
+        Linux lists bottom to top and includes a mapped window that sits
+        past the edge of the screen. Those rows are reversed, and a rect
+        that misses a known display is left out, so index 0 is the front
+        on-screen window. macOS stays front to back.
+        """
         try:
             rows = self.driver.windows()
         except (ComputerUseError, NotImplementedError, OSError, AttributeError):
@@ -3645,10 +3729,15 @@ class Runtime:
             if not b or wid is None or (owner != bundle and owner.lower() not in bundle.lower()):
                 continue
             try:
-                out.append((int(wid), Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
-                                             int(b["width"]), int(b["height"]))))
+                rect = Bounds(int(b.get("display_id", 0)), int(b["x"]), int(b["y"]),
+                              int(b["width"]), int(b["height"]))
             except (KeyError, TypeError, ValueError):
                 continue
+            if self._linux_bounds_on_display(rect) is False:
+                continue
+            out.append((int(wid), rect))
+        if getattr(self.driver, "name", None) == "linux":
+            out.reverse()
         if not out and sys.platform == "darwin" and getattr(self.driver, "window_png", None) is not None:
             out = _windows_all_spaces(bundle)  # a window on another Space still has pixels
         return out
@@ -7372,19 +7461,31 @@ class Runtime:
         if self._resolves_apps():
             return None
         try:
-            rows = self.driver.windows()
+            rows = list(self.driver.windows())
         except (ComputerUseError, AttributeError, NotImplementedError):
             return None
+        if getattr(self.driver, "name", None) == "linux":
+            rows.reverse()
         for row in rows:
             if not self._app_matches(row, name, bundle):
                 continue
             b = row.get("bounds") or {}
             if not b:
+                if getattr(self.driver, "name", None) == "linux":
+                    continue
                 return None
             try:
                 centre = Point(int(b["display_id"]), int(b["x"] + b["width"] / 2), int(b["y"] + b["height"] / 2))
             except (KeyError, TypeError, ValueError):
+                if getattr(self.driver, "name", None) == "linux":
+                    continue
                 return None
+            try:
+                rect = Bounds(centre.display_id, int(b["x"]), int(b["y"]), int(b["width"]), int(b["height"]))
+            except (KeyError, TypeError, ValueError):
+                rect = None
+            if rect is not None and self._linux_bounds_on_display(rect) is False:
+                continue
             owner = _app_at_point(centre)
             return owner if owner and owner != bundle else None
         return None
@@ -7679,6 +7780,19 @@ class Runtime:
             return "suspected_noop", f"window {window_id} is still showing"
         if verb is WindowVerb.MAXIMIZE:
             return "unverifiable", f"window {window_id} does not report maximized"
+        if verb in (WindowVerb.RAISE, WindowVerb.FOCUS):
+            if match.get("on_screen") is False:
+                return "suspected_noop", f"window {window_id} is not on screen"
+            if bounds:
+                try:
+                    rect = Bounds(
+                        int(bounds.get("display_id", 0)), int(bounds["x"]), int(bounds["y"]),
+                        int(bounds["width"]), int(bounds["height"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    rect = None
+                if rect is not None and self._linux_bounds_on_display(rect) is False:
+                    return "suspected_noop", f"window {window_id} is outside the display"
         return "confirmed", f"window {window_id} is still listed"
 
     def _list_granted_and_pidless_windows(self) -> str | None:
