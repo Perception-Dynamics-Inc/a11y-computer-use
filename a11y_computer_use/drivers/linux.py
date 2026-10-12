@@ -127,6 +127,36 @@ def _wheel_point(target: Target) -> tuple[int, int]:
     return (left + right) // 2, (top + bottom) // 2
 
 
+def _anchor_scroll_point(target: Target, handle, x: int, y: int) -> tuple[int, int] | None:
+    """A point inside ``target`` whose window pid is ``handle``'s, or None.
+
+    The center of a scroll area can sit on another window. The wheel moves
+    to another point inside the same box when that point belongs to this
+    process. None leaves ``(x, y)`` unchanged, including when no point
+    matches: that is not reported as a scroll. A Chromium list does not
+    call this; its row point is already chosen.
+    """
+    if handle is None or not isinstance(target, Element):
+        return None
+    from a11y_computer_use.drivers import _atspi, _linux_system
+    from a11y_computer_use.drivers._linux_scroll_anchor import point_for_pid
+
+    pid = _atspi.pid_of(handle)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    width, height = _screen_span()
+    screen = (width, height) if width > 0 and height > 0 else None
+    try:
+        found = point_for_pid(
+            target.bounds, pid, _linux_system.pid_at_point, screen=screen,
+        )
+    except Exception:
+        return None
+    if found is None or found == (int(x), int(y)):
+        return None
+    return found
+
+
 def _clip_box_to_screen(box: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
     """The part of ``box`` that lies on the screen.
 
@@ -1216,11 +1246,18 @@ class LinuxDriver:
 
         A dropped accessibility bus reconnects once. The outermost call retries,
         so a snapshot walks the tree again instead of reusing a disposed node.
+
+        The call caches duplicate stable getters for its duration. The cache
+        is entered on the thread that runs ``fn``, and a mutator drops it.
         """
-        from a11y_computer_use.drivers import _atspi_events, _dbus_guard
+        from a11y_computer_use.drivers import _atspi, _atspi_events, _dbus_guard
 
         def once():
-            return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+            def wrapped():
+                with _atspi.read_cache():
+                    return fn()
+
+            return _atspi_events.submit(wrapped) if _atspi_events.enabled() else wrapped()
 
         return _dbus_guard.call_with_reconnect(once)
 
@@ -2403,6 +2440,9 @@ class LinuxDriver:
             if point is not None:
                 x, y = point
         if container is None:
+            anchored = _anchor_scroll_point(target, handle, x, y)
+            if anchored is not None:
+                x, y = anchored
             # Chrome's document is a group, not a list, and a DevTools port
             # scrolls it. A GTK window has no port and keeps the notch.
             # Either way the Chromium tree trails the paint, so the search
