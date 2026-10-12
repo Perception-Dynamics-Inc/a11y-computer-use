@@ -67,9 +67,26 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    three times in the recent window, the loop emits a `stuck` event and
    tells the model to change strategy. After `max_replans` of those prompts
    (default 2) the run fails with `status` `failed` and `reason` `stuck`.
-9. Done. `done` must carry an answer and 1 to 3 conditions. The loop
+9. Caps. `task_class` selects a step cap and a time cap. The baseline
+   classes (`browser`, `browser_table`, `browser_scroll`, `file_chooser`,
+   `desktop`, `canvas`) are 40 steps and 160 seconds. `desktop_multi_file`
+   is 75 steps and 300 seconds (40 steps scaled by 300/160). `auto`
+   classifies the goal's wording and does not choose a click target.
+   Omit the class and the caps stay 50 steps and 900 seconds. An explicit
+   `max_steps` or `max_time_s` overrides the class. The stuck budget and
+   the hard `max_time` deadline still apply inside those caps.
+10. Verify and finish. Once either cap has used 90 percent, and before the
+    hard cap, the loop gives the model one turn. The message says to check
+    the current screen and call `done` only if the goal already holds. That
+    turn does not derive a click from the goal text and does not substitute
+    an action with a different effect. A passing check is `done`. A failed
+    check ends `status` `failed` and `reason` `verify_failed: ...`, which
+    is not `done`.
+11. Done. `done` must carry an answer and 1 to 3 conditions. The loop
    re-checks them on a fresh snapshot before it accepts success. A failed
    check is rejected and the model continues, until a limit stops the run.
+   A failed check on the verify-and-finish turn does not continue: that
+   attempt is not reported as done.
    When the goal saves or creates a file, one condition has to be
    `file_exists`, and `contains` when the goal names the text. A window
    title is not accepted as proof the file was written. The rule is the
@@ -79,7 +96,8 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    the sheet XML. Those are zip files, and the raw bytes are not the check.
 
 `stream` yields `observation`, `plan`, `step_started`, `action`,
-`step_finished`, `needs_human`, `done`, `error`, and `stuck`. `cancel()` is
+`step_finished`, `needs_human`, `done`, `error`, `stuck`, and
+`verify_finish`. `cancel()` is
 safe to call from another thread; the run stops before the next action with
 `status` `cancelled` and `reason` `cancelled`.
 
@@ -293,7 +311,7 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 | `answer` | The `done` answer, or `""` |
 | `steps` | Count of actions in `step_log` |
 | `elapsed_s` | Wall clock for the run |
-| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `stuck: subgoal ...`, `no_action`, `cancelled`, `error: ...`, or the human message |
+| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `stuck: subgoal ...`, `verify_failed: ...`, `no_action`, `cancelled`, `error: ...`, or the human message |
 | `conditions` | `{condition, ok, detail}` from the last evidence check |
 | `needs_human` | `{kind, message, ref, window}` or null. `kind` is `login`, `captcha`, `2fa`, `payment`, or `other` |
 | `trace_dir` | Directory of the trace |
@@ -332,6 +350,17 @@ A model call that times out after that budget is already spent ends
 `reason` `max_time` with `status` `failed` (exit 1). A model timeout while the
 budget remains is `error: ModelError: ...` (exit 3). The model call is not
 cut short by `--max-time`; it keeps `--model-timeout`.
+
+`--task-class` selects the step and time caps for that kind of task.
+`auto` classifies the goal. The baseline classes are 40 steps and 160
+seconds. `desktop_multi_file` is 75 steps and 300 seconds. With no class,
+the caps stay 50 steps and 900 seconds. `--max-steps` and `--max-time`
+override the class when they are passed. The class does not choose a click
+target. Once either cap has used 90 percent, the model gets one
+verify-and-finish turn. A failed check on that turn is `verify_failed`,
+not `done`. The stuck budget and the hard `--max-time` deadline still
+apply. A `budget` line and a `verify_finish` line in `trajectory.jsonl`
+record the class and that turn.
 
 `--max-time` is a hard deadline for a driver or tool call. Each snapshot,
 screenshot, crop, and tool call runs on a worker. When the budget is spent
@@ -410,7 +439,7 @@ a11y-agent serve --host 127.0.0.1 --port 8765 --token "$TOKEN"
 | `GET` | `/runs/{id}/trace` | | `{"trajectory", "files"}`. `trajectory` is the JSONL with UI text fenced |
 | `GET` | `/runs/{id}/trace/{name}` | | One file from that directory (a screenshot, for example). Names that contain a slash or `..` are `404` |
 
-`limits` is `{"max_steps", "max_time_s", "model_timeout_s"}`. `allowed_domains` and
+`limits` is `{"max_steps", "max_time_s", "model_timeout_s", "stuck_steps", "stuck_time_s", "task_class"}`. `task_class` may be `auto`. Omit `max_steps` and `max_time_s` to use the class caps. Passing either one overrides the class. `allowed_domains` and
 `blocked_domains` are lists of strings or one comma-separated string. Both
 are forwarded to `Agent`. `allow_exec` defaults to false. A field that is
 not in that body, including a key inside `limits`, is `400` with
@@ -641,6 +670,17 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - a subgoal stuck budget switches keyboard, then vision, then re-plan, records
   each switch in the trace, keeps an explicit `x`/`y` click, and stops with
   `status` `stuck` before `max_time`
+- a task class sets the step and time caps. `desktop_multi_file` is 75 steps
+  and 300 seconds. An explicit cap overrides the class. The stuck budget
+  still stops inside that cap. At 90 percent of either cap the loop gives
+  one verify-and-finish turn. A passing check is `done`. A failed check is
+  `verify_failed` and is not `done`. That turn does not click a word from
+  the goal and does not replace a key or a `type` with a different action
+  (`tests/test_agent_core.py`). A live scripted run against the GTK fixture
+  reports `done` only when the window title matches, and its clicks do not
+  target a word named in the goal (`tests/test_agent_live.py`). That file
+  skips when the process has no Linux display, the same gate as the other
+  scripted agent runs. The Linux live job provides the display.
 - a tool call that never returns is abandoned at `max_time`. The run ends
   with `status` `timeout`, `reason` `max_time`, and evidence, within a second
   of the limit (`tests/test_agent_core.py`)
@@ -693,8 +733,9 @@ default port skip the test.
 
 Live on Linux, under Xvfb, with `ScriptedModel` (`tests/test_agent_live.py`):
 
-- GTK save, wrong-step recovery, stuck Ping, Chrome form, needs_human pages,
-  and CLI `--json` exit codes
+- GTK save, wrong-step recovery, stuck Ping, a verify-and-finish turn that
+  is `done` only when the window title matches, Chrome form, needs_human
+  pages, and CLI `--json` exit codes
 - one GTK turn that sets the note, the path, and the format, then saves
 - exec with `allow_exec` writing a file, and the same command denied by the
   approve hook

@@ -946,6 +946,99 @@ def test_agent_stops_early_when_a_subgoal_stays_stuck(tmp_path, isolated_home) -
         stop_process(proc)
 
 
+@requires_display
+def test_agent_verify_finish_reports_done_only_when_the_window_matches(tmp_path, isolated_home) -> None:
+    """At 90 percent of the steps, one turn checks the real window.
+
+    A matching title is done. A title that is not on screen is verify_failed,
+    not done. The script clicks Ping by the ref in the snapshot. The goal
+    mentions Archive, and that word is not a click.
+    """
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    proc = launch_gtk()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+        goal = f"Confirm the {APP_NAME} window is open. Do not click Archive."
+
+        def success_script(messages):
+            text = message_text(messages)
+            if "final verify-and-finish turn" in text:
+                return ModelTurn(calls=[ToolCall("done", {
+                    "answer": f"the {APP_NAME} window is open",
+                    "conditions": [{"window_title_contains": APP_NAME}],
+                })])
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        ok_trace = trace / "ok"
+        ok_trace.mkdir()
+        ok = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, success_script),
+            goal,
+            ok_trace,
+            max_steps=10,
+            max_time_s=120,
+            max_replans=20,
+            stuck_steps=40,
+            stuck_time_s=120,
+            max_retries=0,
+        )
+        assert ok.status == "success", ok
+        assert ok.reason == "done", ok.reason
+        assert ok.answer == f"the {APP_NAME} window is open"
+        assert any(step.action == "done" and step.verified for step in ok.step_log)
+        ok_rows = [
+            json.loads(line)
+            for line in (ok_trace / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert any(row.get("kind") == "verify_finish" and row.get("limit") == "steps" for row in ok_rows)
+        for step in ok.step_log:
+            assert (step.target or {}).get("name") != "Archive"
+
+        def failed_script(messages):
+            text = message_text(messages)
+            if "final verify-and-finish turn" in text:
+                return ModelTurn(calls=[ToolCall("done", {
+                    "answer": "closed",
+                    "conditions": [{"window_title_contains": "not-a-real-title"}],
+                })])
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        bad_trace = trace / "bad"
+        bad_trace.mkdir()
+        bad = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, failed_script),
+            goal,
+            bad_trace,
+            max_steps=10,
+            max_time_s=120,
+            max_replans=20,
+            stuck_steps=40,
+            stuck_time_s=120,
+            max_retries=0,
+        )
+        assert bad.status == "failed", bad
+        assert bad.reason and bad.reason.startswith("verify_failed:"), bad.reason
+        assert bad.reason != "done"
+        assert bad.status != "success"
+        assert bad.answer == ""
+        assert bad.step_log[-1].action == "done"
+        assert bad.step_log[-1].verified is False
+    finally:
+        stop_process(proc)
+
+
 @pytest.fixture
 def pages(tmp_path, isolated_home, monkeypatch):
     assert isolated_home.is_dir()

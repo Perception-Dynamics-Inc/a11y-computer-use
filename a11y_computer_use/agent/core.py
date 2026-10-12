@@ -43,6 +43,13 @@ from a11y_computer_use.agent.actions import (
     tool_schemas,
     validate_action,
 )
+from a11y_computer_use.agent.budget import (
+    DEFAULT_MAX_STEPS,
+    DEFAULT_MAX_TIME_S,
+    caps_for,
+    classify_goal,
+    normalize_task_class,
+)
 from a11y_computer_use.agent.vision_order import cap_worker_threads
 from a11y_computer_use.agent.exec import (
     DEFAULT_EXEC_TIMEOUT_S,
@@ -98,6 +105,19 @@ _STUCK_SWITCH_TEXT = {
 }
 _DEFAULT_STUCK_STEPS = 6
 _DEFAULT_STUCK_TIME_S = 120.0
+# One model turn once either run budget has used this share, while the hard
+# cap is still ahead. A failed check on that turn is not ``done``.
+_VERIFY_FINISH_AT = 0.9
+_VERIFY_FINISH = (
+    "The step or time budget is nearly spent. This is the final verify-and-finish turn. "
+    "Check the current screen against the goal. If the goal already holds, call done "
+    "with an answer and 1 to 3 conditions the loop can see. "
+    "If a condition fails, the run is not done. "
+    "If the goal does not hold, do not call done. "
+    "Do not derive a click target from the goal text. "
+    "Do not substitute an action with a different effect. "
+    "A click that already has x and y stays that click. A key stays that key."
+)
 _SYSTEM = """You control a computer through accessibility actions. You see a pruned
 accessibility snapshot and answer with tool calls. Calls in one turn run one
 at a time, and each one is checked before the next. If a call fails, is
@@ -154,7 +174,12 @@ missing information.
 Call done only when the goal is finished. done requires an answer and 1 to 3
 conditions the loop can see: an element role and name, a field value, a window
 title, or a file on disk. A condition that fails is rejected and you must
-continue. Do not claim success without one of those checks. When the goal
+continue. Do not claim success without one of those checks. When the loop
+says the step or time budget is nearly spent, check the current screen and
+call done only if the goal already holds. If a condition fails, that run is
+not done. Do not derive a click target from the goal text. Do not substitute
+an action with a different effect. A click that already has x and y stays
+that click. A key stays that key. When the goal
 saves or creates a file, one condition must be file_exists for that path,
 and it must include contains for the text the file should hold. When the
 goal says to replace or remove text, contains is the new text, not the
@@ -264,6 +289,22 @@ class _StepDeadline(BaseException):
         super().__init__(where)
 
 
+def _task_class_request(task_class: str | None) -> tuple[str | None, str | None]:
+    """Return ``(resolved class or None, requested token)``.
+
+    ``auto`` stays unresolved until the goal is known. A named class is
+    checked here so a bad name fails before the first snapshot.
+    """
+    if task_class is None:
+        return None, None
+    if not isinstance(task_class, str) or not task_class.strip():
+        raise ValueError("task_class must be a class name or auto")
+    token = normalize_task_class(task_class)
+    if token == "auto":
+        return None, "auto"
+    return caps_for(token).task_class, token
+
+
 class Agent:
     """Run one goal against the desktop.
 
@@ -309,6 +350,13 @@ class Agent:
     when ``model`` is a spec string. A provider that cannot send one of them
     leaves it off the request and records that in the trace. A `Model`
     instance keeps the sampling it was built with.
+    ``task_class`` selects that class's step and time caps. ``auto`` classifies
+    the goal when the run starts. An explicit ``max_steps`` or ``max_time_s``
+    overrides the class. Omitting the class keeps the 50-step, 900-second
+    defaults. The class chooses a budget only. It does not choose a click
+    target. Once either cap has used 90 percent, and before the hard cap,
+    the loop gives the model one verify-and-finish turn. A failed check on
+    that turn is ``verify_failed``, not ``done``.
     """
 
     def __init__(
@@ -316,8 +364,9 @@ class Agent:
         model: str | object,
         *,
         display: str | None = None,
-        max_steps: int = 50,
-        max_time_s: float = 900,
+        max_steps: int | None = None,
+        max_time_s: float | None = None,
+        task_class: str | None = None,
         model_timeout_s: float = DEFAULT_MODEL_TIMEOUT_S,
         approve: Callable[[Action], bool] | None = None,
         auto_deny: bool = True,
@@ -342,8 +391,26 @@ class Agent:
     ) -> None:
         self._model_spec = model
         self.display = display
+        self._steps_explicit = max_steps is not None
+        self._time_explicit = max_time_s is not None
+        self._budget_traced = False
+        self.task_class, self._task_class_requested = _task_class_request(task_class)
+        if self.task_class is not None:
+            class_caps = caps_for(self.task_class)
+            if not self._steps_explicit:
+                max_steps = class_caps.max_steps
+            if not self._time_explicit:
+                max_time_s = class_caps.max_time_s
+        if max_steps is None:
+            max_steps = DEFAULT_MAX_STEPS
+        if max_time_s is None:
+            max_time_s = DEFAULT_MAX_TIME_S
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+            raise ValueError("max_steps must be a positive integer")
+        if isinstance(max_time_s, bool) or not isinstance(max_time_s, (int, float)) or float(max_time_s) < 0:
+            raise ValueError("max_time_s must be a non-negative number")
         self.max_steps = max_steps
-        self.max_time_s = max_time_s
+        self.max_time_s = float(max_time_s)
         if isinstance(model_timeout_s, bool) or not isinstance(model_timeout_s, (int, float)):
             raise ValueError("model_timeout_s must be a positive number")
         if float(model_timeout_s) <= 0:
@@ -526,6 +593,9 @@ class Agent:
         self._trace_requested: Action | None = None
         self._resolved_from: str | None = None
         self._goal = goal
+        self._verify_offered = False
+        self._verify_finish_turn = False
+        self._pending_verify_event = None
         # ``clear`` drops a cancel that arrived before the loop, which the
         # HTTP service re-applies on the next event. A CLI signal sets
         # ``_signal_cancel`` as well, and that one must survive ``clear``:
@@ -630,6 +700,7 @@ class Agent:
         self._messages = [
             Message(role="system", content=prompt),
         ]
+        self._resolve_task_class()
 
     def _drive(self, goal: str, started: float) -> Iterator[Event]:
         self._messages.append(Message(role="user", content=f"Goal: {goal}"))
@@ -728,6 +799,9 @@ class Agent:
             if self._timed_out(started):
                 self._finish("failed", "", "max_time", started)
                 return
+            verify_event = self._maybe_verify_finish(started)
+            if verify_event is not None:
+                yield Event("verify_finish", verify_event)
             try:
                 turn = self.model.complete(  # type: ignore[union-attr]
                     self._messages,
@@ -747,6 +821,7 @@ class Agent:
             yield Event("plan", {"text": turn.text, "calls": [_call_view(call) for call in turn.calls]})
             self._messages.append(assistant_message(turn))
             if not turn.calls:
+                self._verify_finish_turn = False
                 self._nudges += 1
                 if self._nudges >= 2:
                     self._finish("failed", "", "no_action", started)
@@ -773,6 +848,7 @@ class Agent:
                     return
                 if outcome == "stop_turn":
                     break
+            self._verify_finish_turn = False
 
     def _one_call(
         self,
@@ -858,7 +934,7 @@ class Agent:
             requested = resolved
         if requested.name == "done":
             yield from self._done(requested, turn, started, remaining)
-            if self._result is not None and self._result.status == "success":
+            if self._result is not None:
                 return "stop_run"
             return "stop_turn"
         if requested.name == "ask_human":
@@ -1234,6 +1310,14 @@ class Agent:
             answer = str(action.args.get("answer") or "")
             self._finish("success", answer, "done", started)
             yield Event("done", {"answer": answer, "conditions": checked, "skipped": skipped})
+            return
+        if self._verify_finish_turn:
+            # The final turn's check failed. That is not success, and a later
+            # turn does not get to report this attempt as done.
+            reason = "verify_failed: " + " ".join(detail.split())
+            if len(reason) > 300:
+                reason = reason[:297] + "..."
+            self._finish("failed", "", reason, started)
             return
         self._messages.append(Message(
             role="tool",
@@ -2527,6 +2611,71 @@ class Agent:
             return self.trace.save_png(index, png)
         except OSError:
             return None
+
+    def _resolve_task_class(self) -> None:
+        """Apply ``auto`` once the goal is known, and record the class budget.
+
+        A named class was applied in ``__init__``. ``auto`` waits for the
+        goal. An explicit step or time cap is left as the caller set it.
+        Classification picks a budget. It does not pick a click target.
+        """
+        if self._task_class_requested == "auto":
+            chosen = caps_for(classify_goal(self._goal or ""))
+            self.task_class = chosen.task_class
+            self._task_class_requested = chosen.task_class
+            if not self._steps_explicit:
+                self.max_steps = chosen.max_steps
+            if not self._time_explicit:
+                self.max_time_s = chosen.max_time_s
+        if not self.task_class or self.trace is None or self._budget_traced:
+            return
+        self._budget_traced = True
+        self.trace.append({
+            "kind": "budget",
+            "task_class": self.task_class,
+            "max_steps": self.max_steps,
+            "max_time_s": self.max_time_s,
+            "stuck_steps": self.stuck_steps,
+            "stuck_time_s": self.stuck_time_s,
+        })
+
+    def _budget_fraction(self, started: float) -> tuple[float, str]:
+        """How much of the step cap and the time cap is used, and which is ahead."""
+        step_frac = len(self._steps) / float(self.max_steps) if self.max_steps else 1.0
+        if self.max_time_s <= 0:
+            time_frac = 1.0
+        else:
+            time_frac = (time.perf_counter() - started) / float(self.max_time_s)
+        if time_frac >= step_frac:
+            return time_frac, "time"
+        return step_frac, "steps"
+
+    def _maybe_verify_finish(self, started: float) -> dict | None:
+        """Offer one verify-and-finish turn when a cap reaches 90 percent.
+
+        The hard cap still stops the run. This turn does not rewrite the
+        model's action and does not choose a click from the goal text.
+        """
+        if self._verify_offered:
+            return None
+        fraction, which = self._budget_fraction(started)
+        if fraction < _VERIFY_FINISH_AT or fraction >= 1.0:
+            return None
+        self._verify_offered = True
+        self._verify_finish_turn = True
+        self._messages.append(Message(role="user", content=_VERIFY_FINISH))
+        evidence = {
+            "fraction": round(fraction, 3),
+            "limit": which,
+            "steps": len(self._steps),
+            "max_steps": self.max_steps,
+            "elapsed_s": round(time.perf_counter() - started, 3),
+            "max_time_s": self.max_time_s,
+            "task_class": self.task_class,
+        }
+        if self.trace is not None:
+            self.trace.append({"kind": "verify_finish", **evidence})
+        return evidence
 
     def _timed_out(self, started: float) -> bool:
         return (time.perf_counter() - started) >= self.max_time_s
