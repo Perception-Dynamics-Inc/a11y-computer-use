@@ -482,6 +482,43 @@ def test_temperature_and_seed_flags_reach_the_agent(tmp_path):
     assert agent.seed == 7
 
 
+def test_task_class_flag_sets_caps_and_explicit_limits_win(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    plain = cli.build_agent(default)
+    assert plain.task_class is None
+    assert plain.max_steps == 50
+    assert plain.max_time_s == 900.0
+    named = parser.parse_args([
+        "run", "Copy each file into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "desktop_multi_file",
+    ])
+    agent = cli.build_agent(named)
+    assert agent.task_class == "desktop_multi_file"
+    assert agent.max_steps == 75
+    assert agent.max_time_s == 300.0
+    over = parser.parse_args([
+        "run", "Copy each file into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "desktop_multi_file",
+        "--max-steps", "4",
+        "--max-time", "12",
+    ])
+    tighter = cli.build_agent(over)
+    assert tighter.max_steps == 4
+    assert tighter.max_time_s == 12.0
+    auto = parser.parse_args([
+        "run", "Copy each file from Documents into the Backup folder",
+        "--model", f"scripted:{script}",
+        "--task-class", "auto",
+    ])
+    assert cli.build_agent(auto).task_class == "desktop_multi_file"
+    assert cli.build_agent(auto).max_time_s == 300.0
+
+
 def test_model_timeout_flag_defaults_to_120_and_is_configurable(tmp_path):
     script = tmp_path / "turns.json"
     script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")

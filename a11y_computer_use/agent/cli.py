@@ -30,6 +30,7 @@ import time
 from collections.abc import Sequence
 
 from a11y_computer_use.agent.actions import Action, risk_category
+from a11y_computer_use.agent.budget import known_task_classes
 from a11y_computer_use.agent.result import RunResult
 from a11y_computer_use.agent.trace import summarize_args
 from a11y_computer_use.untrusted import render_untrusted
@@ -91,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def build_agent(args: argparse.Namespace):
     """Construct the agent a parsed ``run`` command describes."""
+    from a11y_computer_use.agent.budget import caps_for, classify_goal
     from a11y_computer_use.agent.core import Agent
 
     policy = getattr(args, "approve_policy", "deny")
@@ -100,11 +102,24 @@ def build_agent(args: argparse.Namespace):
     else:
         approve = _stdin_approve if args.approve else None
         auto_deny = not args.approve
+    max_steps = args.max_steps
+    max_time_s = args.max_time_s
+    task_class = getattr(args, "task_class", None)
+    if task_class == "auto":
+        task_class = classify_goal(args.goal)
+    if task_class:
+        class_caps = caps_for(task_class)
+        task_class = class_caps.task_class
+        if max_steps is None:
+            max_steps = class_caps.max_steps
+        if max_time_s is None:
+            max_time_s = class_caps.max_time_s
     return Agent(
         model=args.model,
         display=args.display,
-        max_steps=args.max_steps,
-        max_time_s=args.max_time_s,
+        max_steps=max_steps,
+        max_time_s=max_time_s,
+        task_class=task_class,
         model_timeout_s=args.model_timeout_s,
         stuck_steps=args.stuck_steps,
         stuck_time_s=args.stuck_time_s,
@@ -388,8 +403,30 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("goal", help="what to accomplish")
     run.add_argument("--model", required=True, help="model spec, for example scripted:turns.json or openai:gpt-4.1")
     run.add_argument("--display", default=None, help="X display, for example :1 (also sets $DISPLAY)")
-    run.add_argument("--max-steps", type=int, default=50, dest="max_steps")
-    run.add_argument("--max-time", type=float, default=900.0, dest="max_time_s", help="wall-clock budget in seconds")
+    run.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        dest="max_steps",
+        help="step cap (default 50, or the task class cap when --task-class is set)",
+    )
+    run.add_argument(
+        "--max-time",
+        type=float,
+        default=None,
+        dest="max_time_s",
+        help="wall-clock budget in seconds (default 900, or the task class cap)",
+    )
+    run.add_argument(
+        "--task-class",
+        default=None,
+        dest="task_class",
+        choices=("auto", *known_task_classes()),
+        help=(
+            "step and time caps for this kind of task. auto reads the goal. "
+            "An explicit --max-steps or --max-time overrides that class"
+        ),
+    )
     run.add_argument(
         "--stuck-steps",
         type=int,

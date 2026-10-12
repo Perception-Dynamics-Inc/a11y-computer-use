@@ -413,8 +413,6 @@ class RunStore:
             model = self.model_factory(spec)
         kwargs: dict = {
             "display": display,
-            "max_steps": limits["max_steps"],
-            "max_time_s": limits["max_time_s"],
             "model_timeout_s": limits["model_timeout_s"],
             "stuck_steps": limits["stuck_steps"],
             "stuck_time_s": limits["stuck_time_s"],
@@ -424,6 +422,14 @@ class RunStore:
             "allow_payments": allow_payments,
             "trace_dir": record.trace_dir,
         }
+        # An omitted cap lets the task class supply its own. Passing the
+        # numeric default would hide that class.
+        if limits.get("max_steps_explicit"):
+            kwargs["max_steps"] = limits["max_steps"]
+        if limits.get("max_time_explicit"):
+            kwargs["max_time_s"] = limits["max_time_s"]
+        if limits.get("task_class"):
+            kwargs["task_class"] = limits["task_class"]
         if self.runtime_factory is not None:
             kwargs["runtime"] = self.runtime_factory()
         params = inspect.signature(Agent.__init__).parameters
@@ -507,6 +513,7 @@ _LIMIT_FIELDS = {
     "model_timeout_s",
     "stuck_steps",
     "stuck_time_s",
+    "task_class",
 }
 
 
@@ -547,15 +554,32 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
     unknown_limits = _unknown_field_message(limits, _LIMIT_FIELDS, where="limits")
     if unknown_limits:
         raise ValueError(unknown_limits)
+    from a11y_computer_use.agent.budget import caps_for, normalize_task_class
+
+    steps_explicit = "max_steps" in limits
+    time_explicit = "max_time_s" in limits
     max_steps = limits.get("max_steps", 50)
     max_time_s = limits.get("max_time_s", 900)
     model_timeout_s = limits.get("model_timeout_s", 120)
     stuck_steps = limits.get("stuck_steps", 6)
     stuck_time_s = limits.get("stuck_time_s", 120)
-    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
+    task_class = limits.get("task_class", None)
+    if task_class is not None:
+        if not isinstance(task_class, str) or not task_class.strip():
+            raise ValueError("limits.task_class must be a task class or auto")
+        task_class = normalize_task_class(task_class)
+        if task_class != "auto":
+            task_class = caps_for(task_class).task_class
+    if steps_explicit and (isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1):
         raise ValueError("limits.max_steps must be a positive integer")
-    if isinstance(max_time_s, bool) or not isinstance(max_time_s, (int, float)) or float(max_time_s) <= 0:
+    if not steps_explicit:
+        max_steps = 50
+    if time_explicit and (
+        isinstance(max_time_s, bool) or not isinstance(max_time_s, (int, float)) or float(max_time_s) <= 0
+    ):
         raise ValueError("limits.max_time_s must be a positive number")
+    if not time_explicit:
+        max_time_s = 900.0
     if (
         isinstance(model_timeout_s, bool)
         or not isinstance(model_timeout_s, (int, float))
@@ -582,9 +606,12 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
     limits_out = {
         "max_steps": int(max_steps),
         "max_time_s": float(max_time_s),
+        "max_steps_explicit": steps_explicit,
+        "max_time_explicit": time_explicit,
         "model_timeout_s": float(model_timeout_s),
         "stuck_steps": int(stuck_steps),
         "stuck_time_s": float(stuck_time_s),
+        "task_class": task_class,
     }
     if temperature is not None:
         limits_out["temperature"] = temperature

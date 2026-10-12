@@ -32,11 +32,12 @@ def build_agent_mcp(store: RunStore | None = None):
         goal: str,
         model: str,
         display: str | None = None,
-        max_steps: int = 50,
-        max_time_s: float = 900,
+        max_steps: int | None = None,
+        max_time_s: float | None = None,
         model_timeout_s: float = 120,
         stuck_steps: int = 6,
         stuck_time_s: float = 120,
+        task_class: str | None = None,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
@@ -50,6 +51,11 @@ def build_agent_mcp(store: RunStore | None = None):
         subgoal. The loop then switches keyboard, vision, and re-plan, and
         stops with status ``stuck`` when those are used up.
 
+        ``task_class`` selects that class's step and time caps. ``auto``
+        reads the goal. Omit ``max_steps`` and ``max_time_s`` to use the
+        class. Passing either one overrides the class. With no class, the
+        caps stay 50 steps and 900 seconds.
+
         ``allow_payments`` lets a payment click wait for ``approve`` instead of
         stopping as ``needs_human``. It is off by default.
 
@@ -61,8 +67,6 @@ def build_agent_mcp(store: RunStore | None = None):
             "model": model,
             "display": display,
             "limits": {
-                "max_steps": max_steps,
-                "max_time_s": max_time_s,
                 "model_timeout_s": model_timeout_s,
                 "stuck_steps": stuck_steps,
                 "stuck_time_s": stuck_time_s,
@@ -70,6 +74,12 @@ def build_agent_mcp(store: RunStore | None = None):
             "allow_exec": allow_exec,
             "allow_payments": allow_payments,
         }
+        if max_steps is not None:
+            body["limits"]["max_steps"] = max_steps
+        if max_time_s is not None:
+            body["limits"]["max_time_s"] = max_time_s
+        if task_class is not None:
+            body["limits"]["task_class"] = task_class
         if allowed_domains is not None:
             body["allowed_domains"] = allowed_domains
         if blocked_domains is not None:
