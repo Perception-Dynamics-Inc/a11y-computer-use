@@ -69,6 +69,16 @@ def test_debug_port_requires_the_flag_and_rejects_bad_types(tmp_path) -> None:
     ) == 9333
     assert _cdp_forms.debug_port_from_cmdline(b"--remote-debugging-port=0\x00") is None
     assert _cdp_forms.debug_port_from_cmdline(b"--remote-debugging-port=70000\x00") is None
+    # Chrome rewrites /proc/self/cmdline as one space-separated string.
+    flat = (
+        b"/opt/google/chrome/chrome --no-sandbox "
+        b"--user-data-dir=/tmp/profile --remote-debugging-port=9333 "
+        b"file:///tmp/page.html"
+    )
+    assert _cdp_forms.debug_port_from_cmdline(flat) == 9333
+    assert _cdp_forms.debug_port_from_cmdline(
+        b"chrome --not-remote-debugging-port=9333"
+    ) is None
     folder = tmp_path / "profile"
     folder.mkdir()
     (folder / "DevToolsActivePort").write_text("9334\n/devtools/browser/abc\n", encoding="utf-8")

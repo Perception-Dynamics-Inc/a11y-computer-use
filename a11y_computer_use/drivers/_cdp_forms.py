@@ -296,11 +296,28 @@ class FormControl:
                 raise ValueError("minimum and maximum must be finite numbers or None")
 
 
+def _nul_separated_cmdline(blob: bytes) -> bytes:
+    """NUL-separated argv, including a Chrome cmdline flattened to spaces.
+
+    The kernel separates arguments with NUL. Chrome later rewrites
+    ``/proc/self/cmdline`` as one space-separated string, so a flag that
+    is not the first argument is no longer preceded by NUL. A cmdline
+    that already contains an interior NUL is unchanged, and a space
+    inside one of those arguments stays in that argument.
+    """
+    body = blob.rstrip(b"\x00")
+    if not body or b"\x00" in body:
+        return blob
+    return body.replace(b" ", b"\x00") + b"\x00"
+
+
 def debug_port_from_cmdline(raw: object) -> int | None:
     """The DevTools port on this process command line, or None.
 
     The flag has to be present. Chrome keeps the last value when the
-    flag is repeated, which is the port that actually listens. Port ``0``
+    flag is repeated, which is the port that actually listens. A cmdline
+    Chrome has flattened to spaces is read the same way as NUL-separated
+    argv. Port ``0``
     is the ephemeral port Chrome writes into ``DevToolsActivePort`` under
     the last ``--user-data-dir``. A process that was not started with the
     flag is not a CDP target, even when a default port is open on the
@@ -308,7 +325,7 @@ def debug_port_from_cmdline(raw: object) -> int | None:
     """
     if not isinstance(raw, (bytes, bytearray)):
         raise TypeError("cmdline must be bytes")
-    blob = bytes(raw)
+    blob = _nul_separated_cmdline(bytes(raw))
     flags = list(_PORT_FLAG.finditer(blob))
     if not flags:
         return None
