@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.66] - 2026-10-12
 
-Fifty-three commits since v0.4.65, through #454.
+Fifty-five commits since v0.4.65, through #455.
 
 ### Safety
 
@@ -55,7 +55,9 @@ Fifty-three commits since v0.4.65, through #454.
 - Mousepad and FeatherPad store real newlines in the text value. Compact snapshot and diff lines turned those breaks into spaces, so a multi-line document looked like one line. Those lines now write a line break as `\n`. `Element.value` still holds the breaks. Fixes #405 (#416) (2a912b1, 2026-10-13).
 - FeatherPad's word-count button exposes an HTML paragraph as its accessible name. Snapshot titles now keep the text and decode entities. Angle-bracket text that is not a tag is left as written. Fixes #406 (#417) (3e9a315, 2026-10-13).
 - GIMP stores the visible button label and the modifier help in one description. The snapshot name is now the first line, and the Shift/Ctrl lines stay on the description. Fixes #453 (#454) (89e4fbb, 2026-10-13).
+- A GIMP image canvas is a focusable childless panel under a page tab, so it stays an opaque region. The name is not on the panel. When exactly one label is the image-title prefix of the frame title, that label is the name. Otherwise the name is the frame title. An empty frame title leaves the panel unnamed. Fixes #452 (#455) (b8087dd, 2026-10-13).
 - Evince side-pane page thumbnails are unnamed icons whose Text is the page number. That string is now the name, so the snapshot keeps the image and `find` can match it. Fixes #448 (#450) (4154018, 2026-10-13).
+- Evince publishes each PDF page as AT-SPI role `page` with an empty name and a Text interface. That role mapped to a group, so the snapshot folded the page into an unnamed `opaque_region` and `find` could not match the words. A page with text is now static text. The value is `Text.get_text` from the start, at most 4000 characters, and `find` searches that string past the snapshot clip. A blank page stays a group, so a childless on-screen page is still a region. A focused page is not a type field, so typing in the find bar is not read back as the page. Fixes #447 (#449) (86777bd, 2026-10-13).
 - Chromium exposes `<textarea>` as AT-SPI role entry, the same role as a single-line input. `STATE_MULTI_LINE`, or a multiline / `aria-multiline` attribute, now maps that entry to a textarea when the tag is textarea or the entry has no other tag. A single-line input stays a text field. A contenteditable textbox with `aria-multiline` stays a text field. Fixes #426 (#429) (fe5363f, 2026-10-12).
 - A Gecko contenteditable is an AT-SPI section with `STATE_EDITABLE` and a text interface. That node is a text field, or a textarea when it is multi-line. `set_value` requires the read-back. When EditableText does not change the DOM, focus is confirmed and the same key path `type(ref)` uses replaces the text. Unconfirmed focus types nothing. Fixes #433 (#438) (571aa76, 2026-10-12).
 - Firefox exposes a page textarea as an AT-SPI entry with `STATE_MULTI_LINE`, the same role as a single-line input. That state, and a multiline attribute, map Gecko entries to textarea. A single-line input stays a text field. Chromium entries keep their own mapping. Fixes #432 (#434) (80c45a3, 2026-10-13).
