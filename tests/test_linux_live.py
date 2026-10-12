@@ -10536,6 +10536,63 @@ def test_linux_chrome_outcome_gaps_for_app_click_tab_and_cover(tmp_path) -> None
         _stop_group(proc)
 
 
+def test_linux_mousepad_menu_lists_the_accelerator_not_the_mnemonic(tmp_path) -> None:
+    """Live Mousepad. A mnemonic letter is not the shortcut.
+
+    View > Statusbar is ``a;<Alt>v:a;``: shortcut is null and mnemonic is
+    ``a``. Fullscreen's accelerator field is F11. File's binding is the Alt
+    mnemonic, not a shortcut. Mousepad has to be installed; this does not
+    skip when it is missing.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v mousepad"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "mousepad is not installed"
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "mousepad-config")
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [binary, "--disable-server"], env=env, start_new_session=True,
+    )
+
+    def row(path: str | None, title: str) -> dict:
+        rows = driver.menu_items("mousepad", path)
+        found_row = next((item for item in rows if str(item["title"]).strip() == title), None)
+        assert found_row is not None, (title, [item["title"] for item in rows])
+        return found_row
+
+    try:
+        deadline = time.monotonic() + 20
+        titles: list[str] = []
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                titles = [str(item["title"]).strip() for item in driver.menu_items("mousepad", None)]
+            except ComputerUseError as exc:
+                last = exc.message
+                titles = []
+            if "View" in titles and "File" in titles:
+                break
+            last = ", ".join(titles) or last
+            time.sleep(0.3)
+        assert "View" in titles and "File" in titles, last
+        status = row("View", "Statusbar")
+        assert status["shortcut"] is None, status
+        assert status["mnemonic"] == "a", status
+        fullscreen = row("View", "Fullscreen")
+        assert fullscreen["shortcut"] == "f11", fullscreen
+        assert fullscreen["mnemonic"] == "f", fullscreen
+        file_menu = row(None, "File")
+        assert file_menu["shortcut"] is None, file_menu
+        assert file_menu["mnemonic"] == "f", file_menu
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_mousepad_backspace_and_calc_down_are_confirmed(tmp_path) -> None:
     """Live Mousepad and Calc. A key that edits text or moves the cell is confirmed.
 

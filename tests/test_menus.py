@@ -135,7 +135,10 @@ def test_list_top_level_and_nested_menus() -> None:
     acc, app = FakeAccessor(), textedit_app()
     assert [i.title for i in menus.list_items(acc, app, None)] == ["File", "View"]
     rows = [i.to_dict() for i in menus.list_items(acc, app, "File")]
-    assert rows[0] == {"title": "New", "enabled": True, "shortcut": "cmd+n", "submenu": False, "checked": None}
+    assert rows[0] == {
+        "title": "New", "enabled": True, "shortcut": "cmd+n",
+        "submenu": False, "checked": None, "mnemonic": None,
+    }
     save = next(r for r in rows if r["title"] == "Save")
     assert save["enabled"] is False
     assert next(r for r in rows if r["title"] == "Export")["submenu"] is True
