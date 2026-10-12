@@ -6505,13 +6505,18 @@ class Runtime:
                 """The pinned container in ``shot``.
 
                 A ref string is the slot in one snapshot. After the document
-                moves, that slot can be a cell. The wheel and the unchanged
-                row check follow the table that was pinned.
+                moves, that slot can be a cell. The unchanged-row check
+                follows the table that was pinned, using the fresh bounds.
+                The wheel still resolves once through the driver, so a
+                search records one resolution per scroll.
                 """
                 try:
-                    return self.driver.resolve_ref(pinned[0], ref, live=shot)
+                    return observe.rematch_ref(pinned[0], ref, shot)
                 except (KeyError, ComputerUseError):
-                    return None
+                    try:
+                        return shot.element(ref)
+                    except KeyError:
+                        return None
 
             def ready_anchor() -> Element | None:
                 """The page anchor after Ctrl+F, when that frame is back."""
