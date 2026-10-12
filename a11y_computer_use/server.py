@@ -5691,6 +5691,7 @@ class Runtime:
             page_mode = True
             find_tried = False
             frame_latched = False
+            frame_waits = 0
             same_rows = 0
             previous_rows: tuple[str, ...] | None = None
             last_anchor: Element | None = None
@@ -5858,9 +5859,16 @@ class Runtime:
             def page_frame_missing(shot: Snapshot, anchor: Element | None) -> bool:
                 """True for the find bar or an empty cached Chrome frame.
 
-                That frame is an untitled group with no on-screen rows.
-                Wheeling it does not move the page.
+                A page that already names rows is the frame to search, even
+                while the find bar is still closing. An untitled group with
+                no on-screen rows is the cached frame. Wheeling it does not
+                move the page.
                 """
+                if row_names(shot, anchor):
+                    return False
+                if anchor is not None and (anchor.title or "").strip():
+                    if not (anchor.title or "").lstrip().lower().startswith("find in page"):
+                        return False
                 for el in shot.elements:
                     title = el.title or ""
                     folded = title.lstrip().lower()
@@ -5870,9 +5878,7 @@ class Runtime:
                         return True
                 if anchor is None or anchor.role not in {"AXGroup", "AXWebArea"}:
                     return False
-                if (anchor.title or "").strip():
-                    return False
-                return not row_names(shot, anchor)
+                return True
 
             def restore_page_frame() -> bool:
                 """Latch Chrome once and re-read until the page frame is back.
@@ -5956,32 +5962,6 @@ class Runtime:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
-                if page_frame_missing(snap, last_anchor) and callable(
-                    getattr(self.driver, "latch_chromium_find", None)
-                ):
-                    # A zero budget stops before the re-read. A frame that
-                    # never comes back stops on the no-progress cap too,
-                    # including before the first wheel: spinning here would
-                    # ignore that cap while issued is still 0.
-                    cap = expired_cap()
-                    if budget_s <= 0 and cap is not None:
-                        return unfinished(
-                            issued, snap, last_anchor, budget_hit=True, budget_cap=cap,
-                        )
-                    if restore_page_frame():
-                        snap = self._current
-                        anchor_now = _scroll_anchor(snap)
-                        if anchor_now is not None:
-                            last_anchor = anchor_now
-                    else:
-                        cap = expired_cap()
-                        if cap is not None:
-                            return unfinished(
-                                issued, snap, last_anchor, budget_hit=True, budget_cap=cap,
-                            )
-                        if issued >= limit:
-                            break
-                        continue
                 note_progress(snap, last_anchor)
                 cap = expired_cap()
                 if cap is not None and (issued > 0 or budget_s <= 0):
@@ -6182,15 +6162,16 @@ class Runtime:
                         stalls = 0
                         continue
                 # The find bar or an empty cached frame is not a scroll target.
+                # A few re-reads wait for the page. The search does not spend
+                # the whole budget on that frame, and it does not wheel it.
                 if page_frame_missing(snap, anchor) and callable(
                     getattr(self.driver, "latch_chromium_find", None)
                 ):
-                    cap = expired_cap()
-                    if cap is not None:
-                        return unfinished(
-                            issued, snap, anchor, budget_hit=True, budget_cap=cap,
-                        )
-                    continue
+                    frame_waits += 1
+                    if frame_waits <= 4:
+                        restore_page_frame()
+                        continue
+                    return unfinished(issued, snap, anchor, budget_hit=False)
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:

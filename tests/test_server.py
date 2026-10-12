@@ -2250,8 +2250,8 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     """Synthetic snapshots, not a live Chrome page.
 
     After Ctrl+F the snapshot stays an untitled group with no rows. The
-    search latches Chrome and keeps re-reading, and it stops on the
-    no-progress budget. The empty frame is not a wheel target.
+    search latches Chrome, re-reads a few times, and stops. It does not
+    wheel that frame, and it does not spend the no-progress budget on it.
     """
     from a11y_computer_use import server
 
@@ -2297,13 +2297,14 @@ def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> Non
     out = rt.scroll_to_find(
         "app", text="ROW-0300", direction="down", max_scrolls=60, budget_s=15,
     )
-    assert out.startswith("not found after 0 scroll(s) (time budget 15s)")
+    assert out.startswith("not found after 0 scroll(s)")
+    assert "time budget" not in out
     assert "container: AXGroup ref=e2" in out
     assert "last_rows: none" in out
     assert "scroll_position: unknown" in out
     assert latched == ["com.a"]
     assert scrolled == []
-    assert clock["t"] >= 1015.0
+    assert clock["t"] < 1015.0
 
 
 def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
