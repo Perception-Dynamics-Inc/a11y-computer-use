@@ -3525,27 +3525,28 @@ pad.addEventListener('click', function (event) {
         logged = [
             (step.action, step.result, step.error) for step in resolved.step_log
         ]
-        note = next(
-            (
-                (step.result or "") + "\n" + (step.error or "")
-                for step in resolved.step_log
-                if "resolved " in (step.result or "") or "resolved " in (step.error or "")
-            ),
-            "",
-        )
-        assert note, logged
-        assert state["save"] in note and "Save draft" in note
-        assert "Archive" not in note
+        # The raw walk gives Save draft a new ref. The observation keeps the
+        # ref the model already has, and that click is Save draft, not Archive.
+        save_steps = [
+            step for step in resolved.step_log
+            if step.action == "click" and "Save draft" in (step.result or "")
+        ]
+        assert save_steps, logged
+        assert "Archive" not in (save_steps[-1].result or "")
+        assert state.get("new_save") and state["new_save"] != state["save"]
         resolved_clicks = [params for name, params in sent if name == "click"]
         assert len(resolved_clicks) >= 2
-        assert resolved_clicks[1].get("ref") != state["save"]
-        assert resolved_clicks[1].get("ref") == state["new_save"]
-        assert resolved_clicks[1].get("ref") in note
+        assert resolved_clicks[1].get("ref") == state["save"]
         rows = [
             json.loads(line)
-            for line in (tmp_path / "known" / "trajectory.jsonl").read_text().splitlines()
+            for line in (tmp_path / "known" / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
         ]
-        assert any(row.get("resolved_from") and "Save draft" in row["resolved_from"] for row in rows)
+        click = next(
+            row for row in rows
+            if row.get("action") == "click" and row.get("args", {}).get("ref") == state["save"]
+        )
+        assert "Save draft" in (click.get("result") or "")
+        assert "resolved_from" not in click
         assert outcome() != "out:ARCHIVED"
     finally:
         _stop_group(proc)
