@@ -80,7 +80,10 @@ _ROLE = {
     "window": "AXWindow",
     "dialog": "AXDialog",
     "alert": "AXDialog",
-    "file chooser": "AXWindow",
+    # ATSPI_ROLE_FILE_CHOOSER is a dialog (Ristretto Open, GTK FileChooserDialog).
+    # AXWindow rendered it as a document window. The name is the title; the
+    # Value interface is not the chosen path, so the value probe stays off.
+    "file chooser": "AXDialog",
     "color chooser": "AXWindow",
     "menu item": "AXMenuItem",
     "menu bar": "AXMenuBar",
@@ -107,6 +110,9 @@ _ROLE = {
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
+    # Ristretto's image metadata bar is ATSPI_ROLE_STATUS_BAR. The name is
+    # the status text. AXGroup, the unmapped fallback, hid it among layout.
+    "status bar": "AXStatusBar",
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
@@ -877,6 +883,59 @@ def _frame_ancestor(acc):
     return None
 
 
+def _negative_extent(size) -> bool:
+    """True for GTK's no-allocation sentinel, (-1, -1) width and height."""
+    if size is None:
+        return False
+    try:
+        return float(size[0]) < 0 or float(size[1]) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _frame_accessible_name(node) -> str:
+    """Accessible name of the frame that contains ``node``, or empty."""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    return str(_call_first(frame, ("get_name",), default="") or "").strip()
+
+
+def _hidden_page_tab(node) -> bool:
+    """True when ``node`` is a page tab GTK gave no allocation of its own."""
+    if node is None or _role_name(node) != "page tab":
+        return False
+    _pos, size = _extents(node, keep_zero=True)
+    return _negative_extent(size)
+
+
+def _direct_children(node) -> list:
+    """Immediate children, without the snapshot's page-tab hoist."""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found = []
+    for index in range(min(int(count), _MAX_CHILDREN_FETCH)):
+        child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), index)
+        if child is not None:
+            found.append(child)
+    return found
+
+
+def _hoist_hidden_page_tabs(kids: list) -> list:
+    """Lift a hidden page tab's page up to the tab list.
+
+    The page stays in the snapshot, and it is not a child of the tab button.
+    A page tab that has a real box keeps its own children.
+    """
+    out = []
+    for kid in kids:
+        out.append(kid)
+        if _hidden_page_tab(kid):
+            out.extend(_direct_children(kid))
+    return out
+
+
 def _usable_window_rect(rect) -> bool:
     """False for a missing box, a zero box, or GTK's off-screen sentinel."""
     if rect is None:
@@ -1299,6 +1358,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
+    "AXStatusBar",
 })
 
 
@@ -1709,6 +1769,21 @@ def _sane_range(low: float, high: float) -> bool:
 # 6.93e-310), which is subnormal. Zero and ordinary small values stay.
 _UNINITIALIZED_VALUE_ROLES = frozenset({"AXDialog", "AXCheckBox"})
 _UNINITIALIZED_VALUE_ROLE_NAMES = frozenset({"dialog", "alert", "check box"})
+#: An empty text control whose character count is 0. ``document text`` is
+#: absent: a Writer document's text lives in its paragraphs, and that read
+#: has to run. A filler is absent too, so its Value stays.
+_EMPTY_TEXT_VALUE_NAMES = frozenset({
+    "entry", "text", "password text", "terminal", "paragraph",
+})
+#: Roles whose Value interface is not the text a person reads. A subnormal
+#: double on these is dropped. A filler is not here.
+_SUBNORMAL_TEXT_ROLES = frozenset({
+    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText",
+})
+_SUBNORMAL_TEXT_ROLE_NAMES = frozenset({
+    "entry", "text", "static", "label", "password text", "paragraph",
+    "terminal", "document text",
+})
 
 
 def _uninitialized_double(value: object) -> bool:
@@ -1991,7 +2066,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     maximum are a real range. GTK's fallback for a non-range control is
     unchanged, except a dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
-    value on those roles stay.
+    value on those roles stay. An empty entry, text field, or paragraph
+    (character count 0) has no value either: Chromium's empty input
+    publishes a subnormal double on Value, and that number is not the
+    field. A filler still keeps that double.
     """
     if role == "AXSecureTextField":
         return None
@@ -2036,6 +2114,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         if role_name == "spin button" and _chrome_date_segment(acc):
             return _date_segment_text(acc)
         return None
+    elif count == 0 and role_name in _EMPTY_TEXT_VALUE_NAMES:
+        # Text is present and empty. Chromium's Value on that entry is a
+        # subnormal double (about 4e-323), which is not the field.
+        return None
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
         return choice
@@ -2068,7 +2150,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     if cur is None:
         return None
     if (
-        role in _UNINITIALIZED_VALUE_ROLES or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+        role in _UNINITIALIZED_VALUE_ROLES
+        or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+        or role in _SUBNORMAL_TEXT_ROLES
+        or role_name in _SUBNORMAL_TEXT_ROLE_NAMES
     ) and _uninitialized_double(cur):
         return None
     return cur
@@ -2419,13 +2504,30 @@ class ATSPIAccessor:
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        unallocated = False
+        if role_str == "page tab" and _negative_extent(size):
+            # A notebook with one page hides the tab bar. GTK reports no
+            # allocation and, for a terminal, an empty name. The frame name
+            # is the page label. Inventing a box would put a click on the
+            # menu or the page, so this control stays hidden: named, with
+            # no bounds and no press action.
+            label = str(name).strip()
+            if not label:
+                label = _frame_accessible_name(node)
+            name = label
+            position, size = None, None
+            unallocated = True
         if checked is None and role == "AXButton":
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
                 checked = flag == "true"
         # Groups skip the value probe. A div is a section, and its text is
         # the inline sentence; reading that one string is what find matches.
-        value = None if role in _NO_VALUE_ROLES else _value_text(node, role, role_str)
+        # A file chooser is a dialog, but its name is the title. Probing Value
+        # used to be skipped when the role was a window.
+        value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
+            node, role, role_str,
+        )
         if value is None:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
@@ -2443,7 +2545,8 @@ class ATSPIAccessor:
             focusable=focusable,
             position=position,
             size=size,
-            actions=_action_names(node),
+            actions=() if unallocated else _action_names(node),
+            unallocated=unallocated,
             value=value,
             checked=checked,
             selected=selected,
@@ -2607,16 +2710,22 @@ class ATSPIAccessor:
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        role = _role_name(node)
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
-        if _role_name(node) == "application":
+        if role == "application":
             # The combo menu is already a child of the combo. The extra
             # top-level window would list those same items a second time.
             kids = [child for child in kids if _combo_owning_popup(child) is None]
-        return _with_table_body(node, kids)
+        if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
+            return []
+        kids = _with_table_body(node, kids)
+        if role == "page tab list":
+            return _hoist_hidden_page_tabs(kids)
+        return kids
 
     def _lo_placement(self, frame):
         """``(client origin, screen coordinates already include the frame)``.
@@ -11783,6 +11892,11 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     True only when the snapshot read equals ``text``. A toolkit whose text
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
+    When that call returned false and the snapshot read is NULL (Chromium's
+    empty entry), the field is typed on X11 and this returns true only when
+    a later snapshot read equals ``text``. A number input is not typed: focusing
+    it can make the empty field read back as 0. Focus that never arrives
+    raises ``focus_lost`` and does not report a write.
     A field with no EditableText is cleared and typed on X11; that also
     returns True only when the snapshot read equals ``text``. On Qt the
     character count has to equal that string too: ``GetText`` stops at an
@@ -11836,7 +11950,22 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
-        return wrote
+        if wrote:
+            return True
+        # Chromium's empty entry: set_text_contents returns false and
+        # get_text(0, -1) is NULL. Type only when the field still reads
+        # blank, and only accept the write when that read comes back as
+        # ``text``. A number input is left alone.
+        if (
+            not _number_input(acc)
+            and _text_is_gone(acc)
+            and _x11_keys_available()
+        ):
+            grab_focus(acc)
+            _type_into_target(acc, text)
+            if _confirm_text(acc, text):
+                return True
+        return False
     if not _clear_text(acc, eti, current):
         return False
     if not _call_first(eti, ("set_text_contents",), text, default=False):
