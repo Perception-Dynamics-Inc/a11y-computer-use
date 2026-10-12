@@ -11599,3 +11599,113 @@ def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     assert _linux_system.window_id_for_toplevel(
         title="Missing", pid=9, extents=None,
     ) is None
+
+
+def _scintilla_document(fake_atspi, monkeypatch, *, scroll: bool):
+    """GTK multi-line text whose buffer is longer than the widget.
+
+    Twenty lines fit in the box. ``ROW-150`` is below that. Character
+    extents are the line's real screen rect, including when it misses the
+    widget. ``scroll`` makes ``set_caret_offset`` move the view the way
+    Scintilla does. Not a live window.
+    """
+    lines = [f"ROW-{index:03d}" for index in range(304)]
+    body = "\n".join(lines)
+    width = len(lines[0]) + 1
+    view = {"line": 0}
+    editor = _Acc("text", name="Document", states=("MULTI_LINE", "EDITABLE"), width=400, height=400)
+    editor.text = body
+    _bind_gtk_app(editor)
+    _place_row(editor, 40, 100, 400, 400)
+
+    def extents(acc, offset, _coord):
+        if acc is not editor:
+            return None
+        line = int(offset) // width
+        return _Rect(80, 16, 48, 100 + (line - view["line"]) * 20)
+
+    def set_caret(acc, offset):
+        acc.caret = int(offset)
+        if scroll:
+            view["line"] = max(0, int(offset) // width - 1)
+        return True
+
+    monkeypatch.setattr(fake_atspi.Text, "get_character_extents", staticmethod(extents), raising=False)
+    monkeypatch.setattr(fake_atspi.Text, "set_caret_offset", staticmethod(set_caret))
+    window = _Acc("frame", name="Geany", width=640, height=560)
+    _place_row(window, 20, 40, 640, 560)
+    _bind_gtk_app(window)
+    app = editor.get_application()
+    window.get_application = lambda: app
+    _adopt(window, editor)
+    return window, editor, view
+
+
+def test_scroll_to_find_does_not_call_an_offscreen_scintilla_line_found(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic Scintilla buffer. Not a live Geany window.
+
+    ``ROW-150`` is in the text interface and below the widget. Reporting it
+    as found after 0 scrolls is the bug. The caret scroll brings that line
+    into the widget, and the report counts that scroll. Extents that do not
+    move leave the match not found. No extra rectangle is attached.
+    """
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = driver.snapshot(Scope.WINDOW, "geany")
+    area = next(el for el in opening.elements if el.role == "AXTextArea")
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "hidden"
+    assert _atspi.buffer_match_visibility(editor, "ROW-001") == "visible"
+    assert view["line"] == 0
+    visible = runtime.scroll_to_find("geany", text="ROW-001", max_scrolls=4)
+    assert visible.startswith("found after 0 scroll")
+    assert view["line"] == 0
+    found = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=4)
+    assert found.startswith("found after 1 scroll"), found
+    assert "found after 0" not in found
+    assert view["line"] > 0
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
+    shown = next(el for el in runtime._current.elements if el.role == "AXTextArea")
+    assert shown.bounds == area.bounds
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    runtime = _bare_runtime(driver)
+    missed = runtime.scroll_to_find("geany", text="ROW-150", max_scrolls=4)
+    assert missed.startswith("not found after 0 scroll"), missed
+    assert not missed.startswith("found after")
+    assert "not in the visible text" in missed
+    assert view["line"] == 0
+    plain = runtime.find("geany", text="ROW-150")
+    assert "no elements match" in plain
+    assert "not in the visible text" in plain
+    assert not plain.startswith("found after")
+
+
+def test_find_scrolls_a_scintilla_match_into_the_widget(fake_atspi, monkeypatch) -> None:
+    """Synthetic Scintilla buffer. ``find`` scrolls, then reports the widget.
+
+    The match is omitted when the extents stay outside the widget. A line
+    that is already on screen does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, editor, view = _scintilla_document(fake_atspi, monkeypatch, scroll=True)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    top = runtime.find("geany", text="ROW-001")
+    assert "ROW-001" in top
+    assert "no elements match" not in top
+    assert view["line"] == 0
+    found = runtime.find("geany", text="ROW-150")
+    assert "textarea" in found
+    assert "no elements match" not in found
+    assert "not in the visible text" not in found
+    assert view["line"] > 0
+    assert _atspi.buffer_match_visibility(editor, "ROW-150") == "visible"
