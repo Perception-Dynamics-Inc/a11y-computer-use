@@ -971,8 +971,9 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
 
     # Five notches clear a viewport of tall rows and then a couple more
     # of short ones, so the next snapshot starts below the previous tail
-    # and the row in that gap is never shown. Four notches stay inside
-    # the rows that were on screen.
+    # and the row in that gap is never shown. Four notches are the burst.
+    # On short rows those four can still clear the sample. The search
+    # then wheels back until one of the old rows is on screen again.
     burst = wanted - 1 if wanted >= 5 else wanted
     # The whole request goes out together. A tree that publishes that
     # viewport inside this window — the same 0.9s ``_settle_shown_names``
@@ -993,7 +994,27 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
         if abs(nxt) >= burst or _names_parted(before, after):
             # A read that lost the rows (the list label, or the file
             # infobar) is not the viewport landing. Keep polling.
-            if not (_row_marker(before) and not _row_marker(after)):
+            if _row_marker(before) and not _row_marker(after):
+                pass
+            else:
+                if (
+                    _names_parted(before, after)
+                    and _row_marker(before)
+                    and _row_marker(after)
+                ):
+                    # The burst cleared the sample. One notch back brings
+                    # the previous tail on screen, so the next snapshot
+                    # still contains the row this step would have skipped.
+                    # A sample that stays apart stops after ``burst``
+                    # reverse notches.
+                    for _back in range(burst):
+                        _linux_input.scroll(x, y, dy=-sign)
+                        try:
+                            after = _refresh_shown_names(run, source)
+                        except Exception:
+                            return
+                        if not _names_parted(before, after):
+                            return
                 return
         moved = nxt
         if after != before:

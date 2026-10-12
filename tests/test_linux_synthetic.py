@@ -2665,12 +2665,14 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
 def test_chromium_document_scroll_keeps_a_viewport_burst(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """A viewport burst that clears the on-screen names is not followed by more notches.
+    """A viewport burst that clears the on-screen names is pulled back, not extended.
 
-    Synthetic names, not a live Chrome. The head leaving the sample is the
-    viewport step. The burst is four notches: the fifth lands past the rows
-    that were on screen. Stopping at the first notch, and waiting for the
-    tree after it, is the four-row two-second regression.
+    Synthetic names, not a live Chrome. The burst is four notches down.
+    The fifth forward notch is not sent. When that burst leaves the old
+    sample, reverse notches follow until one old row is back, or the
+    burst count is spent. This mock stays parted, so all four reverse
+    notches are sent. Stopping at the first forward notch, and waiting
+    for the tree after it, is the four-row two-second regression.
     """
     events, _display = xtest_recorder
     sleeps = {"n": 0}
@@ -2700,9 +2702,12 @@ def test_chromium_document_scroll_keeps_a_viewport_burst(
 
     monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
-    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
-    assert len(presses) == 4, len(presses)
-    assert reads["n"] == 2
+    down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
+    assert len(down) == 4, len(down)
+    assert len(up) == 4, len(up)
+    # One read of the old sample, one of the parted sample, then one per reverse notch.
+    assert reads["n"] == 6
     assert sleeps["n"] == 0
 
 
