@@ -3040,6 +3040,50 @@ def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
         return None
 
 
+def _ancestor_key(acc) -> object:
+    """Identity of one accessible across recreated Python wrappers.
+
+    The AT-SPI bus name and object path when both are on the GObject.
+    Otherwise ``id()`` of this wrapper. A collected wrapper's ``id()`` can
+    be reused for a different accessible, so a walk that falls back to
+    ``id()`` keeps every wrapper alive until it finishes.
+    """
+    stable = _atspi_wrapper_key(acc)
+    if stable is not None:
+        return stable
+    return id(acc)
+
+
+def _ancestor_chain(acc, limit: int = 32):
+    """Yield ``acc`` and its parents, nearest first.
+
+    Each wrapper stays referenced until this generator is closed. The seen
+    set is `_ancestor_key`: the bus name and object path when the GObject
+    has them. ``get_parent`` returns a new proxy, and CPython reuses the
+    ``id()`` of one that nothing else references. Electron's page sits
+    several panels under the frame; that collision used to end the walk
+    on a panel and report the showing document hidden.
+    """
+    node = acc
+    pinned: list = []
+    seen: set[object] = set()
+    for _ in range(limit):
+        if node is None:
+            return
+        identity = _ancestor_key(node)
+        if identity in seen:
+            return
+        seen.add(identity)
+        pinned.append(node)
+        yield node
+        parent = _parent_of(node)
+        if parent is None:
+            return
+        if _ancestor_key(parent) == identity:
+            return
+        node = parent
+
+
 def _frame_cache_key(acc) -> object:
     """A stable key for one accessible across wrapper objects.
 
@@ -12984,22 +13028,17 @@ def _frame_hierarchy_showing(node) -> bool:
 
 
 def _selected_tab_name(node) -> str | None:
-    """The selected page tab in ``node``'s top-level frame, or None."""
-    current = node
+    """The selected page tab in ``node``'s top-level frame, or None.
+
+    The parent walk uses `_ancestor_chain`. ``id()`` of a short-lived
+    parent wrapper is not the identity of the next ancestor.
+    """
     frame = None
-    seen: set[int] = set()
-    for _ in range(16):
-        if current is None or id(current) in seen:
-            break
-        seen.add(id(current))
+    for current in _ancestor_chain(node, 16):
         role = _role_name(current)
         if role in {"frame", "window"}:
             frame = current
             break
-        parent = _parent_of(current)
-        if parent is None or parent is current:
-            break
-        current = parent
     if frame is None:
         return None
     return _selected_tab_under(frame, 0)
@@ -13194,15 +13233,15 @@ def _chromium_document_hidden(acc) -> bool:
     the same case. The tab strip sits outside the document, so a click on the
     tab itself is not this case. An element scrolled out of the showing
     document is not this case either: that document is still the selected tab.
+
+    Parents are visited through `_ancestor_chain`. A seen-set of ``id()``
+    stops early when a later panel is allocated at the address of a wrapper
+    the walk has already dropped, which is the Electron tree between the
+    document and the frame.
     """
-    node = acc
-    seen: set[int] = set()
     document = None
     reached_frame = False
-    for _ in range(32):
-        if node is None or id(node) in seen:
-            break
-        seen.add(id(node))
+    for node in _ancestor_chain(acc, 32):
         role = _role_name(node)
         if role in {"document web", "document frame"}:
             document = node
@@ -13211,10 +13250,6 @@ def _chromium_document_hidden(acc) -> bool:
         if role in {"frame", "window", "application"}:
             reached_frame = True
             break
-        parent = _parent_of(node)
-        if parent is None or parent is node:
-            break
-        node = parent
     if document is None:
         return False
     if not reached_frame:
