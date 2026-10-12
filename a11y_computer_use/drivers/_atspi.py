@@ -4442,6 +4442,28 @@ def showing_toplevels(node) -> list:
     return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
 
 
+def snapshot_window_list(node) -> list:
+    """Showing windows to snapshot, active first.
+
+    A find bar, an omnibox popup, and Chrome's empty cached frame are
+    showing siblings of the page. They are not windows. Merging one of
+    them is the untitled group with no rows that stops ``scroll_to_find``
+    before the wheel. A GTK dialog stays in the list. One real window is
+    a one-item list, so the snapshot stays a single tree.
+    """
+    if node is None:
+        return []
+    chrome = _chromium_app(node)
+    frames = []
+    for item in showing_toplevels(node):
+        if _is_browser_bar_frame(item):
+            continue
+        if chrome and _sparse_untitled_chrome_frame(item):
+            continue
+        frames.append(item)
+    return frames or [node]
+
+
 def toplevel_raise_target(node):
     """``(active, title, pid, extents)`` for the window that owns ``node``.
 

@@ -11138,6 +11138,31 @@ def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
     assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
 
 
+def test_snapshot_window_list_skips_chrome_cache_frames() -> None:
+    """A find bar and an empty cached frame are not sibling windows.
+
+    Chrome keeps both beside the page, and both are SHOWING. Listing them
+    made the snapshot an untitled group with no rows, so scroll_to_find
+    stopped before the wheel. The named page is the only window. A GTK
+    dialog beside its editor stays.
+    """
+    filler = _WindowNode("panel", "")
+    panel = _WindowNode("panel", "", children=[filler])
+    empty = _WindowNode("frame", "", states={"SHOWING", "ACTIVE"}, children=[panel])
+    page = _WindowNode("frame", "rowtable - Google Chrome", states={"SHOWING"})
+    bar = _WindowNode("frame", "Find in page", states={"SHOWING"})
+    _WindowNode("application", "Google Chrome", children=[empty, bar, page])
+    assert [node.name for node in _atspi.snapshot_window_list(empty)] == [
+        "rowtable - Google Chrome",
+    ]
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "mousepad", children=[dialog, editor])
+    assert [node.name for node in _atspi.snapshot_window_list(dialog)] == [
+        "Editor", "Preferences",
+    ]
+
+
 def test_raise_skips_a_window_that_is_already_the_ewmh_active_one(monkeypatch) -> None:
     driver = LinuxDriver()
     raised: list[int] = []

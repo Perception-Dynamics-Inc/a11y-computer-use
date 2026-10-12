@@ -1497,66 +1497,78 @@ class LinuxDriver:
                 accessor.libreoffice = _atspi.libreoffice_app(app or "") or _atspi.libreoffice_app(
                     caller or ""
                 )
-                roots = [root]
-                if all_windows:
-                    # A find bar or omnibox popup is a showing frame, but it is
-                    # browser chrome. Merging it beside the page is what made
-                    # a page ref resolve to Reload or the address bar.
-                    listed = [
-                        item for item in _atspi.showing_toplevels(root)
-                        if not _atspi._is_browser_bar_frame(item)
-                    ]
-                    if len(listed) > 1:
-                        roots = listed
                 # LibreOffice 25.2 reports content a title bar high until the
                 # first pointer event. A status-bar motion, then this walk,
                 # republishes those boxes. LibreOffice 24 already matches and
                 # is not moved, so its pointer inset and the placement cache
                 # stay as they were. Each window that is walked is settled.
+                listed = _atspi.snapshot_window_list(root) if all_windows else [walked]
                 if accessor.libreoffice:
-                    for item in roots:
+                    settled: set[int] = set()
+                    for item in (walked, *listed):
+                        mark = id(item)
+                        if mark in settled:
+                            continue
+                        settled.add(mark)
                         _atspi.settle_libreoffice_geometry(item)
                 # A table that starts below the viewport is dropped before
                 # children() can seek it. Scroll the matching cell first, and
                 # only for Chromium: GTK tables seek inside their own walk.
-                # After the find bar, the page frame is ``walked``.
+                # After the find bar, the page frame is ``walked``. Walk that
+                # frame before any sibling: a later Chrome root clears the
+                # client cache, and the page would come back as an untitled
+                # group with no rows.
                 seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
                 geometry = _atspi.primary_geometry()
-                if len(roots) == 1:
-                    # After the find bar, the page frame is ``walked``. One
-                    # window keeps that root so the cached bar is not the tree.
-                    if seek and _atspi._chromium_app(root):
-                        _atspi.reveal_text_in_document(walked, seek)
-                    # Chromium lists: the rows are read from the list node this
-                    # walk holds. A saved head on another wrapper is not the snapshot.
-                    accessor.refresh_visible(walked)
+
+                def _walk(node: object) -> Snapshot:
+                    if seek and _atspi._chromium_app(node):
+                        _atspi.reveal_text_in_document(node, seek)
+                    accessor.refresh_visible(node)
                     snap = observe.build_snapshot(
-                        walked, accessor, scope=scope, app=app, pid=watch.pid,
+                        node, accessor, scope=scope, app=app, pid=watch.pid,
                         geometry=geometry,
                     )
-                    _atspi.note_browser_bar(walked, snap.elements)
+                    _atspi.note_browser_bar(node, snap.elements)
                     return snap
-                snaps = []
-                seen: set[object] = set()
-                for item in roots:
-                    chosen = _atspi.chromium_snapshot_root(item)
+
+                page_snap = _walk(walked)
+                if not all_windows:
+                    return page_snap
+                page_key = _atspi._frame_cache_key(walked)
+                extras: list[Snapshot] = []
+                seen = {page_key}
+                page_is_active = False
+                active_known = False
+                for item in listed:
+                    if _atspi._is_browser_bar_frame(item) or (
+                        _atspi._chromium_app(item) and _atspi._sparse_untitled_chrome_frame(item)
+                    ):
+                        continue
+                    chosen = (
+                        _atspi.chromium_snapshot_root(item)
+                        if _atspi._chromium_app(item) else item
+                    )
+                    if _atspi._is_browser_bar_frame(chosen) or (
+                        _atspi._chromium_app(chosen) and _atspi._sparse_untitled_chrome_frame(chosen)
+                    ):
+                        continue
                     key = _atspi._frame_cache_key(chosen)
                     if key in seen:
+                        if not active_known:
+                            page_is_active = True
+                            active_known = True
                         continue
                     seen.add(key)
-                    if seek and _atspi._chromium_app(chosen):
-                        _atspi.reveal_text_in_document(chosen, seek)
-                    accessor.refresh_visible(chosen)
-                    snap = observe.build_snapshot(
-                        chosen, accessor, scope=scope, app=app, pid=watch.pid,
-                        geometry=geometry,
-                    )
-                    _atspi.note_browser_bar(chosen, snap.elements)
-                    snaps.append(snap)
-                if len(snaps) == 1:
-                    return snaps[0]
+                    extra = _walk(chosen)
+                    extras.append(extra)
+                    if not active_known:
+                        active_known = True
+                if not extras:
+                    return page_snap
+                snaps = [page_snap, *extras] if page_is_active else [extras[0], page_snap, *extras[1:]]
                 merged = observe.merge_window_snapshots(
                     snaps, scope=scope, app=app, pid=watch.pid,
                 )
