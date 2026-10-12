@@ -1179,6 +1179,72 @@ def test_single_line_gtk_text_is_a_text_field_not_a_textarea(monkeypatch) -> Non
     assert plain.role == "AXTextArea"
 
 
+def test_chromium_textarea_entry_is_multi_line_text(monkeypatch) -> None:
+    """Chromium exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
+
+    A single-line ``<input>`` stays a text field. The ``multiline`` attribute
+    is the same fact when the state is absent. A contenteditable
+    ``role=textbox`` with ``aria-multiline`` stays a text field. The snapshot
+    word for the textarea is ``textarea``. Not a live Chrome or Electron.
+    """
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: "line1 line2")
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    class Acc:
+        def __init__(self, states, attrs):
+            self.states = set(states)
+            self.attrs = dict(attrs)
+
+        def get_role_name(self):
+            return "entry"
+
+        def get_name(self):
+            return "Note body" if "MULTI_LINE" in self.states or self.attrs.get("tag") == "textarea" else "Note title"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States(self.states)
+
+        def get_attributes(self):
+            return dict(self.attrs)
+
+    def read(states, attrs):
+        return _atspi.ATSPIAccessor().read(Acc(states, attrs))
+
+    area = read({"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, {"tag": "textarea"})
+    single = read({"SINGLE_LINE", "EDITABLE"}, {"tag": "input"})
+    by_attr = read({"EDITABLE"}, {"multiline": "true"})
+    by_bool = read({"EDITABLE"}, {"multiline": True})
+    rich = read(
+        {"MULTI_LINE", "EDITABLE"},
+        {"tag": "div", "xml-roles": "textbox", "aria-multiline": "true"},
+    )
+    aria_only = read({"EDITABLE"}, {"aria-multiline": "true"})
+    off = read({"EDITABLE"}, {"multiline": "false", "aria-multiline": "false"})
+    assert area.role == "AXTextArea"
+    assert single.role == "AXTextField"
+    assert by_attr.role == "AXTextArea"
+    assert by_bool.role == "AXTextArea"
+    assert rich.role == "AXTextField"
+    assert aria_only.role == "AXTextField"
+    assert off.role == "AXTextField"
+
+    snap = build_snapshot(
+        (area, []), _FakeAccessor(), scope=Scope.WINDOW, app="electron", pid=1, geometry=_geometry(),
+    )
+    text = observe.render_text(snap)
+    assert 'textarea "Note body"' in text
+    single_snap = build_snapshot(
+        (single, []), _FakeAccessor(), scope=Scope.WINDOW, app="electron", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Note title"' in observe.render_text(single_snap)
+
+
 class _Section:
     """A Chrome ``<div contenteditable>`` with no textbox role: AT-SPI section."""
 
