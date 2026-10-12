@@ -11611,6 +11611,205 @@ def _location_value(snap) -> str | None:
     return None
 
 
+def test_linux_gtk_form_stays_on_atspi_without_a_debug_port(tmp_path) -> None:
+    """Live GTK. An entry and a checkbox are AT-SPI, and CDP is not required.
+
+    The process is not started with a debugging port. The snapshot value
+    and the checked bit come from the accessible, and set_value still
+    writes the entry.
+    """
+    from a11y_computer_use.drivers import _cdp_forms
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cuahybridgtk.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        GLib.set_prgname("cuahybridgtk")
+        win = Gtk.Window(title="cuahybridgtk")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        entry = Gtk.Entry()
+        entry.set_text("gtk-text")
+        entry.get_accessible().set_name("Note")
+        agree = Gtk.CheckButton(label="Agree")
+        agree.set_active(True)
+        box.pack_start(entry, False, False, 0)
+        box.pack_start(agree, False, False, 0)
+        win.add(box)
+        win.set_default_size(320, 160)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen([sys.executable, str(script)], env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuahybridgtk")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                from a11y_computer_use import observe
+
+                last = observe.render_text(shot)
+                note = next((el for el in shot.elements if el.title == "Note"), None)
+                agree = next((el for el in shot.elements if el.title == "Agree"), None)
+                if note is not None and note.value == "gtk-text" and agree is not None and agree.checked is True:
+                    snap = shot
+                    break
+            time.sleep(0.3)
+        assert snap is not None, last[:800]
+        note = next(el for el in snap.elements if el.title == "Note")
+        assert note.bounds.width > 0 and note.bounds.height > 0
+        assert _cdp_forms.port_for_pid(proc.pid) is None
+        assert driver.set_value(note, "gtk-next") is True
+        deadline = time.monotonic() + 4
+        shown = None
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "cuahybridgtk")
+            note = next(el for el in shot.elements if el.title == "Note")
+            shown = note.value
+            if shown == "gtk-next":
+                break
+            time.sleep(0.2)
+        assert shown == "gtk-next", shown
+        agree = next(el for el in shot.elements if el.title == "Agree")
+        assert agree.checked is True
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_chrome_dom_form_merges_when_the_port_is_opt_in(tmp_path) -> None:
+    """Live Chrome. Form values and writes use the DOM only because the test opted in.
+
+    The driver does not add ``--remote-debugging-port``. This process is
+    started with it. Text, number, select, and checked state come back on
+    the AT-SPI elements, whose boxes stay the accessible boxes. A rejected
+    value raises and does not mark the node written.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers import _cdp_forms
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the DOM form merge")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "cuahybrid119.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>cuahybrid119</title>"
+        "<label>Name <input id=name aria-label=Name value=Ada></label>"
+        "<label>Seats <input id=seats type=number aria-label=Seats min=0 max=12 value=4></label>"
+        "<label>Country <select id=country aria-label=Country>"
+        "<option>Kazakhstan</option><option selected>Japan</option><option>Peru</option>"
+        "</select></label>"
+        "<label>Agree <input id=agree type=checkbox aria-label=Agree checked></label>"
+    )
+    profile = tmp_path / "chrome-hybrid"
+    profile.mkdir()
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1000,700",
+            f"--remote-debugging-port={port}", page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited {proc.returncode} before the form was exposed")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                titles = {el.title for el in shot.elements}
+                if {"Name", "Seats", "Country", "Agree"} <= titles:
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, last[:800]
+        name = next(el for el in snap.elements if el.title == "Name" and el.stable_id == "name")
+        seats = next(el for el in snap.elements if el.title == "Seats")
+        country = next(el for el in snap.elements if el.title == "Country")
+        agree = next(el for el in snap.elements if el.title == "Agree")
+        assert name.value == "Ada", last
+        assert seats.value is not None and "4" in str(seats.value), seats.value
+        assert country.value == "Japan", country.value
+        assert agree.checked is True
+        assert name.bounds.width > 0 and name.bounds.height > 0
+        again = driver.snapshot(Scope.WINDOW, "chrome")
+        name_again = next(el for el in again.elements if el.stable_id == "name")
+        assert (name_again.bounds.x, name_again.bounds.y, name_again.bounds.width, name_again.bounds.height) == (
+            name.bounds.x, name.bounds.y, name.bounds.width, name.bounds.height,
+        )
+        assert driver.set_value(name, "Grace") is True
+        written = _cdp_forms._evaluate(
+            port, "",
+            "document.getElementById('name').__a11yCuDom === 1"
+            " && document.getElementById('name').value === 'Grace'",
+        )
+        assert written is True
+        with pytest.raises(ValueError, match="Kazakhstan"):
+            driver.set_value(country, "Mars")
+        untouched = _cdp_forms._evaluate(
+            port, "",
+            "document.getElementById('country').__a11yCuDom === 1",
+        )
+        assert untouched is not True
+        assert driver.set_value(country, "Peru") is True
+        with pytest.raises(ValueError, match="not a number"):
+            driver.set_value(seats, "abc")
+        assert driver.set_value(seats, "9") is True
+        assert driver.press_element(agree) is True
+        deadline = time.monotonic() + 4
+        shown = {}
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            shown = {el.title: el for el in shot.elements if el.title in {"Name", "Seats", "Country", "Agree"}}
+            name_ok = shown.get("Name") is not None and shown["Name"].value == "Grace"
+            seats_ok = shown.get("Seats") is not None and shown["Seats"].value is not None and "9" in str(shown["Seats"].value)
+            country_ok = shown.get("Country") is not None and shown["Country"].value == "Peru"
+            agree_ok = shown.get("Agree") is not None and shown["Agree"].checked is False
+            if name_ok and seats_ok and country_ok and agree_ok:
+                break
+            time.sleep(0.25)
+        assert shown["Name"].value == "Grace"
+        assert "9" in str(shown["Seats"].value)
+        assert shown["Country"].value == "Peru"
+        assert shown["Agree"].checked is False
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
     """Live Thunar. A ref click on a side-pane place opens that place.
 

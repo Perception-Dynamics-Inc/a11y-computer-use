@@ -1339,11 +1339,17 @@ class LinuxDriver:
 
     def _snapshot(self, scope: Scope, app: str) -> Snapshot:
         try:
-            return self._snapshot_resolved(scope, app)
+            snap = self._snapshot_resolved(scope, app)
         except ComputerUseError as exc:
             if exc.code is ErrorCode.APP_NOT_RESPONDING and exc.detail.get("app") != app:
                 raise self._not_responding(app, exc) from exc
             raise
+        # DOM values merge onto this tree only when the process opted into
+        # CDP. Bounds, refs, and a snapshot with no port stay as AT-SPI
+        # built them. Windows, menus, and native dialogs are untouched.
+        from a11y_computer_use.drivers import _cdp_forms
+
+        return _cdp_forms.overlay_snapshot(snap)
 
     def _snapshot_resolved(self, scope: Scope, app: str) -> Snapshot:
         from a11y_computer_use.drivers import _atspi
@@ -1701,6 +1707,13 @@ class LinuxDriver:
         self._focused_editable = None
         if element.secure:
             return False
+        # A checkbox or radio in a Chrome/Electron window that already
+        # exposes CDP is toggled in the DOM. No port keeps the AT-SPI action.
+        from a11y_computer_use.drivers import _cdp_forms
+
+        pressed = _cdp_forms.press_checkable(element)
+        if pressed is not None:
+            return pressed
         # A plain zero-size web wrapper can carry Chrome's click action and
         # still not be a target. press_element must not fire that action.
         if not element.clickable and not element.editable:
@@ -1972,8 +1985,14 @@ class LinuxDriver:
             raise
 
     def _apply_set_value(self, element: Element, value: str, handle) -> bool:
-        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _atspi, _cdp_forms
 
+        # Form controls on an opted-in Chrome or Electron window are written
+        # in the DOM. None keeps the AT-SPI writer, including GTK and a
+        # Chrome that was not started with a debugging port.
+        dom = _cdp_forms.write_element(element, value)
+        if dom is not None:
+            return dom
         if handle is not None and self._run(lambda: _atspi.is_sheet_cell(handle)):
             # A Writer table cell is named like a Calc address, but typing
             # into it inserts a paragraph and the cell node reads back empty.
