@@ -74,6 +74,30 @@ def test_calls_outside_the_cache_always_hit_the_object() -> None:
     assert node.role_calls == 2
 
 
+def test_state_set_is_not_cached() -> None:
+    """A click or Escape changes state without an AT-SPI mutator.
+
+    Caching the set inside one driver call reported a combo still expanded
+    and a Qt cell still unselected after the input that changed them.
+    """
+
+    class Node:
+        def __init__(self):
+            self.states = {"ENABLED"}
+            self.calls = 0
+
+        def get_state_set(self):
+            self.calls += 1
+            return set(self.states)
+
+    node = Node()
+    with _atspi.read_cache():
+        assert _atspi._call_first(node, ("get_state_set",)) == {"ENABLED"}
+        node.states.add("SELECTED")
+        assert _atspi._call_first(node, ("get_state_set",)) == {"ENABLED", "SELECTED"}
+    assert node.calls == 2
+
+
 def test_name_is_not_cached() -> None:
     node = _Node()
     with _atspi.read_cache():

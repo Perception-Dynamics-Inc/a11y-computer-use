@@ -591,6 +591,9 @@ def read_cache():
     mutator drops every block on this thread. ``get_name`` is never
     cached: a root probe retries an empty name. A child count of -1 is
     not cached: that value is a failed read the walk revives.
+    ``get_state_set`` is never cached: a pointer click or Escape changes
+    SELECTED and EXPANDED inside the same call, and those inputs are not
+    AT-SPI mutators.
     """
     stack = _read_cache_stack()
     stack.append(_ReadCacheState())
@@ -670,8 +673,10 @@ def _attributes(value) -> bool:
 
 
 # Stable for the length of one driver call. Names, descriptions, extents,
-# and text are read again: they change without a method we can see here,
-# or a caller retries an empty result.
+# text, and state sets are read again: they change without a method we
+# can see here, or a caller retries an empty result. A cached state set
+# kept a combo EXPANDED after Escape and a Qt cell unselected after the
+# pointer click that selected it.
 _CACHEABLE = {
     "get_role_name": _nonempty_str,
     "get_action_name": _any_str,
@@ -686,7 +691,6 @@ _CACHEABLE = {
     "get_toolkit_name": _nonempty_str,
     "getToolkitName": _nonempty_str,
     "get_process_id": _positive_int,
-    "get_state_set": _present,
     "get_child_at_index": _present,
     "getChildAtIndex": _present,
     "get_child_count": _nonneg_int,
