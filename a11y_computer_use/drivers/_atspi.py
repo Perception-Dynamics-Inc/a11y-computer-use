@@ -4398,9 +4398,11 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     A password field is returned so the caller can refuse it before any
     write. None means there is no focused editable: nothing is focused, the
     focused node has no EditableText, the walk could not find focus, or
-    PyGObject is not installed. The caller then uses keystrokes. The same
-    node `insert_text` accepts, so a coordinate click and a ref click share
-    that helper.
+    PyGObject is not installed. The caller then uses keystrokes. An Impress
+    or Draw frame is the exception: the focused container has no
+    EditableText, and the focused or caret paragraph inside it is returned.
+    The same node `insert_text` accepts, so a coordinate click and a ref
+    click share that helper.
     """
     try:
         acc, truncated = _focused_node(app, max_nodes=max_nodes)
@@ -4411,7 +4413,13 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     if is_secure(acc):
         return acc
     if _editable_iface(acc) is None:
-        return None
+        # Impress and Draw focus the presentation or the text frame. The
+        # paragraph being edited is below that container and is the node
+        # insert_text can write.
+        paragraph = _drawing_edit_paragraph(acc)
+        if paragraph is None:
+            return None
+        return paragraph
     return acc
 
 
@@ -7023,6 +7031,269 @@ def replace_writer_cell_text(acc, value: str) -> None:
         actual=failed,
         formula=None,
     )
+
+
+# Impress exposes the slide as ``document presentation``. Draw exposes the
+# page as ``document frame``. The slide sorter is also a document frame; it
+# is not an editable frame. A browser document frame is not LibreOffice.
+_DRAWING_DOCUMENT_ROLES = frozenset({"document presentation", "document frame"})
+_DRAWING_SKIP_ROLES = frozenset({
+    "menu", "menu bar", "menu item", "popup menu", "tool bar", "scroll bar",
+})
+_DRAWING_TYPE_DEADLINE_S = 2.0
+_DRAWING_TYPE_PAUSE_S = 0.05
+
+
+def _libreoffice_node(acc) -> bool:
+    """True when ``acc`` belongs to LibreOffice."""
+    app = _call_first(acc, ("get_application", "getApplication"))
+    if app is None:
+        return False
+    name = str(_call_first(app, ("get_name",), default="") or "")
+    return libreoffice_app(name)
+
+
+def _is_drawing_document(acc) -> bool:
+    """An Impress slide or a Draw page. The slide sorter is not one."""
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role not in _DRAWING_DOCUMENT_ROLES:
+        return False
+    if role == "document frame" and _node_name(acc) == "Slides View":
+        return False
+    return _libreoffice_node(acc)
+
+
+def _drawing_document_of(acc):
+    """The Impress or Draw document that contains ``acc``, or None."""
+    node = acc
+    seen: set[int] = set()
+    for _ in range(10):
+        if node is None or id(node) in seen:
+            return None
+        seen.add(id(node))
+        try:
+            if _is_drawing_document(node):
+                return node
+        except Exception:
+            return None
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        node = parent
+    return None
+
+
+def _frame_paragraphs(frame) -> list:
+    """Editable paragraph children of a text frame, in order."""
+    found = []
+    count = _child_count(frame)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 32)):
+        child = _child_at(frame, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"paragraph", "heading"}:
+            continue
+        found.append(child)
+    return found
+
+
+def _drawing_frame(doc):
+    """The text frame that has the caret, or None when none is focused.
+
+    The focused paragraph's frame wins. Otherwise the focused panel that
+    holds paragraphs. A click focuses that panel before the paragraph
+    itself is focused. A document with no focused frame is not guessed.
+    """
+    focused_paragraph = None
+    focused_panel = None
+    budget = [64]
+
+    def walk(node, depth: int) -> None:
+        nonlocal focused_paragraph, focused_panel
+        if node is None or budget[0] <= 0 or depth > 8:
+            return
+        budget[0] -= 1
+        try:
+            role = _role_name(node)
+        except Exception:
+            return
+        if role in _DRAWING_SKIP_ROLES:
+            return
+        if role == "document frame" and _node_name(node) == "Slides View":
+            return
+        if role in {"paragraph", "heading"} and (
+            _state_has(node, "FOCUSED") or _state_has(node, "ACTIVE")
+        ):
+            focused_paragraph = node
+        if role == "panel" and _state_has(node, "FOCUSED") and _frame_paragraphs(node):
+            focused_panel = node
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 16)):
+            walk(_child_at(node, index), depth + 1)
+
+    walk(doc, 0)
+    if focused_paragraph is not None:
+        parent = _parent_of(focused_paragraph)
+        if parent is not None:
+            return parent
+    return focused_panel
+
+
+def _drawing_edit_paragraph(acc):
+    """The paragraph a type into this Impress or Draw focus should use.
+
+    None when ``acc`` is not inside such a document, or no frame has focus.
+    The focused or active paragraph wins. A frame that was just clicked has
+    one paragraph and a caret there. Several paragraphs use the last one,
+    which is where Return leaves the caret.
+    """
+    doc = _drawing_document_of(acc)
+    if doc is None:
+        return None
+    frame = _drawing_frame(doc)
+    if frame is None:
+        return None
+    paragraphs = [
+        child for child in _frame_paragraphs(frame) if _editable_iface(child) is not None
+    ]
+    if not paragraphs:
+        return None
+    for child in paragraphs:
+        if _state_has(child, "FOCUSED") or _state_has(child, "ACTIVE"):
+            return child
+    if len(paragraphs) == 1:
+        return paragraphs[0]
+    return paragraphs[-1]
+
+
+def is_drawing_text_paragraph(acc) -> bool:
+    """A paragraph inside an Impress slide or a Draw page."""
+    if acc is None:
+        return False
+    try:
+        if _role_name(acc) not in {"paragraph", "heading"}:
+            return False
+    except Exception:
+        return False
+    return _drawing_document_of(acc) is not None
+
+
+def _drawing_frame_text(doc) -> tuple[str, str | None]:
+    """``(status, text)`` for the focused text frame inside ``doc``.
+
+    ``text`` joins the frame's paragraphs with newlines. ``unreadable``
+    means the frame or its text interface is not there. An empty paragraph
+    is ``text`` and ``""``: that value was read.
+    """
+    _call_first(doc, ("clear_cache", "clearCache"))
+    frame = _drawing_frame(doc)
+    if frame is None:
+        return "unreadable", None
+    _call_first(frame, ("clear_cache", "clearCache"))
+    paragraphs = _frame_paragraphs(frame)
+    if not paragraphs:
+        return "unreadable", None
+    parts: list[str] = []
+    for child in paragraphs:
+        raw = _full_text(child)
+        if raw is None:
+            return "unreadable", None
+        parts.append(_type_paragraph_body(raw))
+    return "text", "\n".join(parts)
+
+
+def drawing_focus_text(app: str) -> tuple[str, str | None]:
+    """``(status, text)`` of the focused Impress or Draw frame.
+
+    ``skip`` when focus is not in one. ``unreadable`` when the frame's
+    paragraphs cannot be read. ``text`` is the paragraphs joined by
+    newlines, and ``""`` is a frame that was read and is empty.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return "skip", None
+    if truncated or acc is None:
+        return "skip", None
+    doc = _drawing_document_of(acc)
+    if doc is None:
+        return "skip", None
+    try:
+        return _drawing_frame_text(doc)
+    except Exception:
+        return "unreadable", None
+
+
+def drawing_typed_visible(before: str | None, shown: str | None, text: str) -> bool:
+    """True when a drawing frame shows ``text``.
+
+    Newline, CRLF, U+2028, U+2029, and a paragraph boundary are the same
+    break. A missing or extra character is not. A frame that already held
+    the text and did not change does not count, unless the frame is exactly
+    that text.
+    """
+    if shown is None:
+        return False
+    from a11y_computer_use.outcome import typed_breaks_match
+
+    if typed_breaks_match(shown, text):
+        return True
+    return _typed_visible(before, shown, text)
+
+
+def poll_drawing_type(app: str, before: str | None, text: str) -> tuple[str, str | None]:
+    """Poll an Impress or Draw frame until ``text`` shows or the read settles.
+
+    The first read can still be the placeholder. A later paragraph that is
+    not published yet is not a miss. A stable read that does not show
+    ``text`` is returned as it is. ``skip`` is not a drawing frame.
+    """
+    deadline = time.monotonic() + _DRAWING_TYPE_DEADLINE_S
+    last: object = object()
+    stable = 0
+    status, shown = "skip", None
+    while True:
+        status, shown = drawing_focus_text(app)
+        if status == "skip":
+            return status, shown
+        if status == "text" and drawing_typed_visible(before, shown, text):
+            return status, shown
+        if status == "text" and shown == last:
+            stable += 1
+            if stable >= 2 and shown not in (None, before):
+                return status, shown
+        else:
+            stable = 0
+        last = shown
+        if time.monotonic() >= deadline:
+            return status, shown
+        time.sleep(_DRAWING_TYPE_PAUSE_S)
+
+
+def drawing_frame_outcome_text(
+    app: str, requested: str, before: str | None = None,
+) -> str | None:
+    """``requested`` when the focused Impress or Draw frame shows it.
+
+    None when focus is not in such a frame, when the paragraphs cannot be
+    read, or when a character is missing or extra. The comparison treats a
+    paragraph break and a newline as the same break.
+    """
+    if not requested or not libreoffice_app(app or ""):
+        return None
+    status, shown = drawing_focus_text(app)
+    if status != "text" or shown is None:
+        return None
+    if drawing_typed_visible(before, shown, requested):
+        return requested
+    return None
 
 
 def libreoffice_app(app: str) -> bool:

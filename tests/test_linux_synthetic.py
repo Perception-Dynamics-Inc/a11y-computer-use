@@ -2665,12 +2665,14 @@ def test_chromium_document_scroll_tops_up_a_short_head_move(
 def test_chromium_document_scroll_keeps_a_viewport_burst(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
-    """A viewport burst that clears the on-screen names is not followed by more notches.
+    """A viewport burst that clears the on-screen names is pulled back, not extended.
 
-    Synthetic names, not a live Chrome. The head leaving the sample is the
-    viewport step. The burst is four notches: the fifth lands past the rows
-    that were on screen. Stopping at the first notch, and waiting for the
-    tree after it, is the four-row two-second regression.
+    Synthetic names, not a live Chrome. The burst is four notches down.
+    The fifth forward notch is not sent. When that burst leaves the old
+    sample, reverse notches follow until one old row is back, or the
+    burst count is spent. This mock stays parted, so all four reverse
+    notches are sent. Stopping at the first forward notch, and waiting
+    for the tree after it, is the four-row two-second regression.
     """
     events, _display = xtest_recorder
     sleeps = {"n": 0}
@@ -2700,9 +2702,12 @@ def test_chromium_document_scroll_keeps_a_viewport_burst(
 
     monkeypatch.setattr("a11y_computer_use.drivers.linux._showing_names", names)
     LinuxDriver().scroll(_body(), dy=5, unit=ScrollUnit.LINES)
-    presses = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
-    assert len(presses) == 4, len(presses)
-    assert reads["n"] == 2
+    down = [event for event in events if event[0] == _X_BPRESS and event[1] == 5]
+    up = [event for event in events if event[0] == _X_BPRESS and event[1] == 4]
+    assert len(down) == 4, len(down)
+    assert len(up) == 4, len(up)
+    # One read of the old sample, one of the parted sample, then one per reverse notch.
+    assert reads["n"] == 6
     assert sleeps["n"] == 0
 
 
@@ -7914,6 +7919,154 @@ def test_type_text_writer_multiline_waits_for_later_paragraphs(fake_atspi, monke
         driver.type_text(memo)
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] == ""
+
+
+def _drawing_deck(role="document presentation", name="Untitled 1 - LibreOffice Presentation"):
+    """Impress or Draw focus: the document is focused, the frame's paragraph is not."""
+    app = _Acc("application", name="soffice.bin")
+    doc = _Acc(role, name=name, states=("FOCUSED", "SHOWING"))
+    doc.text = ""
+    doc.get_application = lambda: app
+    panel = _Acc("panel", name="PresentationSubtitle", states=("FOCUSED", "SHOWING"))
+    paragraph = _Acc("paragraph", name="", states=("SHOWING",))
+    paragraph.text = "Click to add Text"
+    paragraph.get_editable_text_iface = lambda: paragraph
+    _adopt(panel, paragraph)
+    _adopt(doc, panel)
+    _adopt(app, doc)
+    return doc, panel, paragraph
+
+
+def test_focused_editable_descends_to_the_impress_paragraph(fake_atspi, monkeypatch) -> None:
+    """The presentation container is focused and has no EditableText.
+
+    The paragraph in the focused text frame is the type target. A Draw page
+    uses document frame and does the same. The slide sorter and a browser
+    document frame do not.
+    """
+    doc, _panel, paragraph = _drawing_deck()
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (doc, False))
+    assert _atspi.focused_editable("soffice.bin") is paragraph
+
+    draw, _draw_panel, draw_paragraph = _drawing_deck(
+        "document frame", "Untitled 1 - LibreOffice Drawing",
+    )
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (draw, False))
+    assert _atspi.focused_editable("soffice.bin") is draw_paragraph
+
+    app = _Acc("application", name="soffice.bin")
+    slides = _Acc("document frame", name="Slides View", states=("FOCUSED",))
+    slides.text = ""
+    slides.get_application = lambda: app
+    slides.parent = app
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (slides, False))
+    assert _atspi.focused_editable("soffice.bin") is None
+
+    chrome = _Acc("application", name="chrome")
+    frame = _Acc("document frame", name="page", states=("FOCUSED",))
+    frame.text = ""
+    frame.get_application = lambda: chrome
+    frame.parent = chrome
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (frame, False))
+    assert _atspi.focused_editable("chrome") is None
+
+
+def test_drawing_type_confirms_multiline_paragraphs(fake_atspi, monkeypatch) -> None:
+    """Synthetic Impress. No display and no LibreOffice.
+
+    Return splits the frame into paragraphs. The document text stays empty.
+    Newline, U+2028, and that paragraph break compare as one break. ``ab``
+    is not ``a\\nb``. A frame that was read and is still empty is a
+    mismatch. A frame with no paragraph cannot be read, so the empty
+    container is unverified instead of text_mismatch.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    doc, panel, _paragraph = _drawing_deck()
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(_atspi, "_DRAWING_TYPE_DEADLINE_S", 0)
+    monkeypatch.setattr(_atspi, "_DRAWING_TYPE_PAUSE_S", 0)
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (doc, False))
+    monkeypatch.setattr(_atspi, "focused_secure", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: _install_frame_lines(panel, text))
+    assert _atspi.drawing_typed_visible("", "A\u2028B", "A\nB") is True
+    assert _atspi.drawing_typed_visible("", "AB", "A\nB") is False
+    assert _atspi.drawing_typed_visible("", "A\n\nB", "A\nB") is False
+    assert _atspi.drawing_typed_visible("A b", "A b", "A\nB") is False
+
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    assert driver.type_text("North\nSouth") == len("North\nSouth")
+    assert _atspi.drawing_focus_text("soffice.bin") == ("text", "North\nSouth")
+    assert driver._type_unverified is False
+
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: _install_frame_lines(panel, "AB"))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.type_text("A\nB")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert exc.value.detail["actual"] == "AB"
+
+    monkeypatch.setattr(_linux_input, "type_string", lambda _text: _install_frame_lines(panel, ""))
+    with pytest.raises(ComputerUseError) as empty:
+        driver.type_text("A\nB")
+    assert empty.value.detail["reason"] == "text_mismatch"
+    assert empty.value.detail["actual"] == ""
+
+    bare = _Acc("document presentation", name="deck", states=("FOCUSED",))
+    bare.text = ""
+    bare.get_application = doc.get_application
+    monkeypatch.setattr(_atspi, "_focused_node", lambda *_args, **_kwargs: (bare, False))
+    sent: list[str] = []
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: sent.append(text))
+    assert driver.type_text("North\nSouth") == len("North\nSouth")
+    assert sent == ["North\nSouth"]
+    assert driver._type_unverified is True
+
+
+def _install_frame_lines(panel, text: str) -> None:
+    children = []
+    for line in (text.split("\n") if text else [""]):
+        child = _Acc("paragraph", name="", states=("SHOWING",))
+        child.text = line
+        child.get_editable_text_iface = lambda: child
+        children.append(child)
+    if children:
+        children[-1].states.add("FOCUSED")
+        children[-1].states.add("ACTIVE")
+    _adopt(panel, *children)
+
+
+def test_drawing_unverified_outcome_is_not_a_mismatch(tmp_path, monkeypatch) -> None:
+    """The judge says unverified when the frame cannot be read.
+
+    A frame that shows the typed lines is confirmed. Neither result is
+    text_mismatch.
+    """
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"),
+        driver=driver,
+    )
+    driver._type_unverified = True
+    driver._drawing_type_state = "unreadable"
+    driver._drawing_type_before = None
+    monkeypatch.setattr(_atspi, "drawing_frame_outcome_text", lambda *_args, **_kwargs: None)
+    verdict = runtime._judge_mutation("soffice.bin", None, None, "North\nSouth")
+    assert verdict == ("unverifiable", "unverified")
+    assert driver._type_unverified is False
+
+    driver._drawing_type_state = "text"
+    driver._drawing_type_before = ""
+    monkeypatch.setattr(
+        _atspi, "drawing_frame_outcome_text", lambda *_args, **_kwargs: "North\nSouth",
+    )
+    confirmed = runtime._judge_mutation("soffice.bin", None, None, "North\nSouth")
+    assert confirmed == ("confirmed", "read back 'North\\nSouth'")
 
 
 def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch) -> None:

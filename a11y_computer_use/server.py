@@ -2559,6 +2559,38 @@ class Runtime:
             return focused[0]
         return next((el for el in snap.elements if el.focused), None)
 
+    def _drawing_type_verdict(
+        self, app: str | None, requested: str | None,
+    ) -> tuple[str, str] | None:
+        """Confirmed or unverified for an Impress or Draw frame, else None.
+
+        The snapshot's focused node is the empty presentation container.
+        The frame's paragraphs are the read-back. An empty container that
+        could not be read is unverified, not a mismatch: a mismatch makes
+        the caller type the same text again.
+        """
+        driver = self.driver
+        unverified = bool(getattr(driver, "_type_unverified", False))
+        state = getattr(driver, "_drawing_type_state", None)
+        before = getattr(driver, "_drawing_type_before", None)
+        if not unverified and before is None and state in (None, "skip"):
+            return None
+        better = None
+        if requested and getattr(driver, "name", None) == "linux":
+            from a11y_computer_use.drivers import _atspi
+
+            better = _atspi.drawing_frame_outcome_text(
+                app or "", requested, before if isinstance(before, str) else None,
+            )
+        driver._type_unverified = False
+        driver._drawing_type_before = None
+        driver._drawing_type_state = None
+        if isinstance(better, str):
+            return "confirmed", f"read back {better!r}"
+        if unverified:
+            return "unverifiable", "unverified"
+        return None
+
     def _judge_mutation(
         self,
         app: str | None,
@@ -2572,6 +2604,11 @@ class Runtime:
         focus_before: tuple | None = None,
         selection: tuple[int, int] | None = None,
     ) -> tuple[str, str]:
+        drawing = self._drawing_type_verdict(app, requested)
+        if drawing is not None:
+            if self._process_died(before):
+                return "partial", "the target process exited after the action"
+            return drawing
         died = self._process_died(before)
         scope = before.get("scope") if before else None
         after = self._reread(app, scope)
