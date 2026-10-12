@@ -11430,6 +11430,34 @@ def test_shared_java_column_headers_keep_each_columns_name(fake_atspi, monkeypat
     found = _bare_runtime(driver).find("swingprobe", text="Item")
     assert "no elements match" not in found
     assert "Item" in found
+def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake_atspi) -> None:
+    """Synthetic Java button. Not a live dialog.
+
+    DEFUNCT is gone on every toolkit. A Java state set that was reported
+    and does not include SHOWING is the disposed dialog button. A showing
+    Java button, and a GTK button that simply omits SHOWING, are not.
+    """
+    app = _Acc("application", name="java")
+    app.get_toolkit_name = lambda: "JAVA"
+    hidden = _Acc("push button", name="Yes", states={"ENABLED", "SENSITIVE", "VISIBLE"})
+    hidden.get_application = lambda: app
+    showing = _Acc("push button", name="Yes", states={"ENABLED", "SHOWING", "VISIBLE"})
+    showing.get_application = lambda: app
+    empty = _Acc("push button", name="Yes", states=())
+    empty.get_application = lambda: app
+    assert _atspi.target_vanished(hidden) is True
+    assert _atspi.target_vanished(showing) is False
+    assert _atspi.target_vanished(empty) is False
+    dead = _Acc("push button", name="Save", states={"DEFUNCT"})
+    assert _atspi.target_vanished(dead) is True
+    gtk = _Acc("push button", name="Save", states={"ENABLED"})
+    gtk_app = _Acc("application", name="gtk")
+    gtk_app.get_toolkit_name = lambda: "gtk"
+    gtk.get_application = lambda: gtk_app
+    assert _atspi.target_vanished(gtk) is False
+    cell = _Acc("table cell", name="ROW-030", states={"ENABLED", "VISIBLE"})
+    cell.get_application = lambda: app
+    assert _atspi.target_vanished(cell) is False
 
 
 def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> None:

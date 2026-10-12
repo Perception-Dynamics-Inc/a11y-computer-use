@@ -2016,6 +2016,14 @@ def _qt_app(acc) -> bool:
     return "qt" in _toolkit_name(acc)
 
 
+def _java_app(acc) -> bool:
+    """True when this node belongs to the Java ATK wrapper.
+
+    The toolkit name is ``JAVA``. GTK, Qt, and a fake with no toolkit are not.
+    """
+    return "java" in _toolkit_name(acc)
+
+
 def _gtk_combo(acc) -> bool:
     """A GTK combo box. Chromium, Firefox, Qt, and a fake with no toolkit are not.
 
@@ -14952,6 +14960,44 @@ def accessible_gone(acc) -> bool:
     except Exception:
         return True
     return not bool(role)
+
+
+# A disposed JOptionPane button stays in the tree without SHOWING. A table
+# cell that is merely scrolled off is the same missing bit and is not gone.
+_JAVA_DIALOG_CONTROL_ROLES = frozenset({
+    "push button", "toggle button", "check box", "radio button",
+})
+
+
+def target_vanished(acc) -> bool:
+    """True when a click or type must not claim the accessible is still there.
+
+    DEFUNCT is gone on every toolkit. A handle that never reported a role
+    is not this case. Java ATK keeps a disposed dialog button in the tree
+    without SHOWING; a button whose state set was reported and does not
+    include SHOWING is that control. A table cell without SHOWING is still
+    in the table. GTK and a fake with no toolkit are not refused for a
+    missing SHOWING bit. An empty state set is not evidence.
+    """
+    if acc is None:
+        return False
+    try:
+        if _state_has(acc, "DEFUNCT"):
+            return True
+    except Exception:
+        return True
+    if not _java_app(acc):
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role not in _JAVA_DIALOG_CONTROL_ROLES:
+        return False
+    names = _state_names(acc)
+    if not names:
+        return False
+    return "SHOWING" not in names
 
 
 def _misses_primary_screen(pos, size) -> bool:

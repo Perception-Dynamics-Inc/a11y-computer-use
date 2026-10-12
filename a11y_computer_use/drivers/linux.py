@@ -4434,6 +4434,45 @@ class LinuxDriver:
         except ComputerUseError:
             return {"open": False, "path": []}
 
+    def menu_escape_safe(self, app: str) -> bool:
+        """False when Escape would hit a showing dialog instead of the menu.
+
+        A failure to read the tree is treated as safe so a click is not
+        refused because the check itself could not run. The caller still
+        sends Escape only when a menu is open.
+        """
+        from a11y_computer_use.drivers import _linux_menus
+
+        try:
+            root = self._menu_root(app)
+        except ComputerUseError:
+            return True
+        try:
+            return bool(self._run(lambda: _linux_menus.escape_reaches_menu(root)))
+        except Exception:
+            return True
+
+    def target_vanished(self, element: Element) -> bool:
+        """True when ``element``'s accessible is gone and must not be clicked.
+
+        No handle is not this case: a coordinate click and a synthetic
+        element keep the path they already had. A read error is not a
+        vanished target.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.target_vanished(handle)))
+        except Exception:
+            return False
+
     def menu_close(self, app: str) -> list[str]:
         """Close the open menu. An app that is not running is ``app_not_found``.
 
