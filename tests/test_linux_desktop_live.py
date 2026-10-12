@@ -489,6 +489,72 @@ def _linux_box(root, win) -> tuple[int, int, int, int] | None:
         return None
 
 
+_STATUS_BAR_SRC = r"""
+import gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, GLib
+GLib.set_prgname("cuastatusbar")
+win = Gtk.Window(title="cuastatusbar")
+win.set_default_size(480, 200)
+win.move(80, 60)
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+label = Gtk.Label(label="picture")
+bar = Gtk.Statusbar()
+bar.push(bar.get_context_id("meta"), "img003-blue.png\t400 x 400\t2.8 kB\t100.0%")
+box.pack_start(label, True, True, 0)
+box.pack_end(bar, False, False, 0)
+win.add(box)
+win.connect("destroy", Gtk.main_quit)
+win.show_all()
+Gtk.main()
+"""
+
+
+def _stop_status_proc(proc: subprocess.Popen) -> None:
+    if proc.poll() is None:
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@requires_desktop
+def test_gtk_status_bar_snapshots_as_statusbar(tmp_path) -> None:
+    """A GTK status bar keeps the statusbar role. It is not a layout group."""
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    script = tmp_path / "cuastatusbar.py"
+    script.write_text(_STATUS_BAR_SRC)
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    driver = LinuxDriver()
+    try:
+        def shot():
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuastatusbar")
+            except Exception:
+                return None
+            if any("img003-blue.png" in (el.title or "") for el in snap.elements):
+                return snap
+            return None
+
+        snap = _until(shot, timeout=15)
+        assert snap is not None, "the GTK status bar did not appear"
+        bars = [el for el in snap.elements if "img003-blue.png" in (el.title or "")]
+        assert bars, [(el.role, el.title) for el in snap.elements]
+        assert all(el.role == "AXStatusBar" for el in bars), [(el.role, el.title) for el in bars]
+        rendered = observe.render_text(snap, mode="full", include_bounds=True)
+        assert "statusbar" in rendered and "img003-blue.png" in rendered
+        assert 'group "img003-blue.png' not in rendered
+    finally:
+        _stop_status_proc(proc)
+
+
 @requires_desktop
 def test_window_list_includes_a_visible_xmessage_with_no_pid(tmp_path) -> None:
     """xmessage is mapped, has WM_CLASS, and publishes no _NET_WM_PID.
