@@ -5880,23 +5880,36 @@ class Runtime:
                     return False
                 return True
 
-            def restore_page_frame() -> bool:
-                """Latch Chrome once and re-read until the page frame is back.
+            def latch_once() -> bool:
+                """Record Chrome once so the next snapshot drops the find cache.
 
-                False when this driver has no latch, or the page did not
-                return within the reads. The current snapshot is the page
-                when True.
+                False when this driver has no latch. A failed latch is not
+                retried.
                 """
                 nonlocal frame_latched
+                if frame_latched:
+                    return True
                 latch = getattr(self.driver, "latch_chromium_find", None)
                 if not callable(latch):
                     return False
-                if not frame_latched:
-                    try:
-                        latch(bundle)
-                    except Exception:
-                        return False
-                    frame_latched = True
+                try:
+                    latch(bundle)
+                except Exception:
+                    return False
+                frame_latched = True
+                return True
+
+            def restore_page_frame() -> bool:
+                """Re-read until the page frame is back.
+
+                False when this driver has no latch, or the page did not
+                return within the reads. The current snapshot is the page
+                when True. The latch itself is the caller's: the confirming
+                read is the one cache clear, and this loop runs only when
+                that read is still the find bar or an empty frame.
+                """
+                if not latch_once():
+                    return False
                 for _ in range(6):
                     fresh = self.driver.snapshot(Scope(scope), bundle)
                     self._current = fresh
@@ -5932,17 +5945,60 @@ class Runtime:
                     self.driver.key_chord("Escape")
                 except Exception:
                     pass
-                restore_page_frame()
+                # The confirming read is the cache clear. A short page that
+                # does not name the target stops there. Another snapshot and
+                # a pause miss the 12s bound. A tall table, or a row that is
+                # already in the tree but off screen, gets one more read.
+                latch_once()
                 kind, verified = confirming_snapshot(issued + 1)
-                if kind != "found":
-                    # A long table can still be publishing the row that
-                    # find scrolled to. One more read before a viewport
-                    # wheel jumps past it.
-                    time.sleep(0.2)
-                    kind, verified = confirming_snapshot(issued + 1)
                 if kind == "found":
                     return verified
+                if ready_anchor() is None:
+                    if restore_page_frame():
+                        kind, verified = confirming_snapshot(issued + 1)
+                        if kind == "found":
+                            return verified
+                elif kind in {"above", "below"} or content_is_tall(self._current):
+                    time.sleep(0.2)
+                    kind, verified = confirming_snapshot(issued + 1)
+                    if kind == "found":
+                        return verified
                 return None
+
+            def content_is_tall(shot: Snapshot) -> bool:
+                """A table or list more than two windows tall.
+
+                Find on that page can scroll the row in before the tree
+                names it. A table that only sticks out past the window does
+                not need the extra read.
+                """
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                height = box[3] - box[1]
+                if height < 1:
+                    return False
+                return any(
+                    el.role in ("AXTable", "AXGrid", "AXOutline", "AXList")
+                    and el.bounds.height > height * 2
+                    for el in shot.elements
+                )
+
+            def ready_anchor() -> Element | None:
+                """The page anchor after Ctrl+F, when that frame is back."""
+                fresh = self._current
+                if fresh is None:
+                    return None
+                if pinned is not None:
+                    try:
+                        found_anchor = fresh.element(ref)
+                    except KeyError:
+                        found_anchor = None
+                else:
+                    found_anchor = _scroll_anchor(fresh)
+                if found_anchor is None or page_frame_missing(fresh, found_anchor):
+                    return None
+                return found_anchor
 
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
@@ -6122,16 +6178,27 @@ class Runtime:
                     found = try_in_page_find(anchor)
                     if found:
                         return found
-                    # The anchor above was chosen before Ctrl+F. The next
-                    # read is the page frame, and that is what gets wheeled.
-                    continue
+                    # The anchor above was chosen before Ctrl+F. Wheel the
+                    # page frame from the read that followed it. An empty
+                    # cache is not that frame.
+                    ready = ready_anchor()
+                    if ready is None:
+                        continue
+                    snap = self._current
+                    anchor = ready
+                    last_anchor = ready
                 if page_mode and prefers_page_step(snap, anchor):
                     if not find_tried:
                         find_tried = True
                         found = try_in_page_find(anchor)
                         if found:
                             return found
-                        continue
+                        ready = ready_anchor()
+                        if ready is None:
+                            continue
+                        snap = self._current
+                        anchor = ready
+                        last_anchor = ready
                     before_names = row_names(snap)
                     before_pos = read_offset(anchor)
                     chord = "pagedown" if wheel > 0 else "pageup"
