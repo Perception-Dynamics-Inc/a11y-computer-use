@@ -952,9 +952,11 @@ def _permission_app_id(identifier: str) -> str:
     """The id a grant is stored under.
 
     macOS: the installed bundle id when a display name matches one, else the
-    identifier. Windows: the identifier. Linux: the process comm of a running
-    window, so ``google-chrome`` and "Google Chrome" key as ``chrome``, the
-    same id ``snapshot`` gates on. An unmatched name is stored as given so a
+    identifier. Windows: the identifier. Linux: the full program name of a
+    running window when the kernel comm is that name's 15-byte cut, and the
+    process comm otherwise. ``gnome-text-editor`` stays ``gnome-text-editor``;
+    ``google-chrome`` and "Google Chrome" still key as ``chrome``, the same
+    id ``snapshot`` gates on. An unmatched name is stored as given so a
     grant can precede launch.
     """
     installed = _installed_bundle_id(identifier)
