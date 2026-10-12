@@ -77,6 +77,8 @@ def _patch(monkeypatch) -> None:
 
     monkeypatch.setattr(_atspi, "_state_flags", flags)
     monkeypatch.setattr(_atspi, "_extents", extents)
+    # A label's value read imports PyGObject. macOS and Windows CI have no gi.
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args, **kwargs: None)
 
 
 def _canvas_tree(*, image_label=True, extra_prefix=False, page_tab=True):
