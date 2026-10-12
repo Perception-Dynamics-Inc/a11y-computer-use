@@ -1071,6 +1071,53 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _direct_label_names(acc) -> list[str]:
+    """Non-generic names of ``acc``'s immediate label children.
+
+    Stops once two names are found. The caller treats that as ambiguous.
+    """
+    count = _child_count(acc)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found: list[str] = []
+    for index in range(min(int(count), 48)):
+        child = _child_at(acc, index)
+        if child is None or _role_name(child) != "label":
+            continue
+        name = _node_name(child)
+        if name and not _generic_region_name(name):
+            found.append(name)
+        if len(found) > 1:
+            return found
+    return found
+
+
+def _selected_icon_name(acc) -> str:
+    """The one label beside a selected icon, or empty.
+
+    GIMP brush-grid icons expose no name, description, text, or tooltip.
+    The dock's selected brush is a label on the filler that also holds the
+    scroll pane. Unselected icons have nothing to read, so this returns
+    empty for them only because the caller skips them. An ancestor with
+    two labels is ambiguous. The walk stops at a page tab or a window so
+    a label from another dock is not borrowed.
+    """
+    node = acc
+    for _ in range(6):
+        node = _parent_of(node)
+        if node is None:
+            return ""
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog", "page tab", "page tab list"}:
+            return ""
+        labels = _direct_label_names(node)
+        if len(labels) == 1:
+            return labels[0]
+        if len(labels) > 1:
+            return ""
+    return ""
+
+
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -3094,6 +3141,15 @@ class ATSPIAccessor:
         surface_name = ""
         if role_str == "panel" and not str(name).strip() and not str(description).strip():
             surface_name = _panel_surface_name(node, size, focusable)
+        if (
+            role_str == "icon"
+            and selected
+            and not str(name).strip()
+            and not str(description).strip()
+        ):
+            label = _selected_icon_name(node)
+            if label:
+                name = label
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
