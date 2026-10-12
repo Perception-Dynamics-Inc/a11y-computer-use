@@ -2695,6 +2695,10 @@ class ATSPIAccessor:
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
                 checked = flag == "true"
+        # A Gecko contenteditable is a section with STATE_EDITABLE and a text
+        # interface. That is a text control: textarea when it is multi-line.
+        # Chromium's roleless contenteditable stays a group.
+        role = _gecko_contenteditable_role(node, role, role_str, attrs, state_editable)
         # Groups skip the value probe. A div is a section, and its text is
         # the inline sentence; reading that one string is what find matches.
         # A file chooser is a dialog, but its name is the title. Probing Value
@@ -2702,6 +2706,14 @@ class ATSPIAccessor:
         value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
             node, role, role_str,
         )
+        if (
+            role_str == "section"
+            and role in {"AXTextField", "AXTextArea"}
+            and not isinstance(value, str)
+        ):
+            # An empty contenteditable can publish a Value double. The text
+            # interface is the value. A number is not that text.
+            value = _div_inline_sentence(node, role_str, attrs)
         if value is None:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
@@ -12269,6 +12281,145 @@ def _replace_drawing_paragraph(acc, text: str) -> bool:
     return _confirm_text(acc, text)
 
 
+def _attribute_multiline(attrs: dict | None) -> bool:
+    """True when ``multiline`` or ``aria-multiline`` is true.
+
+    A false or absent attribute is not multi-line. One true key is enough
+    when the other key is false. ``STATE_MULTI_LINE`` is checked by the caller.
+    """
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _has_text_interface(acc) -> bool:
+    """True when ``acc`` exposes AT-SPI Text or EditableText."""
+    if acc is None:
+        return False
+    if _editable_iface(acc) is not None:
+        return True
+    count = _safe(lambda: _atspi().Text.get_character_count(acc))
+    return isinstance(count, int) and not isinstance(count, bool)
+
+
+def _gecko_contenteditable(acc) -> bool:
+    """True for a Firefox contenteditable that is not an entry.
+
+    Gecko exposes ``<div contenteditable>`` as a section with
+    ``STATE_EDITABLE`` and a text interface. An input, a textarea, a
+    paragraph, and a select are not this node. Chromium's roleless
+    contenteditable stays on its own path.
+    """
+    if acc is None or not _gecko_app(acc):
+        return False
+    if _role_name(acc) != "section":
+        return False
+    attrs = _get_attributes(acc)
+    tag = str(attrs.get("tag") or "").lower()
+    xml = set(str(attrs.get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return False
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return False
+    if _state_has(acc, "READ_ONLY") or not _state_has(acc, "EDITABLE"):
+        return False
+    return _has_text_interface(acc)
+
+
+def _gecko_contenteditable_role(node, role: str, role_str: str, attrs: dict, state_editable: bool) -> str:
+    """Text role for an editable Gecko contenteditable, else ``role``.
+
+    ``STATE_EDITABLE`` plus a text interface is the editor. ``MULTI_LINE``,
+    or a multiline attribute, is a textarea. A single-line editor is a text
+    field. A section that is not editable, or that has no text interface,
+    stays ``role``. Chromium is unchanged.
+    """
+    if role_str != "section" or not state_editable or node is None:
+        return role
+    if not _gecko_app(node):
+        return role
+    tag = str((attrs or {}).get("tag") or "").lower()
+    xml = set(str((attrs or {}).get("xml-roles") or "").split())
+    if "combobox" in xml:
+        return role
+    if tag not in _CONTENTEDITABLE_TAGS and "textbox" not in xml:
+        return role
+    if _state_has(node, "READ_ONLY") or not _has_text_interface(node):
+        return role
+    if _state_has(node, "MULTI_LINE") or _attribute_multiline(attrs):
+        return "AXTextArea"
+    return "AXTextField"
+
+
+def _wait_until_content_blank(acc) -> bool:
+    """Poll until the readable contenteditable text is blank."""
+    for attempt in range(16):
+        if _content_is_blank(acc):
+            return True
+        if attempt + 1 < 16:
+            time.sleep(0.05)
+    return False
+
+
+def _replace_gecko_contenteditable_by_keys(acc, text: str, original: str | None) -> bool:
+    """Replace a Firefox contenteditable with the focused typing path.
+
+    ``grab_focus`` runs first. A later read has to show keyboard focus on
+    this node or a descendant before any chord or character is sent. A miss
+    raises ``focus_lost`` and types nothing. The new string is typed only
+    after the field is blank, through the same ``_type_into_target`` path
+    ``type(ref)`` uses. Success is the readable text, where one trailing
+    newline is the empty ``<br>``. A failed type puts ``original`` back.
+    """
+    if not _x11_keys_available():
+        return False
+    grab_focus(acc)
+    if not _confirm_focus_on_target(acc):
+        raise _focus_lost_error("focus is not on the target; nothing was typed")
+    if _shown_matches(acc, text):
+        return True
+    if not _content_is_blank(acc):
+        _chord_into_target(acc, "ctrl+a")
+        _chord_into_target(acc, "backspace")
+        _chord_into_target(acc, "delete")
+        if not _wait_until_content_blank(acc):
+            _restore_text(acc, original)
+            return False
+    if text == "":
+        return _content_is_blank(acc) or _shown_matches(acc, "")
+    _type_into_target(acc, text)
+    if _confirm_text_landed(acc, text):
+        return True
+    _restore_text(acc, original)
+    return False
+
+
+def _set_gecko_contenteditable(acc, text: str) -> bool:
+    """Replace a Firefox contenteditable and require the read-back.
+
+    EditableText is tried first and is not trusted: Firefox can return
+    success and leave the DOM unchanged. The read-back is the readable
+    text, including one trailing newline. When that read is not ``text``,
+    the fallback is ``_replace_gecko_contenteditable_by_keys``. No Text
+    selection is made: selecting a section can select the page.
+    """
+    if _shown_matches(acc, text):
+        return True
+    original = _readable_text(acc)
+    eti = _editable_iface(acc)
+    if eti is not None:
+        _call_first(eti, ("set_text_contents",), text, default=False)
+        if _confirm_text_landed(acc, text):
+            return True
+    return _replace_gecko_contenteditable_by_keys(acc, text, original)
+
+
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
@@ -12293,7 +12444,11 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     embedded NUL, so the text alone can match while the widget is longer.
     On Firefox, when EditableText returns success and the snapshot read is
     still not ``text``, the field is focused and the value is typed, and
-    success is still that read-back. Chromium and GTK keep the previous
+    success is still that read-back. A Firefox contenteditable section is
+    not cleared through Text selection. EditableText is tried, then the
+    readable text has to match, including one trailing newline. Otherwise
+    focus is confirmed and the same key path ``type(ref)`` uses replaces
+    the text. Unconfirmed focus types nothing. Chromium and GTK keep the previous
     tail: keys are sent only when the snapshot read is already empty,
     because focusing a Chrome number input can make an empty field read
     back as 0. When the snapshot read is left blank and the new text cannot
@@ -12329,6 +12484,8 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return _set_chrome_date_segment(acc, text)
     if text == "" and _chromium_contenteditable(acc):
         return _clear_contenteditable(acc)
+    if _gecko_contenteditable(acc):
+        return _set_gecko_contenteditable(acc, text)
     eti = _editable_iface(acc)
     if eti is None:
         if _chromium_contenteditable(acc):
