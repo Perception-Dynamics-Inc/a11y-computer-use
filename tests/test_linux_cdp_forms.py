@@ -244,7 +244,7 @@ def test_dom_write_readback_failure_is_not_success(monkeypatch) -> None:
 def test_driver_uses_dom_write_without_calling_atspi(monkeypatch) -> None:
     driver = LinuxDriver()
     element = _element()
-    monkeypatch.setattr(_cdp_forms, "write_element", lambda el, value, window_title="": True)
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda el, value, window_title="", pids=(): True)
 
     def boom(*_args, **_kwargs):
         raise AssertionError("AT-SPI set_value ran")
@@ -252,9 +252,9 @@ def test_driver_uses_dom_write_without_calling_atspi(monkeypatch) -> None:
     monkeypatch.setattr(_atspi, "is_sheet_cell", boom)
     assert driver._apply_set_value(element, "Ada", object()) is True
     box = _element(role="AXCheckBox", title="Agree", checked=True)
-    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="": True)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="", pids=(): True)
     assert driver.press_element(box) is True
-    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="": None)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="", pids=(): None)
     assert driver.press_element(box) is False
 
 
@@ -307,6 +307,134 @@ def test_write_tries_the_next_port_when_the_first_page_misses(monkeypatch) -> No
     assert calls == [9222, 9333]
 
 
+def test_space_separated_cmdline_still_names_the_debug_port(tmp_path, monkeypatch) -> None:
+    """Chrome's process title stores argv separated by spaces, not NULs.
+
+    A NUL split then misses ``--remote-debugging-port``. The last flag is
+    the bound port. The profile file is still first when the directory
+    survived the space split.
+    """
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("56643\n/devtools/browser/x\n", encoding="utf-8")
+    raw = (
+        f"chrome --remote-debugging-port=9222 --user-data-dir={profile} "
+        f"--remote-debugging-port=42901"
+    ).encode()
+    assert b"\x00" not in raw
+    monkeypatch.setattr(_cdp_forms, "_cmdline_chain", lambda pid: (raw,))
+    assert _cdp_forms.ports_for_pid(9) == (56643, 42901)
+    assert _cdp_forms.debug_port_from_cmdline(raw) == 42901
+    spaced = b"chrome --remote-debugging-port=42901\x00"
+    assert _cdp_forms.debug_port_from_cmdline(spaced) == 42901
+    intact = b"chrome\x00--user-data-dir=/tmp/my profile\x00--remote-debugging-port=9333\x00"
+    assert _cdp_forms.debug_port_from_cmdline(intact) == 9333
+
+
+def test_ports_try_the_profile_file_before_a_launcher_flag(tmp_path, monkeypatch) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("56643\n/devtools/browser/x\n", encoding="utf-8")
+    raw = (
+        f"chrome\x00--remote-debugging-port=9222\x00--user-data-dir={profile}\x00"
+        f"--remote-debugging-port=9222\x00"
+    ).encode()
+    monkeypatch.setattr(_cdp_forms, "_cmdline_chain", lambda pid: (raw,))
+    assert _cdp_forms.ports_for_pid(9) == (56643, 9222)
+    assert _cdp_forms.debug_port_from_cmdline(raw) == 9222
+
+
+def test_write_uses_the_page_that_has_the_control_when_the_title_matches_another(monkeypatch) -> None:
+    pages = [
+        {
+            "title": "cuahybrid119 - Google Chrome",
+            "url": "chrome://new-tab-page/",
+            "webSocketDebuggerUrl": "ws://ui",
+        },
+        {
+            "title": "cuahybrid119",
+            "url": "file:///tmp/cuahybrid119.html",
+            "webSocketDebuggerUrl": "ws://form",
+        },
+    ]
+    seen: list[str] = []
+
+    def eval_socket(socket, expression):
+        seen.append(socket)
+        if socket == "ws://ui":
+            return {"found": False, "ambiguous": False}
+        if '"action": "locate"' in expression:
+            return {"found": True, "wrote": False}
+        return {"found": True, "wrote": True, "value": "Grace", "kind": "text"}
+
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (56643,))
+    monkeypatch.setattr("a11y_computer_use.drivers._cdp.page_targets", lambda endpoint: pages)
+    monkeypatch.setattr(_cdp_forms, "_eval_socket", eval_socket)
+    assert _cdp_forms.write_element(
+        _element(), "Grace", window_title="cuahybrid119 - Google Chrome",
+    ) is True
+    assert seen[0] == "ws://ui"
+    assert "ws://form" in seen
+
+
+def test_write_accepts_duplicate_targets_of_the_same_document(monkeypatch) -> None:
+    page = {
+        "title": "Other",
+        "url": "file:///tmp/cuahybrid119.html",
+        "webSocketDebuggerUrl": "ws://a",
+    }
+    copy = dict(page)
+    copy["webSocketDebuggerUrl"] = "ws://b"
+    seen: list[str] = []
+
+    def eval_socket(socket, expression):
+        seen.append(socket)
+        if '"action": "locate"' in expression:
+            return {"found": True, "wrote": False}
+        return {"found": True, "wrote": True, "value": "Grace", "kind": "text"}
+
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (56643,))
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._cdp.page_targets", lambda endpoint: [page, copy],
+    )
+    monkeypatch.setattr(_cdp_forms, "_eval_socket", eval_socket)
+    assert _cdp_forms.write_element(_element(), "Grace", window_title="not the tab") is True
+    assert seen[-1] in {"ws://a", "ws://b"}
+
+
+def test_write_does_not_guess_between_two_documents(monkeypatch) -> None:
+    pages = [
+        {"title": "One", "url": "file:///a.html", "webSocketDebuggerUrl": "ws://a"},
+        {"title": "Two", "url": "file:///b.html", "webSocketDebuggerUrl": "ws://b"},
+    ]
+
+    def eval_socket(socket, expression):
+        return {"found": True, "wrote": False}
+
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (56643,))
+    monkeypatch.setattr("a11y_computer_use.drivers._cdp.page_targets", lambda endpoint: pages)
+    monkeypatch.setattr(_cdp_forms, "_eval_socket", eval_socket)
+    assert _cdp_forms.write_element(_element(), "Grace", window_title="") is None
+
+
+def test_write_uses_a_handle_pid_when_the_element_pid_has_no_port(monkeypatch) -> None:
+    def ports(pid):
+        if pid == 9:
+            return ()
+        if pid == 40:
+            return (56643,)
+        raise AssertionError(pid)
+
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", ports)
+    monkeypatch.setattr(
+        _cdp_forms, "_evaluate",
+        lambda port, title, expression: {"found": True, "wrote": True, "value": "Grace", "kind": "text"},
+    )
+    element = _element()
+    assert element.instance_id.startswith("pid:9|")
+    assert _cdp_forms.write_element(element, "Grace", pids=(40,)) is True
+
+
 def test_top_window_title_is_the_outer_frame(monkeypatch) -> None:
     class Node:
         def __init__(self, role: str, name: str, parent: "Node | None") -> None:
@@ -327,8 +455,9 @@ def test_top_window_title_is_the_outer_frame(monkeypatch) -> None:
 def test_driver_passes_the_frame_title_into_the_dom_write(monkeypatch) -> None:
     seen: dict[str, str] = {}
 
-    def write(element, value, window_title=""):
+    def write(element, value, window_title="", pids=()):
         seen["title"] = window_title
+        seen["pids"] = pids
         return True
 
     monkeypatch.setattr(_cdp_forms, "write_element", write)
