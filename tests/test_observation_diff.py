@@ -57,7 +57,10 @@ def _user_observations(agent) -> list[str]:
         if isinstance(content, list):
             content = content[0].get("text", "") if content else ""
         text = str(content)
-        if text.startswith("Observation of "):
+        # The planner budget line is trusted and sits above the observation.
+        if text.startswith("Observation of ") or (
+            text.startswith("budget: ") and "\nObservation of " in text
+        ):
             found.append(text)
     return found
 
