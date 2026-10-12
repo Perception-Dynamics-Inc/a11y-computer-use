@@ -4127,6 +4127,7 @@ class Runtime:
         kept = tuple(el for el in matches if self._buffer_match_kind(el, text) != "hidden")
         return kept, not kept
 
+    @_serialized
     def find(
         self,
         app: str,
@@ -4142,7 +4143,7 @@ class Runtime:
         Takes a fresh snapshot (so the returned refs are live and actionable, and
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
-        `desktop_snapshot`.         On Linux, Chromium searches the whole document,
+        `desktop_snapshot`. On Linux, Chromium searches the whole document,
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
