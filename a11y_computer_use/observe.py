@@ -235,9 +235,10 @@ class RawNode:
     #: role that is not read-only, or a contenteditable section (a div or span
     #: with ``STATE_EDITABLE``; Chromium may omit EditableText, Firefox must
     #: expose it). A paragraph, panel, document, or combo is not an entry, even
-    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. Default
-    #: false, so macOS, Windows, and the browser stay editable only when the
-    #: role is a text field.
+    #: when Firefox reports ``STATE_EDITABLE`` or EditableText on it. An
+    #: Impress or Draw paragraph is an entry when it has ``STATE_EDITABLE``
+    #: and EditableText. Default false, so macOS, Windows, and the browser
+    #: stay editable only when the role is a text field.
     editable: bool = False
     #: Process identity of the app that owns this node. Linux sets
     #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the

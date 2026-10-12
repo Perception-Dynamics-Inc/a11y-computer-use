@@ -2759,6 +2759,11 @@ class Runtime:
                     handle = None
                     if anchor is not None:
                         handle = observe.ax_handle_for(anchor.snapshot_id, anchor.ref)
+                    if handle is None and element is not None:
+                        # A Draw shape paragraph's title contains its text, so
+                        # the post-write snapshot does not match the old title.
+                        # The ref's accessible is still the paragraph.
+                        handle = observe.ax_handle_for(element.snapshot_id, element.ref)
                     origin = getattr(self.driver, "_sheet_type_origin", None)
                     grid_confirmed = isinstance(origin, str) and bool(origin) and bool(requested)
                     if grid_confirmed:
@@ -2772,6 +2777,8 @@ class Runtime:
                         better = _atspi.writer_cell_outcome_text(requested, handle)
                     if better is None and handle is not None:
                         better = _atspi.writer_document_outcome_text(requested, handle)
+                    if better is None and handle is not None:
+                        better = _atspi.drawing_paragraph_shown(handle)
                     if better is not None:
                         readback = better
             if readback is None:
@@ -4966,7 +4973,8 @@ class Runtime:
     def _type_target_error(self, element: Element) -> ComputerUseError | None:
         """Refuse a ref that cannot take text. None when it can.
 
-        A paragraph, button, or document is not a type target. Raising here
+        A paragraph, button, or document is not a type target, except an
+        Impress or Draw paragraph the snapshot marks edit. Raising here
         happens before focus and before any keystroke.
         """
         if element.editable:
@@ -8162,7 +8170,10 @@ def build_server(
         read back on it before any text is entered. If focus cannot be
         confirmed, the result is focus_lost and nothing is typed, so
         keystrokes cannot land in a different field. The outcome read-back
-        is that element. Without ref: the focused element. An undeclared
+        is that element. An Impress or Draw shape paragraph whose snapshot
+        says edit is a type target: focus is that paragraph or its shape,
+        then EditableText inserts at the caret. A browser paragraph is not
+        a type target. Without ref: the focused element. An undeclared
         argument is invalid_arguments and no text is sent. With app=<bundle
         id or name> on macOS the keystrokes are addressed to that app's
         process: it need not be frontmost, nothing is activated, and the
@@ -8351,7 +8362,11 @@ def build_server(
         and that call sends no keystrokes, clicks, or focus changes. A Firefox
         paragraph, document, or select is not an editable entry, even when
         AT-SPI reports STATE_EDITABLE or EditableText; the error is raised
-        before any select-all. A select is still set as a combo. A Chrome or
+        before any select-all. An Impress slide or Draw page paragraph that
+        has both STATE_EDITABLE and EditableText is an entry. The snapshot
+        marks it edit, and set_value replaces that paragraph through
+        EditableText and reads the text back. No select-all is sent. A
+        browser paragraph stays refused. A select is still set as a combo. A Chrome or
         Firefox contenteditable section stays editable. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists

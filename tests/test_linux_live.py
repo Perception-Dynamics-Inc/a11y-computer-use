@@ -6080,6 +6080,176 @@ def test_linux_impress_title_click_then_type_lands_in_the_title(tmp_path) -> Non
         _kill_libreoffice()
 
 
+def _draw_odg(path) -> None:
+    """One Draw page: a rectangle and an ellipse, each with its own text."""
+    import zipfile
+
+    mimetype = b"application/vnd.oasis.opendocument.graphics"
+    manifest = """<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">
+ <manifest:file-entry manifest:full-path="/" manifest:version="1.3" manifest:media-type="application/vnd.oasis.opendocument.graphics"/>
+ <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+ <manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>
+"""
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.3">
+ <office:body>
+  <office:drawing>
+   <draw:page draw:name="page1" svg:width="28cm" svg:height="21cm">
+    <draw:rect draw:name="RectA" svg:x="1cm" svg:y="1cm" svg:width="8cm" svg:height="3cm">
+     <text:p>RECT_A</text:p>
+    </draw:rect>
+    <draw:ellipse draw:name="EllipseB" svg:x="1cm" svg:y="5cm" svg:width="8cm" svg:height="3cm">
+     <text:p>ELLIPSE_B</text:p>
+    </draw:ellipse>
+   </draw:page>
+  </office:drawing>
+ </office:body>
+</office:document-content>
+"""
+    styles = """<?xml version="1.0" encoding="UTF-8"?>
+<office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" office:version="1.3">
+ <office:styles/>
+</office:document-styles>
+"""
+    with zipfile.ZipFile(path, "w") as archive:
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        archive.writestr(info, mimetype)
+        archive.writestr("META-INF/manifest.xml", manifest)
+        archive.writestr("content.xml", content)
+        archive.writestr("styles.xml", styles)
+
+
+def _draw_component_installed() -> bool:
+    return os.path.isfile("/usr/lib/libreoffice/program/sdraw") or os.path.isfile(
+        "/usr/lib/libreoffice/program/sdraw.bin"
+    )
+
+
+def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
+    """Live Draw. A shape paragraph is edit. set_value and type(ref) write it.
+
+    The rectangle and the ellipse each expose a paragraph. The role stays
+    static text and the snapshot says edit. set_value replaces the rectangle
+    through EditableText. type(ref) inserts into the ellipse. The shape
+    group is not an entry. A missing Draw binary fails the test.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice is not installed"
+    assert _draw_component_installed(), "libreoffice-draw is not installed"
+    _kill_libreoffice()
+    time.sleep(0.3)
+    page = tmp_path / "shapes.odg"
+    _draw_odg(page)
+    profile = tmp_path / "draw-profile"
+    _writer_profile(profile)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--draw", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", str(page),
+        ],
+        env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "soffice")
+            except ComputerUseError as exc:
+                last = exc.message
+                shot = None
+            else:
+                last = observe.render_text(shot)[:1600]
+                rect = _paragraph(shot, "RECT_A")
+                ellipse = _paragraph(shot, "ELLIPSE_B")
+                if (
+                    rect is not None
+                    and ellipse is not None
+                    and "Tip of the Day" not in last
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.4)
+        assert snap is not None, f"Draw did not expose the shape text\n{last}"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        rendered = observe.render_text(current)
+        rect = _paragraph(current, "RECT_A")
+        ellipse = _paragraph(current, "ELLIPSE_B")
+        assert rect is not None and ellipse is not None, rendered[:1600]
+        assert rect.role == "AXStaticText" and ellipse.role == "AXStaticText"
+        assert rect.editable is True, rendered[:1600]
+        assert ellipse.editable is True, rendered[:1600]
+        assert "edit" in rendered
+        for el in current.elements:
+            if el.role == "AXStaticText":
+                continue
+            if el.title in {"RectA", "EllipseB"}:
+                assert el.editable is False, (el.ref, el.role, el.title)
+        found_edit = runtime.find("soffice", text="ELLIPSE_B", editable=True)
+        assert "ELLIPSE_B" in found_edit and "edit" in found_edit, found_edit
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        rect = _paragraph(current, "RECT_A")
+        ellipse = _paragraph(current, "ELLIPSE_B")
+        assert rect is not None and ellipse is not None
+        group = next(
+            (el for el in current.elements if el.role == "AXGroup" and el.title == "EllipseB"),
+            None,
+        )
+        if group is not None:
+            with pytest.raises(ComputerUseError) as group_exc:
+                runtime.set_value(group.ref, "NOPE")
+            assert group_exc.value.detail.get("reason") == "not_editable", group_exc.value
+        replaced = runtime.set_value(rect.ref, "RECT_SET")
+        assert replaced.outcome == "confirmed", (replaced, replaced.evidence)
+        assert "RECT_SET" in replaced.evidence
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        landed = _paragraph(current, "RECT_SET")
+        assert landed is not None and landed.value == "RECT_SET", observe.render_text(current)[:1600]
+        assert _paragraph(current, "RECT_A") is None
+        ellipse = _paragraph(current, "ELLIPSE_B")
+        assert ellipse is not None and ellipse.editable is True
+        typed = runtime.type_text("_T", ref=ellipse.ref)
+        assert typed.outcome == "confirmed", (typed, typed.evidence)
+        assert "text_mismatch" not in str(typed)
+        runtime.desktop_snapshot("soffice")
+        current = runtime._current
+        assert current is not None
+        rendered = observe.render_text(current)
+        ellipse_after = _paragraph(current, "_T")
+        assert ellipse_after is not None, (typed, typed.evidence, rendered[:1600])
+        assert "_T" in (ellipse_after.value or "")
+        assert "ELLIPSE_B" in (ellipse_after.value or "") or ellipse_after.value == "_T"
+        rect_after = _paragraph(current, "RECT_SET")
+        assert rect_after is not None and rect_after.value == "RECT_SET", rendered[:1600]
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def _dark_rows(png: bytes) -> list[int]:
     """Rows in a crop that contain the paragraph's ink.
 
