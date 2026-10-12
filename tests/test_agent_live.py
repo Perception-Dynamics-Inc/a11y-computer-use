@@ -1593,12 +1593,29 @@ def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
         good.unlink(missing_ok=True)
 
 
-def _clear_focus() -> str:
-    """Drop the active window so the next observation is the empty desktop."""
+def _clear_focus(*, show_desktop: bool = False) -> str:
+    """Drop the active window so the next observation is the empty desktop.
+
+    ``show_desktop`` asks the window manager to iconify every window. Writing
+    ``_NET_ACTIVE_WINDOW`` as 0 does not do that, and openbox puts the focused
+    app back. A full snapshot of that app can spend a 1s run budget before
+    the model starts.
+    """
     import shutil
 
-    if shutil.which("wmctrl"):
-        subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
+    if show_desktop or shutil.which("wmctrl"):
+        if shutil.which("wmctrl"):
+            subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
+        if show_desktop:
+            try:
+                from a11y_computer_use.drivers._linux_system import _client_message, _open_display
+
+                with _open_display() as opened:
+                    _client_message(
+                        opened, opened.screen().root, "_NET_SHOWING_DESKTOP", [1, 0, 0, 0, 0],
+                    )
+            except Exception:
+                pass
     try:
         from Xlib import Xatom, display
 
@@ -1801,7 +1818,8 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
     from a11y_computer_use.agent.cli import exit_code
     from a11y_computer_use.agent.models.command import CommandModel
 
-    _clear_focus()
+    front = _clear_focus(show_desktop=True)
+    assert front in {"", "unknown"}, front
     _grant_linux_desktop()
     started_flag = tmp_path / "model-started"
     finished_flag = tmp_path / "model-finished"
