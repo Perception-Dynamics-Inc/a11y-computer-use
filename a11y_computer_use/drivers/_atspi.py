@@ -593,7 +593,9 @@ def read_cache():
     not cached: that value is a failed read the walk revives.
     ``get_state_set`` is never cached: a pointer click or Escape changes
     SELECTED and EXPANDED inside the same call, and those inputs are not
-    AT-SPI mutators.
+    AT-SPI mutators. An attribute dict that carries ``valuetext`` or an
+    ``aria-*`` state is not cached either: typing into a date segment
+    updates ``valuetext`` while the same call is still polling.
     """
     stack = _read_cache_stack()
     stack.append(_ReadCacheState())
@@ -666,17 +668,46 @@ def _present(value) -> bool:
     return value is not None
 
 
+# These change when the user types or clicks, and the same driver call
+# polls them until the new value is visible. Caching the dict freezes
+# the first read.
+_VOLATILE_ATTRIBUTES = frozenset({
+    "valuetext",
+    "aria-valuetext",
+    "aria-valuenow",
+    "aria-expanded",
+    "aria-selected",
+    "aria-checked",
+    "aria-pressed",
+})
+
+
+def _attribute_keys(value) -> set[str] | None:
+    try:
+        keys = value.keys()
+    except Exception:
+        return None
+    try:
+        return {str(key).lower() for key in keys}
+    except Exception:
+        return None
+
+
 def _attributes(value) -> bool:
-    if isinstance(value, dict):
-        return True
-    return value is not None and hasattr(value, "keys") and hasattr(value, "get")
+    if isinstance(value, dict) or (
+        value is not None and hasattr(value, "keys") and hasattr(value, "get")
+    ):
+        keys = _attribute_keys(value)
+        return keys is not None and not (keys & _VOLATILE_ATTRIBUTES)
+    return False
 
 
 # Stable for the length of one driver call. Names, descriptions, extents,
 # text, and state sets are read again: they change without a method we
 # can see here, or a caller retries an empty result. A cached state set
 # kept a combo EXPANDED after Escape and a Qt cell unselected after the
-# pointer click that selected it.
+# pointer click that selected it. Attribute dicts are cached only when
+# they have no valuetext or aria state key.
 _CACHEABLE = {
     "get_role_name": _nonempty_str,
     "get_action_name": _any_str,

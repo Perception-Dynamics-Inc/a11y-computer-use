@@ -141,6 +141,30 @@ def test_child_index_is_cached_and_a_missing_child_is_not() -> None:
     assert node.child_calls == [0, 1, -1, -1]
 
 
+def test_valuetext_attributes_are_not_cached() -> None:
+    """A date segment's valuetext updates while set_value is still polling.
+
+    Caching that dict kept the first read ('01') and the call reported
+    that the segment never became '18'.
+    """
+
+    class Node:
+        def __init__(self):
+            self.attrs = {"tag": "spinbutton", "valuetext": "01"}
+            self.calls = 0
+
+        def get_attributes(self):
+            self.calls += 1
+            return dict(self.attrs)
+
+    node = Node()
+    with _atspi.read_cache():
+        assert _atspi._call_first(node, ("get_attributes",))["valuetext"] == "01"
+        node.attrs["valuetext"] = "18"
+        assert _atspi._call_first(node, ("get_attributes",))["valuetext"] == "18"
+    assert node.calls == 2
+
+
 def test_empty_attribute_dict_is_cached() -> None:
     node = _Node()
     with _atspi.read_cache():
