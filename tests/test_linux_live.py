@@ -2108,11 +2108,16 @@ def test_linux_gtk_combo_name_comes_from_labelled_by_and_value_from_selection_or
     LABELLED_BY relation (``Orientation:``). The title is that label without
     the trailing colon. The value is the selected item, or the text the
     combo shows when nothing is selected. ``find`` matches the combo.
+
+    The hermetic suite runs this file with no display, so the test skips
+    there. The live AT-SPI step sets ``DISPLAY`` and runs the test. A missing
+    accessibility bus fails the test.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
 
-    assert os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"), "no display"
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("no DISPLAY/WAYLAND_DISPLAY: the GTK test app cannot open a window")
     driver = LinuxDriver()
     driver.ensure_trusted()
     script = tmp_path / "cucombo377.py"
