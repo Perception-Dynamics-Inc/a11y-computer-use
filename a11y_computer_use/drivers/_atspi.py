@@ -1071,6 +1071,80 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+# A ruler is a drawing area that is thin on one axis. The document canvas
+# is large on both. 64 keeps a default Inkscape ruler unnamed.
+_CANVAS_MIN_SIDE = 64
+_CANVAS_CONTENT_NOTE = "canvas content isn't accessible"
+
+
+def _application_name(node) -> str:
+    """Accessible name of the application that owns ``node``, or empty."""
+    app = _call_first(node, ("get_application", "getApplication"))
+    if not app:
+        return ""
+    return str(_call_first(app, ("get_name",), default="") or "").strip()
+
+
+def _inkscape_window(node) -> bool:
+    """True when the application or the frame title is Inkscape.
+
+    The frame check is the `` - Inkscape`` suffix. A document whose name
+    merely contains the word is not enough. A parent walk that does not
+    yield an accessible returns false, and the canvas stays unnamed.
+    """
+    try:
+        app = _application_name(node).casefold()
+    except Exception:
+        return False
+    if "inkscape" in app:
+        return True
+    # A named application that is not Inkscape keeps its own canvases.
+    # The frame suffix is only the fallback when the application name
+    # itself was not readable.
+    if app:
+        return False
+    try:
+        title = _frame_accessible_name(node).casefold()
+    except Exception:
+        return False
+    return title.endswith(" - inkscape") or title.endswith("– inkscape")
+
+
+def _drawing_canvas_facts(node, size) -> tuple[str, str, str]:
+    """``(surface name, content note, exposed text)`` for one drawing area.
+
+    Empty unless this is a large unnamed Inkscape drawing area. The name is
+    the frame title, or the single label that prefixes that title. The same
+    rule names the GIMP image canvas. The note is set only when the node
+    has no Text and no children: the SVG is not in the tree. Text that the
+    toolkit does expose is returned so the snapshot can show it. The box
+    stays the drawing area's own box.
+    """
+    if size is None:
+        return "", "", ""
+    try:
+        if float(size[0]) < _CANVAS_MIN_SIDE or float(size[1]) < _CANVAS_MIN_SIDE:
+            return "", "", ""
+    except (TypeError, ValueError, IndexError):
+        return "", "", ""
+    if not _inkscape_window(node):
+        return "", "", ""
+    text = _page_text(node) or ""
+    count = _raw_child_count(node)
+    note = ""
+    if not text and count == 0:
+        note = _CANVAS_CONTENT_NOTE
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return "", note, text
+    title = str(_call_first(frame, ("get_name",), default="") or "").strip()
+    if not title or _generic_region_name(title):
+        return "", note, text
+    labels = _prefix_image_labels(frame, title)
+    name = labels[0] if len(labels) == 1 else title
+    return name, note, text
+
+
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -3092,8 +3166,17 @@ class ATSPIAccessor:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         surface_name = ""
+        content_note = ""
         if role_str == "panel" and not str(name).strip() and not str(description).strip():
             surface_name = _panel_surface_name(node, size, focusable)
+        elif (
+            role_str in {"drawing area", "canvas"}
+            and _generic_region_name(str(name))
+            and _generic_region_name(str(description))
+        ):
+            surface_name, content_note, canvas_text = _drawing_canvas_facts(node, size)
+            if canvas_text and not isinstance(value, str):
+                value = canvas_text
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -3123,6 +3206,7 @@ class ATSPIAccessor:
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
             surface_name=surface_name,
+            content_note=content_note,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:

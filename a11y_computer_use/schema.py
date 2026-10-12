@@ -285,6 +285,10 @@ class Element:
     #: older output was omitted. ``find`` still searches the whole buffer.
     #: None for every other role.
     subrole: str | None = None
+    #: Set when a canvas has no accessible text and no children. The
+    #: snapshot and a find that misses print this sentence. Empty when the
+    #: toolkit exposed the content, and on every other role. It is not a box.
+    content_note: str = ""
 
     @property
     def actionable(self) -> bool:
