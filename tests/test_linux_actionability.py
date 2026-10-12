@@ -345,6 +345,61 @@ def test_gecko_set_combo_refreshes_before_collecting_options(monkeypatch) -> Non
     assert order[:3] == ["refresh", "entry", "collect"]
 
 
+def test_property_reads_drop_one_node_while_the_listener_is_up(monkeypatch) -> None:
+    """Name, state, parent, and child reads bypass the event cache.
+
+    ``clear_cache_single`` forgets this accessible only. The recursive
+    ``clear_cache`` is what ``_refresh_event_cache`` counts, and a property
+    read must not call it. With the listener off the cached name stays.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    class Node:
+        def __init__(self) -> None:
+            self.single = 0
+            self.recursive = 0
+            self.name = "Red"
+            self.states: set[str] = set()
+            self.parent = "old-parent"
+            self.kids = 1
+
+        def clear_cache_single(self) -> None:
+            self.single += 1
+            self.name = "Blue"
+            self.states = {"SELECTED"}
+            self.parent = "frame"
+            self.kids = 2
+
+        def clear_cache(self) -> None:
+            self.recursive += 1
+
+        def get_name(self) -> str:
+            return self.name
+
+        def get_state_set(self):
+            names = set(self.states)
+            return type("States", (), {"names": names})()
+
+        def get_parent(self):
+            return self.parent
+
+        def get_child_count(self) -> int:
+            return self.kids
+
+    node = Node()
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    assert _atspi._node_name(node) == "Red"
+    assert _atspi._state_has(node, "SELECTED") is False
+    assert node.single == 0 and node.recursive == 0
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    assert _atspi._node_name(node) == "Blue"
+    assert _atspi._state_has(node, "SELECTED") is True
+    assert _atspi._parent_of(node) == "frame"
+    assert _atspi._child_count(node) == 2
+    assert node.single == 4
+    assert node.recursive == 0
+
+
 def test_other_combos_do_not_refresh_the_event_cache(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi
 

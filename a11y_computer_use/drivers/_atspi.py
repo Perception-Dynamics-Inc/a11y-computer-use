@@ -2659,6 +2659,7 @@ def _state_flags(acc):
     is ``STATE_EDITABLE``. A fake state set that lists names and has no
     ``StateType`` member matches the name string."""
     Atspi = _atspi()
+    _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return True, False, None, False, None, False, False
@@ -6819,6 +6820,7 @@ def _state_has(acc, name: str) -> bool:
     A fake state set matches the name string. The GI binding matches
     ``Atspi.StateType``. Missing gi, or a node with no state set, is false.
     """
+    _drop_cached_properties(acc)
     sset = _call_first(acc, ("get_state_set",))
     if sset is None:
         return False
@@ -13548,6 +13550,7 @@ def _revive_application(acc) -> bool:
 
 
 def _raw_child_count(acc) -> int:
+    _drop_cached_properties(acc)
     try:
         return int(_call_first(acc, ("get_child_count", "get_childCount"), default=0) or 0)
     except (TypeError, ValueError):
@@ -14443,6 +14446,7 @@ def _child_at(acc, index: int):
 
 
 def _parent_of(acc):
+    _drop_cached_properties(acc)
     return _call_first(acc, ("get_parent", "getParent"))
 
 
@@ -14451,6 +14455,7 @@ def _is_scroll_bar(acc) -> bool:
 
 
 def _node_name(acc) -> str:
+    _drop_cached_properties(acc)
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
 
 
@@ -16269,6 +16274,36 @@ def wait_for_shown_rows(container, previous_head: str | None) -> list | None:
 _LIST_NAME_LIMIT = 48
 _LIST_DEPTH = 4
 _LIST_ANCESTORS = 5
+
+
+def _drop_cached_properties(acc) -> None:
+    """Forget one node's cached properties while the event listener is up.
+
+    ``event_main`` answers name, state, parent, and child reads from the
+    client cache. A combo's current item, a SELECTED or CHECKED flag, and a
+    document's parent change on the bus without replacing the accessible, so
+    the next getter would still see the previous value. ``clear_cache_single``
+    clears only this object. The recursive ``clear_cache`` walks every
+    descendant and stays on the snapshot-root and Firefox combo paths. A node
+    without ``clear_cache_single`` is a test double and is left alone. With
+    the listener off the cache is not trusted and this does nothing.
+    """
+    if acc is None:
+        return
+    method = getattr(acc, "clear_cache_single", None)
+    if method is None or getattr(_reply_local, "dropping_properties", False):
+        return
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.listening():
+        return
+    _reply_local.dropping_properties = True
+    try:
+        method()
+    except Exception:
+        return
+    finally:
+        _reply_local.dropping_properties = False
 
 
 def _invalidate_tree_cache(acc) -> None:
