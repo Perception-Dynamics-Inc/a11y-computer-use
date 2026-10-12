@@ -38,6 +38,7 @@ from a11y_computer_use.observe import (
     SHEET_MAX_CHILDREN,
     DisplayGeometry,
     RawNode,
+    _generic_region_name,
     normalize_document_title,
 )
 from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
@@ -1476,6 +1477,40 @@ def _plain_accessible_name(text: str) -> str:
     return current
 
 
+# An unnamed icon's Text is a caption, not a document. Evince thumbnail
+# page numbers are one or two characters. 80 holds a label and does not
+# raise the snapshot value caps.
+_IMAGE_LABEL_CHARS = 80
+
+
+def _image_text_label(acc) -> str:
+    """Text of an unnamed icon or image, used as its name.
+
+    Evince thumbnail icons have an empty name and a Text interface whose
+    string is the page label (``1``, ``2``, ``3``). A missing interface, a
+    blank string, or a generic word such as ``image`` stays empty, and the
+    pruner can still fold the icon. The read is bounded. ``get_text`` is
+    not asked for ``-1``.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return ""
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return ""
+    limit = min(int(count), _IMAGE_LABEL_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str):
+        return ""
+    text = " ".join(
+        got.replace("\u00a0", " ").replace(_OBJECT_REPLACEMENT, " ").split()
+    )
+    if not text or _generic_region_name(text):
+        return ""
+    return text
+
+
 def _is_choice_role(role: str, role_name: str) -> bool:
     return role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES
 
@@ -2776,6 +2811,18 @@ class ATSPIAccessor:
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        # An unnamed icon can still carry a caption on its Text interface.
+        # Evince thumbnail icons do: the text is the page number under the
+        # image. That string is the name, so the pruner does not fold the
+        # thumbnail into an opaque region. A named image is left alone.
+        if (
+            role == "AXImage"
+            and not str(name).strip()
+            and _generic_region_name(str(description))
+        ):
+            label = _image_text_label(node)
+            if label:
+                name = label
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -5890,7 +5937,11 @@ def opaque_click_target(acc) -> bool:
         return True
     if role in {"image", "icon"} or bool(xml & {"img", "image"}):
         name = str(_call_first(acc, ("get_name",), default="") or "").strip()
-        return not name
+        if name:
+            return False
+        # The accessible name is empty. A Text caption (a thumbnail's page
+        # number) is still a label, so the click is not an unnamed image.
+        return not _image_text_label(acc)
     return False
 
 
