@@ -6020,10 +6020,14 @@ def _type_string(text: str) -> None:
     _linux_input.type_string(text)
 
 
-# A click can move focus a beat after it returns. These polls wait for that
-# move and do not send keys. A node that never shows focus is not typed into.
-_FOCUS_CONFIRM_POLLS = 10
+# A click or grab_focus can move focus after it returns. Firefox on a busy
+# AT-SPI bus publishes FOCUSED later than one short pass, and one grab_focus
+# can be dropped. The first 10 polls are that short pass. A miss asks for
+# focus again and keeps waiting. 40 polls is 1.6s. A node that is still
+# unfocused is not typed into.
+_FOCUS_CONFIRM_POLLS = 40
 _FOCUS_CONFIRM_PAUSE_S = 0.04
+_FOCUS_CONFIRM_REGRAB = 10
 
 
 def _focus_lost_error(message: str):
@@ -6115,11 +6119,18 @@ def _focus_on_target(acc) -> bool | None:
 
 
 def _confirm_focus_on_target(acc) -> bool:
-    """Poll until ``acc`` is focused. True when focus cannot be read at all."""
+    """Poll until ``acc`` is focused. True when focus cannot be read at all.
+
+    The first polls are the short wait after the caller's grab_focus. When
+    that wait misses, grab_focus is sent again and the poll continues.
+    Keys are still not sent when focus never arrives.
+    """
     for attempt in range(_FOCUS_CONFIRM_POLLS):
         seen = _focus_on_target(acc)
         if seen is None or seen is True:
             return True
+        if attempt + 1 == _FOCUS_CONFIRM_REGRAB:
+            grab_focus(acc)
         if attempt + 1 < _FOCUS_CONFIRM_POLLS:
             time.sleep(_FOCUS_CONFIRM_PAUSE_S)
     return False

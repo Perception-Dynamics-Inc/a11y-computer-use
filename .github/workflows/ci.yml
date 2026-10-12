@@ -400,6 +400,35 @@ jobs:
             echo 'rows = windows()'
             echo 'blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
             echo 'print(rows)'
-            echo 'assert "xmessage" in blob or "clean-install-window" in blob, rows'
+            echo 'raise SystemExit(0 if ("xmessage" in blob or "clean-install-window" in blob) else 1)'
           } > /tmp/list-windows.py
-          xvfb-run -a -s "-screen 0 1280x800x24" bash -c 'openbox >/dev/null 2>&1 & sleep 1; xmessage -timeout 30 clean-install-window >/dev/null 2>&1 & sleep 1; /tmp/wheel-venv/bin/python /tmp/list-windows.py'
+          # One second is not enough for openbox to publish _NET_CLIENT_LIST.
+          # Run 38272489843 listed [] and the step failed. Wait for the
+          # window manager, then for the xmessage window, and keep the
+          # openbox log when neither appears.
+          xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
+            openbox >/tmp/openbox-pkg.log 2>&1 &
+            ready=0
+            for _ in $(seq 1 40); do
+              if xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+                ready=1
+                break
+              fi
+              sleep 0.25
+            done
+            if [ "$ready" -ne 1 ]; then
+              echo "openbox log:"
+              cat /tmp/openbox-pkg.log
+              exit 1
+            fi
+            xmessage -timeout 30 clean-install-window >/dev/null 2>&1 &
+            for _ in $(seq 1 40); do
+              if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
+                exit 0
+              fi
+              sleep 0.25
+            done
+            echo "openbox log:"
+            cat /tmp/openbox-pkg.log
+            exit 1
+          '
