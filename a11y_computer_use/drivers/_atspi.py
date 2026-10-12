@@ -3541,6 +3541,203 @@ def focused_secure(app: str, *, max_nodes: int = 400) -> bool | None:
 # selected, so typing that query again leaves the same string.
 _CHROME_REWRITE_NAMES = frozenset({"Address and search bar", "Find"})
 
+# Pids whose find bar or omnibox popup has been in a snapshot, or whose find
+# field had keyboard focus. libatspi keeps the child list from that. Closing
+# the bar and Reload do not drop it, so later reads still walk the bar or an
+# empty document. The next snapshot of that process clears the client cache
+# once and uses the page frame. Clearing on every later snapshot walks the
+# document again and blows the short-page scroll budget.
+_BROWSER_BAR_PIDS: set[int] = set()
+_BROWSER_BAR_CLEARED: set[int] = set()
+
+
+def snapshot_shows_browser_bar(elements) -> bool:
+    """True when a snapshot still contains the find bar or an omnibox popup.
+
+    The address bar itself is always present and is not this. A page button
+    titled Find is not this either: only the find field, the close button,
+    the find-in-page frame, and an omnibox URL count.
+    """
+    for el in elements:
+        title = getattr(el, "title", None) or ""
+        role = getattr(el, "role", None) or ""
+        value = str(getattr(el, "value", None) or "")
+        folded = title.lstrip().lower()
+        if title == "Close find bar" or folded.startswith("find in page"):
+            return True
+        if title == "Find" and role in {"AXTextField", "AXSearchField", "AXTextArea"}:
+            return True
+        if "omnibox" in folded or "omnibox" in value.lower():
+            return True
+    return False
+
+
+def note_browser_bar(root, elements) -> None:
+    """Remember that ``root``'s process showed a find bar or omnibox popup."""
+    if root is None or not snapshot_shows_browser_bar(elements):
+        return
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return
+    if pid:
+        pid = int(pid)
+        _BROWSER_BAR_PIDS.add(pid)
+        # The bar is on screen again. The cache from the last clear is stale.
+        _BROWSER_BAR_CLEARED.discard(pid)
+
+
+def _browser_bar_latched(root) -> bool:
+    if not _BROWSER_BAR_PIDS or root is None:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    return bool(pid and int(pid) in _BROWSER_BAR_PIDS)
+
+
+def note_focused_find_bar(app: str | None) -> None:
+    """Latch Chrome when keyboard focus is in the find field.
+
+    ``scroll_to_find`` opens the bar, types, and closes it before the next
+    snapshot, so that snapshot never contains the find field and would not
+    otherwise remember the process. The address bar does not latch.
+    """
+    if not app:
+        return
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return
+    if truncated or acc is None or not _chrome_rewrite_field(acc):
+        return
+    if (_node_name(acc) or "") != "Find":
+        return
+    try:
+        pid = pid_of(acc)
+    except Exception:
+        return
+    if pid:
+        pid = int(pid)
+        _BROWSER_BAR_PIDS.add(pid)
+        _BROWSER_BAR_CLEARED.discard(pid)
+
+
+def _is_browser_bar_frame(node) -> bool:
+    """True for the find-in-page frame or an omnibox popup, not the page window."""
+    if node is None:
+        return False
+    name = (_node_name(node) or "").lstrip().lower()
+    if name.startswith("find in page"):
+        return True
+    url = _doc_url(node) or ""
+    return "omnibox" in url.lower()
+
+
+def _clear_browser_bar_cache(node, depth: int = 0) -> None:
+    """Drop libatspi's child cache on the window and its documents.
+
+    The walk stops at a document, so the page's own nodes are fetched again
+    by the snapshot instead of being cleared one by one.
+    """
+    if node is None or depth > 12:
+        return
+    role = _role_name(node)
+    if depth == 0 or role in {
+        "application", "frame", "window", "document web", "document frame", "internal frame",
+    }:
+        _call_first(node, ("clear_cache", "clearCache"))
+    if depth and role in {"document web", "document frame"}:
+        return
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 8)):
+        _clear_browser_bar_cache(_child_at(node, index), depth + 1)
+
+
+def _application_bar_frame(app):
+    """A find-in-page or omnibox frame cached under ``app``, else None."""
+    if app is None:
+        return None
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is not None and _is_browser_bar_frame(frame):
+            return frame
+    return None
+
+
+def chromium_snapshot_root(root):
+    """Page frame for a Chrome snapshot after the find bar or omnibox was open.
+
+    ``root`` is unchanged until that bar has appeared, or a find-in-page or
+    omnibox frame is still cached beside the page window. After that, the
+    client cache on the application is dropped, and a leftover find-in-page
+    or omnibox frame is not the root. The frame that holds the selected tab
+    is. Reload then reads the new document instead of the cached bar. The
+    open bar itself stays the root the first time it is active, so Find and
+    Close find bar stay in that snapshot.
+    """
+    if root is None or not _chromium_app(root):
+        return root
+    app = _call_first(root, ("get_application", "getApplication")) or root
+    latched = _browser_bar_latched(root)
+    if not latched:
+        # This snapshot is the open bar. Show it. The elements record the pid.
+        if _is_browser_bar_frame(root):
+            return root
+        # scroll_to_find closes the bar before the snapshot, so the page
+        # window is the root and the bar frame is only a cached sibling.
+        # The document walk is then the empty cached tree.
+        if _application_bar_frame(app) is None:
+            return root
+    else:
+        try:
+            pid = pid_of(root)
+        except Exception:
+            pid = None
+        # One clear per latch. A bar frame that is still cached asks for
+        # another, which covers Reload. Further snapshots keep the fresh tree.
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid in _BROWSER_BAR_CLEARED
+            and _application_bar_frame(app) is None
+            and not _is_browser_bar_frame(root)
+        ):
+            return root
+    _clear_browser_bar_cache(app)
+    try:
+        pid = pid_of(root)
+    except Exception:
+        pid = None
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        _BROWSER_BAR_CLEARED.add(int(pid))
+    if not latched or not _is_browser_bar_frame(root):
+        return root
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    pages = []
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is None or _is_browser_bar_frame(frame):
+            continue
+        if _role_name(frame) == "alert":
+            continue
+        pages.append(frame)
+    for frame in pages:
+        if _state_has(frame, "ACTIVE"):
+            return frame
+    for frame in pages:
+        if _selected_tab_name(frame):
+            return frame
+    return pages[0] if pages else root
+
 
 def _chrome_rewrite_field(acc) -> bool:
     """True for the Chrome address bar or find bar, not a web input."""

@@ -1393,7 +1393,13 @@ class LinuxDriver:
         def _do() -> Snapshot:
             hinted = _hint_pid(app)
             with _atspi.app_reply_watch(app, hinted, root) as watch:
-                pid = _atspi.pid_of(root) or hinted
+                # A find bar or omnibox popup fills libatspi's child cache.
+                # Closing the bar and Reload leave that cache in place, so
+                # the next walk would keep the bar or an empty document.
+                # Drop it and use the frame that holds the selected tab.
+                # Until that bar has been snapshotted, this is ``root``.
+                walked = _atspi.chromium_snapshot_root(root)
+                pid = _atspi.pid_of(walked) or _atspi.pid_of(root) or hinted
                 if isinstance(pid, int) and pid > 0:
                     watch.pid = pid
                 accessor = _atspi.ATSPIAccessor()
@@ -1412,18 +1418,21 @@ class LinuxDriver:
                 # A table that starts below the viewport is dropped before
                 # children() can seek it. Scroll the matching cell first, and
                 # only for Chromium: GTK tables seek inside their own walk.
+                # After the find bar, the page frame is ``walked``.
                 seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
                 if seek and _atspi._chromium_app(root):
-                    _atspi.reveal_text_in_document(root, seek)
+                    _atspi.reveal_text_in_document(walked, seek)
                 # Chromium lists: the rows are read from the list node this walk
                 # holds. A saved head on another wrapper is not the snapshot.
-                accessor.refresh_visible(root)
+                accessor.refresh_visible(walked)
                 accessor._table_seek = self._table_seek
                 accessor._expand_page = self._expand_page
-                return observe.build_snapshot(
-                    root, accessor, scope=scope, app=app, pid=watch.pid,
+                snap = observe.build_snapshot(
+                    walked, accessor, scope=scope, app=app, pid=watch.pid,
                     geometry=_atspi.primary_geometry(),
                 )
+                _atspi.note_browser_bar(walked, snap.elements)
+                return snap
 
         return self._run(_do)
 
@@ -2719,6 +2728,10 @@ class LinuxDriver:
                     raise _secure_focus_error(
                         "AT-SPI STATE_FOCUSED on a 'password text' node"
                     )
+        if app_id:
+            # The find field latches this process even when the open bar is
+            # not in a snapshot. scroll_to_find types and closes it first.
+            self._run(lambda: _atspi.note_focused_find_bar(app_id))
         if (
             handle is not None
             and ("\t" in text or "\n" in text)
