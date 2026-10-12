@@ -1806,6 +1806,101 @@ def test_stale_find_frame_beside_the_page_clears_the_cache(monkeypatch) -> None:
     assert cleared == []
 
 
+def test_empty_untitled_chrome_frame_yields_the_named_page() -> None:
+    """An empty untitled Chrome frame is not the snapshot when a titled window exists.
+
+    Chrome keeps those frames beside the document. When one is active, the
+    walk is an untitled group with no rows, and scroll_to_find stops before
+    the wheel. The titled window is the root. A frame that already holds a
+    document stays, and the open find bar stays until it is latched.
+    """
+
+    class _States:
+        def __init__(self, names):
+            self.names = frozenset(names)
+
+    class _Node:
+        def __init__(self, name, *, role="frame", children=(), states=(), pid=5151):
+            self._name = name
+            self._role = role
+            self._children = list(children)
+            self._states = frozenset(states)
+            self._pid = pid
+            self._app = None
+
+        def get_name(self):
+            return self._name
+
+        def get_role_name(self):
+            return self._role
+
+        def get_child_count(self):
+            return len(self._children)
+
+        def get_child_at_index(self, index):
+            return self._children[index]
+
+        def get_state_set(self):
+            return _States(self._states)
+
+        def get_process_id(self):
+            return self._pid
+
+        def get_application(self):
+            return self._app
+
+        def get_toolkit_name(self):
+            return "Chrome"
+
+    def application(*frames):
+        app = _Node("Google Chrome", role="application", children=list(frames))
+        for frame in frames:
+            frame._app = app
+        return app
+
+    def empty_frame(**states):
+        filler = _Node("", role="panel")
+        panel = _Node("", role="panel", children=[filler])
+        return _Node("", children=[panel], states=states.get("states", ("ACTIVE", "SHOWING")))
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_OPEN.clear()
+    try:
+        empty = empty_frame()
+        page = _Node(
+            "cualong - Google Chrome",
+            states=("SHOWING",),
+            children=[_Node("cualong", role="document web")],
+        )
+        application(empty, page)
+        assert _atspi.chromium_snapshot_root(empty) is page
+        assert _atspi.chromium_snapshot_root(page) is page
+
+        document = _Node("", children=[_Node("body", role="document web")])
+        other = _Node("Other - Google Chrome", states=("SHOWING",))
+        application(document, other)
+        assert _atspi.chromium_snapshot_root(document) is document
+
+        only = empty_frame()
+        application(only)
+        assert _atspi.chromium_snapshot_root(only) is only
+
+        bar = _Node("Find in page", states=("ACTIVE", "SHOWING"))
+        page = _Node("cualong - Google Chrome", states=("SHOWING",))
+        empty = empty_frame(states=("SHOWING",))
+        application(empty, bar, page)
+        assert _atspi.chromium_snapshot_root(bar) is bar
+
+        _atspi._BROWSER_BAR_PIDS.add(5151)
+        assert _atspi.chromium_snapshot_root(bar) is page
+        assert _atspi.chromium_snapshot_root(empty) is page
+    finally:
+        _atspi._BROWSER_BAR_PIDS.clear()
+        _atspi._BROWSER_BAR_CLEARED.clear()
+        _atspi._BROWSER_BAR_OPEN.clear()
+
+
 def test_scrolled_off_chromium_root_keeps_the_onscreen_page() -> None:
     """Find-in-page parks the content root above the viewport.
 
@@ -8561,6 +8656,75 @@ def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch
     assert fresh["node"] is not None and fresh["node"].text == "NEWB2-1"
     assert paragraph.text == ""
     assert _atspi.writer_cell_text(cell) == "NEWB2-1"
+
+
+def test_missing_value_interface_is_not_numeric_and_a_real_range_still_is(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A node with no Value interface is not checked as a number.
+
+    AT-SPI reports the interface missing. Minimum and maximum are not read:
+    that read is an uninitialized double, about 6.93e-310. set_numeric_value
+    returns false before parsing, and set_value on the group is not_editable.
+    The same double is not a range when an interface object is handed back.
+    A panel whose minimum and maximum are a real range stays numeric.
+    """
+    junk = 6.93985e-310
+    panel = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    panel.get_value_iface = lambda: None
+    probed = {"n": 0}
+    original_min = fake_atspi.Value.get_minimum_value
+    original_max = fake_atspi.Value.get_maximum_value
+
+    def counting_min(acc):
+        probed["n"] += 1
+        return original_min(acc)
+
+    def counting_max(acc):
+        probed["n"] += 1
+        return original_max(acc)
+
+    fake_atspi.Value.get_minimum_value = staticmethod(counting_min)
+    fake_atspi.Value.get_maximum_value = staticmethod(counting_max)
+    try:
+        assert _atspi._value_interface_present(panel) is False
+        assert _atspi._value_range(panel) is None
+        assert _atspi.control_kind(panel) is None
+        assert _atspi.set_numeric_value(panel, "NOPE") is False
+        assert probed["n"] == 0
+    finally:
+        fake_atspi.Value.get_minimum_value = staticmethod(original_min)
+        fake_atspi.Value.get_maximum_value = staticmethod(original_max)
+
+    handed = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    handed.get_value_iface = lambda: handed
+    assert _atspi._value_range(handed) is None
+    assert _atspi.control_kind(handed) is None
+    assert _atspi.set_numeric_value(handed, "NOPE") is False
+
+    box = Bounds(0, 100, 80, 100, 80)
+    element = Element("e25", "AXGroup", "EllipseB", None, box, "snap-1")
+    target = {"node": handed}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: target["node"])
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    with pytest.raises(ComputerUseError) as group_exc:
+        driver.set_value(element, "NOPE")
+    assert group_exc.value.detail["reason"] == "not_editable", group_exc.value
+    assert "not a number" not in str(group_exc.value)
+    assert "e-310" not in str(group_exc.value)
+    target["node"] = panel
+    with pytest.raises(ComputerUseError) as missing_exc:
+        driver.set_value(element, "NOPE")
+    assert missing_exc.value.detail["reason"] == "not_editable", missing_exc.value
+    assert "e-310" not in str(missing_exc.value)
+
+    meter = _Acc("filler", name="Meter", value=1.0, minimum=0.0, maximum=10.0)
+    assert _atspi.control_kind(meter) == "value"
+    with pytest.raises(ValueError, match="not a number") as numeric:
+        _atspi.set_numeric_value(meter, "NOPE")
+    assert "0" in str(numeric.value) and "10" in str(numeric.value)
+    assert "e-310" not in str(numeric.value)
 
 
 def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
