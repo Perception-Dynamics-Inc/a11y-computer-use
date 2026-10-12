@@ -1675,21 +1675,64 @@ def launch_app(identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
     )
 
 
-def activate_app(identifier: str) -> str:
-    """Raise+focus a window whose comm/title matches ``identifier`` (EWMH
-    _NET_ACTIVE_WINDOW client message). Returns the resolved app id.
+def _root_screen_size(d) -> tuple[int, int] | None:
+    """Pixel size of the X screen, or None when the display does not say.
 
-    The request is retried until ``_NET_ACTIVE_WINDOW`` stays on that window.
+    Synthetic tests omit ``width_in_pixels``. A missing size is not treated
+    as a zero screen.
+    """
+    try:
+        screen = d.screen()
+        width = int(getattr(screen, "width_in_pixels", 0) or 0)
+        height = int(getattr(screen, "height_in_pixels", 0) or 0)
+    except Exception:
+        return None
+    if width > 0 and height > 0:
+        return width, height
+    return None
+
+
+def _geometry_on_screen(geom, screen: tuple[int, int] | None) -> bool:
+    """Whether ``geom`` (x, y, w, h) meets the screen.
+
+    A box that sits entirely left of or above the origin does not. When the
+    screen size is known, a box that starts at or past the far edge does not
+    either. When the size is missing, a positive box that reaches the origin
+    side counts, so a test double without ``width_in_pixels`` still focuses
+    a window at (10, 20).
+    """
+    if geom is None:
+        return False
+    try:
+        x, y, width, height = (int(geom[0]), int(geom[1]), int(geom[2]), int(geom[3]))
+    except (TypeError, ValueError, IndexError):
+        return False
+    if width <= 0 or height <= 0:
+        return False
+    if x + width <= 0 or y + height <= 0:
+        return False
+    if screen is None:
+        return True
+    return x < screen[0] and y < screen[1]
+
+
+def activate_app(identifier: str) -> str:
+    """Raise+focus the topmost on-screen window matching ``identifier``.
+
+    Stacking is bottom to top, so the last on-screen match is the front
+    window. A minimized window and a window whose box misses the screen are
+    not that match. When every match is hidden or off the display, this
+    raises ``window_off_screen`` and does not send ``_NET_ACTIVE_WINDOW``.
     No matching window is ``app_not_found``. The call does not report that
-    it activated an app that was never launched. That answer does not build
-    an X client message, so a desktop with no matching window does not need
-    the X connection beyond the window list.
+    it activated an app that was never launched.
     """
     from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     with _open_display() as d:
+        screen = _root_screen_size(d)
         resolved = identifier
         matched = None
+        saw = False
         for win in _managed_windows(d):
             comm = (_app_id(win, d) or "")
             instance, klass = _wm_class_strings(win, d)
@@ -1699,11 +1742,26 @@ def activate_app(identifier: str) -> str:
             )
             if not named and title:
                 named = any(name and name in title.lower() for name in _identity_needles(identifier))
-            if named:
-                resolved = comm or instance or identifier
-                matched = win
-                break
+            if not named:
+                continue
+            saw = True
+            if _is_hidden(win, d):
+                continue
+            if not _geometry_on_screen(_geometry_on_root(win, d), screen):
+                continue
+            resolved = comm or instance or identifier
+            matched = win
         if matched is None:
+            if saw:
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{identifier!r} has no window on this screen",
+                    detail={
+                        "app": identifier,
+                        "reason": "window_off_screen",
+                        "hint": "every matching window is minimized or outside the display",
+                    },
+                )
             raise ComputerUseError(
                 ErrorCode.APP_NOT_FOUND,
                 f"no running application matches {identifier!r}",
