@@ -11615,6 +11615,7 @@ def test_gtk_outline_row_says_it_activates_on_double_click(fake_atspi) -> None:
     A cell whose actions are expand, edit, then activate only selects on a
     single click. The snapshot says the row activates on double-click. A
     cell whose own action is click, and a cell in a plain table, do not.
+    The table check does not walk that table's children.
     """
     symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
     bare = _outline_cell("plain_row", [])
@@ -11626,10 +11627,18 @@ def test_gtk_outline_row_says_it_activates_on_double_click(fake_atspi) -> None:
     table = _Acc("table", name="grid")
     _bind_gtk_app(table)
     table.get_selection_iface = lambda: table
+    scanned: list[int] = []
+
+    def child_at(index, table=table):
+        scanned.append(index)
+        return table.children[index]
+
+    table.get_child_at_index = child_at
     grid = _outline_cell("A1", [])
     _adopt(table, grid)
     grid.get_application = table.get_application
     assert _atspi.outline_double_click_note(grid) == ""
+    assert scanned == []
 
 
 def test_click_on_an_outline_row_stays_a_single_click(
@@ -11664,6 +11673,9 @@ def test_click_on_an_outline_row_stays_a_single_click(
         store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
     )
     runtime._current = shot
+    # count=2 is a real pointer click. The recheck hit-tests the desktop
+    # under this synthetic box, which is the runner's own terminal.
+    runtime._recheck_target = lambda *_args, **_kwargs: None
     cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
     assert cell.note == "activates on double-click"
     rendered = observe.render_matches(shot, (cell,))

@@ -12585,6 +12585,32 @@ def navigating_folder_row(acc) -> bool:
     return folder_location(acc) is not None
 
 
+def _gtk_outline_parent(acc):
+    """The tree or tree table that holds ``acc``.
+
+    A plain table is not an outline. The child's index is not read here.
+    That read walks every sibling, and a spreadsheet table has hundreds of
+    them. A snapshot of those cells must not pay for that walk.
+    """
+    node = acc
+    try:
+        for _ in range(8):
+            parent = _parent_of(node)
+            if parent is None:
+                return None
+            role = _role_name(parent)
+            if role in {"menu", "popup menu", "menu bar"}:
+                return None
+            if role in {"tree", "tree table"} and _selection_iface(parent) is not None:
+                return parent
+            if role == "table" and _selection_iface(parent) is not None:
+                return None
+            node = parent
+    except Exception:
+        return None
+    return None
+
+
 def outline_double_click_note(acc) -> str:
     """``activates on double-click`` when a single click only selects the row.
 
@@ -12602,8 +12628,8 @@ def outline_double_click_note(acc) -> str:
             return ""
     except Exception:
         return ""
-    parent, _index, _target = _selection_parent(acc)
-    if parent is None or _role_name(parent) not in {"tree", "tree table"}:
+    parent = _gtk_outline_parent(acc)
+    if parent is None:
         return ""
     try:
         if navigating_folder_row(acc):
