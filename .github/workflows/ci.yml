@@ -244,6 +244,12 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends inkscape
           command -v inkscape
+      # Geany 2.0 is the Scintilla document the off-screen find test drives.
+      # A missing binary skips that test, so the install is what makes it run.
+      - name: install Geany
+        run: |
+          sudo apt-get install -y --no-install-recommends geany
+          command -v geany
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;
