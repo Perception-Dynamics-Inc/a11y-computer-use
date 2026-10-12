@@ -2565,7 +2565,27 @@ def _firefox_binary() -> str | None:
     return None
 
 
-def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
+# Same first-run block as the Firefox form fixture. Without the homepage
+# override, a fresh ESR profile can replace the requested file with a
+# what's-new tab, and the paragraph page never becomes the showing document.
+_FIREFOX_PARA_PREFS = textwrap.dedent(
+    """\
+    user_pref("accessibility.force_disabled", 0);
+    user_pref("browser.aboutwelcome.enabled", false);
+    user_pref("browser.startup.homepage_override.mstone", "ignore");
+    user_pref("datareporting.policy.dataSubmissionEnabled", false);
+    user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+    user_pref("browser.shell.checkDefaultBrowser", false);
+    user_pref("browser.tabs.warnOnClose", false);
+    user_pref("browser.startup.firstrunSkipsHomepage", true);
+    user_pref("browser.newtab.preload", true);
+    user_pref("browser.sessionstore.resume_from_crash", false);
+    user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
+    """
+)
+
+
+def _launch_para_browser(tmp_path, kind: str, log_file=None) -> tuple[subprocess.Popen, str]:
     page = tmp_path / "cuapara.html"
     page.write_text(_PARA_PAGE)
     url = page.resolve().as_uri()
@@ -2589,29 +2609,31 @@ def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
     binary = _firefox_binary()
     if binary is None:
         pytest.skip("no Firefox binary for the paragraph AT-SPI test")
-    (profile / "user.js").write_text(
-        'user_pref("accessibility.force_disabled", -1);\n'
-        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
-        'user_pref("datareporting.policy.dataSubmissionEnabled", false);\n'
-        'user_pref("browser.aboutwelcome.enabled", false);\n'
-        'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n'
-    )
+    (profile / "user.js").write_text(_FIREFOX_PARA_PREFS)
     env = os.environ.copy()
     env["MOZ_ENABLE_ACCESSIBILITY"] = "1"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
     proc = subprocess.Popen(
-        [binary, "-no-remote", "-profile", str(profile), url],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [binary, "--profile", str(profile), "--no-remote", "--new-instance", url],
+        env=env,
+        stdout=log_file if log_file is not None else subprocess.DEVNULL,
+        stderr=subprocess.STDOUT if log_file is not None else subprocess.DEVNULL,
         start_new_session=True,
     )
     return proc, "firefox"
 
 
-def _wait_para_snapshot(driver, app: str):
+def _wait_para_snapshot(driver, app: str, proc: subprocess.Popen | None = None):
     from a11y_computer_use import observe
 
     deadline = time.monotonic() + 30
     last = ""
     while time.monotonic() < deadline:
+        # A dead browser will not publish the page. Stop this attempt so the
+        # caller can start a fresh profile instead of waiting out the clock.
+        if proc is not None and proc.poll() is not None:
+            break
         try:
             shot = driver.snapshot(Scope.WINDOW, app)
         except ComputerUseError as exc:
@@ -2623,7 +2645,16 @@ def _wait_para_snapshot(driver, app: str):
             if "Div button" in last and "the docs link" in last and "Verify you are human" in last:
                 return shot
         time.sleep(0.5)
-    raise AssertionError(f"{app} did not expose the paragraph page through AT-SPI\n{last}")
+    missing = [
+        name for name in ("Div button", "the docs link", "Verify you are human") if name not in last
+    ]
+    seen = "no snapshot" if not last else f"snapshot_lines={len(last.splitlines())}"
+    exited = ""
+    if proc is not None and proc.poll() is not None:
+        exited = f" exit={proc.poll()}"
+    raise AssertionError(
+        f"{app} did not expose the paragraph page through AT-SPI; missing {missing}; {seen}{exited}\n{last}"
+    )
 
 
 def _para_page_lists_controls(driver, runtime, app: str) -> None:
@@ -2947,20 +2978,46 @@ def test_linux_chrome_roleless_contenteditable(tmp_path) -> None:
 def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
     """Live Firefox AT-SPI: the same local page, including the empty-label checkbox click.
 
-    Skips when no Firefox binary is on PATH.
+    Skips when no Firefox binary is on PATH. The first launch on a busy runner
+    can exit before AT-SPI sees the app. One fresh profile is enough when that
+    happens. A second miss still fails, and the checkbox assertions are unchanged.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
-    proc, app = _launch_para_browser(tmp_path, "firefox")
+    proc = None
+    log_f = None
     try:
-        _wait_para_snapshot(driver, app)
-        app = driver.activate_app(app)
-        runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
-        _para_page_lists_controls(driver, runtime, app)
+        for attempt in (1, 2):
+            if proc is not None:
+                _stop_group(proc)
+                proc = None
+            if log_f is not None:
+                log_f.close()
+                log_f = None
+            attempt_dir = tmp_path / f"firefox-{attempt}"
+            attempt_dir.mkdir()
+            log_path = attempt_dir / "firefox.log"
+            log_f = log_path.open("w", encoding="utf-8")
+            proc, app = _launch_para_browser(attempt_dir, "firefox", log_f)
+            try:
+                _wait_para_snapshot(driver, app, proc)
+            except AssertionError as exc:
+                log_f.flush()
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
+                if attempt == 2:
+                    raise AssertionError(f"{exc}\nfirefox log:\n{tail}") from None
+                continue
+            app = driver.activate_app(app)
+            runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
+            _para_page_lists_controls(driver, runtime, app)
+            return
     finally:
-        _stop_group(proc)
+        if proc is not None:
+            _stop_group(proc)
+        if log_f is not None:
+            log_f.close()
 
 
 def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:
