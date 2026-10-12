@@ -197,6 +197,97 @@ def test_press_opens_each_level_then_the_leaf() -> None:
     assert file_menu.pressed == ["click"]
 
 
+def libreoffice():
+    """Impress and Writer bar entries: role menu, one action named ''.
+
+    Leaves publish ``click``. Nested menus (Writer's Text under Format) use
+    the same unnamed action. Fake tree, not a live soffice process.
+    """
+    outline = _item("Outline", role="radio menu item")
+    normal = _item("Normal", role="radio menu item")
+    view = Acc("menu", "View", [normal, outline], states=("sensitive", "enabled"), actions=("",))
+    new_slide = _item("New Slide")
+    slide = Acc("menu", "Slide", [new_slide], states=("sensitive", "enabled"), actions=("",))
+    uppercase = _item("UPPERCASE")
+    text = Acc("menu", "Text", [uppercase], states=("sensitive", "enabled"), actions=("",))
+    fmt = Acc("menu", "Format", [text], states=("sensitive", "enabled"), actions=("",))
+    bar = Acc("menu bar", "", [view, slide, fmt])
+    frame = Acc("frame", "Untitled 1 - LibreOffice Impress", [bar], states={"active"})
+    app = Acc("application", "soffice", [frame])
+    return app, view, slide, text, fmt, outline, new_slide, uppercase
+
+
+def test_libreoffice_menu_bar_presses_its_single_unnamed_action() -> None:
+    """do_action(0) opens a menu whose only AT-SPI action is unnamed.
+
+    Listing still does not press. A path through those menus presses the
+    empty action on each menu role and ``click`` on the leaf.
+    """
+    app, view, slide, text, fmt, outline, new_slide, uppercase = libreoffice()
+    assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["View", "Slide", "Format"]
+    assert [row["title"] for row in _linux_menus.menu_items(app, "View")] == ["Normal", "Outline"]
+    assert view.pressed == [] and slide.pressed == [] and fmt.pressed == []
+
+    assert _linux_menus.menu_press(app, "View", settle=lambda _s: None) == "View"
+    assert view.pressed == [""]
+
+    assert _linux_menus.menu_press(app, "View > Outline", settle=lambda _s: None) == "Outline"
+    assert view.pressed == ["", ""]
+    assert outline.pressed == ["click"]
+
+    assert _linux_menus.menu_press(app, "Slide > New Slide", settle=lambda _s: None) == "New Slide"
+    assert slide.pressed == [""]
+    assert new_slide.pressed == ["click"]
+
+    assert _linux_menus.menu_press(app, "Format > Text > UPPERCASE", settle=lambda _s: None) == "UPPERCASE"
+    assert fmt.pressed == [""]
+    assert text.pressed == [""]
+    assert uppercase.pressed == ["click"]
+
+
+def test_unnamed_action_is_not_pressed_outside_a_single_menu() -> None:
+    """The empty-action fallback is role menu and exactly one action."""
+    leaf = Acc("menu item", "Outline", states=("sensitive", "enabled"), actions=("",))
+    view = _menu("View", leaf)
+    bar = Acc("menu bar", "", [view])
+    leaf_app = Acc("application", "soffice", [Acc("frame", "Impress", [bar], states={"active"})])
+    with pytest.raises(ComputerUseError) as leaf_exc:
+        _linux_menus.menu_press(
+            leaf_app, "View > Outline", settle=lambda _s: None, dismiss=lambda: None,
+        )
+    assert leaf_exc.value.detail["reason"] == "press_failed"
+    assert leaf_exc.value.detail["level"] == 1
+    assert leaf.pressed == []
+    assert view.pressed == ["click"]
+
+    ambiguous = Acc(
+        "menu", "View", [_item("Outline")],
+        states=("sensitive", "enabled"), actions=("", "expand"),
+    )
+    ambiguous_bar = Acc("menu bar", "", [ambiguous])
+    ambiguous_app = Acc(
+        "application", "soffice",
+        [Acc("frame", "Impress", [ambiguous_bar], states={"active"})],
+    )
+    with pytest.raises(ComputerUseError) as menu_exc:
+        _linux_menus.menu_press(ambiguous_app, "View", settle=lambda _s: None)
+    assert menu_exc.value.detail["reason"] == "press_failed"
+    assert menu_exc.value.detail["level"] == 0
+    assert ambiguous.pressed == []
+
+    named = Acc(
+        "menu", "Format", [_item("Bold")],
+        states=("sensitive", "enabled"), actions=("", "click"),
+    )
+    named_bar = Acc("menu bar", "", [named])
+    named_app = Acc(
+        "application", "soffice",
+        [Acc("frame", "Writer", [named_bar], states={"active"})],
+    )
+    assert _linux_menus.menu_press(named_app, "Format", settle=lambda _s: None) == "Format"
+    assert named.pressed == ["click"]
+
+
 def test_classify_leaf_press_treats_a_timeout_as_dispatched() -> None:
     assert _linux_menus.classify_leaf_press(True, failed=False, elapsed=0.05) == "ok"
     assert _linux_menus.classify_leaf_press(False, failed=True, elapsed=0.40) == "dispatched"
