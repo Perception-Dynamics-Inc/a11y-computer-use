@@ -110,6 +110,22 @@ def test_snapshot_text_parser_matches_rendered_lines() -> None:
     assert ping is not None and ping.ref == "e16" and "click" in ping.flags
     status = pick(elements, role="statictext", name="Status")
     assert status is not None and status.value == "idle"
+    diff = "\n".join([
+        sample,
+        "[snap-2 <- snap-1] +1 -1 ~1",
+        '  + e18 button "Extra" (click) parent=e1',
+        '  - e16 button "Ping" (gone)',
+        '  ~ e17 statictext "Status" ="saved plain" [value: idle->saved plain]',
+        '  focus e10 textfield "Save path" ="/tmp/n.txt" (click,edit)',
+    ])
+    revised = parse_snapshot(diff)
+    assert pick(revised, role="button", name="Ping") is None
+    extra = pick(revised, role="button", name="Extra")
+    assert extra is not None and extra.ref == "e18" and "click" in extra.flags
+    status = pick(revised, role="statictext", name="Status")
+    assert status is not None and status.value == "saved plain"
+    path = pick(revised, role="textfield", name="Save path")
+    assert path is not None and path.ref == "e10" and path.value == "/tmp/n.txt"
 
 
 @requires_display

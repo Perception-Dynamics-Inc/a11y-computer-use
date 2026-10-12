@@ -103,10 +103,17 @@ accessibility snapshot and answer with tool calls. Calls in one turn run one
 at a time, and each one is checked before the next. If a call fails, is
 refused, or needs a human, later calls in that turn do not run.
 
-Use element refs from the latest observation. Prefer set_value and select for
+Use element refs from the latest observation. The first observation of a
+window is the full tree. After that you see a diff: + added, - removed,
+~ changed (the current line, then old->new in brackets). focus is the focused
+element when it did not change. Refs from the latest full snapshot stay valid,
+including ones the diff does not repeat. A different window sends the full
+tree again. snapshot mode="full" does that on request; mode="diff" repeats
+the changes. Non-element lines in a diff replace the previous open-menu,
+page-tool, and snapshot notes. Prefer set_value and select for
 fields and options. click, double_click, right_click, middle_click,
 triple_click, left_click, type, key, scroll, app, window, menu, wait,
-crop, and choose_file are available. find(text, role) searches the tracked app.
+crop, choose_file, and snapshot are available. find(text, role) searches the tracked app.
 expand(ref) opens a collapsed menu, tree, or section and lists that subtree.
 scroll_to_find scrolls until a name or role is on screen. In a file chooser,
 always use choose_file; never navigate folders. choose_file presses Ctrl+L,
@@ -515,6 +522,16 @@ class Agent:
         self._app: str | None = None
         self._last_observation = ""
         self._last_snap: Snapshot | None = None
+        # The snapshot last appended for the model. Post-action observes
+        # update `_last_snap` without moving this, so the next turn diffs
+        # against what the model actually saw.
+        self._basis: Snapshot | None = None
+        self._basis_window: tuple | None = None
+        self._basis_side: tuple[str, ...] = ()
+        self._force_full = False
+        self._pending_snap: Snapshot | None = None
+        self._pending_window: tuple | None = None
+        self._pending_side: tuple[str, ...] = ()
         self._injection = False
         self._crop_block: dict | None = None
         self._not_found_streak = 0
@@ -702,6 +719,7 @@ class Agent:
                 reason,
                 force=self._tactic == "vision" and sees_images,
             )
+            self._commit_shown()
             self._messages.append(Message(
                 role="user",
                 content=_user_content(
@@ -881,6 +899,10 @@ class Agent:
                 "turn_stop": "needs_human",
             })
             return "stop_run"
+        if requested.name == "snapshot":
+            return (yield from self._snapshot_call(
+                requested, call, turn, index, remaining, prior,
+            ))
 
         kind = target_human_kind(requested, self._last_snap)
         if kind is not None and requested.name in {"type", "set_value", "select", "click", "key"}:
@@ -1937,6 +1959,79 @@ class Agent:
             return bool(self.approve(Action("confirm", {"prompt": str(prompt)}, **fields)))
         return not self.auto_deny
 
+    def _commit_shown(self) -> None:
+        """Remember the observation that was just appended for the model.
+
+        A post-action observe updates ``_last_snap`` and the runtime's current
+        snapshot so the next call in the same turn still resolves. It does not
+        call this. The following turn then diffs against the tree the model saw,
+        which is what shows the effect of the action.
+        """
+        snap = getattr(self, "_pending_snap", None)
+        if isinstance(snap, Snapshot):
+            self._basis = snap
+            self._basis_window = getattr(self, "_pending_window", None)
+            self._basis_side = tuple(getattr(self, "_pending_side", ()) or ())
+        self._force_full = False
+
+    def _clear_basis(self) -> None:
+        """The next focused window is a full snapshot, not a diff."""
+        self._basis = None
+        self._basis_window = None
+        self._basis_side = ()
+        self._pending_snap = None
+        self._pending_window = None
+        self._pending_side = ()
+        self._force_full = False
+
+    def _install_snapshot(self, snap: Snapshot) -> None:
+        """Point the runtime at the snapshot whose refs the model is using."""
+        runtime = getattr(self, "runtime", None)
+        if runtime is None:
+            return
+        try:
+            runtime._current = snap  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - a test double may refuse the attribute
+            return
+
+    def _fence_observation(self, rendered: str) -> str:
+        """Fence one observation the way the loop always has.
+
+        An injection phrase sets ``suspicious=1`` and stays in the text.
+        A fence this process already issued is returned as that fence.
+        """
+        self._injection = False
+        if not self.fence_untrusted:
+            return rendered
+        fenced = fence(rendered)
+        rendered = fenced.text
+        self._injection = fenced.suspicious
+        if fenced.suspicious and self.trace is not None:
+            self.trace.append({
+                "kind": "observation",
+                "injection": True,
+                "observation": redact_text(truncate_observation(rendered), []),
+            })
+        return rendered
+
+    def _project_snapshot(self, full_text: str, snap: Snapshot) -> tuple[str, Snapshot]:
+        """Full tree, or a diff whose refs still name elements in ``snap``."""
+        from a11y_computer_use.observe import project_model_observation
+
+        view = project_model_observation(
+            self._basis,
+            snap,
+            full_text,
+            basis_window=self._basis_window,
+            basis_side=self._basis_side,
+            force_full=self._force_full,
+        )
+        self._install_snapshot(view.snap)
+        self._pending_snap = view.snap
+        self._pending_window = view.window
+        self._pending_side = view.side
+        return self._fence_observation(view.text), view.snap
+
     def _observe(self) -> tuple[str, Snapshot | None]:
         from a11y_computer_use.schema import ErrorCode
         from a11y_computer_use.server import error_text
@@ -1946,6 +2041,7 @@ class Agent:
             overview = self._desktop_overview()
             if self.fence_untrusted:
                 overview = fence(overview).text
+            self._clear_basis()
             return overview, None
         try:
             text = self._run_bounded(
@@ -1957,31 +2053,77 @@ class Agent:
                 raise
             if exc.code is ErrorCode.APP_NOT_FOUND:
                 self._app = None
+                self._clear_basis()
                 return self._desktop_overview(), None
             text = error_text(exc)
         except Exception as exc:  # noqa: BLE001 - observation is data, not fatal
             text = f"error: {type(exc).__name__}: {exc}"
+        else:
+            snap = getattr(self.runtime, "_current", None)
+            if isinstance(snap, Snapshot):
+                return self._project_snapshot(str(text), snap)
+            self._pending_snap = None
+            self._pending_window = None
+            self._pending_side = ()
+            return self._fence_observation(str(text)), None
+        self._pending_snap = None
+        self._pending_window = None
+        self._pending_side = ()
         snap = getattr(self.runtime, "_current", None)
-        rendered = str(text)
-        self._injection = False
-        if self.fence_untrusted:
-            fenced = fence(rendered)
-            rendered = fenced.text
-            self._injection = fenced.suspicious
-            if fenced.suspicious and self.trace is not None:
-                self.trace.append({
-                    "kind": "observation",
-                    "injection": True,
-                    "observation": redact_text(truncate_observation(rendered), []),
-                })
-        return rendered, snap if isinstance(snap, Snapshot) else None
+        return self._fence_observation(str(text)), snap if isinstance(snap, Snapshot) else None
+
+    def _snapshot_call(
+        self,
+        requested: Action,
+        call: ToolCall,
+        turn: ModelTurn,
+        index: int,
+        remaining: list[dict],
+        prior: list[dict],
+    ) -> Iterator[Event]:
+        """Redraw the tree, or repeat the diff, and show that text to the model.
+
+        ``mode=full`` keeps refs of elements that are still in this window.
+        The basis moves to this snapshot, so the next automatic observation
+        is what changed after this request.
+        """
+        mode = str(requested.args.get("mode") or "full")
+        if mode == "full":
+            self._force_full = True
+        observation, snap = self._observe()
+        self._last_observation = observation
+        self._last_snap = snap
+        self._remember_refs(snap)
+        self._commit_shown()
+        self._commit(
+            requested, requested, observation, verified=True, error=None,
+            duration=0.0, recovery=[], turn=turn, started_at=time.perf_counter(),
+        )
+        yield Event("action", _action_event(index, requested, snap))
+        yield Event("observation", {
+            "text": truncate_observation(observation),
+            "app": self._app_name(),
+            "digest": snapshot_digest(snap, observation),
+            "injection": self._injection,
+        })
+        yield Event("step_finished", _step_finished(
+            index, verified=True, error=None,
+            ran=[*prior, _call_view(call)],
+        ))
+        self._messages.append(Message(
+            role="tool",
+            content=observation,
+            tool_call_id=call.id,
+            name=requested.name,
+        ))
+        return "continue"
 
     def _domain_block(self, action: Action) -> str | None:
         """Error text when this action's origin is outside the domain policy."""
         policy = self.domain_policy
         if policy is None or policy.empty:
             return None
-        if action.name in {"done", "ask_human", "wait", "window"}:
+        if action.name in {"done", "ask_human", "wait", "window", "snapshot"}:
             return None
         if action.name == "app":
             if str(action.args.get("action") or "") != "launch":
@@ -3224,7 +3366,7 @@ def forced_method(
     focus. A missing ref stays the click. ``crop`` stays a crop. When no
     same-intent method remains, the model's action is returned unchanged.
     """
-    if action.name in {"crop", "find", "expand", "scroll_to_find", "choose_file"}:
+    if action.name in {"crop", "find", "expand", "scroll_to_find", "choose_file", "snapshot"}:
         return action, None
     if level <= 0:
         return action, None
@@ -4720,7 +4862,7 @@ def _is_verified(action: Action, before: str, after: str, error: str | None) -> 
     if error:
         return False
     verb = str(action.args.get("action") or "")
-    if action.name in {"wait", "crop", "find", "expand", "scroll_to_find"}:
+    if action.name in {"wait", "crop", "find", "expand", "scroll_to_find", "snapshot"}:
         return True
     if action.name in {"app", "window", "menu"} and verb in {"list", "state"}:
         return True

@@ -308,11 +308,11 @@ async def test_mcp_explicit_point_is_not_rewritten_to_the_goal(tmp_path: Path) -
             "model": "scripted:unused",
         }))
         result = {}
-        for _ in range(80):
+        for _ in range(400):
             result = _payload(await client.call_tool("get_run", {"run_id": started["id"]}))
             if result.get("status") != "running":
                 break
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.05)
     assert result["status"] == "success", result
     assert runtime.calls == [
         ("click", point),

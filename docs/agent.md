@@ -16,8 +16,15 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 
 `Agent.run(goal)` and `Agent.stream(goal)` drive this loop:
 
-1. Observe. `Runtime.desktop_snapshot` renders the pruned tree of the tracked
-   app, or the frontmost app before one has been launched or focused.
+1. Observe. The first observation of a window is `Runtime.desktop_snapshot`
+   of the tracked app, or the frontmost app before one has been launched or
+   focused: the pruned tree. Later observations of that same window are a
+   diff of added, removed, and changed elements, plus the focused element
+   when it did not change. Refs from the latest full snapshot stay valid for
+   elements that are still there, including refs the diff does not repeat.
+   A different window, or `snapshot` with `mode=full`, sends the full tree
+   again. `mode=diff` repeats the changes. Text is fenced the same way as a
+   full snapshot.
 2. Pause if the tree shows a password field, a one-time-code field, a card
    field, or a captcha iframe. The result is `needs_human`. Nothing is typed.
 3. Ask the model for one turn. A turn is a list of tool calls. The loop runs
@@ -472,9 +479,14 @@ text starts with `409`. This does not add or remove tools on
 ## Actions
 
 `click`, `type`, `key`, `set_value`, `select`, `scroll`, `crop`, `find`,
-`expand`, `scroll_to_find`, `choose_file`, `app`
+`expand`, `scroll_to_find`, `choose_file`, `snapshot`, `app`
 (`launch`, `focus`, `quit`, `list`), `window` (`list`, `raise`, `focus`,
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
+
+`snapshot` takes optional `mode`. `full` (the default) redraws the current
+window and keeps the refs of elements that are still there. `diff` repeats
+the changes since the last observation the model was shown. A different
+window is always the full tree.
 
 `find` takes `text` and/or `role` (optional `editable`, `clickable`, `scope`)
 and calls the runtime `find` on the tracked app. It searches the whole

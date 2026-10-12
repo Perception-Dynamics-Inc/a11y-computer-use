@@ -144,6 +144,30 @@ def test_set_text_does_not_succeed_when_the_typed_text_does_not_land(
     assert field.text is None
 
 
+def test_set_text_types_when_focus_arrives_after_the_first_wait(fake_atspi, monkeypatch) -> None:
+    """FOCUSED after the old 10-poll budget still types. The miss asks again."""
+    field = _NullEntry()
+    polls = {"n": 0}
+    real = _atspi._focus_on_target
+
+    def focus_on_target(acc):
+        polls["n"] += 1
+        if polls["n"] >= 15:
+            acc.states.add("FOCUSED")
+        return real(acc)
+
+    monkeypatch.setattr(_atspi, "_focus_on_target", focus_on_target)
+
+    def type_string(text: str) -> None:
+        field.text = (field.text or "") + text
+
+    monkeypatch.setattr(_linux_input, "type_string", type_string)
+    assert _atspi.set_text(field, "Bo") is True
+    assert field.text == "Bo"
+    assert polls["n"] >= 15
+    assert field.focused_attempts >= 2
+
+
 def test_set_text_raises_when_the_empty_field_never_focuses(fake_atspi, monkeypatch) -> None:
     field = _NullEntry()
     typed: list[str] = []

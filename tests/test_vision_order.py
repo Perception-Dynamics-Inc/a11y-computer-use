@@ -225,7 +225,7 @@ def test_ref_plus_point_is_invalid_arguments() -> None:
 
 
 def test_missing_ref_resolves_only_from_its_last_known_name(tmp_path) -> None:
-    """The stale ref's own name is the target. A goal word is not."""
+    """A rebuilt button keeps its ref. The goal word is not a target."""
     save = el("e2", "AXButton", "Save draft", parent="e1", clickable=True)
     ping = el("e4", "AXButton", "Ping", parent="e1", clickable=True)
     archive = el("e3", "AXButton", "Archive", parent="e1", clickable=True)
@@ -250,18 +250,60 @@ def test_missing_ref_resolves_only_from_its_last_known_name(tmp_path) -> None:
         trace_dir=tmp_path,
         max_steps=2,
     )
+    # The raw walk named the rebuilt button e5. Alignment keeps e2, so the
+    # click stays on Save draft and does not fall through to Archive.
     assert runtime.calls == [
         ("click", {"ref": "e4"}),
-        ("click", {"ref": "e5"}),
+        ("click", {"ref": "e2"}),
     ]
     assert all(call[1].get("ref") != "e3" for call in runtime.calls)
-    note = "resolved e2 from last-known AXButton 'Save draft' to e5"
+    assert result.step_log[1].target.get("name") == "Save draft"
+    assert "resolved e2" not in (result.step_log[1].result or "")
+    rows = [
+        __import__("json").loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    click = next(row for row in rows if row.get("action") == "click" and row["args"].get("ref") == "e2")
+    assert click["requested"] == {"name": "click", "args": {"ref": "e2"}}
+    assert "resolved_from" not in click
+
+
+def test_a_ref_alignment_cannot_keep_resolves_from_its_last_known_name(tmp_path) -> None:
+    """Two same-named buttons are not one control. The surviving name is the target."""
+    first = el("e2", "AXButton", "Save draft", parent="e1", clickable=True, path=("AXWindow", "AXButton", "0"))
+    other = el("e6", "AXButton", "Save draft", parent="e1", clickable=True, path=("AXWindow", "AXButton", "1"))
+    ping = el("e4", "AXButton", "Ping", parent="e1", clickable=True, path=("AXWindow", "AXButton", "2"))
+    archive = el("e3", "AXButton", "Archive", parent="e1", clickable=True, path=("AXWindow", "AXButton", "3"))
+    runtime = FakeRuntime(window(first, other, ping, archive))
+
+    def on_call(name, params, rt):
+        if name == "click" and params.get("ref") == "e4":
+            rt.elements = [item for item in rt.elements if item.ref != "e2"]
+
+    runtime.on_call = on_call
+    result, runtime = _run(
+        "Click the Save draft button in Chrome. Do not click Archive.",
+        runtime.elements,
+        [
+            turn(ToolCall("click", {"ref": "e4"})),
+            turn(ToolCall("click", {"ref": "e2"})),
+        ],
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=2,
+    )
+    assert runtime.calls == [
+        ("click", {"ref": "e4"}),
+        ("click", {"ref": "e6"}),
+    ]
+    assert all(call[1].get("ref") != "e3" for call in runtime.calls)
+    note = "resolved e2 from last-known AXButton 'Save draft' to e6"
     assert note in (result.step_log[1].result or "")
     rows = [
         __import__("json").loads(line)
-        for line in (tmp_path / "trajectory.jsonl").read_text().splitlines()
+        for line in (tmp_path / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    click = next(row for row in rows if row.get("action") == "click" and row["args"].get("ref") == "e5")
+    click = next(row for row in rows if row.get("action") == "click" and row["args"].get("ref") == "e6")
     assert click["requested"] == {"name": "click", "args": {"ref": "e2"}}
     assert click["resolved_from"] == note
 
@@ -548,8 +590,10 @@ def test_resolved_payment_and_send_still_stop(tmp_path) -> None:
     )
     assert stopped.status == "needs_human", stopped
     assert stopped.needs_human["kind"] == "payment"
-    assert "resolved e2 from last-known AXButton 'Pay now' to e9" in stopped.reason
-    assert [call for call in runtime.calls if call[1].get("ref") == "e9"] == []
+    assert "payment" in stopped.reason
+    assert "Pay now" in stopped.reason
+    # The rebuilt Pay now keeps e2, and that click is stopped before it runs.
+    assert [call for call in runtime.calls if call[1].get("ref") in {"e2", "e9"}] == []
 
     send = el("e2", "AXButton", "Send", parent="e1", clickable=True)
     ping = el("e4", "AXButton", "Ping", parent="e1", clickable=True)
@@ -573,6 +617,6 @@ def test_resolved_payment_and_send_still_stop(tmp_path) -> None:
         trace_dir=tmp_path,
         max_steps=3,
     )
-    assert [call for call in runtime.calls if call[1].get("ref") == "e9"] == []
-    assert any("resolved e2 from last-known AXButton 'Send' to e9" in (step.result or "") for step in refused.step_log)
+    assert [call for call in runtime.calls if call[1].get("ref") in {"e2", "e9"}] == []
+    assert any(step.target.get("name") == "Send" for step in refused.step_log)
     assert any("approval_denied" in (step.error or "") for step in refused.step_log)
