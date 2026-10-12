@@ -2213,3 +2213,157 @@ def test_agent_escape_in_gtk_file_chooser_does_not_press_open(
                 pass
         stop_process(proc)
 
+
+@requires_display
+def test_agent_choose_file_opens_a_gtk_dialog(tmp_path, isolated_home, monkeypatch) -> None:
+    """Live GTK file chooser. choose_file types the path and the dialog must close.
+
+    A missing dialog, a dialog that stays open, or a host that does not show
+    the file fails the test. This does not skip once a display is present.
+    """
+    import pwd
+    import signal
+    import textwrap
+
+    assert isolated_home.is_dir()
+    auth = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".Xauthority")
+    if os.path.isfile(auth) and not os.environ.get("XAUTHORITY"):
+        monkeypatch.setenv("XAUTHORITY", auth)
+
+    from a11y_computer_use.agent.core import Agent
+    from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
+    from a11y_computer_use.agent.models.scripted import ScriptedModel
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "picked.txt"
+    target.write_text("picked")
+    marker = tmp_path / "chooser-result.txt"
+    script = tmp_path / "cuafilechoose.py"
+    # dialog.run() has to be inside the Browse handler. Opening it from
+    # idle_add leaves the Open action unable to end that nested loop, so
+    # Return reports the chooser as still open. The GTK Return tests use
+    # this same button.
+    script.write_text(textwrap.dedent(
+        f"""
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, GLib
+        GLib.set_prgname("cuafilechoose")
+        marker = {str(marker)!r}
+        folder = {str(folder)!r}
+        win = Gtk.Window(title="FileHost")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status = Gtk.Label(label="chosen=")
+        button = Gtk.Button(label="Browse")
+
+        def on_click(_btn):
+            dialog = Gtk.FileChooserDialog(
+                title="Open File", transient_for=win, action=Gtk.FileChooserAction.OPEN,
+            )
+            dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+            dialog.add_button("Open", Gtk.ResponseType.OK)
+            dialog.set_current_folder(folder)
+            dialog.set_default_size(720, 480)
+
+            def _fit(widget):
+                widget.resize(720, 480)
+                widget.move(40, 40)
+            dialog.connect("map", _fit)
+            response = dialog.run()
+            name = dialog.get_filename() or ""
+            if response == Gtk.ResponseType.OK and name:
+                status.set_text("chosen=" + name)
+                open(marker, "w", encoding="utf-8").write(name)
+            else:
+                status.set_text("chosen=")
+                open(marker, "w", encoding="utf-8").write("cancel")
+            dialog.destroy()
+
+        button.connect("clicked", on_click)
+        box.pack_start(status, False, False, 0)
+        box.pack_start(button, False, False, 0)
+        win.add(box)
+        win.set_default_size(420, 160)
+        win.move(40, 40)
+        win.connect("destroy", Gtk.main_quit)
+        win.show_all()
+        win.present()
+        Gtk.main()
+        """
+    ))
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    if os.path.isfile(auth):
+        env["XAUTHORITY"] = auth
+    proc = subprocess.Popen(
+        [sys.executable, str(script)], env=env, start_new_session=True,
+    )
+    try:
+        from a11y_computer_use.schema import ComputerUseError, Scope
+        from a11y_computer_use.server import Runtime
+
+        driver = LinuxDriver()
+        driver.ensure_trusted()
+        _grant_linux_desktop("cuafilechoose", "python3", "python")
+        deadline = time.monotonic() + 15
+        host = None
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.APP, "python3")
+            except ComputerUseError:
+                shot = None
+            if shot is not None and any(el.title == "Browse" and el.clickable for el in shot.elements):
+                host = shot
+                break
+            time.sleep(0.2)
+        assert host is not None, "the GTK file-chooser host did not open"
+        runtime = Runtime(driver=driver)
+        runtime._current = host
+        browse = next(el for el in host.elements if el.title == "Browse" and el.clickable)
+        runtime.click(browse.ref)
+        deadline = time.monotonic() + 8
+        appeared = False
+        while time.monotonic() < deadline:
+            try:
+                rows = driver.windows()
+            except Exception:
+                rows = []
+            if any(str(row.get("title") or "") == "Open File" for row in rows):
+                appeared = True
+                break
+            time.sleep(0.2)
+        assert appeared, "the GTK file chooser did not open"
+        subprocess.run(
+            ["xdotool", "search", "--name", "Open File", "windowactivate"],
+            check=False, timeout=3,
+        )
+
+        def model(_messages):
+            return ModelTurn(calls=[ToolCall("choose_file", {"path": str(target)})])
+
+        result = _run_agent(
+            Agent, ScriptedModel(model), "choose the file in the open dialog",
+            tmp_path / "trace", max_steps=1, max_time_s=90,
+        )
+        step = next(item for item in result.step_log if _step_action(item) == "choose_file")
+        assert _step_verified(step) is True, (step, result)
+        assert str(target) in str(getattr(step, "result", "") or ""), step
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not marker.is_file():
+            time.sleep(0.2)
+        assert marker.is_file(), "the chooser did not accept or cancel"
+        assert marker.read_text() == str(target), marker.read_text()
+        assert not any(
+            str(row.get("title") or "") == "Open File" for row in driver.windows()
+        ), driver.windows()
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stop_process(proc)
+
