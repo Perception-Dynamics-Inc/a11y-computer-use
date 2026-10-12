@@ -7,6 +7,32 @@ published on PyPI as `a11y-computer-use`.
 Each line describes one non-merge commit and ends with its short hash and author date (the date `git log --date=short` prints). Branch-integration merge commits carry no changes of their own and are not listed.
 Within a group, lines are ordered by theme, then by date.
 
+## [0.4.64] - 2026-10-12
+
+Ten commits since v0.4.63, through #338.
+
+### Safety
+
+- 0.4.63's vision resolver could redirect clicks, and users should upgrade. A click with no valid ref was rewritten to the smallest element whose title matched any word in the goal, including "Do not click Archive", and an explicit `x` and `y` was replaced the same way. A double-click at a point was rewritten onto a control named in the goal, such as Upload. A pointer action (`click`, `left_click`, `double_click`, `triple_click`, `right_click`, `middle_click`) is now resolved only from the model's own call: a ref still in the tree, that ref's last-known role and exact name, or an explicit `label`. The goal and the turn text are not names. Zero matches or more than one is an error, and a shorter or longer title is not a match. An `x`/`y` point is not moved. A pointer action with both a `ref` and `x` or `y` is `invalid_arguments` and is not sent. The gesture name sets the button and the count. A resolved target still passes the confirm, send, and payment gates. Fixes #333 (bc0e536, 2026-10-12).
+
+### Agent and vision
+
+- `find` in a Chrome table only searched the on-screen band, so a name on a later row was reported as no match. `expand` of the folded node took another whole-window snapshot at the same child cap and repeated the same truncated list. `find` now scrolls a Chromium table cell whose name matches into the snapshot when that row is not already listed, and returns that cell. `expand(ref)` lists the next page of that node's children. A later expand continues. The snapshot records the rows the band did not publish as `… N more`. Fixes #313 (a0d4000, 2026-10-12).
+
+### Linux drivers
+
+- Typing a newline into a Chrome contenteditable reported `text_mismatch` because the read-back joined the paragraphs and dropped the boundary. A paragraph or block boundary now compares as a newline. Newline, CRLF, U+2028, U+2029, and that boundary are the same break. Missing or extra text still mismatches. Writer and Calc type read-backs use that comparison. Fixes #329 (fb62319, 2026-10-11).
+- After an ARIA treeitem expands, Chrome sizes that row to the tree. The visible-row walk treated a box that tall as a wrapper, so the snapshot kept the inner label and the child and dropped the parent row. An expandable tree item stays the row, with `expanded` set and its child nested under it, so a second click collapses it. A tall list item or panel is still opened as a wrapper. Fixes #331 (afebcf4, 2026-10-12).
+- A Calc tab and newline grid treated a cell LibreOffice had not published yet as `text_mismatch`, so an agent retyped the grid. When the read did succeed, opening a range formula with F2 left the caret on that cell and the next `type` replaced the formula. The read now waits for the committed values. A cell that shows different text is still a mismatch. After the formula read, the caret is put back on the cell Enter moves to, the cell after the last typed cell. Fixes #311 (91a74b6, 2026-10-12).
+- Return in Chrome's GTK upload dialog closed the window and reported a successful keypress while the page still said "No file chosen". The chooser has no accessibility button, so Return is not sent. The window is fitted on screen and Open is clicked. The call succeeds only when the dialog is gone and the page's file input shows the file. A page that still says "No file chosen" is `unsupported` with reason `file_not_chosen`. A dialog that stays open is `file_chooser_unchanged`. Fixes #141 (c77a32c, 2026-10-12).
+- `app launch "Mousepad"` failed with `not on PATH` when the grant spelled the app `Mousepad`, even though `/usr/bin/mousepad` and the desktop entry `Name=Mousepad` were installed. Launch lookup is now the executable on PATH, case-insensitively, then the desktop file by id, then by `Name=` and `GenericName=`. The grant still only allows or refuses that program. Fixes #334 (25b0840, 2026-10-12).
+- `scroll_to_find` on a Chrome body-scroll document sent wheel notches one at a time and stopped after about five names, so a target that 0.4.62 reached in a few scrolls was not found. The search again sends the five-notch burst while the row is not in the tree, and uses one notch once a document names the row and its center is still outside the window. A hit is still returned only when a later snapshot shows that center inside the window. Lists keep the five-line step. Fixes #340 (4f9e3e7, 2026-10-12).
+- A second GTK menu press that opens a dialog in one session sent the action on the shared accessibility connection. `Gtk.Dialog.run()` then held that connection, so the next snapshot took about 25 seconds and came back as one opaque region. The leaf now runs on the application's private socket with a short timeout. A timeout counts as dispatched. Reads stay on the connection that was already in place. Fixes #153 (dfcd35f, 2026-10-12).
+
+### Packaging
+
+- Installing `a11y-computer-use[holo]` pulled torch and transformers but not torchvision. `HoloLocalGrounding.ground` then failed while the processor imported torchvision, even though only an image is sent. The `[holo]` extra now depends on the default PyPI torchvision wheel, not a CUDA index, so a CPU torch build such as `2.14.1+cpu` still satisfies it. If torch, torchvision, or transformers still cannot be imported, `GroundingUnavailable` names that package. Fixes #341 (fa9b154, 2026-10-12).
+
 ## [0.4.63] - 2026-10-11
 
 Nineteen commits since v0.4.62, through #327.
