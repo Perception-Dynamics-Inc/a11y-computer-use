@@ -8871,7 +8871,11 @@ def build_server(
         open switches to the top-level menu with that mnemonic. On Linux, close sends Escape and errors if the menu is
         still open, and a listed shortcut is the accelerator field (a tagged chord
         or a bare key such as F11). A mnemonic with no accelerator is null there
-        and is reported as mnemonic. Destructive labels (Delete, Move to Trash, Discard) ask the
+        and is reported as mnemonic. A Chromium or Electron bar entry is a push
+        button; pressing it opens the popup, including when that popup is a
+        separate window. An item name that ends with its accelerator
+        (New Note Ctrl+N) also matches the name with that suffix removed, and
+        an exact title still wins. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported. The text
