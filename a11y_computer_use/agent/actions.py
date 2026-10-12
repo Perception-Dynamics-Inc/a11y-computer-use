@@ -47,6 +47,7 @@ ACTION_NAMES = frozenset({
     "expand",
     "scroll_to_find",
     "choose_file",
+    "snapshot",
     "done",
     "ask_human",
 })
@@ -239,6 +240,8 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "scroll_to_find direction must be down or up"
     if action.name == "choose_file":
         return chooser_argument_error(args)
+    if action.name == "snapshot" and args.get("mode") not in (None, "full", "diff"):
+        return "snapshot mode must be full or diff"
     return None
 
 
@@ -706,6 +709,15 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
             "action": {"type": "string", "enum": ["open", "save"]},
         },
         ["path"],
+    ),
+    (
+        "snapshot",
+        "Send the accessibility tree again. mode full (the default) redraws the "
+        "current window and keeps the refs of elements that are still there. "
+        "mode diff repeats the changes since the last observation you were shown. "
+        "A different window is always the full tree.",
+        {"mode": {"type": "string", "enum": ["full", "diff"]}},
+        [],
     ),
     (
         "done",

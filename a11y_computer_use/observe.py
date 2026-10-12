@@ -1344,6 +1344,391 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
 
 
 # ---------------------------------------------------------------------------
+# Model observations: full tree once, then a diff with stable refs
+# ---------------------------------------------------------------------------
+
+
+#: A bounds change smaller than this is not reported. Accessibility walks
+#: jitter by a pixel or two; the ref still resolves. A real move or resize
+#: is included.
+_BOUNDS_MOVE_PX = 8
+
+_WINDOW_ROLES = frozenset({"AXWindow", "AXWebArea", "AXDialog", "AXSheet"})
+
+_ELEMENT_LINE = re.compile(r"^\s*e\d+\s")
+
+
+def window_identity(snap: Snapshot) -> tuple:
+    """Identity of the front window.
+
+    A different value means the next observation sent to the model is a full
+    snapshot. A developer-assigned stable id, or a file path carried in the
+    document id, wins over the title. Otherwise the title is used, with one
+    leading modified-marker removed, so ``*name`` and ``name`` are the same
+    window. A different title, app, pid, or instance is a different window.
+    """
+    scope = snap.scope.value if isinstance(snap.scope, Scope) else str(snap.scope)
+    window = next((el for el in snap.elements if el.role in _WINDOW_ROLES), None)
+    if window is None:
+        window = next((el for el in snap.elements if el.parent is None), None)
+    if window is None:
+        return (snap.app, snap.pid, scope, None)
+    file_id = _file_document(window.document_id)
+    instance = window.instance_id
+    if window.stable_id:
+        kind: tuple = ("id", window.stable_id, instance, file_id)
+    elif file_id:
+        kind = ("file", file_id, instance)
+    else:
+        kind = ("title", normalize_document_title(window.title), instance)
+    return (snap.app, snap.pid, scope, window.role, kind)
+
+
+def observation_side_lines(text: str) -> tuple[str, ...]:
+    """Non-element lines a full snapshot adds: open menu, page tools, notes.
+
+    Element lines, the ``[snap]`` header, and ``… N more`` markers are not
+    included. Those markers travel with the element they belong to.
+    """
+    from a11y_computer_use.untrusted import unwrap
+
+    body = unwrap(text)
+    plain = body if body is not None else text
+    kept: list[str] = []
+    for line in plain.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("[") or stripped.startswith("…") or stripped.startswith("..."):
+            continue
+        if _ELEMENT_LINE.match(line) or stripped.startswith("text:"):
+            continue
+        kept.append(stripped)
+    return tuple(kept)
+
+
+def _bounds_matter(old: Bounds, new: Bounds) -> bool:
+    if old.display_id != new.display_id:
+        return True
+    return any(
+        abs(getattr(old, name) - getattr(new, name)) > _BOUNDS_MOVE_PX
+        for name in ("x", "y", "width", "height")
+    )
+
+
+def _model_changes(
+    old: Element, new: Element, old_snap: Snapshot, new_snap: Snapshot,
+) -> dict[str, tuple]:
+    """State the model must see. Sub-pixel bounds jitter is not a change."""
+    changes = dict(_state_changes(old, new))
+    # `_state_changes` ignores display_id. A move to another display is still
+    # a change the model has to see. Jitter within `_BOUNDS_MOVE_PX` is not.
+    moved = "bounds" in changes or old.bounds.display_id != new.bounds.display_id
+    changes.pop("bounds", None)
+    if moved and _bounds_matter(old.bounds, new.bounds):
+        ab, bb = old.bounds, new.bounds
+        changes["bounds"] = (
+            f"{ab.width}x{ab.height}@{ab.display_id}:{ab.x},{ab.y}",
+            f"{bb.width}x{bb.height}@{bb.display_id}:{bb.x},{bb.y}",
+        )
+    old_more = _EPOCHS.get(old_snap.snapshot_id, {}).get(old.ref, 0)
+    new_more = _EPOCHS.get(new_snap.snapshot_id, {}).get(new.ref, 0)
+    if old_more != new_more:
+        changes["more"] = (old_more, new_more)
+    return changes
+
+
+def _stable_id_keeps(old: Element, new: Element) -> bool:
+    """A slot id on a row or link does not survive a new label.
+
+    Buttons and fields may relabel (Submit → Sending) under a developer
+    assigned id. Rows, cells, links, and static text do not: the label is
+    the identity, matching `rematch_ref`.
+    """
+    if new.role not in _ITEM_ROLES:
+        return True
+    if _labels_match(old.title, new.title):
+        return True
+    if not old.title and not new.title:
+        return _labels_match(str(old.value or ""), str(new.value or ""))
+    return False
+
+
+def _claim(mapping: dict[str, str], claimed: set[str], new: Element, old: Element) -> None:
+    mapping[new.ref] = old.ref
+    claimed.add(old.ref)
+
+
+def _match_refs(old: Snapshot, new: Snapshot) -> dict[str, str]:
+    """Map ``new`` ref → ``old`` ref for the same element.
+
+    Order: stable id (except a relabeled row or link), then role + title +
+    path, then a unique role + title whose path changed, then a unique
+    role + path whose title changed, then the same ref string when that
+    element still has the same role, title, and path. The last pass is how
+    two controls with the same name keep the refs a fresh walk assigned
+    them again. Item roles do not match on path alone, because every row
+    in a list shares one path.
+    """
+    claimed: set[str] = set()
+    mapping: dict[str, str] = {}
+    old_by_sid: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.stable_id:
+            old_by_sid.setdefault((el.stable_id, el.role), []).append(el)
+    rest: list[Element] = []
+    for el in new.elements:
+        cands: list[Element] = []
+        if el.stable_id:
+            cands = [c for c in old_by_sid.get((el.stable_id, el.role), []) if c.ref not in claimed]
+        if len(cands) == 1 and _stable_id_keeps(cands[0], el):
+            _claim(mapping, claimed, el, cands[0])
+        else:
+            rest.append(el)
+
+    old_by_rtp: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed:
+            old_by_rtp.setdefault((el.role, el.title, el.path), []).append(el)
+    still: list[Element] = []
+    for el in rest:
+        cands = [c for c in old_by_rtp.get((el.role, el.title, el.path), []) if c.ref not in claimed]
+        if len(cands) == 1:
+            _claim(mapping, claimed, el, cands[0])
+        else:
+            still.append(el)
+
+    old_by_rt: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed and el.title:
+            old_by_rt.setdefault((el.role, el.title), []).append(el)
+    titled = [el for el in still if el.ref not in mapping and el.title]
+    new_by_rt: dict[tuple, list[Element]] = {}
+    for el in titled:
+        new_by_rt.setdefault((el.role, el.title), []).append(el)
+    for key, group in new_by_rt.items():
+        cands = [c for c in old_by_rt.get(key, []) if c.ref not in claimed]
+        if len(group) == 1 and len(cands) == 1:
+            _claim(mapping, claimed, group[0], cands[0])
+
+    old_by_rp: dict[tuple, list[Element]] = {}
+    for el in old.elements:
+        if el.ref not in claimed:
+            old_by_rp.setdefault((el.role, el.path), []).append(el)
+    new_by_rp: dict[tuple, list[Element]] = {}
+    for el in new.elements:
+        if el.ref not in mapping:
+            new_by_rp.setdefault((el.role, el.path), []).append(el)
+    for key, group in new_by_rp.items():
+        if key[0] in _ITEM_ROLES:
+            continue
+        cands = [c for c in old_by_rp.get(key, []) if c.ref not in claimed]
+        if len(group) == 1 and len(cands) == 1:
+            _claim(mapping, claimed, group[0], cands[0])
+
+    # A walk that did not insert or remove nodes assigns the same pre-order
+    # refs. Duplicates (two Save buttons) are not unique by title, so the
+    # passes above leave them unmatched. Keeping the ref that both snapshots
+    # already used leaves those refs valid. A shifted walk gives the ref to
+    # a different node, and a different title or path does not take it.
+    old_by_ref = {el.ref: el for el in old.elements}
+    for el in new.elements:
+        if el.ref in mapping:
+            continue
+        prev = old_by_ref.get(el.ref)
+        if prev is None or prev.ref in claimed:
+            continue
+        if prev.role != el.role or prev.path != el.path:
+            continue
+        if not _labels_match(prev.title, el.title):
+            continue
+        _claim(mapping, claimed, el, prev)
+    return mapping
+
+
+def _alloc_ref(used: set[str]) -> str:
+    number = 1
+    while True:
+        ref = f"e{number}"
+        number += 1
+        if ref not in used:
+            used.add(ref)
+            return ref
+
+
+def align_refs(basis: Snapshot, current: Snapshot) -> Snapshot:
+    """Copy ``current`` so elements that still exist keep ``basis`` refs.
+
+    Added elements get refs that are not in ``basis``, so a removed ref is
+    not handed to a new element in the same step. Handles, elision counts,
+    and unclipped values move with the refs. ``basis`` is not modified.
+    """
+    touch_epoch(basis.snapshot_id)
+    touch_epoch(current.snapshot_id)
+    mapping = _match_refs(basis, current)
+    used = {el.ref for el in basis.elements}
+    assigned: dict[str, str] = {}
+    for el in current.elements:
+        kept = mapping.get(el.ref)
+        if kept is not None and kept not in assigned.values():
+            assigned[el.ref] = kept
+        else:
+            assigned[el.ref] = _alloc_ref(used)
+    snapshot_id = f"snap-{next(_EPOCH_COUNTER)}"
+    elements: list[Element] = []
+    for el in current.elements:
+        parent = assigned.get(el.parent) if el.parent else None
+        elements.append(dataclasses.replace(
+            el, ref=assigned[el.ref], snapshot_id=snapshot_id, parent=parent,
+        ))
+
+    def move(store: dict) -> dict:
+        return {assigned[key]: value for key, value in store.items() if key in assigned}
+
+    _register_epoch(
+        snapshot_id,
+        move(_EPOCHS.get(current.snapshot_id, {})),
+        move(_HANDLES.get(current.snapshot_id, {})),
+        move(_FULL_VALUES.get(current.snapshot_id, {})),
+    )
+    return Snapshot(
+        snapshot_id=snapshot_id,
+        scope=current.scope,
+        app=current.app,
+        pid=current.pid,
+        created_at=current.created_at,
+        displays=current.displays,
+        elements=tuple(elements),
+    )
+
+
+def _element_depth(el: Element, by_ref: dict[str, Element]) -> int:
+    depth = 0
+    parent = el.parent
+    seen: set[str] = set()
+    while parent is not None and parent not in seen and parent in by_ref:
+        seen.add(parent)
+        depth += 1
+        parent = by_ref[parent].parent
+    return depth
+
+
+def _role_name(el: Element) -> str:
+    return el.role[2:].lower() if el.role.startswith("AX") else el.role.lower()
+
+
+def render_model_diff(basis: Snapshot, aligned: Snapshot) -> str:
+    """Added, removed, and changed elements, with the refs on ``aligned``.
+
+    A changed line is the element's current rendering plus the old→new
+    values. The focused element is included when it did not itself change,
+    so a diff still says where the keyboard is. Bounds jitter below
+    `_BOUNDS_MOVE_PX` is omitted. Nothing else the snapshot kept is omitted
+    from an element that changed: the line is the same shape as `render_text`.
+    """
+    old = {el.ref: el for el in basis.elements}
+    new = {el.ref: el for el in aligned.elements}
+    added = [el for el in aligned.elements if el.ref not in old]
+    removed = [el for el in basis.elements if el.ref not in new]
+    changed: list[tuple[Element, Element, dict[str, tuple]]] = []
+    for el in aligned.elements:
+        prev = old.get(el.ref)
+        if prev is None:
+            continue
+        delta = _model_changes(prev, el, basis, aligned)
+        if delta:
+            changed.append((prev, el, delta))
+    changed_refs = {el.ref for _prev, el, _delta in changed}
+    added_refs = {el.ref for el in added}
+    head = (
+        f"[{aligned.snapshot_id} ← {basis.snapshot_id}] "
+        f"+{len(added)} -{len(removed)} ~{len(changed)}"
+    )
+    lines = [head]
+    if not added and not removed and not changed:
+        lines.append("  (no change)")
+    by_ref = {el.ref: el for el in aligned.elements}
+    for el in added:
+        parent = f" parent={el.parent}" if el.parent else ""
+        indent = "  " * _element_depth(el, by_ref)
+        lines.append(f"{indent}+ {_render_line(el)}{parent}")
+    for el in removed:
+        title = f' "{el.title}"' if el.title else ""
+        lines.append(f"  - {el.ref} {_role_name(el)}{title} (gone)")
+    for _prev, el, delta in changed:
+        shown = ", ".join(
+            f"{attr}: {_clip(str(before), _RENDER_VALUE_CHARS)}→{_clip(str(after), _RENDER_VALUE_CHARS)}"
+            for attr, (before, after) in delta.items()
+        )
+        lines.append(f"  ~ {_render_line(el)} [{shown}]")
+    for el in aligned.elements:
+        if el.focused and el.ref not in changed_refs and el.ref not in added_refs:
+            lines.append(f"  focus {_render_line(el)}")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelObservation:
+    """The text to send, the snapshot its refs name, and whether it is full.
+
+    ``window`` and ``side`` are what the next diff compares against. ``side``
+    is the open-menu, page-tool, and snapshot-note lines of the runtime text.
+    """
+
+    text: str
+    snap: Snapshot
+    full: bool
+    window: tuple
+    side: tuple[str, ...]
+
+
+def project_model_observation(
+    basis: Snapshot | None,
+    snap: Snapshot,
+    full_text: str,
+    *,
+    basis_window: tuple | None = None,
+    basis_side: tuple[str, ...] = (),
+    force_full: bool = False,
+) -> ModelObservation:
+    """Choose a full snapshot or a diff for the model.
+
+    The first observation, a window change, an empty tree, and ``force_full``
+    send every element. A later observation of the same window sends the
+    diff from `render_model_diff`. Refs of elements that still exist are the
+    basis refs, including when ``force_full`` redraws the whole tree, so a
+    request for a full snapshot does not invalidate them. ``full_text`` is
+    the runtime's own rendering and is what a window change returns, so a
+    menu header or page-tool block the runtime added is kept.
+    """
+    window = window_identity(snap)
+    side = observation_side_lines(full_text)
+    if basis is not None and basis_window is None:
+        basis_window = window_identity(basis)
+    same = (
+        basis is not None
+        and bool(basis.elements)
+        and bool(snap.elements)
+        and basis_window == window
+    )
+    if not same:
+        return ModelObservation(full_text, snap, True, window, side)
+    aligned = align_refs(basis, snap)
+    if force_full:
+        text = render_text(aligned)
+        if side:
+            text = text + "\n" + "\n".join(side)
+        return ModelObservation(text, aligned, True, window, side)
+    text = render_model_diff(basis, aligned)
+    if side != basis_side:
+        if side:
+            text = text + "\n" + "\n".join(side)
+        else:
+            text = text + "\n(snapshot note gone)"
+    return ModelObservation(text, aligned, False, window, side)
+
+
+# ---------------------------------------------------------------------------
 # Pruning engine
 # ---------------------------------------------------------------------------
 
