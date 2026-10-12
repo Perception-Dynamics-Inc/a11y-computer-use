@@ -105,6 +105,9 @@ _ROLE = {
     "scroll bar": "AXScrollBar",
     "slider": "AXSlider",  # Gtk.Scale and friends: draggable, carries a Value iface
     "progress bar": "AXProgressIndicator",
+    # Ristretto's image metadata bar is ATSPI_ROLE_STATUS_BAR. The name is
+    # the status text. AXGroup, the unmapped fallback, hid it among layout.
+    "status bar": "AXStatusBar",
     "scroll pane": "AXScrollArea",
     "viewport": "AXScrollArea",
     "page tab list": "AXTabGroup",
@@ -1077,6 +1080,7 @@ def _action_names(acc) -> tuple[str, ...]:
 _NO_VALUE_ROLES = frozenset({
     "AXButton", "AXImage", "AXCanvas", "AXGroup", "AXWindow", "AXToolbar", "AXMenuBar",
     "AXMenu", "AXScrollBar", "AXScrollArea", "AXSplitter", "AXTabGroup", "AXUnknown",
+    "AXStatusBar",
 })
 
 
