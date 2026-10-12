@@ -13574,6 +13574,32 @@ def _node_name(acc) -> str:
     return (_call_first(acc, ("get_name", "getName"), default="") or "").strip()
 
 
+def top_window_title(acc) -> str:
+    """Name of the outermost frame, window, or dialog above ``acc``.
+
+    Chrome's window title is that name. The page title is a prefix of it.
+    An empty string means no frame name was readable.
+    """
+    if acc is None:
+        return ""
+    node = acc
+    seen: set[int] = set()
+    title = ""
+    for _ in range(24):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"frame", "window", "dialog"}:
+            name = _node_name(node)
+            if name:
+                title = name
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            break
+        node = parent
+    return title
+
+
 def _is_list_marker(name: str) -> bool:
     """True when ``name`` is a list bullet, not the row's text.
 
