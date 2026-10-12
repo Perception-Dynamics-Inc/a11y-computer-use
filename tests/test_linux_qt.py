@@ -893,3 +893,85 @@ def test_hidden_frame_that_wraps_a_showing_document_stays(atspi) -> None:
     assert "cuapara" in titles
     assert "Hidden notice" not in titles
     assert "Update" not in titles
+
+
+def test_accessible_name_strips_rich_text_and_keeps_angle_brackets(atspi) -> None:
+    """Qt rich-text names lose their tags. Text that is not markup stays.
+
+    FeatherPad's word-count button exposes
+    ``<p style='white-space:pre'>Calculate number of words</p>``. The
+    snapshot title is that sentence. ``<not-a-tag>``, ``a < b``, ``<3 cats>``,
+    and a bare ``<a>`` are not markup. Entities decode, including a name
+    whose tags were stored as ``&lt;p&gt;``. A name with no ``<`` and no
+    ``&`` is unchanged, backslash included.
+    """
+    cases = {
+        "<p style='white-space:pre'>Calculate number of words</p>": "Calculate number of words",
+        "<P STYLE='white-space:pre'>Calculate number of words</P>": "Calculate number of words",
+        "<p>Calculate<br/>number of words</p>": "Calculate number of words",
+        "<p>Hello</p><p>World</p>": "Hello World",
+        "<p>Tom &amp; <b>Jerry</b></p>": "Tom & Jerry",
+        "<span style=\"color:red\">Calculate number of words</span>": "Calculate number of words",
+        "&lt;p&gt;Hi&lt;/p&gt;": "Hi",
+        "&lt;not-a-tag&gt;": "<not-a-tag>",
+        "&#60;not-a-tag&#62;": "<not-a-tag>",
+        "<not-a-tag>": "<not-a-tag>",
+        "a < b and c > d": "a < b and c > d",
+        "press <a>": "press <a>",
+        "Tom &amp; Jerry": "Tom & Jerry",
+        "already plain": "already plain",
+        "C:\\notes": "C:\\notes",
+        "<3 cats>": "<3 cats>",
+        "if (x < y)": "if (x < y)",
+    }
+    for raw, want in cases.items():
+        assert _atspi._plain_accessible_name(raw) == want, raw
+
+    button = _Node(
+        "push button",
+        "<p style='white-space:pre'>Calculate number of words</p>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"],
+        toolkit="Qt",
+    )
+    literal = _Node(
+        "push button", "<not-a-tag>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=40,
+    )
+    compared = _Node(
+        "push button", "a < b and c > d",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=70,
+    )
+    bare = _Node(
+        "push button", "press <a>",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        actions=["press"], toolkit="Qt", x=10, y=100,
+    )
+    frame = _Node(
+        "frame", "FeatherPad",
+        states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[button, literal, compared, bare],
+        toolkit="Qt", x=0, y=0, w=400, h=300,
+    )
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    titles = {el.title for el in snap.elements}
+    assert "Calculate number of words" in titles
+    assert "<not-a-tag>" in titles
+    assert "a < b and c > d" in titles
+    assert "press <a>" in titles
+    assert not any("<p" in el.title or "</" in el.title for el in snap.elements)
+    rendered = observe.render_text(snap)
+    assert 'button "Calculate number of words"' in rendered
+    assert "<p style" not in rendered
+    assert 'button "<not-a-tag>"' in rendered
+    assert 'button "a < b and c > d"' in rendered
+    assert 'button "press <a>"' in rendered

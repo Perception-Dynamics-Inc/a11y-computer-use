@@ -12319,3 +12319,58 @@ def _qt5_has_accessible_plugin() -> bool:
             if os.path.isdir(plugin) and os.listdir(plugin):
                 return True
     return False
+
+
+def test_linux_featherpad_word_count_name_is_plain_text(tmp_path) -> None:
+    """Live FeatherPad. The word-count control is not raw HTML.
+
+    The Qt accessible name is
+    ``<p style='white-space:pre'>Calculate number of words</p>``. The
+    snapshot title is ``Calculate number of words``. This skips when
+    ``featherpad`` is not on PATH, and when the process never appears on
+    the bus because the Qt 5 accessible plugin is absent. Ubuntu 24.04 CI
+    does not install FeatherPad.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("featherpad")
+    if not binary:
+        pytest.skip("featherpad is not installed")
+    env = os.environ.copy()
+    env["QT_ACCESSIBILITY"] = "1"
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    proc = subprocess.Popen([binary], env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        shot = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "featherpad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None and shot.elements:
+                last = observe.render_text(shot)
+                if any(el.role == "AXTextArea" for el in shot.elements):
+                    break
+            time.sleep(0.3)
+        if shot is None or not any(el.role == "AXTextArea" for el in shot.elements):
+            if not _qt5_has_accessible_plugin():
+                pytest.skip(
+                    "FeatherPad did not publish an AT-SPI tree; this Qt 5 build "
+                    "has no accessible plugin"
+                )
+            raise AssertionError(f"featherpad did not expose its document ({proc.poll()}): {last}")
+        rendered = observe.render_text(shot)
+        assert "<p style" not in rendered, rendered
+        assert "</p>" not in rendered, rendered
+        words = [el for el in shot.elements if "Calculate number of words" in (el.title or "")]
+        assert words, rendered
+        assert all(el.title == "Calculate number of words" for el in words), rendered
+    finally:
+        _stop_group(proc)
