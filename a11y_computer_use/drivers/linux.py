@@ -1179,6 +1179,12 @@ class LinuxDriver:
                 # stay as they were.
                 if accessor.libreoffice:
                     _atspi.settle_libreoffice_geometry(root)
+                # A table that starts below the viewport is dropped before
+                # children() can seek it. Scroll the matching cell first, and
+                # only for Chromium: GTK tables seek inside their own walk.
+                seek = self._table_seek.strip() if isinstance(self._table_seek, str) else ""
+                if seek and _atspi._chromium_app(root):
+                    _atspi.reveal_text_in_document(root, seek)
                 # Chromium lists: the rows are read from the list node this walk
                 # holds. A saved head on another wrapper is not the snapshot.
                 accessor.refresh_visible(root)

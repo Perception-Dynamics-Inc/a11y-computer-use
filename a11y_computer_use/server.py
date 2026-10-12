@@ -3707,10 +3707,10 @@ class Runtime:
         Takes a fresh snapshot (so the returned refs are live and actionable, and
         this becomes the current ref epoch), then filters via
         `observe.find_elements`. Gated + audited at READ, exactly like
-        `desktop_snapshot`. On Linux, a GTK or Chromium table row whose name
-        matches ``text`` is scrolled into that snapshot when the folded
-        window does not already list it, and the ref is that on-screen cell.
-        The search is the table, not only the rows the child cap kept."""
+        `desktop_snapshot`. On Linux, Chromium searches the whole document,
+        including a table that starts below the viewport, and scrolls the
+        matching cell into that snapshot. A GTK table still seeks inside
+        its own walk. The ref is that on-screen cell."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -3724,9 +3724,10 @@ class Runtime:
         _running, bundle = self._resolve_app(app)
 
         def execute() -> str:
-            # The Linux snapshot reads this once. A table row that matches
-            # ``text`` and is still off screen is scrolled into the tree
-            # before the pruner runs. Other drivers ignore the attribute.
+            # The Linux snapshot reads this once. The match is sought in the
+            # whole Chromium document, including a table that starts below
+            # the viewport, and that cell is scrolled into the tree before
+            # the pruner runs. Other drivers ignore the attribute.
             seek = text.strip() if isinstance(text, str) and text.strip() else None
             armed = hasattr(self.driver, "_table_seek")
             previous = getattr(self.driver, "_table_seek", None) if armed else None
@@ -3746,14 +3747,14 @@ class Runtime:
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
     def expanded_children(self, app: str, ref: str) -> str:
-        """The next page of ``ref``'s children past the ones the snapshot kept.
+        """The next page of ``ref``'s own children, contiguous with the last page.
 
         A folded table lists the on-screen band and a ``… N more`` marker.
-        This scrolls the following page of that node (or of the table under
-        it, when the ref itself is the document) into a fresh snapshot and
-        returns that subtree. Another call continues. The page is not the
-        same truncated window. Drivers without an expand page return a full
-        snapshot, which is the previous listing.
+        This returns the following child indexes of the node the caller
+        named, including children that sit below the viewport. The cursor
+        resumes at the exact end of that slice. Another call continues
+        with no gap. Drivers without an expand page return a full snapshot,
+        which is the previous listing.
         """
         app = _required_app_arg(app, "expanded_children")
         snap = self._current
@@ -3811,11 +3812,11 @@ class Runtime:
         return (key, start, limit)
 
     def _expand_target(self, snap: Snapshot, ref: str) -> tuple | None:
-        """``(element, handle)`` for ``ref``, or the folded table under it.
+        """``(element, handle)`` for ``ref`` itself.
 
-        The ref wins when it is the node the snapshot folded. Otherwise the
-        descendant with the largest ``… N more`` count is the table the
-        document was folded around.
+        The node the caller named is paged, including a document whose
+        off-screen paragraphs were dropped and so have no fold count. A
+        descendant is used only when ``ref`` has no live handle.
         """
         element = next(el for el in snap.elements if el.ref == ref)
         children: dict[str | None, list] = {}
@@ -3835,10 +3836,9 @@ class Runtime:
                 return None
             return item, handle
 
-        if folded.get(ref, 0) > 0:
-            found = paired(element)
-            if found is not None:
-                return found
+        own = paired(element)
+        if own is not None:
+            return own
         best: tuple[int, object, object] | None = None
         for item in descendants:
             count = folded.get(item.ref, 0)
@@ -3851,9 +3851,6 @@ class Runtime:
                 best = (count, found[0], found[1])
         if best is not None:
             return best[1], best[2]
-        own = paired(element)
-        if own is not None:
-            return own
         return None
 
     def _ref_for_expand_key(self, snap: Snapshot, key: object) -> str | None:

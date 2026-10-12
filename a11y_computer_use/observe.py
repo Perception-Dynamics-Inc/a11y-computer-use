@@ -1009,33 +1009,23 @@ def _apply_budget(entries: Sequence[tuple[str, bool]], budget: int | None) -> li
 
 
 def expand_start_index(names: Sequence[str], shown: set[str], cursor: int = 0) -> int:
-    """Child index just past the run ``shown`` already lists.
+    """Child index where the next expand page starts.
 
-    ``names`` is document order. A name that is in ``shown`` extends the run,
-    including a run that does not start at child 0. Empty names do not end
-    the run. ``cursor`` is the index a previous expand already passed; the
-    result is never earlier than that.
+    A positive ``cursor`` is that index exactly: the next page resumes where
+    the previous page ended, even when the snapshot also shows a later name.
+    With no cursor, the start is the first child whose name is not already
+    listed. A later listed name does not skip the hole in front of it, and
+    an empty name ends the prefix (it is not proof the child was shown).
     """
+    if cursor > 0:
+        return int(cursor)
     shown_folded = {item.casefold() for item in shown if item}
-    last = -1
-    gap = 0
     for index, name in enumerate(names):
         text = (name or "").strip()
         if text and text.casefold() in shown_folded:
-            last = index
-            gap = 0
             continue
-        if last < 0:
-            continue
-        gap += 1
-        # A few unnamed wrappers can sit between titled rows. A longer gap
-        # is the tail past the listed run.
-        if gap > 8:
-            break
-    start = last + 1
-    if cursor > start:
-        return int(cursor)
-    return start
+        return index
+    return len(names)
 
 
 def render_subtree(snap: Snapshot, ref: str) -> str:
@@ -1468,9 +1458,21 @@ def _prune_inner(
     # named, or genuinely interactive zero-size node still drops.
     hollow_zero = in_web and _plain_zero_wrapper(raw)
     hollow = bounds is None and (_degenerate_size(raw.size) or hollow_zero)
+    # An expand page lists the next children even when they sit below the
+    # viewport. A normal snapshot still drops those nodes. A marked node
+    # with a zero side is hollow so the cell under it is still walked;
+    # a positive off-screen rect keeps its own coordinates.
+    forced = _forced_offscreen(accessor, node, raw)
     # The empty label may have no box of its own. Its checkbox still does.
-    if bounds is None and not hollow and not text_container:
+    if bounds is None and not hollow and not text_container and not forced:
         return None  # zero-size (not web) or fully offscreen: drop subtree
+    if bounds is None and forced and not hollow:
+        if _zero_extent(raw.size):
+            hollow = True
+        else:
+            bounds = _project_offscreen(raw.position, raw.size, geometry)
+            if bounds is None:
+                return None
 
     kept: list[_PNode] = []
     elided = 0
@@ -1916,6 +1918,55 @@ def _flatten(
             child, ref, path, snapshot_id, out, elisions, handles, full_values,
             instance_id, document_id,
         )
+
+
+def _forced_offscreen(accessor: object, node: object, raw: RawNode) -> bool:
+    """True when an expand page asked to list ``node`` even though it is off screen.
+
+    A normal snapshot has no ``keep_offscreen`` and still drops the node.
+    GTK's off-screen sentinel stays dropped so a parked widget is not given
+    a box. A zero-size marked node is still forced: the caller treats it as
+    hollow and keeps the children that hold the text.
+    """
+    fn = getattr(accessor, "keep_offscreen", None)
+    if not callable(fn):
+        return False
+    try:
+        if not fn(node):
+            return False
+    except Exception:
+        return False
+    pos, size = raw.position, raw.size
+    if pos is None or size is None:
+        return False
+    try:
+        x, y = float(pos[0]), float(pos[1])
+    except (TypeError, ValueError):
+        return False
+    if x <= -2_000_000_000 or y <= -2_000_000_000:
+        return False
+    return True
+
+
+def _project_offscreen(
+    position: tuple[float, float] | None,
+    size: tuple[float, float] | None,
+    geometry: tuple[DisplayGeometry, ...],
+) -> Bounds | None:
+    """Project a real off-screen rect onto the main display without moving it.
+
+    The box stays where the toolkit put it, including past the display edge,
+    so a click is not aimed at a different control that happens to be visible.
+    """
+    if position is None or size is None or not geometry:
+        return None
+    try:
+        if float(size[0]) <= 0 or float(size[1]) <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    geom = next((item for item in geometry if item.display.is_main), geometry[0])
+    return _project(position, size, geom)
 
 
 def _to_bounds(

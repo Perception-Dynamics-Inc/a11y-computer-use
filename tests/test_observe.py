@@ -1666,14 +1666,57 @@ def test_optgroup_labels_render_as_group_lines() -> None:
 
 
 def test_expand_start_index_passes_the_listed_run() -> None:
-    """The next page starts after the rows the snapshot already shows."""
-    names = [f"Row {index:03d}" for index in range(1, 301)]
-    names[199] = "Elevation"
-    shown = set(names[:33])
-    assert observe.expand_start_index(names, shown, 0) == 33
-    assert observe.expand_start_index(names, set(names[33:57]), 33) == 57
+    """The next page resumes at the cursor, or at the first hole with none.
+
+    A later listed name does not skip the children in front of it. A
+    positive cursor is that index exactly, even when the snapshot also
+    shows a name further down the list.
+    """
+    names = [f"P{index:02d}" for index in range(1, 65)]
+    shown = set(names[:19]) | set(names[35:40])
+    assert observe.expand_start_index(names, shown, 0) == 19
+    assert observe.expand_start_index(names, shown, 20) == 20
+    assert observe.expand_start_index(names, set(names[:33]), 0) == 33
+    assert observe.expand_start_index(names, set(names[33:57]), 33) == 33
     assert observe.expand_start_index(names, shown, 40) == 40
-    assert observe.expand_start_index(names, set(names[100:130]), 0) == 130
+
+
+def test_expand_page_keeps_an_offscreen_child() -> None:
+    """A marked child below the display stays in the snapshot.
+
+    The same node is dropped when the accessor does not ask for it, and a
+    GTK off-screen sentinel stays dropped even when it is marked.
+    """
+
+    class Keep(DictAccessor):
+        def keep_offscreen(self, node: object) -> bool:
+            assert isinstance(node, dict)
+            return node.get("title") in {"Paragraph 40", "Parked"}
+
+    below = ax(
+        "AXStaticText", title="Paragraph 40", at=(10.0, 2000.0), size=(200.0, 20.0),
+    )
+    parked = ax(
+        "AXStaticText", title="Parked", at=(10.0, -2_100_000_000.0), size=(80.0, 20.0),
+    )
+    tree = ax(
+        "AXWindow", title="Doc", at=(0.0, 0.0), size=(400.0, 500.0),
+        children=[
+            ax(
+                "AXGroup", title="Body", at=(0.0, 40.0), size=(400.0, 400.0),
+                children=[below, parked],
+            ),
+        ],
+    )
+    kept = build_snapshot(
+        tree, Keep(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    assert any(el.title == "Paragraph 40" for el in kept.elements)
+    assert all(el.title != "Parked" for el in kept.elements)
+    dropped = build_snapshot(
+        tree, DictAccessor(), scope=Scope.WINDOW, app=FIXTURE_APP, pid=101, geometry=GEOMETRY,
+    )
+    assert all(el.title != "Paragraph 40" for el in dropped.elements)
 
 
 def test_unlisted_children_are_folded_on_the_parent() -> None:
