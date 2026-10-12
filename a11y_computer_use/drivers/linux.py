@@ -1807,6 +1807,7 @@ class LinuxDriver:
             # and only when this item belongs to that select.
             if pressed:
                 self._run(lambda: _atspi.finish_chrome_select_option_click(handle))
+                self._run(lambda: _atspi.finish_gtk_combo_option_click(handle))
             return pressed
         if selected:
             return True

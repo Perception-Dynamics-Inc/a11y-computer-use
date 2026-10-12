@@ -1449,6 +1449,23 @@ def _qt_app(acc) -> bool:
     return "qt" in _toolkit_name(acc)
 
 
+def _gtk_combo(acc) -> bool:
+    """A GTK combo box. Chromium, Firefox, Qt, and a fake with no toolkit are not.
+
+    The toolkit name is what distinguishes a GtkComboBox from a web select
+    that happens to use the same AT-SPI role. An empty toolkit stays on the
+    EXPANDABLE flag the snapshot already had.
+    """
+    if acc is None or _role_name(acc) != "combo box":
+        return False
+    try:
+        if _chromium_app(acc) or _gecko_app(acc) or _qt_app(acc):
+            return False
+    except Exception:
+        return False
+    return "gtk" in _toolkit_name(acc)
+
+
 def _sane_range(low: float, high: float) -> bool:
     """True when minimum and maximum are a real widget range.
 
@@ -2049,6 +2066,11 @@ class ATSPIAccessor:
                 if shifted is not None:
                     position = shifted
         enabled, focused, checked, selected, expanded, focusable, state_editable = _state_flags(node)
+        # A GTK combo does not set EXPANDABLE, so the shared flag stays unset
+        # while its menu is on screen. The open popup is that menu becoming
+        # SHOWING. expanded follows the menu, including after it closes.
+        if role_str == "combo box" and _gtk_combo(node):
+            expanded = bool(_popup_open(node))
         name = _call_first(node, ("get_name",), default="") or ""
         description = _call_first(node, ("get_description",), default="") or ""
         if role_str == "combo box":
@@ -2243,6 +2265,10 @@ class ATSPIAccessor:
             # the tree with on-screen bounds. They are not SHOWING. Drop the
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
+        if _role_name(node) == "application":
+            # The combo menu is already a child of the combo. The extra
+            # top-level window would list those same items a second time.
+            kids = [child for child in kids if _combo_owning_popup(child) is None]
         return _with_table_body(node, kids)
 
     def _lo_placement(self, frame):
@@ -3262,13 +3288,125 @@ def _window_is_only_browser_chrome(root) -> bool:
     return chrome
 
 
+def _combo_owning_popup(window):
+    """The GTK combo whose menu this top-level popup is showing, or None.
+
+    GtkComboBox puts the open menu in its own window and marks that window
+    ACTIVE. The menu's parent is still the combo, so the options are already
+    under the combo. A named frame, a dialog, a menu-bar menu, and a
+    Chromium or Qt popup are not this window.
+    """
+    if window is None:
+        return None
+    try:
+        role = _role_name(window)
+        if role not in {"window", "popup menu"}:
+            return None
+        if role == "window" and _node_name(window):
+            return None
+        if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
+            return None
+    except Exception:
+        return None
+    starts = []
+    if role == "popup menu":
+        starts.append(window)
+    else:
+        count = _child_count(window)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 4)):
+            child = _child_at(window, index)
+            if child is not None and _role_name(child) in {"menu", "popup menu"}:
+                starts.append(child)
+    for start in starts:
+        node = start
+        for _ in range(8):
+            parent = _parent_of(node)
+            if parent is None or parent is node:
+                break
+            parent_role = _role_name(parent)
+            if parent_role == "combo box":
+                if _gtk_combo(parent):
+                    return parent
+                return None
+            if parent_role in {
+                "menu bar", "frame", "dialog", "application", "window",
+                "document web", "document frame",
+            }:
+                break
+            node = parent
+    return None
+
+
+def _frame_containing(node, frames):
+    """The frame or dialog in ``frames`` that contains ``node``, or None."""
+    if node is None:
+        return None
+    wanted = {id(frame): frame for frame in frames}
+    current = node
+    for _ in range(20):
+        if current is None:
+            return None
+        found = wanted.get(id(current))
+        if found is not None:
+            return found
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return None
+        current = parent
+    return None
+
+
+def _preferred_window(frames, is_active):
+    """The window a snapshot should root at.
+
+    An ACTIVE frame or dialog wins. When the only ACTIVE top-level is a GTK
+    combo popup, the frame that contains that combo stays the root, so the
+    popup's menu items are listed under the combo instead of replacing it.
+    """
+    if not frames:
+        return None
+    popup_ids = {id(frame) for frame in frames if _combo_owning_popup(frame) is not None}
+    ordinary = [frame for frame in frames if id(frame) not in popup_ids]
+    for frame in ordinary:
+        if is_active(frame):
+            return frame
+    if popup_ids:
+        owners = []
+        for frame in frames:
+            if id(frame) not in popup_ids:
+                continue
+            combo = _combo_owning_popup(frame)
+            owner = _frame_containing(combo, ordinary)
+            if owner is not None and all(owner is not item for item in owners):
+                owners.append(owner)
+        if len(owners) == 1:
+            return owners[0]
+        showing = [frame for frame in ordinary if _state_has(frame, "SHOWING")]
+        dialogs = [frame for frame in showing if _role_name(frame) == "dialog"]
+        if len(dialogs) == 1:
+            return dialogs[0]
+        if len(showing) == 1:
+            return showing[0]
+        if dialogs:
+            return dialogs[0]
+        if showing:
+            return showing[0]
+    if ordinary:
+        return ordinary[0]
+    return frames[0]
+
+
 def find_root(app: str, scope) -> object | None:
     """The AT-SPI root for ``app`` at ``scope``.
 
     ``app`` matches an application accessible by name substring (case-insensitive)
     — the Linux analog of a bundle id / process exe. For `Scope.APP` the app
     accessible is returned; for `Scope.WINDOW` its active (else first) top-level
-    frame. None when nothing matches (the engine yields an empty snapshot)."""
+    frame. A GTK combo popup that is the only ACTIVE window does not replace
+    the frame that contains the combo. None when nothing matches (the engine
+    yields an empty snapshot)."""
     from a11y_computer_use.schema import Scope
 
     Atspi = _atspi()
@@ -3357,10 +3495,8 @@ def find_root(app: str, scope) -> object | None:
         if pid:
             watch.pid = pid
         frames = _frames(app_acc)
-        for frame in frames:
-            if _is_active(frame):
-                return frame
-        return frames[0] if frames else app_acc
+        picked = _preferred_window(frames, _is_active)
+        return picked if picked is not None else app_acc
 
 
 def desktop_application_roots() -> DesktopApplications:
@@ -8672,6 +8808,62 @@ def finish_chrome_select_option_click(acc) -> None:
         return
     _close_combo_popup(combo)
     if _state_has(combo, "EXPANDED"):
+        label = _option_label(acc) or "the option"
+        raise _text_mismatch(
+            "popup_open",
+            f"the combo popup is still open after clicking {label!r}",
+            expected=label,
+        )
+
+
+def _gtk_combo_option_owner(acc):
+    """The GTK combo that owns this menu item, or None.
+
+    The option's parent menu belongs to the combo. An application menu
+    item, a Chromium select, and a Firefox or Qt combo are not this
+    control, so a later Escape cannot land on them.
+    """
+    if acc is None:
+        return None
+    if _role_name(acc) not in {"menu item", "check menu item", "radio menu item"}:
+        return None
+    try:
+        if _chromium_control(acc) or _gecko_app(acc) or _qt_app(acc):
+            return None
+    except Exception:
+        return None
+    node = acc
+    for _ in range(8):
+        parent = _parent_of(node)
+        if parent is None or parent is node:
+            return None
+        role = _role_name(parent)
+        if role == "combo box":
+            return parent if _gtk_combo(parent) else None
+        if role in {
+            "application", "frame", "dialog", "menu bar",
+            "document web", "document frame",
+        }:
+            return None
+        node = parent
+    return None
+
+
+def finish_gtk_combo_option_click(acc) -> None:
+    """Close a GTK combo popup after its option action succeeded.
+
+    The option's click usually closes the menu. A popup that stays open is
+    closed the way ``set_value`` closes one. A popup that is still open
+    after that is ``popup_open``. An application menu item has no combo
+    owner, so Escape is not sent.
+    """
+    combo = _gtk_combo_option_owner(acc)
+    if combo is None:
+        return
+    if not _popup_open(combo):
+        return
+    _close_combo_popup(combo)
+    if _popup_open(combo):
         label = _option_label(acc) or "the option"
         raise _text_mismatch(
             "popup_open",

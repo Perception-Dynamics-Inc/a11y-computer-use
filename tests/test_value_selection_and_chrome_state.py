@@ -686,6 +686,161 @@ def test_chrome_menu_item_outside_a_select_does_not_send_escape(monkeypatch) -> 
     assert keys == []
 
 
+def _gtk_combo_tree(*, open_menu: bool):
+    """A GTK combo whose popup window is ACTIVE and whose menu stays under the combo."""
+    item_states = {"SHOWING", "VISIBLE", "ENABLED"} if open_menu else {"VISIBLE", "ENABLED"}
+    none = _Node("menu item", "None", states=set(item_states) | {"SELECTED"}, actions=["click"])
+    classic = _Node("menu item", "Classic", states=set(item_states), actions=["click"])
+    cobalt = _Node(
+        "menu item", "Cobalt", states=set(item_states), actions=["click"],
+        x=40, y=110, w=120, h=28,
+    )
+    menu_states = {"SHOWING", "VISIBLE", "ENABLED"} if open_menu else {"ENABLED"}
+    menu_box = (40, 80, 120, 90) if open_menu else (-2147483648, -2147483648, 1, 1)
+    menu = _Node("menu", "", states=menu_states, children=[none, classic, cobalt],
+                 x=menu_box[0], y=menu_box[1], w=menu_box[2], h=menu_box[3])
+    combo = _Node(
+        "combo box", "Color", text="", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[menu], actions=["press"], x=40, y=40, w=120, h=34,
+    )
+    dialog = _Node(
+        "dialog", "Preferences", states={"SHOWING", "VISIBLE", "ENABLED"},
+        children=[combo], x=20, y=20, w=300, h=220,
+    )
+    frame = _Node(
+        "frame", "Editor", states={"SHOWING", "VISIBLE", "ENABLED"},
+        x=10, y=10, w=400, h=300,
+    )
+    window = _Node(
+        "window", "", states={"SHOWING", "VISIBLE", "ACTIVE", "ENABLED"},
+        children=[menu], x=40, y=80, w=120, h=90,
+    )
+    # The window lists the same menu. Its parent stays the combo.
+    menu.parent = combo
+    app = _Node("application", "mousepad", children=[frame, dialog, window])
+    for node in (none, classic, cobalt, menu, combo, dialog, frame, window, app):
+        node.toolkit = "gtk"
+    return app, dialog, frame, window, combo, menu, cobalt
+
+
+def _screen():
+    from a11y_computer_use.schema import Display
+
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    return (observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),)
+
+
+def test_gtk_combo_popup_stays_under_the_combo(monkeypatch) -> None:
+    """The ACTIVE popup window is not the snapshot root.
+
+    The menu items keep their names and the selected state, nested under
+    the combo, and the combo reports expanded. The same items are not
+    listed again from the popup window.
+    """
+    from a11y_computer_use.schema import Scope
+
+    app, dialog, _frame, window, combo, _menu, _cobalt = _gtk_combo_tree(open_menu=True)
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _Atspi)
+    picked = _atspi._preferred_window(
+        app.children, lambda frame: "ACTIVE" in frame.states,
+    )
+    assert picked is dialog
+    assert _atspi._combo_owning_popup(window) is combo
+    assert _atspi._combo_owning_popup(dialog) is None
+    snap = observe.build_snapshot(
+        dialog, ATSPIAccessor(), scope=Scope.WINDOW, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    by_ref = {el.ref: el for el in snap.elements}
+    box = next(el for el in snap.elements if el.role == "AXComboBox" and el.title == "Color")
+    assert box.expanded is True
+    cobalt = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "Cobalt")
+    chosen = next(el for el in snap.elements if el.role == "AXMenuItem" and el.title == "None")
+    assert chosen.selected is True
+    assert cobalt.selected is False
+    ancestor = cobalt
+    while ancestor.parent is not None and ancestor.ref != box.ref:
+        ancestor = by_ref[ancestor.parent]
+    assert ancestor.ref == box.ref
+    rendered = observe.render_text(snap)
+    assert "expanded" in rendered.split('combobox "Color"')[1].splitlines()[0]
+    assert 'menuitem "Cobalt"' in rendered
+    whole = observe.build_snapshot(
+        app, ATSPIAccessor(), scope=Scope.APP, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    assert [el.title for el in whole.elements if el.role == "AXMenuItem" and el.title == "Cobalt"] == ["Cobalt"]
+    assert not any(el.role == "AXWindow" and not el.title for el in whole.elements)
+
+    _app, closed, _frame, _window, _combo, _menu, _cobalt = _gtk_combo_tree(open_menu=False)
+    collapsed = observe.build_snapshot(
+        closed, ATSPIAccessor(), scope=Scope.WINDOW, app="mousepad", pid=None,
+        geometry=_screen(),
+    )
+    box = next(el for el in collapsed.elements if el.role == "AXComboBox")
+    assert box.expanded is False
+    assert not any(el.role == "AXMenuItem" for el in collapsed.elements)
+    assert "collapsed" in observe.render_text(collapsed)
+
+
+def test_gtk_combo_option_click_closes_the_popup(monkeypatch) -> None:
+    """A ref click on a GTK option collapses the combo and sends no Escape.
+
+    A popup that stays open is popup_open. A menu-bar item is not a combo
+    option, so it does not send Escape either.
+    """
+    from a11y_computer_use.drivers import _linux_input
+
+    _app, _dialog, _frame, _window, combo, menu, cobalt = _gtk_combo_tree(open_menu=True)
+
+    def choose(index, option=cobalt, popup=menu):
+        option.action_log.append(option.actions[index])
+        for child in popup.children:
+            child.states.discard("SELECTED")
+        option.states.add("SELECTED")
+        popup.states.discard("SHOWING")
+        popup.states.discard("VISIBLE")
+        return True
+
+    cobalt.do_action = choose
+    keys: list[str] = []
+    monkeypatch.setattr(_linux_input, "press_chord", lambda chord: keys.append(chord))
+    driver = _driver(monkeypatch, cobalt)
+    element = _element("e8", "AXMenuItem", "Cobalt", clickable=True)
+    assert driver.press_element(element) is True
+    assert cobalt.action_log == ["click"]
+    assert "SELECTED" in cobalt.states
+    assert keys == []
+    assert ATSPIAccessor().read(combo).expanded is False
+
+    _app, _dialog, _frame, _window, stuck, menu, cobalt = _gtk_combo_tree(open_menu=True)
+
+    def ignore(index, option=cobalt):
+        option.action_log.append(option.actions[index])
+        return True
+
+    cobalt.do_action = ignore
+    stuck.do_action = ignore
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cobalt)
+    with pytest.raises(ComputerUseError) as exc:
+        driver.press_element(element)
+    assert exc.value.detail["reason"] == "popup_open"
+    assert "Cobalt" in exc.value.message
+    assert keys == ["Escape", "Escape", "Escape", "Escape"]
+
+    item = _Node("menu item", "Save", actions=["click"])
+    item.toolkit = "gtk"
+    bar_menu = _Node("menu", "File", children=[item])
+    bar_menu.toolkit = "gtk"
+    _Node("menu bar", "", children=[bar_menu]).toolkit = "gtk"
+    keys.clear()
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: item)
+    assert driver.press_element(_element("e3", "AXMenuItem", "Save", clickable=True)) is True
+    assert keys == []
+    assert item.action_log == ["click"]
+
+
 def test_spin_button_uses_the_value_interface_and_rejects_out_of_range(monkeypatch) -> None:
     spin = _Node("spin button", "Quantity", text="3", value=3.0, minimum=0.0, maximum=10.0)
     driver = _driver(monkeypatch, spin)
