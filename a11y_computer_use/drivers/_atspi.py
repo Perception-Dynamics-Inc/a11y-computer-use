@@ -3096,7 +3096,11 @@ class ATSPIAccessor:
             surface_name = _panel_surface_name(node, size, focusable)
         return RawNode(
             role=role,
-            subrole="terminal" if role_str == "terminal" else None,
+            subrole=(
+                "terminal" if role_str == "terminal"
+                else "label" if role_str == "label"
+                else None
+            ),
             title=str(name),
             description=str(description),
             enabled=enabled,

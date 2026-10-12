@@ -283,6 +283,9 @@ class Element:
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
     #: text, or the tail of a longer buffer, with a leading ellipsis when
     #: older output was omitted. ``find`` still searches the whole buffer.
+    #: ``label`` for an AT-SPI label. ``find`` keeps that label when its
+    #: title is the search text, and leaves it out when the title only
+    #: mentions the text and a cell or control has the exact name.
     #: None for every other role.
     subrole: str | None = None
     #: A fact about how this row opens, when a single click only selects it.

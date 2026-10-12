@@ -10949,6 +10949,54 @@ def test_find_reaches_a_gtk_tree_row_that_is_off_screen(fake_atspi, monkeypatch)
     assert "ROW-00293" in landed
 
 
+def test_find_prefers_the_gtk_cell_over_a_label_that_mentions_the_row(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic GTK tree plus a label. Not a live window.
+
+    The label's name contains ROW-00000 and ROW-00293. find returns the
+    cell. scroll_to_find does not stop on the label before it scrolls.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _gtk_tree_page()
+    label = _Acc(
+        "label", name="See ROW-00000 and ROW-00293 in the list",
+        width=400, height=24,
+    )
+    _place_row(label, 90, 60, 400, 24)
+    app = table.get_application()
+    label.get_application = lambda: app
+    scroll = window.children[0]
+    _adopt(window, label, scroll)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    driver.key_chord = lambda *_args, **_kwargs: None
+    driver.type_text = lambda *_args, **_kwargs: None
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    shot = driver.snapshot(Scope.WINDOW, "treeprobe")
+    mentioned = next(el for el in shot.elements if el.title.startswith("See ROW-00000"))
+    assert mentioned.role == "AXStaticText"
+    assert mentioned.subrole == "label"
+    top = runtime.find("treeprobe", text="ROW-00000")
+    assert "ROW-00000" in top
+    assert "See ROW-00000" not in top
+    assert "cell" in top
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="ROW-00293")
+    assert "ROW-00293" in found
+    assert "See ROW-00000" not in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    place(0)
+    hunted = runtime.scroll_to_find("treeprobe", text="ROW-00293", max_scrolls=2)
+    assert not hunted.startswith("found after 0"), hunted
+    assert "See ROW-00000" not in hunted
+    assert "not found" in hunted
+    assert state["head"] == 0
+
+
 def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupported(
     fake_atspi, monkeypatch
 ) -> None:

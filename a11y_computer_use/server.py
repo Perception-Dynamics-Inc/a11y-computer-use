@@ -4086,7 +4086,9 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. When a cell,
+        row, or other control has the exact name, that control is the
+        match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4115,8 +4117,11 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
             return observe.render_matches(snap, matches, text=text)
 
@@ -5974,6 +5979,9 @@ class Runtime:
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+        When a cell, row, or other control has the exact name, that control
+        is the match. A label counts only when its own title is the text,
+        so a label that merely mentions the name does not stop the search.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
@@ -6109,11 +6117,18 @@ class Runtime:
             center_y = bounds.y + bounds.height / 2
             return left <= center_x < right and top <= center_y < bottom
 
+        def ranked_matches(snap: Snapshot) -> tuple[Element, ...]:
+            """Substring hits, with an exact cell or control ahead of a label.
+
+            A label whose title only mentions the text is not a hit, so the
+            search keeps scrolling the view that holds the real row.
+            """
+            return observe.prefer_exact_targets(
+                observe.find_elements(snap, text=text, role=role), text,
+            )
+
         def visible_matches(snap: Snapshot) -> list[Element]:
-            return [
-                el for el in observe.find_elements(snap, text=text, role=role)
-                if on_screen(el, snap)
-            ]
+            return [el for el in ranked_matches(snap) if on_screen(el, snap)]
 
         def place_of(snap: Snapshot) -> str:
             """Where the match sits relative to the window.
@@ -6123,7 +6138,7 @@ class Runtime:
             no match in this snapshot. A document table keeps rows that have
             already left the viewport, so a name in the tree is not a hit.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = ranked_matches(snap)
             located = [el for el in found if el.bounds is not None]
             if not located:
                 return "missing"
@@ -6182,7 +6197,7 @@ class Runtime:
             many viewports below never arrives one line at a time, so
             the search keeps the five-line burst until the row is close.
             """
-            found = observe.find_elements(snap, text=text, role=role)
+            found = ranked_matches(snap)
             box = viewport_box(snap)
             if not found or box is None:
                 return False
@@ -6593,7 +6608,7 @@ class Runtime:
                     else:
                         same_rows = 0
                     previous_rows = seen
-                matches = observe.find_elements(snap, text=text, role=role)
+                matches = ranked_matches(snap)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
@@ -8613,7 +8628,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches). A
+        (text past the 200 characters kept on the element still matches). When
+        a cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. A
         terminal's shown value is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
@@ -9040,7 +9057,9 @@ def build_server(
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title or the field's full value, including
-        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
+        text past the 200 characters a snapshot keeps) and/or role. When a
+        cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
