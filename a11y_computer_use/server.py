@@ -4384,11 +4384,13 @@ class Runtime:
             return None
 
     def _paragraph_click_verdict(self, element: Element) -> tuple[str, str] | None:
-        """Caret check for a LibreOffice paragraph click. None for every other target.
+        """Caret or text-edit check for a LibreOffice click. None otherwise.
 
         A pointer click on Writer text moves focus, so the accessibility
         state changes even when the caret lands in the paragraph above.
-        That state change is not confirmation.
+        That state change is not confirmation. An Impress or Draw frame is
+        confirmed only when a focused editable paragraph or the caret is
+        inside it.
         """
         if getattr(self.driver, "name", None) != "linux":
             return None
@@ -7859,8 +7861,13 @@ def build_server(
         On Linux a Qt table cell is clicked at its center. That click is
         confirmed only when the cell is the only selected cell and it is
         focused, which is the current cell. Toggle adds the cell and is not
-        reported as success. A click on a LibreOffice text paragraph is
-        confirmed only when the caret is in that paragraph. A click aimed at
+        reported as success. A click on a LibreOffice Writer paragraph is
+        confirmed only when the caret is in that paragraph. A click on an
+        Impress or Draw shape or text frame, or a paragraph inside one, is
+        a pointer click at the element's center. When that click does not
+        enter text editing, a double-click follows. It is confirmed only
+        when a focused editable paragraph or the caret is inside the frame.
+        A click aimed at
         a Calc cell is confirmed only when the selected cell address, the
         Name Box, is that cell. A different cell is partial.         A click on a
         canvas or an unnamed image is unverifiable: accessibility cannot

@@ -4589,27 +4589,254 @@ def grab_focus(acc) -> bool:
 
 
 _TEXT_CARET_ROLES = frozenset({"paragraph", "heading"})
+_WRITER_DOCUMENT_ROLES = frozenset({"document text"})
+_SHAPE_DOCUMENT_ROLES = frozenset({"document presentation", "document drawing"})
+_SHAPE_FRAME_ROLES = frozenset({"shape", "text frame", "text-frame"})
+_SHAPE_TEXT_ROLES = _TEXT_CARET_ROLES | _SHAPE_FRAME_ROLES
+
+
+def _ancestor_nodes(acc, limit: int = 40) -> list:
+    """``acc`` and its parents, nearest first. Cycles stop the walk."""
+    nodes = []
+    node = acc
+    seen: set[int] = set()
+    for _ in range(limit):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        nodes.append(node)
+        node = _parent_of(node)
+    return nodes
+
+
+def _document_roles(acc) -> set[str]:
+    """Document roles on ``acc`` and its parents."""
+    found = set()
+    for node in _ancestor_nodes(acc):
+        role = _role_name(node)
+        if role in _WRITER_DOCUMENT_ROLES or role in _SHAPE_DOCUMENT_ROLES:
+            found.add(role)
+        if role == "application":
+            break
+    return found
 
 
 def is_libreoffice_text_paragraph(acc) -> bool:
-    """A Writer paragraph or heading. A click on one has to land the caret there."""
+    """A Writer paragraph or heading under ``document text``.
+
+    Impress and Draw paragraphs live in a shape's text frame. Setting their
+    caret does not start text editing, so they are not this shortcut.
+    """
     if acc is None or _role_name(acc) not in _TEXT_CARET_ROLES:
         return False
-    app = _call_first(acc, ("get_application", "getApplication"))
-    if app is None:
+    if not _libreoffice_accessible(acc):
         return False
-    name = str(_call_first(app, ("get_name",), default="") or "")
-    return libreoffice_app(name)
+    roles = _document_roles(acc)
+    if roles & _SHAPE_DOCUMENT_ROLES:
+        return False
+    return bool(roles & _WRITER_DOCUMENT_ROLES)
+
+
+def _text_frame_panel(acc) -> bool:
+    """A panel LibreOffice names as a text frame. The role stays ``panel``."""
+    if acc is None or _role_name(acc) != "panel":
+        return False
+    name = str(_call_first(acc, ("get_name",), default="") or "").strip().casefold()
+    return name.startswith("text frame")
+
+
+def _shape_text_node(acc) -> bool:
+    """A paragraph, shape, text-frame role, or a panel named as a text frame."""
+    if acc is None:
+        return False
+    role = _role_name(acc)
+    if role in _SHAPE_TEXT_ROLES:
+        return True
+    return _text_frame_panel(acc)
+
+
+def is_libreoffice_shape_text(acc) -> bool:
+    """An Impress or Draw shape, text frame, or a paragraph inside one."""
+    if not _shape_text_node(acc) or not _libreoffice_accessible(acc):
+        return False
+    return bool(_document_roles(acc) & _SHAPE_DOCUMENT_ROLES)
+
+
+def _shape_text_frame(acc):
+    """The shape or text frame that holds ``acc``, or ``acc`` when it is one."""
+    fallback = acc
+    for node in _ancestor_nodes(acc):
+        if _role_name(node) in _SHAPE_FRAME_ROLES or _text_frame_panel(node):
+            return node
+        if _role_name(node) in _SHAPE_DOCUMENT_ROLES:
+            break
+    return fallback
+
+
+def _bounded_descendants(acc, *, limit: int = 48) -> list:
+    """``acc`` and descendants, capped so a slide tree cannot walk the app."""
+    found: list = []
+    stack = [acc]
+    seen: set[int] = set()
+    while stack and len(found) < limit:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        found.append(node)
+        count = _raw_child_count(node)
+        if count <= 0:
+            continue
+        for index in range(min(count, 24)):
+            if len(found) + len(stack) >= limit:
+                break
+            stack.append(_child_at(node, index))
+    return found
+
+
+def _shape_text_nodes(acc) -> list:
+    """The frame, its descendants, and ``acc`` when the frame did not list it."""
+    frame = _shape_text_frame(acc)
+    nodes = _bounded_descendants(frame)
+    if acc is not None and all(node is not acc for node in nodes):
+        nodes.append(acc)
+    return nodes
+
+
+def _caret_offset(acc):
+    """The text caret, or None when this node has none."""
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    caret = _safe(lambda: Atspi.Text.get_caret_offset(acc))
+    if isinstance(caret, bool) or not isinstance(caret, int) or caret < 0:
+        return None
+    return caret
+
+
+def _focused_editable_paragraph(acc) -> bool:
+    """True when ``acc`` is a focused paragraph that can take text."""
+    if acc is None or _role_name(acc) not in _TEXT_CARET_ROLES:
+        return False
+    if not _state_has(acc, "FOCUSED"):
+        return False
+    if _state_has(acc, "EDITABLE"):
+        return True
+    return _editable_iface(acc) is not None
+
+
+def shape_text_click_verdict(acc) -> tuple[str, str] | None:
+    """``(outcome, evidence)`` for an Impress or Draw text click.
+
+    Confirmed when a paragraph inside the frame is focused and editable, or
+    when the caret is in that frame and the frame has focus. A caret set on
+    an unfocused paragraph is not text editing, and that click is partial.
+    None when ``acc`` is not shape text.
+    """
+    if not is_libreoffice_shape_text(acc):
+        return None
+    nodes = _shape_text_nodes(acc)
+    if any(_focused_editable_paragraph(node) for node in nodes):
+        return "confirmed", "a focused editable paragraph is inside the text frame"
+    focused = any(_state_has(node, "FOCUSED") for node in nodes)
+    if focused and any(
+        _role_name(node) in _TEXT_CARET_ROLES and _caret_offset(node) is not None
+        for node in nodes
+    ):
+        return "confirmed", "the caret is inside the text frame"
+    return "partial", "the text frame is not in text edit"
+
+
+def shape_text_editing(acc) -> bool:
+    """True when an Impress or Draw click has entered text editing."""
+    verdict = shape_text_click_verdict(acc)
+    return verdict is not None and verdict[0] == "confirmed"
+
+
+def _shape_document(acc):
+    """The presentation or drawing that contains ``acc``, or None."""
+    for node in _ancestor_nodes(acc):
+        if _role_name(node) in _SHAPE_DOCUMENT_ROLES:
+            return node
+    return None
+
+
+def _shape_edit_paragraph_text(acc) -> str | None:
+    """Text of the paragraph in text edit, or None.
+
+    The document presentation stays focused and its own text stays empty.
+    The paragraph inside the text frame is where the keys land. A caret on
+    an unfocused paragraph is still that frame. None when ``acc`` is not in
+    a LibreOffice presentation or drawing, or no paragraph there is editing.
+    """
+    root = _shape_document(acc)
+    if root is None or not _libreoffice_accessible(root):
+        return None
+    caret_text = None
+    for node in _bounded_descendants(root, limit=96):
+        if _role_name(node) not in _TEXT_CARET_ROLES:
+            continue
+        try:
+            text = _full_text(node)
+        except Exception:
+            text = None
+        if text is None:
+            continue
+        shown = text.replace("\u00a0", " ")
+        if _state_has(node, "FOCUSED"):
+            return shown
+        if caret_text is None and _caret_offset(node) is not None:
+            caret_text = shown
+    return caret_text
+
+
+def focused_shape_edit_text(app: str) -> str | None:
+    """Paragraph text of the Impress or Draw frame in text edit, or None.
+
+    None when focus is not in a presentation or drawing, so a Writer
+    document and a Calc cell keep their own read-back.
+    """
+    try:
+        acc, truncated = _focused_node(app)
+    except Exception:
+        return None
+    if truncated or acc is None:
+        return None
+    try:
+        return _shape_edit_paragraph_text(acc)
+    except Exception:
+        return None
+
+
+def poll_focused_shape_type(app: str, before: str | None, text: str) -> str | None:
+    """Settled paragraph text of the Impress or Draw frame in edit.
+
+    None when that frame is no longer in text edit. ``before`` is the
+    paragraph captured before the keys. The document's empty text is not
+    this result, so a title that gains the typed characters confirms.
+    """
+    def read():
+        return focused_shape_edit_text(app)
+
+    try:
+        current = read()
+    except Exception:
+        return None
+    if current is None:
+        return None
+    return _poll_typed_text(read, before, text)
 
 
 def place_paragraph_caret(acc, x: int, y: int) -> bool:
-    """Put the caret in this paragraph. False when ``acc`` is not one.
+    """Put the caret in this Writer paragraph. False when ``acc`` is not one.
 
     A coordinate click uses LibreOffice screen extents, which sit about one
     title bar above the text, so the pointer lands in the paragraph above.
     ``set_caret_offset`` addresses the paragraph itself. A point inside that
     paragraph's text uses that character. Any other point uses the end,
-    which is where a following ``type`` appends.
+    which is where a following ``type`` appends. Impress and Draw shapes
+    are not this path: a pointer click enters their text edit.
     """
     if not is_libreoffice_text_paragraph(acc):
         return False
@@ -4639,9 +4866,14 @@ def place_paragraph_caret(acc, x: int, y: int) -> bool:
 def paragraph_click_verdict(acc) -> tuple[str, str] | None:
     """``(outcome, evidence)`` for a paragraph click, or None for any other target.
 
-    Confirmed only when the caret is in that paragraph. A click that changes
-    focus and leaves the caret in the line above is not confirmed.
+    Writer is confirmed only when the caret is in that paragraph. A click
+    that changes focus and leaves the caret in the line above is not
+    confirmed. Impress and Draw are confirmed only when the frame is in
+    text edit.
     """
+    shape = shape_text_click_verdict(acc)
+    if shape is not None:
+        return shape
     if not is_libreoffice_text_paragraph(acc):
         return None
     try:
