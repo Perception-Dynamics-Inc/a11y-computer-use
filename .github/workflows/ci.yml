@@ -425,8 +425,9 @@ jobs:
           # for the whole poll. The property can land before openbox adopts
           # a client, and an xmessage started in that gap never joins
           # _NET_CLIENT_LIST. setsid keeps the WM off the shell's process
-          # group. The message is started only after the check holds, and
-          # restarted if that process has already exited.
+          # group. The message is started only after the check holds.
+          # A process that stays alive but never appears in the client list
+          # is replaced, not left running.
           xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
             setsid openbox >/tmp/openbox-pkg.log 2>&1 < /dev/null &
             ready=0
@@ -455,9 +456,16 @@ jobs:
               if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
                 exit 0
               fi
-              if ! pgrep -x xmessage >/dev/null 2>&1 && [ "$restarts" -lt 2 ]; then
+              # A live xmessage that openbox never adopted stays out of
+              # _NET_CLIENT_LIST. Process-death is not the only miss: run
+              # 38300008066 printed [] for the whole poll while xmessage
+              # was still alive. Replace it a few times.
+              if [ "$restarts" -lt 4 ]; then
                 restarts=$((restarts + 1))
+                pkill -x xmessage >/dev/null 2>&1 || true
+                sleep 0.2
                 xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+                sleep 0.3
               fi
               sleep 0.25
             done
