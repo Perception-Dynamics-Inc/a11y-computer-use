@@ -468,15 +468,16 @@ text starts with `409`. This does not add or remove tools on
 `move`, `resize`, `minimize`, `close`), `menu`, `wait`, `done`, `ask_human`.
 
 `find` takes `text` and/or `role` (optional `editable`, `clickable`, `scope`)
-and calls the runtime `find` on the tracked app. It searches past the folded
-snapshot budget: on Linux a table row whose name matches `text` is scrolled
-into the snapshot when that row is not already listed, and the ref is that
-on-screen cell. `scroll_to_find` takes `text` and/or `role` and scrolls until
-that element is on screen. `expand` takes `ref`. A collapsed node, or a menu
-or tree, is pressed first. The result is the next page of that node's
-children past the ones the last snapshot kept (the table under the ref, when
-the ref is the document that was folded). A later `expand` of that node
-continues the page. It does not repeat the same truncated window. Use these
+and calls the runtime `find` on the tracked app. It searches the whole
+document tree, not only the on-screen or budgeted nodes: on Linux a match
+inside a table that starts below the viewport is scrolled into the snapshot,
+and the ref is that cell rather than only the table that contains it.
+`scroll_to_find` takes `text` and/or `role` and scrolls until that element
+is on screen. `expand` takes `ref`. A collapsed node, or a menu or tree, is
+pressed first. The result is the next contiguous page of that node's own
+children, including children that do not fit on screen. The following
+`expand` of that node resumes at the exact index where the previous page
+ended, so a later listed name cannot skip the hole in front of it. Use these
 before a coordinate click when the observation names a collapsed node or
 `… N more` children.
 

@@ -1966,6 +1966,9 @@ class ATSPIAccessor:
         # Children a list or table did not publish. ``take_unlisted`` moves
         # the count onto the prune elision for ``… N more``.
         self._unlisted: dict[object, int] = {}
+        # Expand-page nodes the pruner must keep even when their box is
+        # below the viewport. Empty on a normal snapshot.
+        self._page_keep: set[object] = set()
         # Set by the Linux snapshot when the tree is LibreOffice. Content
         # bounds then pick SCREEN or the client origin plus WINDOW, per node.
         self.libreoffice = False
@@ -2107,13 +2110,31 @@ class ATSPIAccessor:
         """Hidden children recorded for ``node`` during ``children``, once."""
         return int(self._unlisted.pop(_frame_cache_key(node), 0))
 
-    def _expanded_child_page(self, node: object, start: int, limit: int) -> list:
-        """Children ``[start, start + limit)``, scrolled so the prune can keep them.
+    def keep_offscreen(self, node: object) -> bool:
+        """True for an expand-page child the pruner must list below the viewport."""
+        return _frame_cache_key(node) in self._page_keep
 
-        The visible-band walk never publishes a row below the viewport, and
-        the child cap then repeats that same window. This page is the next
-        slice. The first child is brought on screen, then the slice is read
-        again so the boxes are the post-scroll ones.
+    def _mark_page(self, node: object, depth: int) -> None:
+        """Remember ``node`` and one level of its children so their text is listed."""
+        if node is None or depth < 0:
+            return
+        self._page_keep.add(_frame_cache_key(node))
+        if depth == 0:
+            return
+        count = _child_count(node)
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return
+        for index in range(min(int(count), 6)):
+            self._mark_page(_child_at(node, index), depth - 1)
+
+    def _expanded_child_page(self, node: object, start: int, limit: int) -> list:
+        """Children ``[start, start + limit)``, in that order.
+
+        Every child in the slice is returned, including ones below the
+        viewport. Replacing the slice with whichever rows happen to be
+        painted skips the ones in between. The first child is scrolled
+        toward the screen; the rest stay in the page even if they do not
+        fit. The pruner keeps them via ``keep_offscreen``.
         """
         count = _child_count(node)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -2131,22 +2152,12 @@ class ATSPIAccessor:
             return found
 
         kids = read()
-        screen = _screen_size()
         if kids:
-            _bring_cell_on_screen(kids[0], screen, start, max(count, 1))
+            _bring_cell_on_screen(kids[0], _screen_size(), start, max(count, 1))
             _invalidate_tree_cache(node)
             kids = read()
-        visible = [child for child in kids if _on_screen_item(child, screen) is not None]
-        # A table row's own box can stay off screen after the cell has
-        # scrolled in. The named-row walk is the on-screen cells.
-        if len(visible) < 2:
-            live = _in_view_named_rows(node)
-            named = [acc for acc, _pos, _size in live]
-            if len(named) >= 2:
-                kids = named[:limit]
-                visible = kids
-        else:
-            kids = visible[:limit]
+        for child in kids:
+            self._mark_page(child, 1)
         remaining = max(0, count - (start + len(kids)))
         if remaining:
             self._note_unlisted(node, remaining)
@@ -10269,12 +10280,13 @@ def _visible_tree_matches(rows, needle: str) -> bool:
     return False
 
 
-def _reveal_chromium_table_match(node, needle: str) -> bool:
-    """Scroll a Chromium table cell named ``needle`` into view.
+def _table_seek_cell(node, needle: str):
+    """``(cell, row, rows)`` for the first cell whose name contains ``needle``.
 
-    The snapshot lists the on-screen band only, so a row below that band
-    is missing with nothing for ``find`` to match. ``Table.get_accessible_at``
-    still addresses it. False when no cell in the seek window matches.
+    ``Table.get_accessible_at`` addresses a row the snapshot never walks.
+    None when no cell in the seek window matches. A long HTML table is not
+    a spreadsheet: 300 rows still scan. Calc never reaches this from the
+    Chromium document walk.
     """
     rows, cols = _plain_table_size(node)
     if rows is None or rows <= 0:
@@ -10282,21 +10294,134 @@ def _reveal_chromium_table_match(node, needle: str) -> bool:
         rows = int(counted) if isinstance(counted, int) and not isinstance(counted, bool) else 0
         cols = 1
     if rows <= 0:
-        return False
+        return None
     cols = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 1
-    screen = _screen_size()
+    total = max(rows, 1)
     for row in range(min(rows, _GTK_SEEK_MAX_ROWS)):
         for col in range(min(cols, _GTK_SEEK_MAX_COLS)):
             cell = _table_cell_at(node, row, col)
             if cell is None and col == 0:
                 cell = _child_at(node, row)
             found = _seek_hit(cell, needle)
-            if found is None:
-                continue
-            _bring_cell_on_screen(found, screen, row, rows)
-            _invalidate_tree_cache(node)
-            return True
-    return False
+            if found is not None:
+                return found, row, total
+    return None
+
+
+_SEEK_SKIP_ROLES = frozenset({
+    "document web", "document frame", "application", "frame", "window",
+    "panel", "filler", "section", "grouping", "scroll pane", "viewport",
+    "desktop frame", "dialog",
+})
+_SEEK_NODE_BUDGET = 8000
+_SEEK_CHILD_CAP = 400
+
+
+def _content_documents(root, limit: int = 4) -> list:
+    """Up to ``limit`` document nodes under ``root``, chrome only until then."""
+    found: list = []
+    queue = [root]
+    seen: set[object] = set()
+    examined = 0
+    while queue and len(found) < limit and examined < 300:
+        node = queue.pop(0)
+        if node is None:
+            continue
+        key = _frame_cache_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        examined += 1
+        role = _role_name(node)
+        if role in {"document web", "document frame"}:
+            found.append(node)
+            continue
+        count = _child_count(node)
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            continue
+        for index in range(min(int(count), 30)):
+            queue.append(_child_at(node, index))
+    return found
+
+
+def _seek_document_tree(node, needle: str, budget: list[int], seen: set[object]):
+    """The first match in document order, or None.
+
+    A table is scanned through the Table interface and not by walking every
+    row as a child, so a 300-row table below the fold is still reached.
+    Other nodes are searched children-first, so a cell wins over the
+    container whose value is the whole table. Identity is the AT-SPI object
+    path: ``id()`` is reused when a proxy is freed, and that collision
+    skipped the table at the end of a long document.
+    """
+    if node is None or budget[0] <= 0:
+        return None
+    key = _frame_cache_key(node)
+    if key in seen:
+        return None
+    seen.add(key)
+    budget[0] -= 1
+    role = _role_name(node)
+    if role in {"table", "tree table"}:
+        return _table_seek_cell(node, needle)
+    count = _child_count(node)
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        for index in range(min(int(count), _SEEK_CHILD_CAP)):
+            if budget[0] <= 0:
+                return None
+            found = _seek_document_tree(_child_at(node, index), needle, budget, seen)
+            if found is not None:
+                return found
+    if role not in _SEEK_SKIP_ROLES and _matches_seek(node, needle):
+        return node, 0, 1
+    return None
+
+
+def reveal_text_in_document(root, needle: str) -> bool:
+    """Scroll a document-order match for ``needle`` onto the screen.
+
+    The walk includes nodes the pruner will drop, so a table that starts
+    below the viewport is still searched. A match that is already on screen
+    is left where it is. False when nothing in the seek window matches.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None:
+        return False
+    budget = [_SEEK_NODE_BUDGET]
+    seen: set[object] = set()
+    hit = None
+    documents = _content_documents(root)
+    for doc in documents:
+        hit = _seek_document_tree(doc, text, budget, seen)
+        if hit is not None:
+            break
+    if hit is None:
+        hit = _seek_document_tree(root, text, budget, seen)
+    if hit is None:
+        return False
+    cell, row, rows = hit
+    screen = _screen_size()
+    if _on_screen_item(cell, screen) is not None:
+        return True
+    _bring_cell_on_screen(cell, screen, row, rows)
+    _invalidate_tree_cache(root)
+    return True
+
+
+def _reveal_chromium_table_match(node, needle: str) -> bool:
+    """Scroll a Chromium table cell named ``needle`` into view.
+
+    The snapshot lists the on-screen band only, so a row below that band
+    is missing with nothing for ``find`` to match. ``Table.get_accessible_at``
+    still addresses it. False when no cell in the seek window matches.
+    """
+    found = _table_seek_cell(node, needle)
+    if found is None:
+        return False
+    cell, row, rows = found
+    _bring_cell_on_screen(cell, _screen_size(), row, rows)
+    _invalidate_tree_cache(node)
+    return True
 
 
 def _gtk_rows_match(rows, needle: str) -> bool:

@@ -7509,6 +7509,357 @@ def test_linux_chrome_folded_table_find_and_expand(tmp_path) -> None:
         _stop(proc)
 
 
+def _quoted_names(text: str, pattern: str) -> list[str]:
+    """Names in title quotes, skipping a table's own line.
+
+    A table value repeats every cell. Coverage has to come from a row,
+    cell, or other line, not from that one string.
+    """
+    import re
+
+    found: list[str] = []
+    compiled = re.compile(pattern)
+    for line in text.splitlines():
+        if re.search(r"\btable\b", line):
+            continue
+        found.extend(compiled.findall(line))
+    return found
+
+
+def _launch_chrome_file(tmp_path, name: str, html: str):
+    """A local file in a fresh Chrome profile. Caller stops the process."""
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the document-coverage test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / f"{name}.html"
+    page.write_text(html)
+    profile = tmp_path / f"{name}-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile}", "--window-size=1100,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return driver, proc
+
+
+def _deepest_common_ref(snap, elements: list) -> str:
+    """The closest ancestor shared by every element in ``elements``."""
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def chain(element) -> list[str]:
+        refs: list[str] = []
+        seen: set[str] = set()
+        current = element
+        while current is not None and current.ref not in seen:
+            seen.add(current.ref)
+            refs.append(current.ref)
+            parent = by_ref.get(current.parent) if current.parent else None
+            current = parent
+        return refs
+
+    chains = [chain(element) for element in elements]
+    common = set(chains[0])
+    for item in chains[1:]:
+        common &= set(item)
+    sample = chains[0]
+    return min(common, key=sample.index)
+
+
+def test_linux_chrome_find_table_below_the_fold(tmp_path) -> None:
+    """find reaches a table that starts below the viewport.
+
+    The page is a long run of paragraphs and then a 300-row table. Row 200
+    says Elevation. The first snapshot does not include that cell. ``find``
+    returns it three times from the top, as a cell or its text, not only as
+    the table that contains the word. Skips when Chrome or the bus is absent.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
+
+    paragraphs = "\n".join(
+        f"<p>Paragraph {index:02d} sits above the table.</p>" for index in range(1, 81)
+    )
+    rows = "\n".join(
+        "<tr><td>"
+        + ("Row 200 Elevation 742 m" if index == 200 else f"Row {index:03d}")
+        + "</td></tr>"
+        for index in range(1, 301)
+    )
+    html = (
+        "<!doctype html><meta charset=utf-8><title>cufoldbelow</title>"
+        "<style>body{margin:0;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td{padding:2px 8px}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));</script>"
+        f"<h1>Long page</h1>{paragraphs}<table>{rows}</table>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "fold-below", html)
+
+    def elevation_cells(snap) -> list:
+        return [
+            el for el in snap.elements
+            if el.role in {"AXCell", "AXStaticText", "AXRow", "AXColumn"}
+            and el.title
+            and "Elevation" in el.title
+            and len(el.title) < 80
+        ]
+
+    try:
+        def wait_at_top(timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            shown: list[str] = []
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise AssertionError(
+                        f"Chrome exited with status {proc.returncode} before the page top"
+                    )
+                try:
+                    shot = driver.snapshot(Scope.WINDOW, "chrome")
+                except ComputerUseError as exc:
+                    if exc.code is not ErrorCode.APP_NOT_FOUND:
+                        raise
+                else:
+                    titles = _titles(shot)
+                    shown = sorted(title for title in titles if title.startswith("Paragraph "))[:4]
+                    if any(title.startswith("Paragraph 01") for title in titles) and not elevation_cells(shot):
+                        return
+                time.sleep(0.4)
+            raise AssertionError(f"Chrome did not show the page top without Elevation: {shown}")
+
+        wait_at_top(45)
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        for _pass in range(3):
+            if _pass:
+                runtime.key("f5")
+                wait_at_top(30)
+            found = runtime.find("chrome", text="Elevation")
+            assert "no elements match" not in found, found
+            hits = elevation_cells(runtime._current)
+            assert hits, found
+    finally:
+        _stop(proc)
+
+
+def test_linux_chrome_expand_document_pages_are_contiguous(tmp_path) -> None:
+    """Expanding a 64-paragraph document lists every paragraph, with no gaps.
+
+    The first snapshot shows the top of the page. Each expand page is a
+    contiguous run, and the next page starts at or before the previous end
+    plus one. Paragraphs 21–35 and 41–43 are in the union. Skips when Chrome
+    or the bus is absent.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
+
+    paragraphs = "\n".join(
+        f"<p>Paragraph {index:02d} of the long document.</p>" for index in range(1, 65)
+    )
+    html = (
+        "<!doctype html><meta charset=utf-8><title>cufold64</title>"
+        "<style>body{margin:0;font:16px/22px sans-serif}p{margin:0}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));</script>"
+        f"<h1>Doc head</h1>{paragraphs}"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "fold64", html)
+
+    def numbers_in(text: str) -> list[int]:
+        found: list[int] = []
+        for name in _quoted_names(text, r'"(Paragraph \d{2}[^"]*)"'):
+            found.append(int(name.split()[1]))
+        unique: list[int] = []
+        for number in found:
+            if number not in unique:
+                unique.append(number)
+        return unique
+
+    try:
+        deadline = time.monotonic() + 45
+        shot = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                if any("Paragraph 01" in (el.title or "") for el in shot.elements):
+                    break
+            time.sleep(0.4)
+        else:
+            raise AssertionError("Chrome did not show Paragraph 01")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        listed = runtime.desktop_snapshot("chrome")
+        first = numbers_in(listed)
+        assert first, listed
+        assert 64 not in first, first
+        assert first == list(range(first[0], first[-1] + 1)), first
+        covered = set(first)
+        prev_end = first[-1]
+        titled = [
+            el for el in runtime._current.elements
+            if el.title and "Paragraph " in el.title
+        ]
+        ref = _deepest_common_ref(runtime._current, titled)
+        pages: list[tuple[int, ...]] = []
+        for _page in range(8):
+            if covered >= set(range(1, 65)):
+                break
+            opened = runtime.expanded_children("chrome", ref)
+            assert "no further children" not in opened, (sorted(covered), opened)
+            nums = numbers_in(opened)
+            assert nums, opened
+            assert nums == list(range(nums[0], nums[-1] + 1)), nums
+            assert nums[0] <= prev_end + 1, (prev_end, nums)
+            assert tuple(nums) not in pages, nums
+            pages.append(tuple(nums))
+            covered.update(nums)
+            prev_end = max(prev_end, nums[-1])
+            fresh = [
+                el for el in runtime._current.elements
+                if el.title and "Paragraph " in el.title
+            ]
+            assert fresh, opened
+            ref = _deepest_common_ref(runtime._current, fresh)
+        missing = sorted(set(range(1, 65)) - covered)
+        assert not missing, missing
+    finally:
+        _stop(proc)
+
+
+def test_linux_chrome_expand_infobox_lists_every_row(tmp_path) -> None:
+    """Expanding an infobox lists every row, including ones below the fold.
+
+    The table starts on screen. Elevation is a header around row 40, past
+    the viewport. ``find`` returns that cell. ``expand`` of the table lists
+    row labels on every page, and the pages together cover every header.
+    Skips when Chrome or the bus is absent.
+    """
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope
+
+    def header_name(index: int) -> str:
+        return "Elevation" if index == 40 else f"Field {index:02d}"
+
+    body = "\n".join(
+        f"<tr><th>{header_name(index)}</th><td>"
+        + ("742 m" if index == 40 else f"Value {index:02d}")
+        + "</td></tr>"
+        for index in range(1, 81)
+    )
+    expected = [header_name(index) for index in range(1, 81)]
+    html = (
+        "<!doctype html><meta charset=utf-8><title>cuinfobox</title>"
+        "<style>body{margin:8px;font:16px/20px sans-serif}"
+        "table{border-collapse:collapse}th,td{padding:4px 8px;height:28px}</style>"
+        "<script>history.scrollRestoration='manual';"
+        "addEventListener('pageshow',()=>scrollTo(0,0));</script>"
+        "<h1>City</h1><p>intro</p>"
+        f"<table><caption>Almaty</caption>{body}</table>"
+    )
+    driver, proc = _launch_chrome_file(tmp_path, "infobox", html)
+
+    def headers_in(text: str) -> list[str]:
+        found = _quoted_names(text, r'"(Elevation|Field \d{2})"')
+        unique: list[str] = []
+        for name in found:
+            if name not in unique:
+                unique.append(name)
+        return unique
+
+    def indexes(names: list[str]) -> list[int]:
+        out = []
+        for name in names:
+            out.append(40 if name == "Elevation" else int(name.split()[1]))
+        return out
+
+    try:
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"Chrome exited with status {proc.returncode}")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = _titles(shot)
+                if any(el.role == "AXTable" for el in shot.elements) and any(
+                    title.startswith("Field 01") for title in titles
+                ):
+                    break
+            time.sleep(0.4)
+        else:
+            raise AssertionError("Chrome did not show the infobox top")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        top = runtime.desktop_snapshot("chrome")
+        assert "Field 01" in top, top
+        assert not any(
+            el.role in {"AXCell", "AXStaticText", "AXRow", "AXColumn"}
+            and (el.title or "") == "Elevation"
+            for el in runtime._current.elements
+        ), top
+        found = runtime.find("chrome", text="Elevation")
+        assert "no elements match" not in found, found
+        assert any(
+            el.role in {"AXCell", "AXStaticText", "AXRow", "AXColumn"}
+            and el.title
+            and "Elevation" in el.title
+            and len(el.title) < 80
+            for el in runtime._current.elements
+        ), found
+        runtime.key("f5")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "chrome")
+            if any((el.title or "").startswith("Field 01") for el in shot.elements) and not any(
+                (el.title or "") == "Elevation" for el in shot.elements
+            ):
+                break
+            time.sleep(0.4)
+        else:
+            raise AssertionError("infobox did not return to the top")
+        listed = runtime.desktop_snapshot("chrome")
+        covered = headers_in(listed)
+        assert covered, listed
+        assert indexes(covered) == list(range(indexes(covered)[0], indexes(covered)[-1] + 1))
+        table = next(el for el in runtime._current.elements if el.role == "AXTable")
+        ref = table.ref
+        prev_end = indexes(covered)[-1]
+        pages: list[tuple[str, ...]] = []
+        for _page in range(8):
+            if set(covered) >= set(expected):
+                break
+            opened = runtime.expanded_children("chrome", ref)
+            assert "no further children" not in opened, (covered, opened)
+            names = headers_in(opened)
+            assert names, opened
+            got = indexes(names)
+            assert got == list(range(got[0], got[-1] + 1)), names
+            assert got[0] <= prev_end + 1, (prev_end, names)
+            assert tuple(names) not in pages, names
+            pages.append(tuple(names))
+            covered.extend(name for name in names if name not in covered)
+            prev_end = max(prev_end, got[-1])
+            fresh = runtime._current
+            table = next(el for el in fresh.elements if el.role == "AXTable")
+            ref = table.ref
+        missing = [name for name in expected if name not in covered]
+        assert not missing, missing
+    finally:
+        _stop(proc)
+
+
 def test_linux_chrome_upload_picker_exposes_chooser_controls(tmp_path) -> None:
     """A visible file input opens Chrome's GTK chooser, and a typed path is chosen.
 
