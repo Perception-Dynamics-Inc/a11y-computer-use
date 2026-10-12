@@ -14071,11 +14071,117 @@ def _row_from_edge(table, comp, x: float, start: float, stop: float, step: float
     return None
 
 
+def _box_overlaps(pos, size, origin, span) -> bool:
+    """True when the two rectangles meet and neither is the off-screen sentinel."""
+    if pos is None or size is None or origin is None or span is None:
+        return False
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    if width <= 0 or height <= 0 or ow <= 0 or oh <= 0:
+        return False
+    if x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return False
+    if ox <= _OFFSCREEN_SENTINEL or oy <= _OFFSCREEN_SENTINEL:
+        return False
+    return x < ox + ow and x + width > ox and y < oy + oh and y + height > oy
+
+
+def _intersect_box(pos, size, origin, span):
+    """The overlapping rectangle, or None when the overlap is not a real box."""
+    if not _box_overlaps(pos, size, origin, span):
+        return None
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    ox, oy = float(origin[0]), float(origin[1])
+    ow, oh = float(span[0]), float(span[1])
+    left = max(x, ox)
+    top = max(y, oy)
+    right = min(x + width, ox + ow)
+    bottom = min(y + height, oy + oh)
+    if right - left <= 1 or bottom - top <= 1:
+        return None
+    return (left, top), (right - left, bottom - top)
+
+
+def _viewport_box(node):
+    """Nearest scroll pane or viewport ancestor that has a real box.
+
+    None when the table is not inside one. A GTK tree whose scroll pane is
+    the table's own box is that box, so the span does not move.
+    """
+    current = _parent_of(node)
+    for _depth in range(8):
+        if current is None:
+            return None
+        if _role_name(current) in {"scroll pane", "viewport"}:
+            pos, size = _extents(current)
+            if (
+                pos is not None
+                and size is not None
+                and float(size[0]) > 1
+                and float(size[1]) > 1
+            ):
+                return pos, size
+        current = _parent_of(current)
+    return None
+
+
+def _reported_showing(acc) -> bool | None:
+    """SHOWING when a state set was reported. None when that is not evidence.
+
+    An empty set is not evidence: a GTK fake leaves ``states`` empty, and a
+    missing bit there is not a hidden cell. A set that names other states
+    and omits SHOWING is not painted.
+    """
+    try:
+        names = _state_names(acc)
+    except Exception:
+        return None
+    if not names:
+        return None
+    return "SHOWING" in names
+
+
+def _painted_table_item(acc, screen: tuple[int, int]):
+    """``(accessible, position, size)`` when ``acc`` is painted in the viewport.
+
+    Overlapping the screen is not enough. A Swing row below the scroll pane
+    still has screen coordinates. A reported state set without SHOWING is
+    the same row. An empty state set is not that evidence.
+    """
+    item = _on_screen_item(acc, screen)
+    if item is None:
+        return None
+    if _reported_showing(acc) is False:
+        return None
+    view = _viewport_box(acc)
+    if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+        return None
+    return item
+
+
 def _gtk_visible_span(table, pos, size, rows: int) -> tuple[int, int] | None:
-    """Inclusive row range whose cells overlap the table's on-screen box."""
+    """Inclusive row range whose cells overlap the viewport, then the screen.
+
+    The table's own box can be the whole body. Rows under that box and still
+    on the display are not painted when a scroll pane clips them.
+    """
     comp = _component(table)
     if comp is None or pos is None or size is None:
         return None
+    view = _viewport_box(table)
+    if view is not None:
+        clipped = _intersect_box(pos, size, view[0], view[1])
+        if clipped is None:
+            return None
+        pos, size = clipped
+    screen = _screen_size()
+    clipped = _intersect_box(pos, size, (0.0, 0.0), (float(screen[0]), float(screen[1])))
+    if clipped is None:
+        return None
+    pos, size = clipped
     x = float(pos[0])
     y = float(pos[1])
     width = float(size[0])
@@ -14468,6 +14574,45 @@ def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) ->
     return _on_screen_item(cell, screen) is not None
 
 
+def _cell_matches_needle(cell, needle: str) -> bool:
+    """True when the cell, or an unnamed cell's child, is named ``needle``.
+
+    A GTK cell carries the row text on itself. Opening every child of a
+    miss is what made a 10k TreeView find exceed the event-thread budget.
+    Swing leaves the cell unnamed and puts the text on a child. That is
+    the only miss that looks one level down.
+    """
+    if cell is None:
+        return False
+    name = str(_call_first(cell, ("get_name", "getName"), default="") or "")
+    folded = needle.replace("\u00a0", " ").casefold()
+    haystack = name.replace("\u00a0", " ").casefold()
+    if name.strip():
+        return folded in haystack
+    return _seek_hit(cell, needle) is not None
+
+
+def _bring_gtk_cell_into_view(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
+    """Scroll ``cell`` into the viewport. True when it is then painted.
+
+    On screen but below the scroll pane is not painted. ``scroll_to`` and
+    the vertical bar are the same calls a GTK tree already uses. A cell
+    that stays outside the viewport is not given a coordinate.
+    """
+    scroll_to(cell)
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    scroll_to_edge(cell, "TOP_EDGE")
+    if _painted_table_item(cell, screen) is not None:
+        return True
+    _scroll_vertical_bar_to_row(cell, row, rows)
+    for _attempt in range(8):
+        if _painted_table_item(cell, screen) is not None:
+            return True
+        time.sleep(0.05)
+    return _painted_table_item(cell, screen) is not None
+
+
 def _reveal_named_cell(cell, screen: tuple[int, int], row: int, rows: int):
     """Scroll ``cell`` on screen when AT-SPI can. The same cell either way.
 
@@ -14533,10 +14678,10 @@ def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
             if cell is None:
                 continue
             saw_cell = True
-            if not _matches_seek(cell, needle):
+            if not _cell_matches_needle(cell, needle):
                 continue
-            if _on_screen_item(cell, screen) is None:
-                _bring_cell_on_screen(cell, screen, row, rows)
+            if _painted_table_item(cell, screen) is None:
+                _bring_gtk_cell_into_view(cell, screen, row, rows)
                 refreshed = _table_cell_at(node, row, col)
                 if refreshed is not None:
                     cell = refreshed
@@ -14563,16 +14708,20 @@ def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
         return None
     first, last = span
     out = []
+    view = _viewport_box(node)
     for header in _gtk_column_headers(node, cols):
         item = _on_screen_item(header, screen)
-        if item is not None:
-            out.append(item)
+        if item is None:
+            continue
+        if view is not None and not _box_overlaps(item[1], item[2], view[0], view[1]):
+            continue
+        out.append(item)
     for row in range(first, last + 1):
         for col in range(cols):
             cell = _table_cell_at(node, row, col)
             if cell is None:
                 continue
-            item = _on_screen_item(cell, screen)
+            item = _painted_table_item(cell, screen)
             if item is not None:
                 out.append(item)
     return out or None
@@ -14596,14 +14745,14 @@ def _gtk_table_rows_for_snapshot(
     if not painted:
         return None
     needle = seek.strip() if isinstance(seek, str) else ""
-    if needle and not _gtk_rows_match(painted, needle):
+    if needle and not _visible_tree_matches(painted, needle):
         match = _reveal_gtk_table_match(node, needle, screen)
         if match is not None:
             refreshed = _visible_gtk_table_cells(node, screen)
             if refreshed:
                 painted = refreshed
-            if not _gtk_rows_match(painted, needle):
-                item = _on_screen_item(match, screen)
+            if not _visible_tree_matches(painted, needle):
+                item = _painted_table_item(match, screen)
                 if item is not None:
                     painted = [*painted, item]
                 elif offscreen is not None:
@@ -14749,6 +14898,90 @@ def scroll_gtk_viewport_page(acc, direction: int) -> bool:
             _invalidate_tree_cache(table)
             return True
     return False
+
+
+def _owning_large_table(node):
+    """``(cell, table)`` when ``node`` is inside a cell of a large table.
+
+    A short table, a spreadsheet, and a node that is not in a cell are
+    ``(None, None)``. The published click point stays in those cases.
+    """
+    current = node
+    for _depth in range(6):
+        if current is None:
+            return None, None
+        role = _role_name(current)
+        if role in {"table cell", "tree cell"} or role.endswith(" cell"):
+            parent = _parent_of(current)
+            for _up in range(4):
+                if parent is None:
+                    return None, None
+                parent_role = _role_name(parent)
+                if parent_role in {"table", "tree table"}:
+                    try:
+                        large = _gtk_row_table(parent)
+                    except Exception:
+                        large = False
+                    if not large:
+                        return None, None
+                    return current, parent
+                parent = _parent_of(parent)
+            return None, None
+        current = _parent_of(current)
+    return None, None
+
+
+def _row_index_of_cell(table, cell) -> int | None:
+    index = _call_first(cell, ("get_index_in_parent", "getIndexInParent"))
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        return None
+    return _row_at_child_index(table, int(index))
+
+
+def reveal_unpainted_table_click(node):
+    """Live center of a table cell that was not painted, after scrolling it.
+
+    None when ``node`` is not an unpainted cell of a large table: the
+    caller keeps the published point. A cell that stays outside the
+    viewport raises ``not_visible``. No coordinate is invented.
+    """
+    if node is None:
+        return None
+    try:
+        cell, table = _owning_large_table(node)
+    except Exception:
+        return None
+    if cell is None or table is None:
+        return None
+    screen = _screen_size()
+    if (
+        _painted_table_item(node, screen) is not None
+        or _painted_table_item(cell, screen) is not None
+    ):
+        return None
+    rows, _cols = _plain_table_size(table)
+    total = int(rows) if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else 1
+    row = _row_index_of_cell(table, cell)
+    if row is None:
+        row = 0
+    _bring_gtk_cell_into_view(cell, screen, row, total)
+    painted = _painted_table_item(node, screen) or _painted_table_item(cell, screen)
+    if painted is None:
+        raise ComputerUseError(
+            ErrorCode.NOT_VISIBLE,
+            "the table cell is not visible and could not be scrolled into view; the click was not sent",
+            detail={
+                "reason": "not_visible",
+                "outcome": "refused",
+                "next": ["ref"],
+                "evidence": "the cell is outside the viewport and scrolling did not paint it",
+            },
+        )
+    _acc, pos, size = painted
+    return (
+        int(round(float(pos[0]) + float(size[0]) / 2.0)),
+        int(round(float(pos[1]) + float(size[1]) / 2.0)),
+    )
 
 
 _TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
