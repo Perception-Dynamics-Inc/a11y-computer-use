@@ -10955,7 +10955,8 @@ def test_find_prefers_the_gtk_cell_over_a_label_that_mentions_the_row(
     """Synthetic GTK tree plus a label. Not a live window.
 
     The label's name contains ROW-00000 and ROW-00293. find returns the
-    cell. scroll_to_find does not stop on the label before it scrolls.
+    cell. scroll_to_find does not stop on the label at scroll 0. The
+    row-index jump then lands that cell.
     """
     from a11y_computer_use import server
 
@@ -10993,8 +10994,10 @@ def test_find_prefers_the_gtk_cell_over_a_label_that_mentions_the_row(
     hunted = runtime.scroll_to_find("treeprobe", text="ROW-00293", max_scrolls=2)
     assert not hunted.startswith("found after 0"), hunted
     assert "See ROW-00000" not in hunted
-    assert "not found" in hunted
-    assert state["head"] == 0
+    assert hunted.startswith("found after "), hunted
+    assert "ROW-00293" in hunted
+    assert "cell" in hunted
+    assert state["head"] == 293
 
 
 def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupported(
