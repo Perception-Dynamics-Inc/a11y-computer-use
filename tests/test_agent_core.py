@@ -351,13 +351,20 @@ def test_model_call_uses_the_fixed_timeout_not_the_run_budget():
 
 
 def test_budget_is_checked_again_before_the_model_call():
-    """Observation can spend the budget. The next model call does not start."""
+    """A blocked observation spends the budget and the model is not called.
+
+    The snapshot waits past ``max_time`` so the observe join abandons it.
+    The macOS run with a 0.05s sleep and a 0.02s budget returned status failed.
+    """
+    import threading
+
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
     runtime = FakeRuntime(elements)
     called = {"n": 0}
+    limit = 0.5
 
     def snapshot(app, **kwargs):
-        time.sleep(0.05)
+        threading.Event().wait(timeout=8)
         return FakeRuntime.desktop_snapshot(runtime, app, **kwargs)
 
     runtime.desktop_snapshot = snapshot  # type: ignore[method-assign]
@@ -366,15 +373,18 @@ def test_budget_is_checked_again_before_the_model_call():
         called["n"] += 1
         return turn(ToolCall("click", {"ref": "e2"}))
 
+    started = time.perf_counter()
     result, _events, _runtime, _agent = run(
-        ScriptedModel(script), elements, runtime=runtime, max_time_s=0.02, model_timeout_s=30,
+        ScriptedModel(script), elements, runtime=runtime, max_time_s=limit, model_timeout_s=30,
     )
-    assert result.status == "timeout"
+    elapsed = time.perf_counter() - started
+    assert result.status == "timeout", result
     assert result.reason == "max_time"
     assert result.evidence["where"] == "observe"
     assert result.evidence["abandoned"] is True
     assert called["n"] == 0
     assert result.steps == 0
+    assert elapsed < limit + 1.0
 
 
 def test_model_timeout_after_the_budget_is_max_time_not_an_error():
