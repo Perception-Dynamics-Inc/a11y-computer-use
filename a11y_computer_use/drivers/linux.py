@@ -1206,11 +1206,18 @@ class LinuxDriver:
 
         A dropped accessibility bus reconnects once. The outermost call retries,
         so a snapshot walks the tree again instead of reusing a disposed node.
+
+        The call caches duplicate stable getters for its duration. The cache
+        is entered on the thread that runs ``fn``, and a mutator drops it.
         """
-        from a11y_computer_use.drivers import _atspi_events, _dbus_guard
+        from a11y_computer_use.drivers import _atspi, _atspi_events, _dbus_guard
 
         def once():
-            return _atspi_events.submit(fn) if _atspi_events.enabled() else fn()
+            def wrapped():
+                with _atspi.read_cache():
+                    return fn()
+
+            return _atspi_events.submit(wrapped) if _atspi_events.enabled() else wrapped()
 
         return _dbus_guard.call_with_reconnect(once)
 
