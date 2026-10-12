@@ -509,6 +509,12 @@ class Agent:
         self._restore_signal_cancel()
         try:
             self._prepare()
+            # The wall-clock budget starts after the model and trace exist.
+            # On a slow runner, building those can exceed a short max_time
+            # before the first observation. That used to stop as failed
+            # rather than abandoning the observation that spends the budget.
+            started = time.perf_counter()
+            self._run_started = started
             yield from self._drive(goal, started)
         except _StepDeadline as deadline:
             evidence = self._timeout_evidence(deadline)
