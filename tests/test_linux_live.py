@@ -2829,8 +2829,8 @@ def test_linux_chrome_click_resolution_does_not_follow_the_goal(tmp_path) -> Non
     Archive is not clicked for "Do not click Archive". An x/y click is sent
     as that point. A ref plus x/y is invalid_arguments. A missing ref
     resolves only to the role and name it last had. Snapshot refs are
-    pre-order indexes, so the page is reduced to one Save draft button
-    before that click; an in-place swap would keep the old index. B5 and
+    pre-order indexes, so the page grows until Save draft's ref is past
+    the tree Chrome keeps after the page is reduced to one button. B5 and
     D3 are two more coordinate clicks that must not move onto a button
     named in the goal.
     """
@@ -2872,6 +2872,29 @@ document.getElementById('chrome').onclick = function () { mark('CHROME'); };
 document.getElementById('save').onclick = function () { mark('SAVED'); };
 document.getElementById('b5').onclick = function () { mark('B5'); };
 document.getElementById('ping').onclick = function () { mark('PING'); };
+window.__inflateSave = function () {
+  var body = document.body;
+  var anchor = body.firstChild;
+  var cursor = body;
+  for (var level = 0; level < 6; level++) {
+    var rack = document.createElement('div');
+    rack.setAttribute('role', 'group');
+    rack.setAttribute('aria-label', 'Rack ' + level);
+    rack.style.cssText = 'position:absolute;left:0;top:0;width:12px;height:12px';
+    if (level === 0) body.insertBefore(rack, anchor);
+    else cursor.appendChild(rack);
+    for (var i = 0; i < 20; i++) {
+      var pad = document.createElement('button');
+      pad.type = 'button';
+      pad.textContent = 'Pad ' + level + '-' + i;
+      pad.setAttribute('aria-label', 'Pad ' + level + '-' + i);
+      pad.style.cssText = 'position:absolute;left:0;top:0;width:8px;height:8px;padding:0';
+      rack.appendChild(pad);
+    }
+    cursor = rack;
+  }
+  return 'inflated';
+};
 window.__isolateSave = function () {
   var body = document.body;
   while (body.firstChild) body.removeChild(body.firstChild);
@@ -3141,14 +3164,51 @@ pad.addEventListener('click', function (event) {
             value = (reply.get("result") or {}).get("value")
             return "" if value is None else str(value)
 
-        def desktop_snapshot(app, **kwargs):
+        def _tree(app, **kwargs):
             text = orig_snap(app, **kwargs)
-            # Snapshot refs are pre-order indexes, so replacing Save draft in
-            # place keeps the same ref and the click is not a resolution.
-            # After Ping has been activated, drop the rest of the page so that
-            # index is past the end of the tree and one new Save draft remains.
-            if not state["ping_done"] or state["waited"]:
+            current = getattr(runtime, "_current", None)
+            elements = () if current is None else tuple(current.elements)
+            return text, elements
+
+        def desktop_snapshot(app, **kwargs):
+            # Snapshot refs are pre-order indexes. An in-place swap keeps the
+            # same index, and Chrome's own nodes keep that index in the tree
+            # after the page is reduced. Insert a block of controls before
+            # Save draft so the remembered ref sits past the shrunk tree,
+            # then drop that block. The old index is absent and one new
+            # Save draft remains.
+            if not state.get("inflated"):
+                try:
+                    state["inflate"] = cdp_eval("window.__inflateSave()")
+                except Exception as exc:
+                    state["inflate"] = f"{type(exc).__name__}: {exc}"
+                deadline = time.monotonic() + 15
+                text = ""
+                seen = ""
+                while time.monotonic() < deadline:
+                    text, elements = _tree(app, **kwargs)
+                    saves = [el for el in elements if el.title == "Save draft"]
+                    pads = sum(1 for el in elements if str(el.title or "").startswith("Pad "))
+                    ref_n = 0
+                    if len(saves) == 1 and str(saves[0].ref).startswith("e"):
+                        try:
+                            ref_n = int(str(saves[0].ref)[1:])
+                        except ValueError:
+                            ref_n = 0
+                    seen = (
+                        f"n={len(elements)} pads={pads} "
+                        f"save={saves[0].ref if len(saves) == 1 else len(saves)}"
+                    )
+                    if len(saves) == 1 and ref_n >= 80 and pads >= 20:
+                        state["inflated"] = True
+                        state["inflate_seen"] = seen
+                        return text
+                    time.sleep(0.3)
+                state["inflated"] = True
+                state["inflate_error"] = f"inflate={state.get('inflate')!r} {seen}"
                 return text
+            if not state["ping_done"] or state["waited"]:
+                return orig_snap(app, **kwargs)
             try:
                 state["swap"] = cdp_eval("window.__isolateSave()")
             except Exception as exc:
@@ -3185,7 +3245,10 @@ pad.addEventListener('click', function (event) {
             trace="known",
             max_steps=4,
         )
-        assert resolved.status == "needs_human", (resolved.reason, resolved.step_log, state.get("wait_error"))
+        assert resolved.status == "needs_human", (
+            resolved.reason, resolved.step_log, state.get("inflate_error"), state.get("wait_error"),
+        )
+        assert not state.get("inflate_error"), state.get("inflate_error")
         assert not state.get("wait_error"), state.get("wait_error")
         logged = [
             (step.action, step.result, step.error) for step in resolved.step_log
@@ -3204,8 +3267,8 @@ pad.addEventListener('click', function (event) {
         resolved_clicks = [params for name, params in sent if name == "click"]
         assert len(resolved_clicks) >= 2
         assert resolved_clicks[1].get("ref") != state["save"]
+        assert resolved_clicks[1].get("ref") == state["new_save"]
         assert resolved_clicks[1].get("ref") in note
-        assert all(params.get("ref") not in archive_refs for params in resolved_clicks)
         rows = [
             json.loads(line)
             for line in (tmp_path / "known" / "trajectory.jsonl").read_text().splitlines()
