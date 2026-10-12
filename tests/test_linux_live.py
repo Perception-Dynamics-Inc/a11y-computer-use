@@ -6134,7 +6134,8 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
     The rectangle and the ellipse each expose a paragraph. The role stays
     static text and the snapshot says edit. set_value replaces the rectangle
     through EditableText. type(ref) inserts into the ellipse. The shape
-    group is not an entry. A missing Draw binary fails the test.
+    group is in the snapshot and is not an entry: set_value on it is
+    not_editable. A missing Draw binary fails the test.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -6217,10 +6218,11 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
             (el for el in current.elements if el.role == "AXGroup" and el.title == "EllipseB"),
             None,
         )
-        if group is not None:
-            with pytest.raises(ComputerUseError) as group_exc:
-                runtime.set_value(group.ref, "NOPE")
-            assert group_exc.value.detail.get("reason") == "not_editable", group_exc.value
+        assert group is not None, observe.render_text(current)[:1600]
+        with pytest.raises(ComputerUseError) as group_exc:
+            runtime.set_value(group.ref, "NOPE")
+        assert group_exc.value.detail.get("reason") == "not_editable", group_exc.value
+        assert "not a number" not in str(group_exc.value)
         replaced = runtime.set_value(rect.ref, "RECT_SET")
         assert replaced.outcome == "confirmed", (replaced, replaced.evidence)
         assert "RECT_SET" in replaced.evidence
