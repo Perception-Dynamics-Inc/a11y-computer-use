@@ -421,6 +421,97 @@ def test_ewmh_window_list_is_exact_and_verbs_run(tmp_path, monkeypatch) -> None:
             pass
 
 
+@requires_desktop
+def test_window_move_accepts_a_title_bar_point_and_rejects_bad_coordinates(tmp_path, monkeypatch) -> None:
+    """A client origin inside the title bar used to raise OverflowError.
+
+    The move stays that client point. A negative, a float, a bool, or a
+    pixel past the screen edge is ValueError and the window is not moved.
+    The last on-screen pixel is width-1 and height-1, the same bound as a click.
+    """
+    from Xlib import X, display
+
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    dpy = display.Display()
+    screen = dpy.screen()
+    win = screen.root.create_window(
+        40, 60, 180, 90, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
+        background_pixel=screen.white_pixel, event_mask=0,
+    )
+    win.set_wm_name("a11y-move")
+    win.set_wm_class("a11ymove", "A11yMove")
+    win.map()
+    dpy.flush()
+    driver = LinuxDriver()
+
+    def row():
+        return next((item for item in driver.windows() if item["window_id"] == win.id), None)
+
+    try:
+        found = _until(row)
+        assert found is not None and found["app"] == "a11ymove", found
+        shown = driver.displays()
+        assert shown[0].width == screen.width_in_pixels
+        assert shown[0].height == screen.height_in_pixels
+        width, height = shown[0].width, shown[0].height
+        store = safety.PermissionStore(tmp_path / "p.json")
+        store.set_tier("a11ymove", safety.Tier.CLICK)
+        rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+
+        rt.window("move", window_id=win.id, x=120, y=90)
+        moved = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["x"] - 120) < 48 and abs(current["bounds"]["y"] - 90) < 48
+        ) and current)
+        assert moved, row()
+
+        rt.window("move", window_id=win.id, x=18, y=12)
+        parked = _until(lambda: (current := row()) and current.get("bounds") and (
+            abs(current["bounds"]["x"] - 18) < 48 and abs(current["bounds"]["y"] - 12) < 48
+        ) and current)
+        assert parked, row()
+
+        for kwargs in (
+            {"x": -1, "y": 12},
+            {"x": width, "y": 12},
+            {"x": 18, "y": height},
+            {"x": 10.2, "y": 12},
+            {"x": True, "y": 12},
+        ):
+            before = dict(row()["bounds"])
+            with pytest.raises(ValueError) as exc:
+                rt.window("move", window_id=win.id, **kwargs)
+            text = str(exc.value)
+            assert "OverflowError" not in text
+            assert "internal_error" not in text
+            if "x" in kwargs and kwargs["x"] == width:
+                assert f"valid x is 0..{width - 1}" in text
+                assert f"valid x is 0..{width}" not in text
+            if kwargs.get("y") == height:
+                assert f"y is 0..{height - 1}" in text
+                assert f"y is 0..{height}" not in text
+            again = row()
+            assert again["bounds"]["x"] == before["x"] and again["bounds"]["y"] == before["y"]
+
+        driver.move_window(win.id, 18, 12)
+        held = dict(row()["bounds"])
+        with pytest.raises(ValueError, match="window move"):
+            driver.move_window(win.id, -1, 12)
+        with pytest.raises(ValueError, match=rf"valid x is 0\.\.{width - 1}") as exc:
+            driver.move_window(win.id, width, 12)
+        assert f"valid x is 0..{width}" not in str(exc.value)
+        stayed = row()
+        assert stayed["bounds"]["x"] == held["x"] and stayed["bounds"]["y"] == held["y"]
+        assert abs(held["x"] - 18) < 48 and abs(held["y"] - 12) < 48
+    finally:
+        try:
+            dpy.close()
+        except Exception:
+            pass
+
+
 _HOLDER_SRC = r"""
 import os
 import time

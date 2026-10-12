@@ -992,6 +992,92 @@ def client_origin_for_outer_frame(
         return None
 
 
+# Signed 32-bit range of an EWMH move coordinate. The client-message field
+# is CARD32 on the wire; values outside this range are not a position.
+_INT32_MIN = -1 << 31
+_INT32_MAX = (1 << 31) - 1
+
+
+def _screen_pixels(d) -> tuple[int, int] | None:
+    """(width, height) of this X screen, or None when it publishes none.
+
+    A synthetic display has no ``width_in_pixels``. That absence is not a
+    1280x800 guess, and it is not a reason to widen the range.
+    """
+    try:
+        screen = d.screen()
+        width = screen.width_in_pixels
+        height = screen.height_in_pixels
+    except Exception:
+        return None
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None
+    if width < 1 or height < 1:
+        return None
+    return width, height
+
+
+def _move_integers(x: object, y: object) -> tuple[int, int]:
+    """``(x, y)`` when both are integers. A bool is not an integer.
+
+    A float is not truncated. Truncating would place the window somewhere
+    other than the coordinate the caller passed.
+    """
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+        raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+    return x, y
+
+
+def _reject_move_point(x: object, y: object, size: tuple[int, int] | None) -> tuple[int, int]:
+    """The client origin, or ValueError when it is not a pixel we can place.
+
+    With a screen size, valid pixels are 0..width-1 and 0..height-1, the
+    same range as a click. Without one, the point has to be a non-negative
+    signed 32-bit coordinate. Nothing is clamped into range.
+    """
+    px, py = _move_integers(x, y)
+    if size is None:
+        if px < 0 or py < 0 or px > _INT32_MAX or py > _INT32_MAX:
+            raise ValueError(
+                f"window move ({px}, {py}) is outside the signed screen range "
+                f"(valid x and y are 0..{_INT32_MAX})"
+            )
+        return px, py
+    width, height = size
+    if 0 <= px <= width - 1 and 0 <= py <= height - 1:
+        return px, py
+    raise ValueError(
+        f"window move ({px}, {py}) is outside the screen "
+        f"({width}x{height} physical px; "
+        f"valid x is 0..{width - 1}, y is 0..{height - 1})"
+    )
+
+
+def _card32(value: int) -> int:
+    """CARD32 wire form of a signed frame coordinate.
+
+    python-xlib packs client-message data with an unsigned array, which
+    raises ``OverflowError: can't convert negative value to unsigned int``
+    for a negative. EWMH reads the field as signed. The two's-complement
+    bits are that same coordinate, not a clamp to zero. A value outside
+    signed 32-bit is rejected and no message is sent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"window move coordinate must be an integer, got {value!r}")
+    if value < _INT32_MIN or value > _INT32_MAX:
+        raise ValueError(
+            f"window move coordinate {value} is outside the signed 32-bit range"
+        )
+    if value < 0:
+        return value + (1 << 32)
+    return value
+
+
 def move_window(window_id: int, x: int, y: int) -> bool:
     """Move the client window of ``window_id`` so its top-left is (x, y).
 
@@ -999,25 +1085,40 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     with NorthWest gravity places the outer frame, so the request is shifted
     back by ``_NET_FRAME_EXTENTS`` (left, top). A move to (100, 80) with a
     5px border and a 29px title bar sends the frame to (95, 51), and the
-    client then lists at (100, 80). Only the X and Y flags are set, so the
-    window manager keeps the current size. The request is sent again, with
-    fresh frame extents, until the client origin is that point. Returns
-    False when the id is not managed.
+    client then lists at (100, 80). A point inside the title bar makes the
+    frame origin negative. That signed coordinate is sent as a CARD32; it
+    is not clamped to zero, and the client origin stays the one asked for.
+    Only the X and Y flags are set, so the window manager keeps the current
+    size. The request is sent again, with fresh frame extents, until the
+    client origin is that point.
+
+    ``x`` and ``y`` have to be integers. When the display reports a size
+    they also have to be on that screen (0..width-1 and 0..height-1). A
+    float, a bool, a negative, or a point past that edge raises ValueError
+    and sends nothing. Returns False when the id is not managed.
     """
+    _reject_move_point(x, y, None)
     with _with_window(window_id) as (d, win):
+        px, py = _reject_move_point(x, y, _screen_pixels(d))
         if win is None:
             return False
 
         def send() -> None:
-            _restore_if_hidden(d, win)
             left, top = _frame_insets(win, d)
             # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-            _client_message(
-                d, win, "_NET_MOVERESIZE_WINDOW",
-                [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
-            )
+            # Validate the frame origin before any client message, including
+            # the uniconify a hidden window would otherwise receive.
+            data = [
+                1 | (3 << 8),
+                _card32(px - left),
+                _card32(py - top),
+                0,
+                0,
+            ]
+            _restore_if_hidden(d, win)
+            _client_message(d, win, "_NET_MOVERESIZE_WINDOW", data)
 
-        _retry_until(d, send, lambda: _geometry_matches(win, d, x=x, y=y))
+        _retry_until(d, send, lambda: _geometry_matches(win, d, x=px, y=py))
         return True
 
 

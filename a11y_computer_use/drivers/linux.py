@@ -3928,7 +3928,10 @@ class LinuxDriver:
 
         The same origin ``windows`` reports. The outer frame is shifted by
         ``_NET_FRAME_EXTENTS`` so a decorated window does not list a few
-        pixels down and to the right of the point that was asked for.
+        pixels down and to the right of the point that was asked for. A
+        frame origin above or left of the screen is sent as a signed
+        coordinate. A float, a bool, a negative, or a point outside the
+        screen raises ValueError and the window is not moved.
         """
         self._ewmh(window_id, "move_window", lambda sys: sys.move_window(window_id, x, y))
 

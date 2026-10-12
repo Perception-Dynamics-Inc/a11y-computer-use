@@ -3239,6 +3239,32 @@ class Runtime:
             return
         self._display_named(display_id)
 
+    def _require_window_move_point(self, x: object, y: object) -> tuple[int, int]:
+        """Reject a move coordinate before any window lookup or client message.
+
+        ``x`` and ``y`` are integers. A bool is not an integer here, and a
+        float is not truncated: truncating would move the window to a
+        different point. When the driver can name display 0, the point has
+        to be one of its pixels (0..width-1, 0..height-1), the same range
+        as click. Otherwise it has to be a non-negative signed 32-bit
+        value. The window is not moved, and the coordinate is not clamped.
+        """
+        if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+            raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+        display = self._display_named(0)
+        if display is None:
+            limit = (1 << 31) - 1
+            if x < 0 or y < 0 or x > limit or y > limit:
+                raise ValueError(
+                    f"window move ({x}, {y}) is outside the signed screen range "
+                    f"(valid x and y are 0..{limit})"
+                )
+            return x, y
+        detail = point_outside_display(x, y, display, where="window move")
+        if detail is not None:
+            raise ValueError(detail)
+        return x, y
+
     def _require_point(self, x: object, y: object, display_id: int | None, *, where: str = "point") -> None:
         """Reject a coordinate outside the target display before any input."""
         display = self._display_named(display_id)
@@ -7465,6 +7491,10 @@ class Runtime:
             raise ValueError("window resize requires width and height")
         if verb is WindowVerb.RESIZE and (int(width) < 1 or int(height) < 1):
             raise ValueError("window resize requires a positive width and height")
+        if verb is WindowVerb.MOVE:
+            # Before the owner lookup and the grant: a bad coordinate is not
+            # an audited move, and it is not clamped onto the screen.
+            x, y = self._require_window_move_point(x, y)
         # The owner is the grant key. An empty name is not a grant target:
         # asking the user to grant "" is the bug this rejects.
         owner = self.driver.window_owner(int(window_id))
@@ -7480,14 +7510,14 @@ class Runtime:
                     "hint": "There is no app name for this window, so there is nothing to grant.",
                 },
             )
-        position = Point(display_id=0, x=int(x), y=int(y)) if verb is WindowVerb.MOVE else None
+        position = Point(display_id=0, x=x, y=y) if verb is WindowVerb.MOVE else None
         size = (int(width), int(height)) if verb is WindowVerb.RESIZE else None
         op = WindowOp(verb=verb, window_id=int(window_id), position=position, size=size)
 
         def act() -> None:
             self._guard_user(owner_name)
             if verb is WindowVerb.MOVE:
-                method(int(window_id), int(x), int(y))
+                method(int(window_id), x, y)
             elif verb is WindowVerb.RESIZE:
                 method(int(window_id), int(width), int(height))
             else:
@@ -7495,7 +7525,7 @@ class Runtime:
 
         self._run_gated(op, owner_name, act)
         if verb is WindowVerb.MOVE:
-            text = f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
+            text = f"moved window {window_id} to ({x}, {y}) ({owner_name})"
         elif verb is WindowVerb.RESIZE:
             text = f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
         else:
@@ -8761,7 +8791,12 @@ def build_server(
         not the outer frame. A move to (100, 80) lists the client at
         (100, 80). raise, focus, minimize, maximize, move, resize, and close
         are gated at tier 'click' against the owning app, the same grant as
-        raise. move requires x and y; resize requires width and height. On
+        raise. move requires x and y, both integers on the display
+        (0..width-1 and 0..height-1, the same pixels as click). A float, a
+        bool, a negative, or a point past that edge is invalid_arguments
+        and the window is not moved; the coordinate is not clamped. A point
+        inside the title bar is still that point: the frame origin is sent
+        as a signed coordinate. resize requires width and height. On
         Linux X11 those verbs send EWMH or ICCCM client messages. A backend
         that cannot perform a verb returns unsupported and names the platform.
         A window whose owner cannot be identified returns unsupported with
