@@ -2569,6 +2569,49 @@ class LinuxDriver:
 
         return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
 
+    def supports_in_page_find(self, app: str) -> bool:
+        """True when Ctrl+F opens a find bar in ``app``.
+
+        Chromium and Firefox do. Java Swing, GTK, and Qt do not. False when
+        the tree cannot be read, so ``scroll_to_find`` does not type the query
+        into whichever cell already has the caret.
+        """
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Scope
+
+        def probe() -> bool:
+            root = _atspi.find_root(app, Scope.WINDOW)
+            return _atspi.app_supports_in_page_find(root)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
+
+    def find_bar_focused(self, app: str) -> bool:
+        """True when keyboard focus is in the browser find field.
+
+        One focused-node read, not a page snapshot. An open find bar fills
+        libatspi's child cache, and a snapshot of it is the empty frame
+        ``scroll_to_find`` must not wheel. False when focus is a table cell,
+        a page input, or unknown.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def probe() -> bool:
+            try:
+                acc, truncated = _atspi._focused_node(app, max_nodes=48)
+            except Exception:
+                return False
+            if truncated or acc is None:
+                return False
+            return _atspi.focused_find_field(acc)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
+
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
                dry_run: bool = False) -> object:

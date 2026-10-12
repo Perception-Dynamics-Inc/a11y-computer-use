@@ -5033,6 +5033,60 @@ _BROWSER_BAR_CLEARED: set[int] = set()
 _BROWSER_BAR_OPEN: set[int] = set()
 
 
+_FIND_ENTRY_ROLES = frozenset({
+    "text", "entry", "password text", "edit bar", "paragraph",
+})
+
+
+def focused_find_field(acc) -> bool:
+    """True when ``acc`` is a browser find field, not a page control or a cell.
+
+    Chrome names that field ``Find`` and gives it an entry role with no HTML
+    tag. A page input titled Find has a tag. A push button titled Find, a
+    table cell, and a Swing editor are not this field. A find-in-page frame
+    that itself holds focus counts too.
+    """
+    if acc is None:
+        return False
+    try:
+        name = _node_name(acc) or ""
+    except Exception:
+        return False
+    folded = name.lstrip().lower()
+    if folded.startswith("find in page"):
+        return True
+    if name != "Find":
+        return False
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        attrs = {}
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip()
+    if tag:
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role in {"push button", "toggle button", "link", "menu item", "table cell", "cell"}:
+        return False
+    return role in _FIND_ENTRY_ROLES or role == "entry" or "text" in role
+
+
+def app_supports_in_page_find(root) -> bool:
+    """True for Chromium and Firefox, which open a find bar on Ctrl+F.
+
+    Java, Swing, GTK, Qt, and a tree with no toolkit are false. A failed
+    read is false, so the caller does not type into a table cell.
+    """
+    if root is None:
+        return False
+    try:
+        return bool(_chromium_app(root) or _gecko_app(root))
+    except Exception:
+        return False
+
+
 def snapshot_shows_browser_bar(elements) -> bool:
     """True when a snapshot still contains the find bar or an omnibox popup.
 
