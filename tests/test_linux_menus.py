@@ -210,7 +210,9 @@ def libreoffice():
     slide = Acc("menu", "Slide", [new_slide], states=("sensitive", "enabled"), actions=("",))
     uppercase = _item("UPPERCASE")
     text = Acc("menu", "Text", [uppercase], states=("sensitive", "enabled"), actions=("",))
-    fmt = Acc("menu", "Format", [text], states=("sensitive", "enabled"), actions=("",))
+    # A sibling item keeps Text from being read as Format's sole popup.
+    bold = _item("Bold")
+    fmt = Acc("menu", "Format", [bold, text], states=("sensitive", "enabled"), actions=("",))
     bar = Acc("menu bar", "", [view, slide, fmt])
     frame = Acc("frame", "Untitled 1 - LibreOffice Impress", [bar], states={"active"})
     app = Acc("application", "soffice", [frame])
