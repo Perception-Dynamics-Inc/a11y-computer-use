@@ -1156,6 +1156,11 @@ class LinuxDriver:
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
+        # Impress or Draw frame text from before a type, and whether that
+        # frame could be read. The outcome judge consumes these once.
+        self._drawing_type_before: str | None = None
+        self._drawing_type_state: str | None = None
+        self._type_unverified: bool = False
         # The last editable element focused via press_element — type_text enters
         # text into it through AT-SPI EditableText (deterministic; see type_text).
         self._focused_editable = None
@@ -2700,6 +2705,9 @@ class LinuxDriver:
         self._chooser_readback = None
         self._type_expected = None
         self._sheet_type_origin = None
+        self._drawing_type_before = None
+        self._drawing_type_state = None
+        self._type_unverified = False
         text = text.replace("\r\n", "\n")
         from a11y_computer_use.drivers import _atspi
 
@@ -2742,6 +2750,21 @@ class LinuxDriver:
             # Tab and Return leave the cell. insertText would keep the grid
             # in this cell, and the read-back would only see that cell.
             handle = None
+        if (
+            handle is not None
+            and "\n" in text
+            and self._run(lambda: _atspi.is_drawing_text_paragraph(handle))
+        ):
+            # Return starts the next paragraph in an Impress or Draw frame.
+            # insertText of the newline stays in this paragraph and drops the
+            # rest. The keys already do that split. The frame's paragraphs
+            # are the read-back.
+            handle = None
+        if app_id and _atspi.libreoffice_app(app_id):
+            status, shown = self._run(lambda: _atspi.drawing_focus_text(app_id))
+            if status != "skip":
+                self._drawing_type_state = status
+                self._drawing_type_before = "" if shown is None else shown
         if handle is not None:
             try:
                 inserted = self._run(lambda: _atspi.insert_text(handle, text))
@@ -2911,6 +2934,27 @@ class LinuxDriver:
                         expected=text,
                         actual=self._run(lambda: _atspi.writer_type_readback(writer)),
                     )
+        if self._drawing_type_state not in (None, "skip"):
+            status, shown = self._run(
+                lambda: _atspi.poll_drawing_type(app_id, self._drawing_type_before, text)
+            )
+            self._drawing_type_state = status
+            if status == "text" and _atspi.drawing_typed_visible(
+                self._drawing_type_before, shown, text,
+            ):
+                return len(text)
+            if status == "unreadable":
+                # The container's empty text is not the frame. Reporting it
+                # as a mismatch makes the caller type the same string again.
+                self._type_unverified = True
+                return len(text)
+            if status == "text":
+                raise _atspi._text_mismatch(
+                    "text_mismatch",
+                    f"the text read back does not contain {text!r}",
+                    expected=text,
+                    actual=shown,
+                )
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)

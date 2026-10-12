@@ -5118,6 +5118,94 @@ def test_linux_calc_grid_type_reads_every_cell(tmp_path) -> None:
         _kill_libreoffice()
 
 
+def _impress_subtitle_point(root) -> tuple[int, int] | None:
+    """Screen centre of the body text frame, or None while the slide is loading."""
+    from a11y_computer_use.drivers import _atspi
+
+    stack = [root]
+    seen = 0
+    while stack and seen < 400:
+        node = stack.pop(0)
+        seen += 1
+        role = _atspi._role_name(node)
+        if role in {"menu", "menu bar", "menu item", "popup menu", "tool bar"}:
+            continue
+        if role == "panel" and _atspi._node_name(node) == "PresentationSubtitle":
+            pos, size = _atspi._extents(node)
+            if pos and size and size[0] > 0 and size[1] > 0:
+                return int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2)
+        count = int(_atspi._child_count(node) or 0)
+        for index in range(min(count, 20)):
+            child = _atspi._child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return None
+
+
+def test_linux_impress_frame_type_confirms_multiline(tmp_path) -> None:
+    """Click into an Impress text frame and type two lines.
+
+    The focused presentation container has no text of its own. The paragraphs
+    in the frame do. The type is confirmed. A missing Impress fails the test.
+    """
+    from a11y_computer_use.drivers import _atspi
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    found = subprocess.run(["bash", "-lc", "command -v soffice"], capture_output=True, text=True)
+    binary = found.stdout.strip()
+    assert binary, "libreoffice-impress is not installed"
+    template = "/usr/lib/libreoffice/share/template/common/presnt/Lights.otp"
+    assert os.path.isfile(template), "libreoffice-impress did not install a presentation template"
+    _kill_libreoffice()
+    time.sleep(0.4)
+    profile = tmp_path / "lo-impress"
+    (profile / "user").mkdir(parents=True)
+    (profile / "user" / "registrymodifications.xcu").write_text(_LO_REGISTRY)
+    env = os.environ.copy()
+    env["SAL_USE_VCLPLUGIN"] = "gtk3"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [
+            binary, "--impress", "--nologo", "--norestore", "--nolockcheck",
+            f"-env:UserInstallation=file://{profile}", template,
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 90
+        point = None
+        while time.monotonic() < deadline:
+            try:
+                root = _atspi.find_root("soffice", Scope.WINDOW)
+            except Exception:
+                root = None
+            if root is not None:
+                point = _impress_subtitle_point(root)
+                if point is not None:
+                    break
+            time.sleep(0.4)
+        assert point is not None, "Impress did not expose a text frame"
+        driver.activate_app("soffice")
+        runtime = _runtime_for(
+            tmp_path, driver, "soffice", "soffice.bin", "libreoffice", "LibreOffice",
+        )
+        runtime.desktop_snapshot("soffice")
+        x, y = point
+        runtime.click(x=x, y=y)
+        time.sleep(0.4)
+        typed = runtime.type_text("North\nSouth")
+        assert typed.outcome == "confirmed", (typed.outcome, typed.evidence)
+        assert "North" in typed.evidence and "South" in typed.evidence
+        assert "text_mismatch" not in str(typed)
+    finally:
+        _stop_group(proc)
+        _kill_libreoffice()
+
+
 def test_linux_calc_range_formula_and_normalised_numbers_confirm(tmp_path) -> None:
     """Live Calc. A range formula and a normalised number are not mismatches.
 
