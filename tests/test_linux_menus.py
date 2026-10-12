@@ -309,6 +309,180 @@ def test_active_frame_menu_bar_wins() -> None:
     assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File"]
 
 
+class _Fresh:
+    """A new proxy on every ``get_child_at_index``, as PyGObject does.
+
+    The previous wrapper is collected when the walk drops it. On CPython the
+    next proxy can be allocated at that same ``id()``.
+    """
+
+    __slots__ = ("role", "name", "states", "spec", "actions", "key", "pressed", "log")
+
+    def __init__(self, role, name, spec=(), states=(), log=None):
+        self.role = role
+        self.name = name
+        self.spec = tuple(spec)
+        self.states = set(states)
+        self.actions = ["click"]
+        self.key = ""
+        self.pressed = []
+        self.log = [] if log is None else log
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_child_count(self):
+        return len(self.spec)
+
+    def get_child_at_index(self, index):
+        role, name, spec, states = self.spec[index]
+        return _Fresh(role, name, spec, states, self.log)
+
+    def get_action_iface(self):
+        return self
+
+    def get_n_actions(self):
+        return 1
+
+    def get_action_name(self, index):
+        return "click"
+
+    def get_key_binding(self, index):
+        return ""
+
+    def do_action(self, index):
+        self.log.append(self.name)
+        return True
+
+
+def _spec(role, name, children=(), states=()):
+    return (role, name, tuple(children), tuple(states))
+
+
+def _writer_app():
+    """Writer's bar sits under panels, beside a toolbar that allocates leaves.
+
+    An idle frame publishes a different bar first. The search has to keep
+    going and then prefer the ACTIVE frame.
+    """
+    upper = _spec("menu item", "UPPERCASE", states=("sensitive", "enabled"))
+    text = _spec("menu", "Text", (upper,), ("sensitive", "enabled"))
+    bold = _spec("menu item", "Bold", states=("sensitive", "enabled"))
+    fmt = _spec("menu", "Format", (bold, text), ("sensitive", "enabled"))
+    new = _spec("menu item", "New", states=("sensitive", "enabled"))
+    file_menu = _spec("menu", "File", (new,), ("sensitive", "enabled"))
+    bar = _spec("menu bar", "", (file_menu, fmt))
+    root_pane = _spec("root pane", "", (bar,))
+    panel_b = _spec("panel", "", (root_pane,))
+    panel_a = _spec("panel", "", (panel_b,))
+    leaves = tuple(_spec("push button", f"b{i}", states=("sensitive",)) for i in range(40))
+    toolbar = _spec("panel", "toolbar", leaves)
+    writer = _spec("frame", "Untitled 1 - LibreOffice Writer", (toolbar, panel_a), ("active",))
+    about = _spec("menu item", "About", states=("sensitive", "enabled"))
+    help_menu = _spec("menu", "Help", (about,), ("sensitive", "enabled"))
+    idle_bar = _spec("menu bar", "", (help_menu,))
+    idle = _spec("frame", "other", (idle_bar,))
+    log: list[str] = []
+    return _Fresh("application", "soffice", (idle, writer), log=log), log
+
+
+def test_recycled_proxy_ids_still_operate_the_writer_menu_bar() -> None:
+    """LibreOffice Writer's menu bar is below a toolbar of leaf buttons.
+
+    Each ``get_child_at_index`` builds a new proxy. After a leaf is
+    processed nothing else references it, so it is collected and its
+    ``id()`` is reused for the root pane that owns the menu bar. A seen-set
+    of those ids skips the root pane and reports that Writer has no menu
+    bar, even though an idle frame's bar was found. ``menu`` has to list
+    File and Format and press Format > Text > UPPERCASE.
+    """
+    for _ in range(20):
+        app, log = _writer_app()
+        assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File", "Format"]
+        assert _linux_menus.menu_press(app, "Format > Text > UPPERCASE", settle=lambda _s: None) == "UPPERCASE"
+        assert log == ["Format", "Text", "UPPERCASE"]
+
+
+def test_same_bus_path_is_not_a_new_node(monkeypatch) -> None:
+    """Two live wrappers of one accessible share a bus name and object path.
+
+    Their ``id()`` values differ, because both wrappers are still alive.
+    A panel that reports eighty copies of itself would otherwise fill the
+    400-node cap before the menu bar further down the frame is reached.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: node.atspi_key)
+
+    class Node:
+        __slots__ = ("kind", "role", "name", "states", "atspi_key", "actions", "key")
+
+        def __init__(self, kind, role, name, atspi_key, states=()):
+            self.kind = kind
+            self.role = role
+            self.name = name
+            self.atspi_key = atspi_key
+            self.states = set(states)
+            self.actions = ["click"]
+            self.key = ""
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_child_count(self):
+            if self.kind == "cycle":
+                return 80
+            if self.kind in {"app", "down", "bar", "menu"}:
+                return 1
+            if self.kind == "frame":
+                return 2
+            return 0
+
+        def get_child_at_index(self, index):
+            if self.kind == "cycle":
+                return Node("cycle", "panel", "cycle", (":1.9", "/cycle"))
+            if self.kind == "app":
+                return Node("frame", "frame", "Writer", (":1.9", "/frame"), ("active",))
+            if self.kind == "frame":
+                if index == 0:
+                    return Node("cycle", "panel", "cycle", (":1.9", "/cycle"))
+                return Node("down", "panel", "down", (":1.9", "/d0"))
+            if self.kind == "down":
+                depth = int(self.atspi_key[1][2:])
+                if depth >= 8:
+                    return Node("bar", "menu bar", "", (":1.9", "/bar"))
+                return Node("down", "panel", "down", (":1.9", f"/d{depth + 1}"))
+            if self.kind == "bar":
+                return Node("menu", "menu", "File", (":1.9", "/file"), ("sensitive", "enabled"))
+            if self.kind == "menu":
+                return Node("item", "menu item", "New", (":1.9", "/new"), ("sensitive", "enabled"))
+            raise IndexError(index)
+
+        def get_action_iface(self):
+            return self
+
+        def get_n_actions(self):
+            return 1
+
+        def get_action_name(self, _index):
+            return "click"
+
+        def get_key_binding(self, _index):
+            return ""
+
+        def do_action(self, _index):
+            return True
+
+    app = Node("app", "application", "soffice", (":1.9", "/app"))
+    assert [row["title"] for row in _linux_menus.menu_items(app, None)] == ["File"]
+
+
 def test_listing_a_leaf_does_not_activate_it() -> None:
     app, file_menu = mousepad()
     with pytest.raises(ComputerUseError) as exc:

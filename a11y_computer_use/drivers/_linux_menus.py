@@ -314,20 +314,51 @@ def _press(node: object) -> bool:
         return False
 
 
+def _node_key(node: object) -> object:
+    """Identity of one accessible across recreated Python wrappers.
+
+    The AT-SPI bus name and object path when both are on the GObject.
+    Otherwise ``id()`` of this wrapper. A collected wrapper's ``id()`` can
+    be reused for a different accessible, so a walk that falls back to
+    ``id()`` has to keep every wrapper alive until it finishes.
+    """
+    from a11y_computer_use.drivers._atspi import _atspi_wrapper_key
+
+    stable = _atspi_wrapper_key(node)
+    if stable is not None:
+        return stable
+    return id(node)
+
+
 def find_menu_bar(root: object) -> object | None:
-    """The menu bar under ``root``, preferring one inside an ACTIVE frame."""
+    """The menu bar under ``root``, preferring one inside an ACTIVE frame.
+
+    ``get_child_at_index`` returns a new proxy. The proxy is reachable only
+    from this walk, so a leaf that has already been processed can be
+    collected before a later node is created. CPython then reuses the leaf's
+    ``id()``. A seen-set of those ids skips the new node. LibreOffice Writer
+    publishes the bar at ``application > frame > panel > panel > root pane >
+    menu bar``. The root pane is created after toolbar leaves have been
+    collected, the skip drops it, and the bar is never reached.
+
+    Visited proxies stay referenced for the whole search, and the seen-set
+    and parent links use `_node_key` rather than a bare ``id()``.
+    """
     if root is None:
         return None
     if _role(root) == "menu bar":
         return root
     found: list[object] = []
-    parent: dict[int, object] = {}
+    parent: dict[object, object] = {}
+    # Keep every proxy alive. Dropping one lets its id be reused for a node
+    # that has not been walked; the seen-set would then skip that node.
+    pinned: list[object] = [root]
     queue = [root]
-    seen: set[int] = set()
+    seen: set[object] = set()
     walked = 0
     while queue and walked < 400:
         node = queue.pop(0)
-        identity = id(node)
+        identity = _node_key(node)
         if identity in seen:
             continue
         seen.add(identity)
@@ -336,17 +367,23 @@ def find_menu_bar(root: object) -> object | None:
             found.append(node)
             continue
         for child in _raw_children(node)[:80]:
-            parent[id(child)] = node
+            pinned.append(child)
+            parent[_node_key(child)] = node
             queue.append(child)
     if not found:
         return None
 
     def in_active(node: object) -> bool:
         current: object | None = node
-        while current is not None:
+        guard: set[object] = set()
+        while current is not None and len(guard) < 64:
             if _has_state(current, "ACTIVE"):
                 return True
-            current = parent.get(id(current))
+            key = _node_key(current)
+            if key in guard:
+                return False
+            guard.add(key)
+            current = parent.get(key)
         return False
 
     for bar in found:

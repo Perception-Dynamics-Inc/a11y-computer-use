@@ -2729,6 +2729,60 @@ def _atspi_object_path(acc) -> str | None:
         return None
 
 
+def _atspi_wrapper_key(acc) -> tuple[str, str] | None:
+    """``(bus_name, object_path)`` for one libatspi accessible, else None.
+
+    ``get_child_at_index`` can return a new Python wrapper after the previous
+    one is collected, and CPython can reuse that wrapper's ``id()``. The bus
+    name and object path stay on the C object. This does not call D-Bus. A
+    test double has no gpointer. An object whose unique bus name cannot be
+    read is None, so the caller does not treat two applications that happen
+    to publish the same path as one node.
+    """
+    pointer = _gobject_pointer(acc)
+    if not pointer:
+        return None
+    try:
+        import ctypes
+    except Exception:
+        return None
+
+    class _GObject(ctypes.Structure):
+        _fields_ = [
+            ("g_class", ctypes.c_void_p),
+            ("ref_count", ctypes.c_uint),
+            ("pad", ctypes.c_uint),
+            ("qdata", ctypes.c_void_p),
+        ]
+
+    class _AtspiObject(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("app", ctypes.c_void_p),
+            ("path", ctypes.c_char_p),
+        ]
+
+    class _AtspiApplication(ctypes.Structure):
+        _fields_ = [
+            ("parent", _GObject),
+            ("hash", ctypes.c_void_p),
+            ("bus_name", ctypes.c_char_p),
+            ("bus", ctypes.c_void_p),
+        ]
+
+    try:
+        obj = _AtspiObject.from_address(pointer)
+        raw_path = obj.path or b""
+        if not raw_path.startswith(b"/org/a11y/atspi/") or not obj.app:
+            return None
+        raw_bus = _AtspiApplication.from_address(obj.app).bus_name or b""
+        if not raw_bus.startswith(b":"):
+            return None
+        return (raw_bus.decode("utf-8", "replace"), raw_path.decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
 def _frame_cache_key(acc) -> object:
     """A stable key for one accessible across wrapper objects.
 
