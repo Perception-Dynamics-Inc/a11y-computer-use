@@ -126,6 +126,123 @@ def test_unmarked_tree_still_hides_the_buried_controls() -> None:
     assert reads < 500
 
 
+class _Proxy:
+    """A new object on every ``children`` call, as ``get_child_at_index`` does.
+
+    The walk used to record ``id()``. A collected static's id is reused for
+    the next group, and the scan then skips the button under it.
+    """
+
+    __slots__ = ("role", "title", "atspi_web", "kind", "index", "key", "__gpointer__")
+
+    def __init__(self, role, title, *, web="", kind="wrap", index=0, key=None, pointer=None):
+        self.role = role
+        self.title = title
+        self.atspi_web = web
+        self.kind = kind
+        self.index = index
+        self.key = key
+        self.__gpointer__ = pointer
+
+
+class _FreshAccessor:
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read(self, node: object) -> RawNode:
+        assert isinstance(node, _Proxy)
+        self.reads += 1
+        assert self.reads < 500, "the buried-control scan is not bounded"
+        actions = ("AXPress",) if node.role == "AXButton" else ()
+        size = (10.0, 10.0) if node.role == "AXStaticText" else (200.0, 80.0)
+        return RawNode(
+            role=node.role,
+            title=node.title,
+            position=(20.0, 40.0),
+            size=size,
+            actions=actions,
+            atspi_web=node.atspi_web,
+            editable=node.role == "AXTextArea",
+        )
+
+    def children(self, node: object):
+        assert isinstance(node, _Proxy)
+        if node.kind == "window":
+            return [_Proxy("AXGroup", "Form", web="page", kind="page")]
+        if node.kind == "page":
+            return [_Proxy("AXGroup", "L15", kind="level", index=15)]
+        if node.kind == "level":
+            kids = []
+            if node.index > 0:
+                kids.append(_Proxy("AXGroup", f"L{node.index - 1}", kind="level", index=node.index - 1))
+            else:
+                kids.append(_Proxy("AXButton", "General", kind="leaf"))
+                kids.append(_Proxy("AXTextArea", "Composer", kind="leaf"))
+            kids.append(_Proxy("AXStaticText", f"sib {node.index}", kind="leaf"))
+            return kids
+        if node.kind == "cycle":
+            return [
+                _Proxy("AXGroup", "Loop", kind="cycle", key=node.key, pointer=node.__gpointer__),
+                _Proxy("AXButton", "General", kind="leaf", key=("bus", "/general"), pointer=1),
+            ]
+        return []
+
+
+def test_recycled_proxy_ids_still_reach_the_buried_controls() -> None:
+    """Sixteen nested groups, a fresh proxy per child, controls at the bottom.
+
+    This is the Chromium shape: each level is a named group plus a static
+    sibling, and the button sits under the innermost group. ``id()`` of a
+    dropped static is reused for the next group. The button and the text
+    area still appear. The groups themselves stay elided.
+    """
+    accessor = _FreshAccessor()
+    snap = build_snapshot(
+        _Proxy("AXWindow", "Chrome", kind="window"),
+        accessor,
+        scope=Scope.WINDOW,
+        app="chrome",
+        pid=1,
+        geometry=_GEOMETRY,
+    )
+    titles = {el.title for el in snap.elements}
+    assert "General" in titles
+    assert "Composer" in titles
+    assert "L0" not in titles
+    assert "sib 0" not in titles
+    assert accessor.reads < 500
+
+
+def test_same_atspi_path_does_not_consume_the_scan(monkeypatch) -> None:
+    """Two wrappers of one accessible share a bus path and differ in ``id()``.
+
+    A group that returns a new wrapper of itself would otherwise spend the
+    whole scan budget. The sibling button is still read.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", lambda node: getattr(node, "key", None))
+    accessor = _FreshAccessor()
+    root = _Proxy("AXWindow", "Chrome", kind="window")
+    # Replace the page's child with the cycle once the walk asks for it.
+    page = _Proxy("AXGroup", "Form", web="page", kind="page")
+
+    def children(node):
+        if isinstance(node, _Proxy) and node.kind == "window":
+            return [page]
+        if node is page:
+            return [_Proxy("AXGroup", "Loop", kind="cycle", key=("bus", "/loop"), pointer=1)]
+        return _FreshAccessor.children(accessor, node)
+
+    accessor.children = children  # type: ignore[method-assign]
+    snap = build_snapshot(
+        root, accessor, scope=Scope.WINDOW, app="chrome", pid=1, geometry=_GEOMETRY,
+    )
+    titles = {el.title for el in snap.elements}
+    assert "General" in titles
+    assert accessor.reads < 40
+
+
 def test_web_scan_does_not_read_past_the_existing_budget() -> None:
     """The control past ``_MAX_WEB_FRAME_SCAN`` stays elided."""
     early = _ax("AXButton", "Early", actions=("AXPress",), size=(80.0, 24.0))

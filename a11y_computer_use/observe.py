@@ -1676,6 +1676,30 @@ def _prune_inner(
     )
 
 
+def _web_scan_identity(node: object) -> object:
+    """Identity of one node in the buried web scan.
+
+    ``get_child_at_index`` returns a new proxy. After a leaf is handled,
+    nothing else referenced it, so it was collected and CPython reused its
+    ``id()`` for a later control. A seen-set of those ids then skipped the
+    control (a settings button under a named group never reached
+    ``_prune_inner``). The AT-SPI bus name and object path stay on the C
+    object and do not call D-Bus. A synthetic node has no GObject pointer
+    and uses ``id()``. The scan also retains every proxy, so that fallback
+    cannot collide with a collected leaf.
+    """
+    if getattr(node, "__gpointer__", None) is not None:
+        try:
+            from a11y_computer_use.drivers._atspi import _atspi_wrapper_key
+
+            stable = _atspi_wrapper_key(node)
+        except Exception:
+            stable = None
+        if stable is not None:
+            return stable
+    return id(node)
+
+
 def _open_nested_frames(
     raw_children: Sequence[object],
     accessor: TreeAccessor,
@@ -1695,7 +1719,9 @@ def _open_nested_frames(
     button, field, link, or other control is kept at the cap, so a phone
     entry or a settings control under a named group is not dropped. The
     group itself is not kept. Static text stays elided. ``MAX_DEPTH`` and
-    ``web.scan_reads`` are not raised.
+    ``web.scan_reads`` are not raised. Proxies stay referenced for the
+    whole scan, and the seen-set uses `_web_scan_identity` rather than a
+    bare ``id()``.
     """
     kept: list[_PNode] = []
     elided = 0
@@ -1703,13 +1729,17 @@ def _open_nested_frames(
         (child, depth + 1, in_page, in_web) for child in raw_children[:_MAX_WALK_CHILDREN]
     ]
     elided += max(0, len(raw_children) - len(pending))
-    seen: set[int] = set()
+    # Keep every proxy alive. Dropping a leaf lets its id be reused for a
+    # control that has not been walked; the seen-set would then skip it.
+    pinned: list[object] = []
+    seen: set[object] = set()
     while pending and web.scan_reads > 0 and len(kept) < MAX_CHILDREN:
         child, child_depth, page, web_here = pending.pop(0)
+        pinned.append(child)
         if child_depth >= _MAX_RAW_DEPTH:
             elided += 1
             continue
-        marker = id(child)
+        marker = _web_scan_identity(child)
         if marker in seen:
             continue
         seen.add(marker)
@@ -1765,6 +1795,7 @@ def _open_nested_frames(
             next_page = page or kind in ("page", "iframe")
             next_web = web_here or kind in ("page", "docframe", "iframe")
             for kid in room:
+                pinned.append(kid)
                 pending.append((kid, child_depth + 1, next_page, next_web))
             continue
         elided += 1
