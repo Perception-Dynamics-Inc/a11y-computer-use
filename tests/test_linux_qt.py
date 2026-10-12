@@ -647,3 +647,79 @@ def test_gtk_combo_still_uses_its_own_selection(atspi, monkeypatch) -> None:
     assert clicks == []
     assert _read(combo).title == "Color"
     assert _read(combo).value == "Green"
+
+
+def test_unnamed_gtk_combo_takes_its_name_from_labelled_by_and_its_value_from_the_selection(atspi) -> None:
+    """An empty GTK combo name is the LABELLED_BY label, without the colon.
+
+    The value is the selected item. A selected item whose name is empty
+    contributes its text. A combo that already has a name keeps that name.
+    Qt still uses the label as the title and the accessible name as the value.
+    """
+    label = _Node("label", "Orientation:", toolkit="gtk")
+    landscape = _Node("menu item", "Landscape", toolkit="gtk")
+    portrait = _Node("menu item", "Portrait", states={"SELECTED"}, toolkit="gtk")
+    menu = _Node("menu", "", children=[landscape, portrait], toolkit="gtk")
+    combo = _Node(
+        "combo box", "", text="", toolkit="gtk",
+        states={"ENABLED", "SENSITIVE", "SHOWING", "VISIBLE"},
+        children=[menu],
+    )
+    combo.relations = [_Relation("LABELLED_BY", [label])]
+    raw = _read(combo)
+    assert raw.title == "Orientation"
+    assert raw.value == "Portrait"
+
+    blank = _Node("menu item", "", text="Landscape", states={"SELECTED"}, toolkit="gtk")
+    text_menu = _Node("menu", "", children=[blank], toolkit="gtk")
+    text_combo = _Node("combo box", "", text="", toolkit="gtk", children=[text_menu])
+    text_combo.relations = [_Relation("LABELLED_BY", [label])]
+    text_raw = _read(text_combo)
+    assert text_raw.title == "Orientation"
+    assert text_raw.value == "Landscape"
+
+    named_label = _Node("label", "Color:", toolkit="gtk")
+    red = _Node("menu item", "Red", states={"SELECTED"}, toolkit="gtk")
+    named = _Node("combo box", "Color", text="", toolkit="gtk", children=[red])
+    named.relations = [_Relation("LABELLED_BY", [named_label])]
+    named_raw = _read(named)
+    assert named_raw.title == "Color"
+    assert named_raw.value == "Red"
+
+
+def test_unnamed_gtk_combo_value_is_displayed_text_or_a_selected_cell(atspi) -> None:
+    """No selected menu item: the value is the text the combo shows.
+
+    A label under the combo is that text. A selected table cell is that
+    text when the popup is a tree. The caption is not the value.
+    """
+    caption = _Node("label", "Margin:", toolkit="gtk")
+    shown = _Node("label", "1.25 cm", toolkit="gtk")
+    combo = _Node(
+        "combo box", "", text="", toolkit="gtk",
+        children=[shown],
+    )
+    combo.relations = [_Relation("LABELLED_BY", [caption])]
+    raw = _read(combo)
+    assert raw.title == "Margin"
+    assert raw.value == "1.25 cm"
+
+    entry = _Node("text", "", text="Narrow", toolkit="gtk")
+    filler = _Node("filler", "", toolkit="gtk")
+    sibling = _Node("combo box", "", text="", toolkit="gtk")
+    filler.children = [entry, sibling]
+    entry.parent = filler
+    sibling.parent = filler
+    sibling.relations = [_Relation("LABELLED_BY", [_Node("label", "Format:", toolkit="gtk")])]
+    sibling_raw = _read(sibling)
+    assert sibling_raw.title == "Format"
+    assert sibling_raw.value == "Narrow"
+
+    cell = _Node("table cell", "Portrait", states={"SELECTED"}, toolkit="gtk")
+    other = _Node("table cell", "Landscape", toolkit="gtk")
+    table = _Node("table", "", children=[other, cell], toolkit="gtk")
+    tree_combo = _Node("combo box", "", text="", toolkit="gtk", children=[table])
+    tree_combo.relations = [_Relation("LABELLED_BY", [_Node("label", "Orientation:", toolkit="gtk")])]
+    tree_raw = _read(tree_combo)
+    assert tree_raw.title == "Orientation"
+    assert tree_raw.value == "Portrait"

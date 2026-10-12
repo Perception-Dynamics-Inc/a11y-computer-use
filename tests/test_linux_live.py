@@ -2061,6 +2061,130 @@ def test_linux_gtk_combo_popup_lists_options_under_the_combo(tmp_path) -> None:
         _stop_group(proc)
 
 
+_GTK_LABELLED_COMBO = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Atk", "1.0")
+    from gi.repository import Gtk, GLib, Atk
+    GLib.set_prgname("cucombo377")
+    win = Gtk.Window(title="cucombo377")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+    orient_label = Gtk.Label(label="Orientation:", xalign=0)
+    orient = Gtk.ComboBoxText.new()
+    for name in ("Landscape", "Portrait"):
+        orient.append_text(name)
+    orient.set_active(1)
+    orient_label.set_mnemonic_widget(orient)
+    orient.get_accessible().set_name("")
+    margin_label = Gtk.Label(label="Margin:", xalign=0)
+    margin = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+    margin.pack_start(Gtk.Label(label="1.25 cm", xalign=0), True, True, 0)
+    margin_acc = margin.get_accessible()
+    margin_acc.set_role(Atk.Role.COMBO_BOX)
+    margin_acc.set_name("")
+    margin_acc.ref_relation_set().add(
+        Atk.Relation.new([margin_label.get_accessible()], Atk.RelationType.LABELLED_BY)
+    )
+    box.pack_start(orient_label, False, False, 0)
+    box.pack_start(orient, False, False, 0)
+    box.pack_start(margin_label, False, False, 0)
+    box.pack_start(margin, False, False, 0)
+    win.add(box)
+    win.set_default_size(360, 200)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    orient.get_accessible().set_name("")
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_gtk_combo_name_comes_from_labelled_by_and_value_from_selection_or_text(tmp_path) -> None:
+    """Live GTK3. An unnamed combo is titled from its label and valued from the selection or text.
+
+    LibreOffice Draw's page sidebar combos publish an empty name and a
+    LABELLED_BY relation (``Orientation:``). The title is that label without
+    the trailing colon. The value is the selected item, or the text the
+    combo shows when nothing is selected. ``find`` matches the combo.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    assert os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"), "no display"
+    driver = LinuxDriver()
+    driver.ensure_trusted()
+    script = tmp_path / "cucombo377.py"
+    script.write_text(_GTK_LABELLED_COMBO)
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cucombo377")
+            except ComputerUseError as exc:
+                last = exc.message
+                snap = None
+            else:
+                last = observe.render_text(snap)
+                orient = next(
+                    (
+                        el for el in snap.elements
+                        if el.role == "AXComboBox" and el.title == "Orientation"
+                    ),
+                    None,
+                )
+                margin = next(
+                    (
+                        el for el in snap.elements
+                        if el.role == "AXComboBox" and el.title == "Margin"
+                    ),
+                    None,
+                )
+                if (
+                    orient is not None and orient.value == "Portrait"
+                    and margin is not None and margin.value == "1.25 cm"
+                ):
+                    break
+            time.sleep(0.25)
+        assert snap is not None, last
+        orient = next(
+            el for el in snap.elements
+            if el.role == "AXComboBox" and el.title == "Orientation"
+        )
+        margin = next(
+            el for el in snap.elements
+            if el.role == "AXComboBox" and el.title == "Margin"
+        )
+        assert orient.value == "Portrait", last
+        assert margin.value == "1.25 cm", last
+        by_role = observe.find_elements(snap, text="Orientation", role="combobox")
+        assert any(
+            el.role == "AXComboBox" and el.title == "Orientation" and el.value == "Portrait"
+            for el in by_role
+        ), last
+        by_margin = observe.find_elements(snap, text="Margin", role="combobox")
+        assert any(
+            el.role == "AXComboBox" and el.title == "Margin" and el.value == "1.25 cm"
+            for el in by_margin
+        ), last
+        shown = observe.render_text(snap)
+        assert 'combobox "Orientation" ="Portrait"' in shown, shown
+        assert 'combobox "Margin" ="1.25 cm"' in shown, shown
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
     """Live Chrome. A page script steals focus during set_value.
 
