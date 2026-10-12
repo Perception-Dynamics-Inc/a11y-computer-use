@@ -9,7 +9,7 @@ Within a group, lines are ordered by theme, then by date.
 
 ## [0.4.66] - 2026-10-12
 
-Fifty-two commits since v0.4.65, through #454.
+Fifty-three commits since v0.4.65, through #454.
 
 ### Safety
 
@@ -70,6 +70,7 @@ Fifty-two commits since v0.4.65, through #454.
 - A window-title match can land on a Chrome UI target that does not have the control, and a launcher port can hide the port the profile bound. The write then fell through to AT-SPI, which updates the DOM value without the DOM mark. The write tries the profile's `DevToolsActivePort`, the node pid as well as the application pid, and the page that actually has the control. Chrome's space-separated `/proc/pid/cmdline` is split on spaces before the port scan. A command line that still has an interior NUL is unchanged. A table that started below the window and then fits has reached the end, so Page Down stops. (#445) (3481b1b, 2026-10-13).
 - Duplicate AT-SPI getters are cached for one driver call. State sets are not cached: a pointer click and Escape change SELECTED and EXPANDED without an AT-SPI mutator, and a cached set left combo popups looking open and Qt cells looking unselected. Attribute dicts that carry a live value are not cached: `valuetext` and aria state change while the same call is still polling, and a cached dict kept a Chrome date segment at 01 after `set_value` had typed 18. Refs #12 (#409) (854416f, 2026-10-12).
 - A snapshot-text wait wakes on a structural AT-SPI event (`children-changed`, `load-complete`, `property-change`, `window:activate`) instead of sleeping out the poll. A state or text event, including a caret blink, does not end the wait. When AT-SPI events are off, the wait keeps the poll sleep. Refs #12 (#412) (c9b8184, 2026-10-12).
+- Linux `wait_for` of `actionable` returns only when the target is showing, on the primary screen, enabled or sensitive, stable (the same box on two reads at least 0.05s apart), and the process that owns the top window at its center, with the hit on that node or a descendant. The wait wakes on AT-SPI state, children, bounds, and focus events. An event is not success; the next read has to pass every check. A timeout is `ErrorCode.TIMEOUT` and names the check that failed (`visible`, `enabled`, `stable`, `receiving_events`, or `actionable`). While that listener is up, a snapshot drops the application's cached children before the walk, so a Chromium page that never entered the cache is still read, and a Firefox combo select refreshes `SELECTED` before the read-back. Fixes #120 (#408) (bd691bd, 2026-10-13).
 - Electron's page sits several panels under the frame. `get_parent` returns a new wrapper, and CPython reuses the id of one the walk has already dropped, so the seen set stops early and a showing document is reported hidden. Visited ancestors now use the bus name and object path, and stay referenced when that key is missing. Fixes #424 (#427) (90b5a44, 2026-10-12).
 
 ## [0.4.65] - 2026-10-12
