@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from a11y_computer_use.agent.choose_file import chooser_argument_error
 from a11y_computer_use.agent.models.base import ToolCall
 from a11y_computer_use.schema import unknown_fields_message
 
@@ -45,6 +46,7 @@ ACTION_NAMES = frozenset({
     "find",
     "expand",
     "scroll_to_find",
+    "choose_file",
     "done",
     "ask_human",
 })
@@ -235,6 +237,8 @@ def validate_action(action: Action, *, allow_exec: bool = False) -> str | None:
         return "scroll_to_find requires text or role"
     if action.name == "scroll_to_find" and args.get("direction") not in (None, "down", "up"):
         return "scroll_to_find direction must be down or up"
+    if action.name == "choose_file":
+        return chooser_argument_error(args)
     return None
 
 
@@ -686,6 +690,22 @@ _SPECS: list[tuple[str, str, dict[str, Any], list[str]]] = [
             "ref": _STR,
         },
         [],
+    ),
+    (
+        "choose_file",
+        "In an open GTK, Qt, or Chrome file chooser, choose this absolute path. "
+        "Always use choose_file; never navigate folders. Presses Ctrl+L, types the "
+        "path once, and presses Return. When the location entry is visible and the "
+        "typed text is not the path, one set_value writes the path. Return is not "
+        "pressed until that entry reads the path back. Succeeds only when the dialog "
+        "has closed and the file name is shown outside the dialog. If that cannot be "
+        "verified, the result is a failure. action is open (default) or save. open "
+        "requires the file to exist. This does not call file_dialog.",
+        {
+            "path": _STR,
+            "action": {"type": "string", "enum": ["open", "save"]},
+        },
+        ["path"],
     ),
     (
         "done",
