@@ -8798,13 +8798,15 @@ def build_server(
         'File > Export > Add to Render Queue' (case-insensitive, trailing
         ellipsis ignored, unique prefixes accepted). action='list' returns the
         items of the menu at path as JSON (title, enabled, shortcut, submenu,
-        checked); omit path to list the top-level menus. action='state' reports
+        checked, mnemonic); omit path to list the top-level menus. mnemonic is
+        the underlined letter, or null when the item has none. action='state' reports
         whether a menu is open and its path; action='close' dismisses it.
         click and type close an open menu first and say so. key does not:
         the chord is delivered to the open menu. alt+letter while a menu is
         open switches to the top-level menu with that mnemonic. On Linux, close sends Escape and errors if the menu is
-        still open, and a listed shortcut is the accelerator (a tagged chord
-        or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
+        still open, and a listed shortcut is the accelerator field (a tagged chord
+        or a bare key such as F11). A mnemonic with no accelerator is null there
+        and is reported as mnemonic. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported. The text
