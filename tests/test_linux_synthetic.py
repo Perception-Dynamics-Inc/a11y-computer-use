@@ -10814,6 +10814,72 @@ def test_header_only_table_still_adds_its_body_cells(fake_atspi) -> None:
     assert "file-39" in names
 
 
+def test_shared_java_column_headers_keep_each_columns_name(fake_atspi, monkeypatch) -> None:
+    """Synthetic headers that share one Java ATK name. Not a live table.
+
+    ``get_column_header`` rewrites the name on every object already
+    returned. The snapshot still shows ID, Item, and Qty at their own x,
+    and ``find`` hits Item. Reading the raw objects afterwards yields Qty.
+    """
+    from a11y_computer_use import server
+
+    shared = {"name": ""}
+    columns = ("ID", "Item", "Qty")
+    xs = (46, 263, 481)
+    headers = []
+    for x in xs:
+        header = _Acc("table column header", name="unset", width=200, height=24)
+        header.get_name = lambda shared=shared: shared["name"]
+        headers.append(header)
+    app = _Acc("application", name="swingprobe")
+    app.get_toolkit_name = lambda: "JAVA"
+    table = _Acc("table", name="Rows", width=640, height=400)
+    table.get_application = lambda: app
+    cells = []
+    for col in range(3):
+        cell = _Acc("table cell", name=f"cell-{col}", width=200, height=22)
+        cell.get_index_in_parent = lambda index=3 + col: index
+        cell.get_application = lambda: app
+        cells.append(cell)
+    _adopt(table, *headers, *cells)
+    for col, header in enumerate(headers):
+        _place_row(header, xs[col], 80, 200, 24)
+        header.get_application = lambda: app
+    for col, cell in enumerate(cells):
+        _place_row(cell, xs[col], 110, 200, 22)
+    _place_row(table, 40, 70, 640, 400)
+
+    def column_header(col):
+        shared["name"] = columns[col]
+        return headers[col]
+
+    table.get_column_header = column_header
+    table.get_n_rows = lambda: 30
+    table.get_n_columns = lambda: 3
+    table.get_accessible_at = lambda row, col: cells[col] if row == 0 else None
+    table.get_row_at_index = lambda index: -1 if index < 3 else 0
+    table.component.get_accessible_at_point = lambda _x, _y, _coord: cells[0]
+    window = _Acc("frame", name="SwingHeaders", width=720, height=500)
+    _place_row(window, 20, 40, 720, 500)
+    window.get_application = lambda: app
+    _adopt(window, table)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    snap = driver.snapshot(Scope.WINDOW, "swingprobe")
+    titles = [el.title for el in snap.elements]
+    assert titles.count("ID") == 1
+    assert titles.count("Item") == 1
+    assert titles.count("Qty") == 1
+    by_title = {el.title: el for el in snap.elements if el.title in columns}
+    assert by_title["ID"].bounds.x == 46
+    assert by_title["Item"].bounds.x == 263
+    assert by_title["Qty"].bounds.x == 481
+    assert all(header.get_name() == "Qty" for header in headers)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    found = _bare_runtime(driver).find("swingprobe", text="Item")
+    assert "no elements match" not in found
+    assert "Item" in found
+
+
 def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> None:
     """Synthetic Qt grid, not a live Qt window. The GTK span walk is not used."""
     table = _Acc("table", name="grid", width=200, height=400)

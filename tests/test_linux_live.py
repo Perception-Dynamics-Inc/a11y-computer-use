@@ -12319,3 +12319,105 @@ def _qt5_has_accessible_plugin() -> bool:
             if os.path.isdir(plugin) and os.listdir(plugin):
                 return True
     return False
+
+
+def _java_atk_jar() -> str | None:
+    """The Java ATK wrapper jar, or None when this machine does not have it."""
+    jar = "/usr/share/java/java-atk-wrapper.jar"
+    libs = (
+        "/usr/lib/x86_64-linux-gnu/jni/libatk-wrapper.so",
+        "/usr/lib/jni/libatk-wrapper.so",
+        "/usr/lib/x86_64-linux-gnu/libatk-wrapper.so",
+    )
+    if os.path.isfile(jar) and any(os.path.isfile(path) for path in libs):
+        return jar
+    return None
+
+
+_SWING_HEADER_APP = textwrap.dedent(
+    r"""
+    import javax.swing.*;
+    import java.awt.*;
+
+    public class SwingHeaderProbe {
+        public static void main(String[] args) {
+            SwingUtilities.invokeLater(() -> {
+                JFrame frame = new JFrame("SwingHeaderProbe");
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                String[] columns = {"ID", "Item", "Qty"};
+                Object[][] rows = new Object[8][3];
+                for (int i = 0; i < rows.length; i++) {
+                    rows[i][0] = i;
+                    rows[i][1] = "row-" + i;
+                    rows[i][2] = i;
+                }
+                JTable table = new JTable(rows, columns);
+                frame.setContentPane(new JScrollPane(table));
+                frame.setSize(640, 320);
+                frame.setLocation(40, 40);
+                frame.setVisible(true);
+            });
+        }
+    }
+    """
+)
+
+
+def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
+    """Live Swing JTable, when the Java ATK wrapper is installed.
+
+    Each column header keeps the name it had when that column was read.
+    The last column's name is not copied onto the earlier headers.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    jar = _java_atk_jar()
+    javac = _which("javac")
+    java = _which("java")
+    if jar is None or not javac or not java:
+        pytest.skip("Java ATK wrapper is not installed")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    source = tmp_path / "SwingHeaderProbe.java"
+    source.write_text(_SWING_HEADER_APP)
+    compiled = subprocess.run(
+        [javac, str(source)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    if compiled.returncode != 0:
+        pytest.skip(f"javac failed: {compiled.stderr[-400:]}")
+    proc = subprocess.Popen(
+        [
+            java,
+            "-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper",
+            "-cp", f"{jar}:{tmp_path}", "SwingHeaderProbe",
+        ],
+        cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    app = "java"
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.skip(f"Swing header probe exited {proc.returncode} before it was on the bus")
+            try:
+                snap = driver.snapshot(Scope.WINDOW, app)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            titles = [el.title for el in snap.elements] if snap is not None else []
+            if "Qty" in titles or "ID" in titles:
+                break
+            time.sleep(0.3)
+        else:
+            pytest.skip("Swing header probe did not publish column headers")
+        assert snap is not None
+        titles = [el.title for el in snap.elements]
+        assert titles.count("ID") == 1, titles
+        assert titles.count("Item") == 1, titles
+        assert titles.count("Qty") == 1, titles
+        xs = {el.title: el.bounds.x for el in snap.elements if el.title in {"ID", "Item", "Qty"} and el.bounds}
+        assert xs["ID"] < xs["Item"] < xs["Qty"]
+    finally:
+        _stop(proc)

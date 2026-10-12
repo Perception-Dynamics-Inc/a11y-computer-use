@@ -13232,8 +13232,78 @@ def _gtk_visible_span(table, pos, size, rows: int) -> tuple[int, int] | None:
     return first, min(last, rows - 1)
 
 
+class _HeaderRect:
+    """Screen box captured before the next column header is requested."""
+
+    def __init__(self, x: float, y: float, width: float, height: float) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+
+
+class _FrozenColumnHeader:
+    """A column header whose name and screen box are fixed at read time.
+
+    Java ATK's ``Table.get_column_header`` objects share one native header.
+    Asking for the next column rewrites the name on every object already
+    returned. The snapshot reads names later, so each column would show the
+    last name. The box is captured in the same moment: a later read can
+    move too. Role, states, and actions still come from the live object.
+    """
+
+    def __init__(self, header, name: str, rect: _HeaderRect | None) -> None:
+        self._header = header
+        self._name = name
+        self._rect = rect
+
+    def get_name(self):
+        return self._name
+
+    def getName(self):
+        return self._name
+
+    def get_component_iface(self):
+        if self._rect is None:
+            return _call_first(self._header, ("get_component_iface", "get_component"))
+        return self
+
+    def get_component(self):
+        return self.get_component_iface()
+
+    def get_extents(self, _coord=None):
+        if self._rect is not None:
+            return self._rect
+        comp = _call_first(self._header, ("get_component_iface", "get_component"))
+        if comp is None:
+            return None
+        return _call_first(comp, ("get_extents", "getExtents"), _coord)
+
+    def __getattr__(self, item):
+        return getattr(self._header, item)
+
+
+def _freeze_column_header(header):
+    """Copy the header name and screen box before another column is requested."""
+    got = _call_first(header, ("get_name", "getName"), default="")
+    name = "" if got is None else str(got)
+    rect = None
+    try:
+        pos, size = _extents(header)
+    except Exception:
+        pos, size = None, None
+    if pos is not None and size is not None:
+        rect = _HeaderRect(float(pos[0]), float(pos[1]), float(size[0]), float(size[1]))
+    return _FrozenColumnHeader(header, name, rect)
+
+
 def _gtk_column_headers(table, cols: int) -> list:
-    """Column headers, from the Table interface or the leading header children."""
+    """Column headers, from the Table interface or the leading header children.
+
+    Each Table-interface header is frozen as soon as it is returned. Java
+    ATK reuses the native header state, so the next ``get_column_header``
+    would otherwise rename the columns already collected.
+    """
     found = []
     seen: set[int] = set()
     for col in range(max(0, cols)):
@@ -13241,7 +13311,7 @@ def _gtk_column_headers(table, cols: int) -> list:
         if header is None or id(header) in seen:
             continue
         seen.add(id(header))
-        found.append(header)
+        found.append(_freeze_column_header(header))
     if found:
         return found
     for index in range(min(_raw_child_count(table), max(cols, 0) + 2)):
