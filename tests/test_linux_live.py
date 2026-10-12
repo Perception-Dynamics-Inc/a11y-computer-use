@@ -12445,6 +12445,136 @@ def test_linux_featherpad_snapshot_omits_the_hidden_replacement_window(tmp_path)
         _stop_group(proc)
 
 
+def test_linux_mousepad_snapshot_keeps_newlines_in_the_document(tmp_path) -> None:
+    """Live Mousepad. A multi-line document stays multi-line in the snapshot.
+
+    ``set_value`` writes ``AAA\\nBBB\\nCCC``. The textarea value keeps those
+    breaks. The compact field escapes them as ``\\\\n`` and does not print
+    ``AAA BBB CCC``. The hermetic suite has no display, so this skips there.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("mousepad")
+    assert binary, "mousepad is not installed"
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "mousepad-config")
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [binary, "--disable-server"], env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "mousepad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None:
+                last = observe.render_text(shot)
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                if area is not None:
+                    break
+            time.sleep(0.3)
+        assert area is not None, f"mousepad did not expose its document ({proc.poll()}): {last}"
+        runtime = _runtime_for(tmp_path, driver, "mousepad")
+        runtime.desktop_snapshot("mousepad")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea")
+        runtime.click(area.ref)
+        written = runtime.set_value(area.ref, "AAA\nBBB\nCCC")
+        assert "AAA" in written, written
+        shot = driver.snapshot(Scope.WINDOW, "mousepad")
+        area = next(
+            (el for el in shot.elements if el.role == "AXTextArea" and el.value and "AAA" in el.value),
+            None,
+        )
+        rendered = observe.render_text(shot)
+        assert area is not None and area.value is not None, rendered
+        assert "AAA\nBBB\nCCC" in area.value, area.value
+        assert "AAA\\nBBB\\nCCC" in rendered
+        assert "AAA BBB CCC" not in rendered
+        body_line = next(line for line in rendered.splitlines() if "AAA" in line)
+        assert "BBB" in body_line and "CCC" in body_line
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_featherpad_snapshot_keeps_newlines_in_the_document(tmp_path) -> None:
+    """Live FeatherPad when the Qt5 AT-SPI tree is published.
+
+    Ubuntu 24.04's ``featherpad`` package is Qt 5, and that Qt build ships
+    no accessible plugin, so the Linux CI job does not install it. This
+    skips when ``featherpad`` is not on PATH, and when the process starts
+    but never appears on the bus because that plugin is absent. A published
+    textarea keeps ``AAA\\nBBB\\nCCC`` in the value and escapes it in the
+    compact field.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("featherpad")
+    if not binary:
+        pytest.skip("featherpad is not installed")
+    env = os.environ.copy()
+    env["QT_ACCESSIBILITY"] = "1"
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    proc = subprocess.Popen([binary], env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "featherpad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None and shot.elements:
+                last = observe.render_text(shot)
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                if area is not None:
+                    break
+            time.sleep(0.3)
+        if area is None:
+            if not _qt5_has_accessible_plugin():
+                pytest.skip(
+                    "FeatherPad did not publish an AT-SPI tree; this Qt 5 build "
+                    "has no accessible plugin"
+                )
+            raise AssertionError(f"featherpad did not expose its document ({proc.poll()}): {last}")
+        runtime = _runtime_for(tmp_path, driver, "featherpad", "FeatherPad")
+        runtime.desktop_snapshot("featherpad")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea")
+        runtime.click(area.ref)
+        written = runtime.set_value(area.ref, "AAA\nBBB\nCCC")
+        assert "AAA" in written, written
+        shot = driver.snapshot(Scope.WINDOW, "featherpad")
+        area = next(
+            (el for el in shot.elements if el.role == "AXTextArea" and el.value and "AAA" in el.value),
+            None,
+        )
+        rendered = observe.render_text(shot)
+        assert area is not None and area.value is not None, rendered
+        assert "AAA\nBBB\nCCC" in area.value, area.value
+        assert "AAA\\nBBB\\nCCC" in rendered
+        assert "AAA BBB CCC" not in rendered
+    finally:
+        _stop_group(proc)
+
+
 def _which(name: str) -> str:
     found = subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True, text=True)
     return found.stdout.strip()
