@@ -3624,6 +3624,35 @@ def note_focused_find_bar(app: str | None) -> None:
         _BROWSER_BAR_CLEARED.discard(pid)
 
 
+def latch_chromium_find(app: str) -> bool:
+    """Record Chrome's pid so the next snapshot drops the find-bar cache.
+
+    ``scroll_to_find`` closes the bar before a snapshot can see the Find
+    field, so the focus latch misses. The next walk is then an empty
+    document or the find frame. True when a Chrome pid was recorded.
+    """
+    from a11y_computer_use.schema import Scope
+
+    root = find_root(app, Scope.WINDOW)
+    if root is None:
+        return False
+    try:
+        if not _chromium_app(root):
+            return False
+    except Exception:
+        return False
+    try:
+        pid = pid_of(root)
+    except Exception:
+        return False
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    pid = int(pid)
+    _BROWSER_BAR_PIDS.add(pid)
+    _BROWSER_BAR_CLEARED.discard(pid)
+    return True
+
+
 def _is_browser_bar_frame(node) -> bool:
     """True for the find-in-page frame or an omnibox popup, not the page window."""
     if node is None:

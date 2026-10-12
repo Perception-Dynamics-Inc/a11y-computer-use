@@ -1587,6 +1587,37 @@ def test_find_field_focus_latches_and_the_address_bar_does_not(monkeypatch) -> N
     assert _atspi._BROWSER_BAR_PIDS == set()
 
 
+def test_latch_chromium_find_records_the_pid_before_the_bar_is_seen(monkeypatch) -> None:
+    """scroll_to_find closes Find before a snapshot can latch on focus."""
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+    _atspi._BROWSER_BAR_CLEARED.add(4242)
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    monkeypatch.setattr(_atspi, "pid_of", lambda _acc: 4242)
+    assert _atspi.latch_chromium_find("chrome") is True
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+    assert 4242 not in _atspi._BROWSER_BAR_CLEARED
+
+    _atspi._BROWSER_BAR_PIDS.clear()
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: False)
+    assert _atspi.latch_chromium_find("gedit") is False
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: None)
+    assert _atspi.latch_chromium_find("chrome") is False
+    assert _atspi._BROWSER_BAR_PIDS == set()
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "find_root", lambda app, scope: object())
+    monkeypatch.setattr(_atspi, "_chromium_app", lambda _acc: True)
+    assert driver.latch_chromium_find("chrome") is True
+    assert 4242 in _atspi._BROWSER_BAR_PIDS
+    _atspi._BROWSER_BAR_PIDS.clear()
+    _atspi._BROWSER_BAR_CLEARED.clear()
+
+
 def test_stale_find_frame_beside_the_page_clears_the_cache(monkeypatch) -> None:
     """A cached find-in-page sibling is dropped even before the pid is latched."""
     cleared: list[object] = []

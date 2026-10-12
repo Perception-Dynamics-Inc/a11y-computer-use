@@ -2151,6 +2151,18 @@ class LinuxDriver:
             return None
         return float(value) if isinstance(value, (int, float)) else None
 
+    def latch_chromium_find(self, app: str) -> bool:
+        """Remember this Chrome process before the post-find snapshot.
+
+        Ctrl+F closes the bar before that snapshot can see the Find field.
+        Without the pid, the next walk keeps the find frame or an empty
+        document, and a wheel on that frame does not move the page.
+        True when a Chrome pid was recorded.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
+
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
                dry_run: bool = False) -> object:

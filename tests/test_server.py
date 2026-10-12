@@ -2176,6 +2176,136 @@ def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch
     assert clock["t"] == 1120.0
 
 
+def _empty_cached_frame() -> Snapshot:
+    """An untitled group and no rows. The post-find Chrome cache, not a page."""
+    els = [
+        Element(ref="win", role="AXWindow", title="rows", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+        Element(ref="e2", role="AXGroup", title="", value=None,
+                bounds=Bounds(0, 0, 80, 900, 700), snapshot_id="s"),
+    ]
+    return Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+        displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+    )
+
+
+def test_scroll_to_find_re_reads_until_the_page_frame_returns(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Ctrl+F leaves two empty cached frames. The search latches Chrome and
+    reads again until the list is back. That untitled group is never wheeled,
+    and the row found by Ctrl+F is returned.
+    """
+    from a11y_computer_use import server
+
+    state = {"poison": False, "stale": 0, "latched": 0}
+    scrolled: list[str] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if state["stale"] > 0:
+                state["stale"] -= 1
+                return _empty_cached_frame()
+            if state["poison"]:
+                return _empty_cached_frame()
+            found = "ITEM-020 scroll-row" if state["latched"] else None
+            return _short_overflow_list(169, found=found)
+
+        def scroll(self, target, **kw):
+            scrolled.append(target.role)
+            raise AssertionError(f"wheeled {target.role} {target.ref}")
+
+        def key_chord(self, chord, **_kw):
+            if chord == "ctrl+f":
+                state["poison"] = True
+
+        def type_text(self, text, **_kw):
+            pass
+
+        def latch_chromium_find(self, app):
+            state["latched"] += 1
+            state["poison"] = False
+            state["stale"] = 2
+            assert app == "com.a"
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
+    assert "ITEM-020" in out
+    assert "found after 1 scroll" in out
+    assert state["latched"] == 1
+    assert scrolled == []
+
+
+def test_scroll_to_find_does_not_wheel_an_empty_cached_frame(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    After Ctrl+F the snapshot stays an untitled group with no rows. The
+    search latches Chrome and keeps re-reading, and it stops on the
+    no-progress budget. The empty frame is not a wheel target.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    latched: list[str] = []
+    scrolled: list[str] = []
+    poisoned = {"on": False}
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            if poisoned["on"]:
+                return _empty_cached_frame()
+            return _short_overflow_list(169)
+
+        def scroll(self, target, **kw):
+            scrolled.append(f"{target.role}:{target.ref}")
+
+        def key_chord(self, chord, **_kw):
+            if chord == "ctrl+f":
+                poisoned["on"] = True
+
+        def type_text(self, text, **_kw):
+            pass
+
+        def latch_chromium_find(self, app):
+            latched.append(app)
+
+    def sleep(seconds):
+        clock["t"] += float(seconds)
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(server.time, "sleep", sleep)
+
+    out = rt.scroll_to_find(
+        "app", text="ROW-0300", direction="down", max_scrolls=60, budget_s=15,
+    )
+    assert out.startswith("not found after 0 scroll(s) (time budget 15s)")
+    assert "container: AXGroup ref=e2" in out
+    assert "last_rows: none" in out
+    assert "scroll_position: unknown" in out
+    assert latched == ["com.a"]
+    assert scrolled == []
+    assert clock["t"] >= 1015.0
+
+
 def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome page.
 

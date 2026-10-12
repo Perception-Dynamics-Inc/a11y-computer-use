@@ -5493,6 +5493,9 @@ class Runtime:
         scroll position, and the last rows on screen. A document, a
         table, or a list is tried with Ctrl+F first, including an
         overflow list shorter than the window. A miss keeps the wheel.
+        After Ctrl+F, Chrome is latched and the tree is read again until
+        the page frame is back. The find bar and an empty cached frame
+        are not wheeled.
         A paginated or virtualized table that already fits in the window
         then steps with Page Down. A table that still runs past the
         window keeps the wheel, so the last rows can come on screen.
@@ -5687,6 +5690,7 @@ class Runtime:
             hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
             page_mode = True
             find_tried = False
+            frame_latched = False
             same_rows = 0
             previous_rows: tuple[str, ...] | None = None
             last_anchor: Element | None = None
@@ -5851,11 +5855,57 @@ class Runtime:
                     f"last_rows: {tail}"
                 )
 
+            def page_frame_missing(shot: Snapshot, anchor: Element | None) -> bool:
+                """True for the find bar or an empty cached Chrome frame.
+
+                That frame is an untitled group with no on-screen rows.
+                Wheeling it does not move the page.
+                """
+                for el in shot.elements:
+                    title = el.title or ""
+                    folded = title.lstrip().lower()
+                    if title == "Close find bar" or folded.startswith("find in page"):
+                        return True
+                    if title == "Find" and el.role in {"AXTextField", "AXSearchField", "AXTextArea"}:
+                        return True
+                if anchor is None or anchor.role not in {"AXGroup", "AXWebArea"}:
+                    return False
+                if (anchor.title or "").strip():
+                    return False
+                return not row_names(shot, anchor)
+
+            def restore_page_frame() -> bool:
+                """Latch Chrome once and re-read until the page frame is back.
+
+                False when this driver has no latch, or the page did not
+                return within the reads. The current snapshot is the page
+                when True.
+                """
+                nonlocal frame_latched
+                latch = getattr(self.driver, "latch_chromium_find", None)
+                if not callable(latch):
+                    return False
+                if not frame_latched:
+                    try:
+                        latch(bundle)
+                    except Exception:
+                        return False
+                    frame_latched = True
+                for _ in range(6):
+                    fresh = self.driver.snapshot(Scope(scope), bundle)
+                    self._current = fresh
+                    if not page_frame_missing(fresh, _scroll_anchor(fresh)):
+                        return True
+                    time.sleep(0.12)
+                return False
+
             def try_in_page_find(anchor: Element) -> str | None:
                 """Ctrl+F once. The match is returned only when a later snapshot shows it.
 
                 Escape closes the find bar before that snapshot, so the ref
-                is the page. A miss does not count as a scroll.
+                is the page. The Chrome process is latched and the tree is
+                read again until that page frame is back. A miss does not
+                count as a scroll.
                 """
                 if not text or "\n" in text or len(text) > 80:
                     return None
@@ -5876,6 +5926,7 @@ class Runtime:
                     self.driver.key_chord("Escape")
                 except Exception:
                     pass
+                restore_page_frame()
                 kind, verified = confirming_snapshot(issued + 1)
                 if kind != "found":
                     # A long table can still be publishing the row that
@@ -5905,6 +5956,32 @@ class Runtime:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
+                if page_frame_missing(snap, last_anchor) and callable(
+                    getattr(self.driver, "latch_chromium_find", None)
+                ):
+                    # A zero budget stops before the re-read. A frame that
+                    # never comes back stops on the no-progress cap too,
+                    # including before the first wheel: spinning here would
+                    # ignore that cap while issued is still 0.
+                    cap = expired_cap()
+                    if budget_s <= 0 and cap is not None:
+                        return unfinished(
+                            issued, snap, last_anchor, budget_hit=True, budget_cap=cap,
+                        )
+                    if restore_page_frame():
+                        snap = self._current
+                        anchor_now = _scroll_anchor(snap)
+                        if anchor_now is not None:
+                            last_anchor = anchor_now
+                    else:
+                        cap = expired_cap()
+                        if cap is not None:
+                            return unfinished(
+                                issued, snap, last_anchor, budget_hit=True, budget_cap=cap,
+                            )
+                        if issued >= limit:
+                            break
+                        continue
                 note_progress(snap, last_anchor)
                 cap = expired_cap()
                 if cap is not None and (issued > 0 or budget_s <= 0):
@@ -5922,8 +5999,12 @@ class Runtime:
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
+                        # Ctrl+F can land the row before a wheel is counted.
+                        # The report is still one step, not a row that was
+                        # already on screen.
+                        count = 1 if find_tried else 0
                         return (
-                            f"found after {issued} scroll(s):\n"
+                            f"found after {count} scroll(s):\n"
                             f"{observe.render_matches(snap, shown)}"
                         )
                     if issued == 0:
@@ -6061,12 +6142,16 @@ class Runtime:
                     found = try_in_page_find(anchor)
                     if found:
                         return found
+                    # The anchor above was chosen before Ctrl+F. The next
+                    # read is the page frame, and that is what gets wheeled.
+                    continue
                 if page_mode and prefers_page_step(snap, anchor):
                     if not find_tried:
                         find_tried = True
                         found = try_in_page_find(anchor)
                         if found:
                             return found
+                        continue
                     before_names = row_names(snap)
                     before_pos = read_offset(anchor)
                     chord = "pagedown" if wheel > 0 else "pageup"
@@ -6096,6 +6181,16 @@ class Runtime:
                         page_mode = False
                         stalls = 0
                         continue
+                # The find bar or an empty cached frame is not a scroll target.
+                if page_frame_missing(snap, anchor) and callable(
+                    getattr(self.driver, "latch_chromium_find", None)
+                ):
+                    cap = expired_cap()
+                    if cap is not None:
+                        return unfinished(
+                            issued, snap, anchor, budget_hit=True, budget_cap=cap,
+                        )
+                    continue
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
@@ -8245,7 +8340,9 @@ def build_server(
         also stops at 120 seconds. It reports the container, its scroll
         position, and the last rows seen. A document, a table, or a list
         is searched with Ctrl+F first, including an overflow list shorter
-        than the window. A paginated
+        than the window. After Ctrl+F, Chrome is latched and the tree is
+        read again until the page frame is back. The find bar and an
+        empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. page_unchanged is raised only when that
