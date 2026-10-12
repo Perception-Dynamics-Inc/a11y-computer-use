@@ -416,7 +416,7 @@ class ComputerAdapter:
             if not el.actionable:
                 continue
             b = el.bounds
-            if display_id is not None and b.display_id != display_id:
+            if b is None or (display_id is not None and b.display_id != display_id):
                 continue
             if not (b.x <= px < b.x + b.width and b.y <= py < b.y + b.height):
                 continue

@@ -41,6 +41,8 @@ def build_agent_mcp(store: RunStore | None = None):
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
         allow_payments: bool = False,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> dict:
         """Start one goal. Returns ``{"id": ...}``. 409 when that display is busy.
 
@@ -50,6 +52,9 @@ def build_agent_mcp(store: RunStore | None = None):
 
         ``allow_payments`` lets a payment click wait for ``approve`` instead of
         stopping as ``needs_human``. It is off by default.
+
+        ``temperature`` and ``seed`` override the sampling defaults (0 and 0)
+        where the model provider can send them. Omit either to keep that default.
         """
         body = {
             "goal": goal,
@@ -69,6 +74,10 @@ def build_agent_mcp(store: RunStore | None = None):
             body["allowed_domains"] = allowed_domains
         if blocked_domains is not None:
             body["blocked_domains"] = blocked_domains
+        if temperature is not None:
+            body["temperature"] = temperature
+        if seed is not None:
+            body["seed"] = seed
         try:
             record = shared.start(body)
         except DisplayBusy as exc:

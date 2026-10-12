@@ -431,6 +431,10 @@ class RunStore:
             kwargs["allowed_domains"] = domains
         if blocked is not None and "blocked_domains" in params:
             kwargs["blocked_domains"] = blocked
+        if "temperature" in limits and "temperature" in params:
+            kwargs["temperature"] = limits["temperature"]
+        if "seed" in limits and "seed" in params:
+            kwargs["seed"] = limits["seed"]
         return Agent(model, **kwargs)
 
     def _approve(self, record: RunRecord, action: object) -> bool:
@@ -494,6 +498,8 @@ _RUN_FIELDS = {
     "allow_payments",
     "allowed_domains",
     "blocked_domains",
+    "temperature",
+    "seed",
 }
 _LIMIT_FIELDS = {
     "max_steps",
@@ -572,22 +578,41 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
     allow_payments = bool(body.get("allow_payments", False))
     domains = _domains(body.get("allowed_domains", None), "allowed_domains")
     blocked = _domains(body.get("blocked_domains", None), "blocked_domains")
+    temperature, seed = _sampling_overrides(body)
+    limits_out = {
+        "max_steps": int(max_steps),
+        "max_time_s": float(max_time_s),
+        "model_timeout_s": float(model_timeout_s),
+        "stuck_steps": int(stuck_steps),
+        "stuck_time_s": float(stuck_time_s),
+    }
+    if temperature is not None:
+        limits_out["temperature"] = temperature
+    if seed is not None:
+        limits_out["seed"] = seed
     return (
         goal,
         model,
         display,
-        {
-            "max_steps": int(max_steps),
-            "max_time_s": float(max_time_s),
-            "model_timeout_s": float(model_timeout_s),
-            "stuck_steps": int(stuck_steps),
-            "stuck_time_s": float(stuck_time_s),
-        },
+        limits_out,
         allow_exec,
         allow_payments,
         domains,
         blocked,
     )
+
+
+def _sampling_overrides(body: dict) -> tuple[float | None, int | None]:
+    """``temperature`` and ``seed`` from a run body. Absent means the provider default."""
+    from a11y_computer_use.agent.models.base import ModelError
+    from a11y_computer_use.agent.models.sampling import parse_seed, parse_temperature
+
+    try:
+        temperature = None if "temperature" not in body else parse_temperature(body["temperature"])
+        seed = None if "seed" not in body else parse_seed(body["seed"])
+    except ModelError as exc:
+        raise ValueError(str(exc)) from exc
+    return temperature, seed
 
 
 def _domains(value: object, field: str) -> list[str] | None:

@@ -29,6 +29,7 @@ from a11y_computer_use.agent.models.base import (
     ModelTurn,
     model_turn_from_dict,
 )
+from a11y_computer_use.agent.models.sampling import resolve_sampling
 
 __all__ = ["ScriptedModel"]
 
@@ -46,6 +47,8 @@ class ScriptedModel:
         source: Sequence[TurnSource] | Callable[[list[Message]], ModelTurn] | None = None,
         *,
         path: str | None = None,
+        temperature: float | None = None,
+        seed: int | None = None,
     ) -> None:
         if path is not None and source is not None:
             raise ModelError("ScriptedModel takes a turn list, a callable, or a path, not more than one")
@@ -63,6 +66,16 @@ class ScriptedModel:
             self._turns = _coerce_turns(source)
         else:
             raise ModelError("ScriptedModel needs a turn list, a callable, or a path")
+        # A script replays turns. It does not sample, so temperature and seed
+        # are not applied. The requested values stay in the trace note.
+        self.sampling = resolve_sampling(
+            temperature=temperature,
+            seed=seed,
+            supports_temperature=False,
+            supports_seed=False,
+            temperature_gap="scripted models do not sample",
+            seed_gap="scripted models do not sample",
+        )
 
     def complete(
         self,

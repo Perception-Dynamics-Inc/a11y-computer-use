@@ -129,6 +129,89 @@ def _comm_for_pid(pid: int) -> str | None:
         return None
 
 
+# ``/proc/<pid>/comm`` is at most 15 bytes (TASK_COMM_LEN includes the NUL).
+_COMM_MAX = 15
+
+
+def _cmdline_basename(pid: int) -> str | None:
+    """argv[0] basename from ``/proc/<pid>/cmdline``, or None."""
+    if not pid:
+        return None
+    try:
+        raw = open(f"/proc/{int(pid)}/cmdline", "rb").read()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    field = raw.split(b"\x00", 1)[0]
+    if not field:
+        return None
+    name = os.path.basename(field.decode("utf-8", "replace")).strip()
+    return name or None
+
+
+def _exe_basename(pid: int) -> str | None:
+    """Basename of ``/proc/<pid>/exe``, or None when the link cannot be read."""
+    if not pid:
+        return None
+    try:
+        target = os.readlink(f"/proc/{int(pid)}/exe")
+    except OSError:
+        return None
+    name = os.path.basename(target).strip()
+    if name.endswith(" (deleted)"):
+        name = name[: -len(" (deleted)")].strip()
+    return name or None
+
+
+def _comm_cuts(name: str, comm: str) -> bool:
+    """True when ``comm`` is ``name`` or the kernel's 15-byte cut of ``name``.
+
+    The cut is byte-exact. A different program that merely shares a prefix
+    (``gnome-text-editor-nightly`` versus ``gnome-text-editor``) is not this
+    name, even though both comms are ``gnome-text-edit``.
+    """
+    if not name or not comm:
+        return False
+    if name == comm:
+        return True
+    try:
+        raw = name.encode("utf-8")
+        cut = comm.encode("utf-8")
+    except UnicodeError:
+        return False
+    return len(cut) == _COMM_MAX and len(raw) > _COMM_MAX and raw.startswith(cut)
+
+
+def _identity_for_pid(pid: int, comm: str | None) -> str | None:
+    """Program name grants and listings use for ``pid``.
+
+    When ``comm`` is the 15-byte cut of the cmdline argv0 or the exe basename,
+    that full name is the id. cmdline wins when both are the same extension.
+    When they name two different longer programs, ``comm`` is kept: picking
+    either one would grant a program the user did not name. A short comm
+    (``chrome``, ``gedit``) is unchanged, and so is a pid whose cmdline and
+    exe cannot be read.
+    """
+    if not comm or len(comm.encode("utf-8", "replace")) != _COMM_MAX:
+        return comm
+    if not pid:
+        return comm
+    cmdline = _cmdline_basename(pid)
+    exe = _exe_basename(pid)
+
+    def extends(name: str | None) -> bool:
+        return bool(name) and name != comm and _comm_cuts(name, comm)
+
+    if extends(cmdline) and extends(exe) and cmdline != exe:
+        return comm
+    if extends(cmdline):
+        return cmdline
+    if extends(exe):
+        return exe
+    return comm
+
+
 # A client can map a window before ``_NET_WM_PID`` is visible on another
 # connection. One read then reports pid 0 and the app id falls back to
 # WM_CLASS. Wait once per window id, then remember that it stayed unset so
@@ -234,9 +317,17 @@ def _is_dialog_window(win, d) -> bool:
 
 
 def _app_id(win, d, *, settle: bool = False) -> str:
-    """Permission-keying app id: process comm, else the WM_CLASS instance."""
+    """Permission-keying app id: full program name, else comm, else WM_CLASS.
+
+    The full name comes from ``/proc/<pid>/cmdline`` or the exe when the
+    kernel comm is that name's 15-byte cut. A short comm is the id, which is
+    how ``chrome`` stays ``chrome``.
+    """
     pid = _settled_pid(win, d) if settle else _pid_of(win, d)
-    return _comm_for_pid(pid) or _wm_class_instance(win, d)
+    comm = _comm_for_pid(pid)
+    if comm:
+        return _identity_for_pid(pid, comm) or comm
+    return _wm_class_instance(win, d)
 
 
 def _atom_is(candidate, expected) -> bool:
@@ -323,11 +414,13 @@ def _geometry_on_root(win, d):
 
 
 def frontmost_app_id() -> str:
-    """comm name of the active window's owner (e.g. "gedit"); "" if undetectable.
+    """App id of the active window's owner; "" if undetectable.
 
-    This is the process comm only. A window with no pid is not a frontmost
-    app here, even when ``active_window`` can still name it by WM_CLASS.
-    A missing python-xlib is an error, not an empty frontmost app.
+    The id is the full program name when ``/proc/<pid>/comm`` is the 15-byte
+    cut of that name (``gnome-text-editor``, not ``gnome-text-edit``). A short
+    comm stays the comm. A window with no pid is not a frontmost app here,
+    even when ``active_window`` can still name it by WM_CLASS. A missing
+    python-xlib is an error, not an empty frontmost app.
     """
     from a11y_computer_use.schema import ComputerUseError
 
@@ -337,7 +430,11 @@ def frontmost_app_id() -> str:
             if not active:
                 return ""
             win = d.create_resource_object("window", int(active[0]))
-            return _comm_for_pid(_pid_of(win, d)) or ""
+            pid = _pid_of(win, d)
+            comm = _comm_for_pid(pid)
+            if not comm:
+                return ""
+            return _identity_for_pid(pid, comm) or ""
     except ComputerUseError:
         raise
     except Exception:
@@ -479,6 +576,60 @@ def _comm_matches_identifier(identifier: str, comm: str) -> bool:
     return False
 
 
+def _identifier_matches_process(identifier: str, identity: str) -> bool:
+    """True when ``identifier`` names the process whose id is ``identity``.
+
+    ``identity`` is the full program name when the comm was its 15-byte cut,
+    and the comm otherwise. A long name matches that exact name, an alias,
+    or the 15-byte comm of that same name. It does not match a different
+    program that shares the prefix, and a shorter token inside the name
+    (``text`` inside ``gnome-text-editor``) is not a match. A short comm
+    keeps the substring and launcher rules ``resolve_app`` already used.
+    """
+    folded = (identity or "").lower()
+    if not folded:
+        return False
+    from a11y_computer_use.app_identity import shares_alias
+
+    if shares_alias(identifier, folded):
+        return True
+    long_name = len(folded.encode("utf-8", "replace")) > _COMM_MAX
+    for needle in _identity_needles(identifier):
+        if needle == folded:
+            return True
+        if long_name:
+            if _comm_cuts(folded, needle):
+                return True
+            if needle.endswith("-" + folded):
+                return True
+            continue
+        if needle in folded or _launcher_comm(needle, folded):
+            return True
+    return False
+
+
+def _unique_identity(identifier: str, hits: list[str]) -> str | None:
+    """The one program ``hits`` name, or None when they disagree.
+
+    One id is that id. An exact spelling of ``identifier`` wins when several
+    windows matched. Two different full names that share a truncated comm are
+    not collapsed into either name.
+    """
+    ordered: list[str] = []
+    for hit in hits:
+        if hit and hit not in ordered:
+            ordered.append(hit)
+    if not ordered:
+        return None
+    if len(ordered) == 1:
+        return ordered[0]
+    wanted = (identifier or "").lower()
+    exact = [hit for hit in ordered if hit.lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    return None
+
+
 def _class_matches_identifier(identifier: str, instance: str, klass: str) -> bool:
     """True when WM_CLASS instance or class is one of ``identifier``'s names."""
     inst = (instance or "").lower()
@@ -496,56 +647,63 @@ def _class_matches_identifier(identifier: str, instance: str, klass: str) -> boo
 
 
 def resolve_app(identifier: str) -> str:
-    """Resolve a window title / comm substring to the owning comm name (the
-    permission-keying id), or the identifier itself if unmatched.
+    """Resolve a window title or program name to the permission-keying id.
 
-    A comm substring wins over a launcher alias, and both win over a window
-    title: ``krita`` stays Krita even when a Chrome tab is titled
-    "Donations | Krita". ``google-chrome`` and "Google Chrome" both resolve to
-    the running ``chrome`` process. An unmatched name is returned unchanged so
-    a grant or a launch can name an app that has no window yet.
+    The id is the full program name when the kernel comm is that name's
+    15-byte cut, and the comm otherwise. ``gnome-text-editor`` stays
+    ``gnome-text-editor``; ``google-chrome`` still resolves to ``chrome``.
+    A comm match wins over a window title: ``krita`` stays Krita even when a
+    Chrome tab is titled "Donations | Krita". Two different programs that
+    share a truncated comm are not collapsed, so a grant for one is not a
+    grant for the other. An unmatched name is returned unchanged so a grant
+    or a launch can name an app that has no window yet.
     """
     needle = (identifier or "").lower()
     if not needle:
         return identifier
+    hits: list[str] = []
     by_class: str | None = None
     by_title: str | None = None
     try:
         with _open_display() as d:
             for win in _managed_windows(d):
-                comm = (_app_id(win, d) or "").lower()
-                if comm and _comm_matches_identifier(identifier, comm):
-                    return comm  # the app itself beats any window that merely names it
+                identity = (_app_id(win, d) or "").lower()
+                if identity and _identifier_matches_process(identifier, identity):
+                    hits.append(identity)
+                    continue
                 instance, klass = _wm_class_strings(win, d)
                 if by_class is None and _class_matches_identifier(identifier, instance, klass):
-                    by_class = comm or instance
-                # A title match is a fallback, never a winner over a comm match:
-                # a Chromium tab "Donations | Krita" stacked above Krita's window
-                # must not turn `krita` into `chrome`. A path matches its
-                # basename in the title the same way the bare name does.
-                if by_title is None and comm:
+                    by_class = identity or instance.lower()
+                # A title match is a fallback, never a winner over a program
+                # match: a Chromium tab "Donations | Krita" stacked above
+                # Krita's window must not turn `krita` into `chrome`. A path
+                # matches its basename in the title the same way the bare
+                # name does.
+                if by_title is None and identity:
                     title = _win_title(win, d).lower()
                     if any(name and name in title for name in _identity_needles(identifier)):
-                        by_title = comm
+                        by_title = identity
     except ComputerUseError:
         raise
     except Exception:
         pass
+    chosen = _unique_identity(identifier, hits)
+    if chosen:
+        return chosen
     return by_class or by_title or identifier
 
 
 def pids_matching(identifier: str) -> set[int]:
-    """PIDs of the managed windows whose owner comm is ``identifier``.
+    """PIDs of the managed windows whose program ``identifier`` names.
 
-    A comm substring matches, and so does a launcher alias (``google-chrome``
-    for comm ``chrome``). Bridges the two Linux identities: the
-    permission-keying app id is the process comm ("python3"), while an AT-SPI
-    application registers under its program name ("cuatestapp"), so a
-    comm-based lookup must find the a11y application by PID, not by name.
-    Titles are deliberately NOT matched here: Runtime already maps a title to
-    its comm via `resolve_app`, and a title match at this layer would let any
-    window whose title merely mentions the app id (a browser tab
-    "gedit - Google Search") hand find_root a foreign application's tree."""
+    The match is the full program name when the comm is its 15-byte cut, and
+    the comm otherwise. A launcher alias (``google-chrome`` for comm
+    ``chrome``) still matches. A different longer program that shares the
+    cut does not. Titles are deliberately NOT matched here: Runtime already
+    maps a title to its id via `resolve_app`, and a title match at this layer
+    would let any window whose title merely mentions the app id (a browser
+    tab "gedit - Google Search") hand find_root a foreign application's tree.
+    """
     needle = (identifier or "").lower()
     pids: set[int] = set()
     if not needle:
@@ -556,8 +714,9 @@ def pids_matching(identifier: str) -> set[int]:
                 pid = _pid_of(win, d)
                 if not pid:
                     continue
-                comm = (_comm_for_pid(pid) or "").lower()
-                if _comm_matches_identifier(identifier, comm):
+                comm = _comm_for_pid(pid) or ""
+                identity = (_identity_for_pid(pid, comm) or comm).lower()
+                if _identifier_matches_process(identifier, identity):
                     pids.add(pid)
     except ComputerUseError:
         raise
@@ -598,8 +757,10 @@ def running_apps() -> list[dict]:
 def windows() -> list[dict]:
     """Managed windows: {window_id, app, title, pid, bounds, on_screen}.
 
-    ``app`` is the process comm, or the WM_CLASS instance when the window has
-    no pid. A missing ``_NET_WM_PID`` is read again before that fallback, so
+    ``app`` is the full program name (or the process comm when that name is
+    not longer than the kernel's 15-byte comm), or the WM_CLASS instance when
+    the window has no pid. A missing ``_NET_WM_PID`` is read again before that
+    fallback, so
     a window that has just mapped does not list pid 0 while the property is
     still arriving. A minimized window (ICCCM iconic or ``_NET_WM_STATE_HIDDEN``) has
     ``on_screen`` false and ``bounds`` null, so a caller does not aim at the
@@ -992,6 +1153,92 @@ def client_origin_for_outer_frame(
         return None
 
 
+# Signed 32-bit range of an EWMH move coordinate. The client-message field
+# is CARD32 on the wire; values outside this range are not a position.
+_INT32_MIN = -1 << 31
+_INT32_MAX = (1 << 31) - 1
+
+
+def _screen_pixels(d) -> tuple[int, int] | None:
+    """(width, height) of this X screen, or None when it publishes none.
+
+    A synthetic display has no ``width_in_pixels``. That absence is not a
+    1280x800 guess, and it is not a reason to widen the range.
+    """
+    try:
+        screen = d.screen()
+        width = screen.width_in_pixels
+        height = screen.height_in_pixels
+    except Exception:
+        return None
+    if isinstance(width, bool) or isinstance(height, bool):
+        return None
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None
+    if width < 1 or height < 1:
+        return None
+    return width, height
+
+
+def _move_integers(x: object, y: object) -> tuple[int, int]:
+    """``(x, y)`` when both are integers. A bool is not an integer.
+
+    A float is not truncated. Truncating would place the window somewhere
+    other than the coordinate the caller passed.
+    """
+    if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+        raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+    return x, y
+
+
+def _reject_move_point(x: object, y: object, size: tuple[int, int] | None) -> tuple[int, int]:
+    """The client origin, or ValueError when it is not a pixel we can place.
+
+    With a screen size, valid pixels are 0..width-1 and 0..height-1, the
+    same range as a click. Without one, the point has to be a non-negative
+    signed 32-bit coordinate. Nothing is clamped into range.
+    """
+    px, py = _move_integers(x, y)
+    if size is None:
+        if px < 0 or py < 0 or px > _INT32_MAX or py > _INT32_MAX:
+            raise ValueError(
+                f"window move ({px}, {py}) is outside the signed screen range "
+                f"(valid x and y are 0..{_INT32_MAX})"
+            )
+        return px, py
+    width, height = size
+    if 0 <= px <= width - 1 and 0 <= py <= height - 1:
+        return px, py
+    raise ValueError(
+        f"window move ({px}, {py}) is outside the screen "
+        f"({width}x{height} physical px; "
+        f"valid x is 0..{width - 1}, y is 0..{height - 1})"
+    )
+
+
+def _card32(value: int) -> int:
+    """CARD32 wire form of a signed frame coordinate.
+
+    python-xlib packs client-message data with an unsigned array, which
+    raises ``OverflowError: can't convert negative value to unsigned int``
+    for a negative. EWMH reads the field as signed. The two's-complement
+    bits are that same coordinate, not a clamp to zero. A value outside
+    signed 32-bit is rejected and no message is sent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"window move coordinate must be an integer, got {value!r}")
+    if value < _INT32_MIN or value > _INT32_MAX:
+        raise ValueError(
+            f"window move coordinate {value} is outside the signed 32-bit range"
+        )
+    if value < 0:
+        return value + (1 << 32)
+    return value
+
+
 def move_window(window_id: int, x: int, y: int) -> bool:
     """Move the client window of ``window_id`` so its top-left is (x, y).
 
@@ -999,25 +1246,40 @@ def move_window(window_id: int, x: int, y: int) -> bool:
     with NorthWest gravity places the outer frame, so the request is shifted
     back by ``_NET_FRAME_EXTENTS`` (left, top). A move to (100, 80) with a
     5px border and a 29px title bar sends the frame to (95, 51), and the
-    client then lists at (100, 80). Only the X and Y flags are set, so the
-    window manager keeps the current size. The request is sent again, with
-    fresh frame extents, until the client origin is that point. Returns
-    False when the id is not managed.
+    client then lists at (100, 80). A point inside the title bar makes the
+    frame origin negative. That signed coordinate is sent as a CARD32; it
+    is not clamped to zero, and the client origin stays the one asked for.
+    Only the X and Y flags are set, so the window manager keeps the current
+    size. The request is sent again, with fresh frame extents, until the
+    client origin is that point.
+
+    ``x`` and ``y`` have to be integers. When the display reports a size
+    they also have to be on that screen (0..width-1 and 0..height-1). A
+    float, a bool, a negative, or a point past that edge raises ValueError
+    and sends nothing. Returns False when the id is not managed.
     """
+    _reject_move_point(x, y, None)
     with _with_window(window_id) as (d, win):
+        px, py = _reject_move_point(x, y, _screen_pixels(d))
         if win is None:
             return False
 
         def send() -> None:
-            _restore_if_hidden(d, win)
             left, top = _frame_insets(win, d)
             # NorthWestGravity = 1. Flags X=1 and Y=2, shifted into the high byte.
-            _client_message(
-                d, win, "_NET_MOVERESIZE_WINDOW",
-                [1 | (3 << 8), int(x) - left, int(y) - top, 0, 0],
-            )
+            # Validate the frame origin before any client message, including
+            # the uniconify a hidden window would otherwise receive.
+            data = [
+                1 | (3 << 8),
+                _card32(px - left),
+                _card32(py - top),
+                0,
+                0,
+            ]
+            _restore_if_hidden(d, win)
+            _client_message(d, win, "_NET_MOVERESIZE_WINDOW", data)
 
-        _retry_until(d, send, lambda: _geometry_matches(win, d, x=x, y=y))
+        _retry_until(d, send, lambda: _geometry_matches(win, d, x=px, y=py))
         return True
 
 

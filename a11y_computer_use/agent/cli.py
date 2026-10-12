@@ -116,6 +116,8 @@ def build_agent(args: argparse.Namespace):
         trace_dir=args.trace_dir,
         allowed_domains=args.allowed_domains,
         blocked_domains=args.blocked_domains,
+        temperature=getattr(args, "temperature", None),
+        seed=getattr(args, "seed", None),
     )
 
 
@@ -410,6 +412,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="seconds for one model call (default 120); this is not the run budget",
     )
     run.add_argument("--trace-dir", default=None, dest="trace_dir", help="directory for trajectory.jsonl and screenshots")
+    run.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="sampling temperature (default 0 where the provider allows it)",
+    )
+    run.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="sampling seed (default 0 where the provider allows it)",
+    )
     run.add_argument("--json", action="store_true", help="print the result as one JSON object on stdout")
     run.add_argument("--approve", action="store_true", help="prompt before quit, close, pay, send, delete, and exec")
     run.add_argument(

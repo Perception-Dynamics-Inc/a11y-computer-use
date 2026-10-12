@@ -111,7 +111,19 @@ def test_shortcut_binding_renders_gtk_tags() -> None:
     assert _linux_menus.shortcut_from_binding("0;0;0") is None
     # Mousepad New: mnemonic path, then the Primary accelerator. Not alt+f:n.
     assert _linux_menus.shortcut_from_binding("n;<Alt>f:n;<Primary>n") == "ctrl+n"
-    assert _linux_menus.shortcut_from_binding("s;<Control>s;s") == "ctrl+s"
+    assert _linux_menus.shortcut_from_binding("s;<Alt>e:s;<Control>s") == "ctrl+s"
+    # The accelerator field is empty or only the mnemonic letter. Not alt+f, not f, not s.
+    assert _linux_menus.shortcut_from_binding("f;<Alt>f;") is None
+    assert _linux_menus.shortcut_from_binding("_F;;") is None
+    assert _linux_menus.shortcut_from_binding("a;<Alt>v:a;") is None
+    assert _linux_menus.shortcut_from_binding("<Alt>f;<Alt>f;") is None
+    assert _linux_menus.shortcut_from_binding("s;<Control>s;s") is None
+    assert _linux_menus.mnemonic_from_binding("f;<Alt>f;") == "f"
+    assert _linux_menus.mnemonic_from_binding("_F;;") == "f"
+    assert _linux_menus.mnemonic_from_binding("a;<Alt>v:a;") == "a"
+    assert _linux_menus.mnemonic_from_binding("<Alt>f;<Alt>f;") == "f"
+    assert _linux_menus.mnemonic_from_binding("n;<Alt>f:n;<Primary>n") == "n"
+    assert _linux_menus.mnemonic_from_binding("<Primary>n") is None
     # Bare named accelerators beat the leading mnemonic letter. Not f, c, or d.
     assert _linux_menus.shortcut_from_binding("f;<Alt>v:f;F11") == "f11"
     assert _linux_menus.shortcut_from_binding("c;<Alt>h:c;F1") == "f1"
@@ -134,6 +146,29 @@ def test_list_uses_a_bare_named_accelerator_not_the_mnemonic_letter() -> None:
     assert listed("View", "Fullscreen") == "f11"
     assert listed("Help", "Contents") == "f1"
     assert listed("Edit", "Delete Selection") == "delete"
+    status = _item("Statusbar", role="check menu item", key="a;<Alt>v:a;")
+    view.children.append(status)
+    rows = _linux_menus.menu_items(app, "View")
+    bar_entry = next(row for row in rows if row["title"] == "Statusbar")
+    assert bar_entry["shortcut"] is None
+    assert bar_entry["mnemonic"] == "a"
+
+
+def test_mnemonic_binding_is_not_listed_as_a_shortcut() -> None:
+    """``f;<Alt>f;`` and ``_F;;`` are the underlined letter, not a shortcut."""
+    file_menu = _menu("File", _item("New", key="n;<Alt>f:n;<Primary>n"))
+    file_menu.key = "f;<Alt>f;"
+    label = _menu("Format", _item("Bold", key="_B;;"))
+    label.key = "_F;;"
+    bar = Acc("menu bar", "", [file_menu, label])
+    app = Acc("application", "mousepad", [Acc("frame", "Mousepad", [bar], states={"active"})])
+    rows = {row["title"]: row for row in _linux_menus.menu_items(app, None)}
+    assert rows["File"]["shortcut"] is None and rows["File"]["mnemonic"] == "f"
+    assert rows["Format"]["shortcut"] is None and rows["Format"]["mnemonic"] == "f"
+    new = _linux_menus.menu_items(app, "File")[0]
+    assert new["shortcut"] == "ctrl+n" and new["mnemonic"] == "n"
+    bold = _linux_menus.menu_items(app, "Format")[0]
+    assert bold["shortcut"] is None and bold["mnemonic"] == "b"
 
 
 def test_list_reads_a_gtk_menu_without_pressing_it() -> None:

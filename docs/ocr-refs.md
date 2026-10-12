@@ -24,7 +24,7 @@ display-qualified physical pixels, like the `e` refs of a snapshot.
 | `find(app, text=..., ocr=true)` | fresh OCR, only the lines containing the text |
 | `wait_for("o7", "exists" or "gone")` | re-OCR until the text appears or leaves |
 | `screenshot(marks=true)` | draws `o` refs in blue next to the red `e` refs |
-| `desktop_snapshot` with no actionable element | appends the OCR lines automatically, so the planner has targets in the same reply (`A11Y_COMPUTER_USE_AUTO_OCR=0` turns this off) |
+| `desktop_snapshot` with no actionable element | stays on the accessibility tree. Set `A11Y_COMPUTER_USE_AUTO_OCR=1` to append the OCR lines in the same reply. The vision handoff hint is still appended. |
 
 Every call goes through the same gate as a screenshot: tier `read` against
 the frontmost app, an audit row, and the Screen Recording grant. An `o` ref
@@ -107,7 +107,7 @@ real custom-drawn app end to end through `o` refs; that is the agency demo's job
 
 ## Cropping to the app
 
-The automatic escalation (an empty snapshot appending OCR lines) reads only the
+The automatic escalation runs when `A11Y_COMPUTER_USE_AUTO_OCR=1`. It reads only the
 target app's windows: the union of the window rects in the snapshot, or, when
 the tree has none, of the driver's window list for that app. The menu bar and
 other apps' pixels stay out of the refs. When no window rect is known at all,
