@@ -25,7 +25,7 @@ from a11y_computer_use.agent.vision_order import (
     words_from_spans,
 )
 from a11y_computer_use.schema import Bounds
-from tests.test_agent_core import FakeRuntime, el, turn, window
+from tests.test_agent_core import FakeRuntime, _look_rows, _proposed_pixel, _solid_png, el, turn, window
 
 PNG = b"\x89PNG\r\n\x1a\nfake"
 
@@ -211,16 +211,17 @@ def test_explicit_canvas_point_is_not_rewritten_to_chrome(monkeypatch) -> None:
 
 def test_ref_plus_point_is_invalid_arguments() -> None:
     elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
-    result, runtime = _run(
-        "Click Save.",
-        elements,
-        turn(ToolCall("click", {"ref": "e2", "x": 10, "y": 20})),
-        max_steps=1,
-    )
-    assert runtime.calls == []
-    error = result.step_log[0].error or ""
-    assert error.startswith("invalid_arguments: click:")
-    assert "ref and x/y" in error
+    for name in ("click", "right_click", "double_click"):
+        result, runtime = _run(
+            "Click Save. Do not click Upload.",
+            elements,
+            turn(ToolCall(name, {"ref": "e2", "x": 10, "y": 20})),
+            max_steps=1,
+        )
+        assert runtime.calls == [], name
+        error = result.step_log[0].error or ""
+        assert error.startswith(f"invalid_arguments: {name}:"), error
+        assert "ref and x/y" in error
 
 
 def test_missing_ref_resolves_only_from_its_last_known_name(tmp_path) -> None:
@@ -365,6 +366,75 @@ def test_double_click_point_is_not_rewritten_to_upload(monkeypatch) -> None:
     error = rejected.step_log[0].error or ""
     assert error.startswith("invalid_arguments: double_click:")
     assert "ref and x/y" in error
+
+
+def test_explicit_point_survives_look_again_snap_and_retry(tmp_path, monkeypatch) -> None:
+    """Look-again, a snap, and a retry leave a model x/y click on that point.
+
+    Upload is focused and named by the goal. The window contains the point,
+    so escalation would otherwise move it to the window center or press
+    Return. The verifier asks for a different pixel. The click that is sent
+    stays, for a single click, a double-click, and a right-click.
+    """
+    from a11y_computer_use.agent.grounding import GroundingHit
+
+    def upload_word(_image, **_kwargs):
+        return [{
+            "text": "Upload",
+            "bounds": {"display_id": 0, "x": 10, "y": 10, "width": 40, "height": 20},
+            "confidence": 0.9,
+        }]
+
+    monkeypatch.setattr(ocr, "ocr", upload_word)
+    elements = [
+        el("e1", "AXWindow", "Chrome", bounds=Bounds(0, 0, 0, 1280, 800)),
+        el(
+            "e2", "AXButton", "Upload", parent="e1", clickable=True, focused=True,
+            bounds=Bounds(0, 10, 10, 40, 20),
+        ),
+    ]
+    point = {"x": 640, "y": 360, "display_id": 0}
+    goal = "Open the B5 total in Chrome. Do not click Upload."
+    gestures = {
+        "click": {},
+        "double_click": {"button": "left", "count": 2},
+        "right_click": {"button": "right", "count": 1},
+    }
+
+    class _Shift:
+        def __init__(self) -> None:
+            self.seen = 0
+
+        def ground(self, png, instruction):
+            del png
+            self.seen += 1
+            mx, my = _proposed_pixel(instruction)
+            return GroundingHit(mx + 80, my + 80)
+
+    for name, gesture in gestures.items():
+        runtime = FakeRuntime(elements)
+        runtime.png = _solid_png(1280, 800)
+        ground = _Shift()
+        args = {**point, "button": "right", "count": 1} if gesture else dict(point)
+        _result, runtime = _run(
+            goal,
+            elements,
+            turn(ToolCall(name, args)),
+            runtime=runtime,
+            grounding=ground,
+            trace_dir=tmp_path / name,
+            max_retries=2,
+            max_steps=1,
+        )
+        expected = {**point, **gesture} if gesture else dict(point)
+        assert runtime.calls == [("click", expected)], (name, runtime.calls)
+        assert all(call[0] != "key" for call in runtime.calls)
+        assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+        assert ground.seen >= 1, name
+        notes = _look_rows(tmp_path / name)
+        assert notes, name
+        assert notes[0]["proposed"] == point
+        assert all(call[1].get("x") == 640 and call[1].get("y") == 360 for call in runtime.calls)
 
 
 def test_pointer_gestures_still_stop_for_payment_and_send() -> None:

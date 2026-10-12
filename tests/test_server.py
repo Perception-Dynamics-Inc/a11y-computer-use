@@ -2801,6 +2801,68 @@ def test_hover_off_linux_is_unsupported_and_does_not_move(tmp_path, monkeypatch)
     assert driver.hovered == []
 
 
+def test_click_point_is_not_rewritten_to_the_element_under_it(tmp_path, monkeypatch) -> None:
+    """A raw x/y click stays that point. Save's box contains it and is not the target.
+
+    call_tool and an act step keep the coordinates. Single, double, and
+    right clicks are the same point.
+    """
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    driver = _HoverDriver()
+    clicked: list[tuple] = []
+
+    def record(target, **kwargs):
+        clicked.append((target, kwargs))
+
+    driver.click = record
+    rt = _hover_runtime(tmp_path, driver)
+    rt._current = build_synthetic_snapshot(app="editor")
+    # Save is e2 at display 1, (240, 140) 120x56. (250, 150) is inside it.
+    point = {"x": 250, "y": 150, "display_id": 1}
+    assert "clicked (250, 150)" in rt.call_tool("click", dict(point))
+    steps = json.loads(rt.act_batch([
+        {"do": "click", **point, "count": 2},
+        {"do": "click", **point, "button": "right"},
+    ]))
+    assert steps[0]["ok"] is True and steps[1]["ok"] is True
+    assert [target for target, _kwargs in clicked] == [
+        Point(display_id=1, x=250, y=150),
+        Point(display_id=1, x=250, y=150),
+        Point(display_id=1, x=250, y=150),
+    ]
+    assert [kwargs["count"] for _target, kwargs in clicked] == [1, 2, 1]
+    assert [kwargs["button"] for _target, kwargs in clicked] == [
+        server.MouseButton.LEFT, server.MouseButton.LEFT, server.MouseButton.RIGHT,
+    ]
+    assert all(not isinstance(target, Element) for target, _kwargs in clicked)
+
+
+async def test_mcp_click_point_is_not_rewritten_to_save(store, audit_dir, monkeypatch) -> None:
+    """The MCP click tool sends the caller's point, not the Save ref under it."""
+    monkeypatch.setattr(server, "_frontmost_bundle", lambda: "editor")
+    monkeypatch.setattr(server, "_app_at_point", lambda point: None)
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    store.set_tier("editor", safety.Tier.CLICK)
+    driver = _HoverDriver()
+    clicked: list = []
+    driver.click = lambda target, **kwargs: clicked.append((target, kwargs))
+    with server.Runtime(store=store, audit=safety.AuditLog(audit_dir), driver=driver) as runtime:
+        runtime._current = build_synthetic_snapshot(app="editor")
+        mcp = server.build_server(runtime=runtime)
+        result = await call_tool(mcp, "click", {
+            "x": 250, "y": 150, "display_id": 1, "button": "right", "count": 2,
+        })
+    assert not result.isError, result.content[0].text
+    assert "250" in result.content[0].text and "150" in result.content[0].text
+    target, kwargs = clicked[0]
+    assert target == Point(display_id=1, x=250, y=150)
+    assert kwargs["button"] is server.MouseButton.RIGHT
+    assert kwargs["count"] == 2
+    assert not isinstance(target, Element)
+
+
 async def test_mcp_hover_on_linux_moves_and_off_linux_is_unsupported(
     store, audit_dir, monkeypatch
 ) -> None:

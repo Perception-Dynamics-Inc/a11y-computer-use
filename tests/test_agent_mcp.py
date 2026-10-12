@@ -19,7 +19,8 @@ from a11y_computer_use.agent.mcp_server import build_agent_mcp
 from a11y_computer_use.agent.models.base import ModelTurn, ToolCall
 from a11y_computer_use.agent.models.scripted import ScriptedModel
 from a11y_computer_use.agent.service import RunStore
-from tests.test_agent_core import FakeRuntime, el, window
+from a11y_computer_use.schema import Bounds
+from tests.test_agent_core import FakeRuntime, _solid_png, el, window
 from tests.test_server import EXPECTED_TOOLS
 
 pytestmark = pytest.mark.anyio
@@ -251,6 +252,105 @@ async def test_mcp_approve_shows_the_same_payment_target(tmp_path: Path) -> None
         }))
         assert answered["approve"] is False
         assert opted_runtime.calls == []
+
+
+def _point_tree():
+    return [
+        el("e1", "AXWindow", "Demo", bounds=Bounds(0, 0, 0, 1280, 800)),
+        el(
+            "e2", "AXButton", "Upload", parent="e1", clickable=True, focused=True,
+            bounds=Bounds(0, 10, 10, 40, 20),
+        ),
+    ]
+
+
+def _point_script():
+    point = {"x": 640, "y": 360, "display_id": 0}
+    order = [
+        ToolCall("click", dict(point)),
+        ToolCall("double_click", {**point, "button": "right", "count": 1}),
+        ToolCall("right_click", {**point, "button": "left", "count": 1}),
+    ]
+    sent = {"n": 0}
+
+    def script(messages):
+        content = messages[-1].content
+        text = content if isinstance(content, str) else ""
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            text = str(content[0].get("text") or "")
+        if "proposed image pixel" in text:
+            return ModelTurn(text='{"point":[900, 900],"space":"image"}', calls=[])
+        if sent["n"] < len(order):
+            call = order[sent["n"]]
+            sent["n"] += 1
+            return ModelTurn(calls=[call])
+        return ModelTurn(calls=[ToolCall(
+            "done",
+            {"answer": "stayed", "conditions": [{"window_title_contains": "Demo"}]},
+        )])
+
+    return point, script
+
+
+async def test_mcp_explicit_point_is_not_rewritten_to_the_goal(tmp_path: Path) -> None:
+    """run_goal keeps a model x/y click, including double and right."""
+    point, script = _point_script()
+    runtime = FakeRuntime(_point_tree())
+    runtime.png = _solid_png(1280, 800)
+    server = build_agent_mcp(RunStore(
+        runtime_factory=lambda: runtime,
+        model_factory=lambda _spec: ScriptedModel(script),
+        trace_root=tmp_path / "traces",
+    ))
+    async with client_session(server) as client:
+        started = _payload(await client.call_tool("run_goal", {
+            "goal": "Open the B5 total in Chrome. Do not click Upload.",
+            "model": "scripted:unused",
+        }))
+        result = {}
+        for _ in range(80):
+            result = _payload(await client.call_tool("get_run", {"run_id": started["id"]}))
+            if result.get("status") != "running":
+                break
+            await asyncio.sleep(0.02)
+    assert result["status"] == "success", result
+    assert runtime.calls == [
+        ("click", point),
+        ("click", {**point, "button": "left", "count": 2}),
+        ("click", {**point, "button": "right", "count": 1}),
+    ]
+    assert all(call[1].get("ref") != "e2" for call in runtime.calls)
+
+
+async def test_mcp_ref_plus_point_is_invalid_arguments(tmp_path: Path) -> None:
+    runtime = FakeRuntime(_point_tree())
+    server = build_agent_mcp(RunStore(
+        runtime_factory=lambda: runtime,
+        model_factory=lambda _spec: ScriptedModel([
+            ModelTurn(calls=[ToolCall("click", {"ref": "e2", "x": 640, "y": 360})]),
+            ModelTurn(calls=[ToolCall(
+                "done",
+                {"answer": "stayed", "conditions": [{"window_title_contains": "Demo"}]},
+            )]),
+        ]),
+        trace_root=tmp_path / "traces",
+    ))
+    async with client_session(server) as client:
+        started = _payload(await client.call_tool("run_goal", {
+            "goal": "Click Upload.",
+            "model": "scripted:unused",
+        }))
+        result = {}
+        for _ in range(80):
+            result = _payload(await client.call_tool("get_run", {"run_id": started["id"]}))
+            if result.get("status") != "running":
+                break
+            await asyncio.sleep(0.02)
+    assert result["status"] == "success", result
+    assert runtime.calls == []
+    error = result["step_log"][0]["error"] or ""
+    assert "invalid_arguments: click:" in error
+    assert "ref and x/y" in error
 
 
 def test_run_store_rejects_an_unknown_body_field(tmp_path: Path) -> None:

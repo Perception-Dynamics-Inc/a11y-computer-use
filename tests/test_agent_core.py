@@ -1614,6 +1614,36 @@ def test_escalation_keeps_the_requested_intent():
     assert strategy_action("foreground", menu, snap_focused, "demo", recovering=True) is None
     assert strategy_action("keyboard", escape, None, None, recovering=True) is None
     assert strategy_action("coordinates", typed, snap_field, None, recovering=False) is None
+
+    # An explicit point is not moved onto the window that contains it, or
+    # onto a focused control the goal might have named. Return is not a retry.
+    covering = Snapshot(
+        "snap", Scope.WINDOW, "demo", 1, 0.0, (),
+        (
+            el("e1", "AXWindow", "Chrome", bounds=Bounds(0, 0, 0, 1280, 800)),
+            el(
+                "e2", "AXButton", "Upload", parent="e1", clickable=True, focused=True,
+                bounds=Bounds(0, 10, 10, 40, 20),
+            ),
+        ),
+    )
+    explicit = {
+        "single": {"x": 640, "y": 360, "display_id": 0},
+        "double": {"x": 640, "y": 360, "display_id": 0, "button": "left", "count": 2},
+        "right": {"x": 640, "y": 360, "display_id": 0, "button": "right", "count": 1},
+        "inside": {"x": 20, "y": 15, "display_id": 0, "button": "left", "count": 2},
+    }
+    for name, args in explicit.items():
+        point = Action("click", args)
+        for level in range(5):
+            forced, point_label = forced_method(point, level, covering)
+            assert point_label is None, (name, level, point_label, forced.args)
+            assert forced.name == "click"
+            assert forced.args == args
+        for strategy in ("ref", "coordinates", "keyboard"):
+            assert strategy_action(
+                strategy, point, covering, "demo", recovering=True,
+            ) is None, (name, strategy)
     assert _action_key(escape) != _action_key(select_all)
     assert _action_key(typed) != _action_key(Action("type", {"ref": "e25", "text": "other"}))
     assert _action_key(menu) != _action_key(Action("menu", {"path": "File > Save", "action": "press"}))
