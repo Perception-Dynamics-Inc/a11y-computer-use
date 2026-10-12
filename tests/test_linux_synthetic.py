@@ -6081,6 +6081,16 @@ def test_short_table_past_the_document_wheels_the_page(
     assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
     assert called["wheel"] == 2
     assert called["nudge"] == 0
+    # Live Chrome on an 800px screen publishes this 25-row table at about
+    # 857px. That is still the document. A list more than twice the screen
+    # stays a viewport.
+    hit.y, hit.height = 120, 857
+    assert _atspi.scroll_container_kind(listing) == "document"
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 3
+    assert called["nudge"] == 0
+    hit.height = 1601
+    assert _atspi.scroll_container_kind(listing) == "viewport"
 
 
 def test_content_height_line_scroll_does_not_write_the_scroll_bar(

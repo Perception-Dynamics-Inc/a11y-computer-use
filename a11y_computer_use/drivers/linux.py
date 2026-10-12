@@ -1538,29 +1538,31 @@ class LinuxDriver:
                 if not all_windows:
                     return page_snap
                 page_key = _atspi._frame_cache_key(walked)
+                # One real window is the page already walked. Resolving that
+                # Chrome root again clears the client cache, and the next
+                # snapshot of a short page then misses the 12s bound.
                 extras: list[Snapshot] = []
                 seen = {page_key}
                 page_is_active = False
                 active_known = False
                 for item in listed:
-                    if _atspi._is_browser_bar_frame(item) or (
-                        _atspi._chromium_app(item) and _atspi._sparse_untitled_chrome_frame(item)
-                    ):
-                        continue
-                    chosen = (
-                        _atspi.chromium_snapshot_root(item)
-                        if _atspi._chromium_app(item) else item
-                    )
-                    if _atspi._is_browser_bar_frame(chosen) or (
-                        _atspi._chromium_app(chosen) and _atspi._sparse_untitled_chrome_frame(chosen)
-                    ):
-                        continue
-                    key = _atspi._frame_cache_key(chosen)
+                    key = _atspi._frame_cache_key(item)
                     if key in seen:
                         if not active_known:
                             page_is_active = True
                             active_known = True
                         continue
+                    chosen = item
+                    if _atspi._chromium_app(item):
+                        chosen = _atspi.chromium_snapshot_root(item)
+                        if _atspi._is_browser_bar_frame(chosen) or _atspi._sparse_untitled_chrome_frame(chosen):
+                            continue
+                        key = _atspi._frame_cache_key(chosen)
+                        if key in seen:
+                            if not active_known:
+                                page_is_active = True
+                                active_known = True
+                            continue
                     seen.add(key)
                     extra = _walk(chosen)
                     extras.append(extra)

@@ -14554,13 +14554,15 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
 def list_scrolls_with_document(container) -> bool:
     """True when a Chromium list is body content and the document scrolls.
 
-    A short table can be shorter than the screen and still longer than
-    the window. Its box is the content, not a scrollport. After the
-    document moves, the top sits above the page or the bottom still runs
-    past it, and the box stays no taller than the screen. A fixed-height
-    overflow list sits inside the document. A list taller than the screen
-    keeps the list wheel. No document edges means the caller keeps the
-    list's own bar.
+    A short table can be a little taller than an 800px screen and still
+    be body content. Its box is not a scrollport. After the document
+    moves, the top sits above the page or the bottom still runs past it.
+    The list bar does not move that table, and a wheel judged as a
+    scrollport then reports the page unchanged and the search turns
+    around before the last row. A list more than twice the screen is a
+    virtualized viewport and keeps the list wheel. A fixed-height
+    overflow list sits inside the document. No document edges means the
+    caller keeps the list's own bar.
     """
     if container is None or _role_name(container) not in _LIST_ROLES:
         return False
@@ -14571,17 +14573,17 @@ def list_scrolls_with_document(container) -> bool:
     pos, size = _extents(container)
     if pos is None or size is None or float(size[1]) < 4:
         return False
-    _sw, sh = _screen_size()
-    if sh > 0 and float(size[1]) > sh:
-        return False
     page = _page_edges(container)
     if page is None:
         return False
     top = float(pos[1])
     bottom = top + float(size[1])
-    if bottom > page[3] + 8:
-        return True
-    return top < page[1] - 8
+    if bottom <= page[3] + 8 and top >= page[1] - 8:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh * 2:
+        return False
+    return True
 
 
 def _page_node(container):

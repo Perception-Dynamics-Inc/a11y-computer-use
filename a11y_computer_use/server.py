@@ -6501,16 +6501,25 @@ class Runtime:
                     for el in shot.elements
                 )
 
+            def pinned_anchor(shot: Snapshot) -> Element | None:
+                """The pinned container in ``shot``.
+
+                A ref string is the slot in one snapshot. After the document
+                moves, that slot can be a cell. The wheel and the unchanged
+                row check follow the table that was pinned.
+                """
+                try:
+                    return self.driver.resolve_ref(pinned[0], ref, live=shot)
+                except (KeyError, ComputerUseError):
+                    return None
+
             def ready_anchor() -> Element | None:
                 """The page anchor after Ctrl+F, when that frame is back."""
                 fresh = self._current
                 if fresh is None:
                     return None
                 if pinned is not None:
-                    try:
-                        found_anchor = fresh.element(ref)
-                    except KeyError:
-                        found_anchor = None
+                    found_anchor = pinned_anchor(fresh)
                 else:
                     found_anchor = _scroll_anchor(fresh)
                 if found_anchor is None or page_frame_missing(fresh, found_anchor):
@@ -6527,10 +6536,7 @@ class Runtime:
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
                 if pinned is not None:
-                    try:
-                        anchor_now = snap.element(ref)
-                    except KeyError:
-                        anchor_now = None
+                    anchor_now = pinned_anchor(snap)
                 else:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
