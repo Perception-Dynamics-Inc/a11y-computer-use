@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-Status = Literal["success", "failed", "stuck", "needs_human", "cancelled"]
+Status = Literal["success", "failed", "stuck", "timeout", "needs_human", "cancelled"]
 
 
 @dataclass(slots=True)
@@ -42,7 +42,8 @@ class RunResult:
     ``steps`` is the count of ``step_log`` entries. ``conditions`` is the
     evidence check that decided the run (each item is ``condition``, ``ok``,
     ``detail``).     ``needs_human`` is set only when ``status`` is
-    ``needs_human``. ``evidence`` is set only when ``status`` is ``stuck``.
+    ``needs_human``. ``evidence`` is set when ``status`` is ``stuck`` or
+    ``timeout``.
     """
 
     status: Status

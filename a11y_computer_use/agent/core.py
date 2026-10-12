@@ -242,6 +242,20 @@ class _Cancelled(Exception):
     """Raised on the loop thread when ``cancel`` has been set."""
 
 
+class _StepDeadline(BaseException):
+    """The run budget elapsed while a driver or tool call was still blocked.
+
+    This is a ``BaseException`` so a tool's ``except Exception`` cannot turn
+    the deadline into a step error and keep going. The loop abandons the
+    blocked call and stops.
+    """
+
+    def __init__(self, where: str, action: str | None = None) -> None:
+        self.where = where
+        self.action = action
+        super().__init__(where)
+
+
 class Agent:
     """Run one goal against the desktop.
 
@@ -257,7 +271,10 @@ class Agent:
     still approved and audited. ``model_timeout_s`` is the limit for one model
     call (default 120 seconds). It is not the remaining run budget. The budget
     is checked between steps, and a model timeout after that budget is spent
-    ends as ``max_time``. ``cancel`` is safe to call from another thread.
+    ends as ``max_time``. A snapshot, screenshot, or tool call that is still
+    blocked when the budget runs out is abandoned. That run ends with status
+    ``timeout``, reason ``max_time``, and evidence. ``cancel`` is safe to call
+    from another thread.
     Observations are wrapped in ``<untrusted>`` fences (``fence_untrusted``,
     default on). ``allowed_domains`` and ``blocked_domains`` reject browser
     navigation and actions with ``domain_blocked``. ``grounding`` is an
@@ -345,6 +362,10 @@ class Agent:
         self._domains_explicit = allowed_domains is not None or blocked_domains is not None
         self.domain_policy = DomainPolicy.resolve(allowed_domains, blocked_domains)
         self._cancel = threading.Event()
+        #: Set when a blocked driver call is abandoned at ``max_time``.
+        #: Cooperative waits poll this through ``_agent_stop``. It is not a
+        #: user cancel.
+        self._deadline_hit = threading.Event()
         #: Set by the CLI signal handler. Unlike ``_cancel``, ``_loop`` does
         #: not clear it, so a signal during startup still stops the run.
         self._signal_cancel: threading.Event | None = None
@@ -367,6 +388,57 @@ class Agent:
         """True when ``cancel`` or a CLI signal has asked the run to stop."""
         self._restore_signal_cancel()
         return self._cancel.is_set()
+
+    def _deadline_or_stop(self) -> bool:
+        """True when the run budget abandoned a call, or the user cancelled."""
+        if self._deadline_hit.is_set():
+            return True
+        return self._stop_requested()
+
+    def _remaining_s(self) -> float:
+        started = getattr(self, "_run_started", None)
+        if started is None:
+            return float(self.max_time_s)
+        return float(self.max_time_s) - (time.perf_counter() - started)
+
+    def _run_bounded(self, fn, *, where: str, action: str | None = None):
+        """Run ``fn`` until ``max_time``. A call that is still blocked is abandoned.
+
+        The worker is a daemon thread. The loop does not join it after the
+        budget. A driver that never returns cannot hold the run open.
+        """
+        remaining = self._remaining_s()
+        if remaining <= 0:
+            self._deadline_hit.set()
+            raise _StepDeadline(where, action)
+        box: dict = {}
+
+        def worker() -> None:
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the loop thread
+                box["error"] = exc
+
+        thread = threading.Thread(target=worker, name=f"a11y-{where}", daemon=True)
+        thread.start()
+        thread.join(remaining)
+        if thread.is_alive():
+            self._deadline_hit.set()
+            raise _StepDeadline(where, action)
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def _timeout_evidence(self, deadline: _StepDeadline) -> dict:
+        started = getattr(self, "_run_started", None)
+        elapsed = 0.0 if started is None else time.perf_counter() - started
+        return {
+            "limit_s": self.max_time_s,
+            "elapsed_s": round(elapsed, 3),
+            "where": deadline.where,
+            "action": deadline.action,
+            "abandoned": True,
+        }
 
     def _mark_signal_cancel(self) -> None:
         """Record a cancel from a signal, including one seen as ``InterruptedError``."""
@@ -432,10 +504,26 @@ class Agent:
         # the handler is installed before ``run``, so the signal can land
         # in this window or during ``_prepare``.
         self._cancel.clear()
+        self._deadline_hit.clear()
+        self._run_started = started
         self._restore_signal_cancel()
         try:
             self._prepare()
             yield from self._drive(goal, started)
+        except _StepDeadline as deadline:
+            evidence = self._timeout_evidence(deadline)
+            self._result = self._build("timeout", "", "max_time", started, evidence=evidence)
+            if self.trace is not None:
+                self.trace.append({
+                    "kind": "timeout",
+                    "reason": "max_time",
+                    "evidence": evidence,
+                })
+            yield Event("timeout", {
+                "terminal": True,
+                "reason": "max_time",
+                "evidence": evidence,
+            })
         except _Cancelled:
             self._result = self._build("cancelled", "", "cancelled", started)
             yield Event("error", {"reason": "cancelled"})
@@ -482,7 +570,7 @@ class Agent:
         # step instead of running the next turn. Missing attributes on a test
         # double are ignored.
         try:
-            self.runtime._agent_stop = self._stop_requested  # type: ignore[attr-defined]
+            self.runtime._agent_stop = self._deadline_or_stop  # type: ignore[attr-defined]
             self.runtime._agent_interrupt = self._mark_signal_cancel  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 - a test double may refuse new attributes
             pass
@@ -1159,7 +1247,11 @@ class Agent:
             return self._invoke_expand(action)
         try:
             tool, params = to_runtime_call(action, self._app_name())
-            raw = self.runtime.call_tool(tool, params, confirm=self._safety_confirm)  # type: ignore[union-attr]
+            raw = self._run_bounded(
+                lambda: self.runtime.call_tool(tool, params, confirm=self._safety_confirm),  # type: ignore[union-attr]
+                where="tool",
+                action=tool,
+            )
         except ComputerUseError as exc:
             text = self._fence_tool_text(error_text(exc))
             marker = outcome.refused_result(
@@ -1219,8 +1311,12 @@ class Agent:
         opened = False
         if element.expanded is False or _role_key(element.role) in _PRESS_TO_EXPAND:
             try:
-                self.runtime.call_tool(  # type: ignore[union-attr]
-                    "click", {"ref": ref}, confirm=self._safety_confirm,
+                self._run_bounded(
+                    lambda: self.runtime.call_tool(  # type: ignore[union-attr]
+                        "click", {"ref": ref}, confirm=self._safety_confirm,
+                    ),
+                    where="tool",
+                    action="click",
                 )
             except Exception as exc:  # noqa: BLE001 - the expand result is the error
                 text = self._fence_tool_text(f"expand failed: {type(exc).__name__}: {exc}")
@@ -1233,7 +1329,10 @@ class Agent:
             if expand is not None:
                 listed = expand(app, ref)
             else:
-                listed = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
+                listed = self._run_bounded(
+                    lambda: self.runtime.desktop_snapshot(app, mode="full"),  # type: ignore[union-attr]
+                    where="observe",
+                )
         except Exception as exc:  # noqa: BLE001 - the listing is data for the model
             listed = f"error: {type(exc).__name__}: {exc}"
         verb = "expanded" if opened else "listed"
@@ -1702,7 +1801,10 @@ class Agent:
                 overview = fence(overview).text
             return overview, None
         try:
-            text = self.runtime.desktop_snapshot(app, mode="full")  # type: ignore[union-attr]
+            text = self._run_bounded(
+                lambda: self.runtime.desktop_snapshot(app, mode="full"),  # type: ignore[union-attr]
+                where="observe",
+            )
         except ComputerUseError as exc:
             if exc.code is ErrorCode.PERMISSION_DENIED_ACCESSIBILITY:
                 raise
@@ -1814,7 +1916,11 @@ class Agent:
 
     def _listed(self, tool: str, params: dict) -> str | None:
         try:
-            raw = self.runtime.call_tool(tool, params, confirm=self._safety_confirm)  # type: ignore[union-attr]
+            raw = self._run_bounded(
+                lambda: self.runtime.call_tool(tool, params, confirm=self._safety_confirm),  # type: ignore[union-attr]
+                where="tool",
+                action=tool,
+            )
         except Exception:
             return None
         text = _stringify(raw).strip()
@@ -2045,7 +2151,7 @@ class Agent:
         if not callable(crop):
             return None
         try:
-            return crop(ref)
+            return self._run_bounded(lambda: crop(ref), where="tool", action="crop")
         except Exception:  # noqa: BLE001 - one opaque ref must not drop the window shot
             return None
 
@@ -2064,7 +2170,10 @@ class Agent:
 
     def _grab(self) -> object:
         try:
-            return self.runtime.screenshot()  # type: ignore[union-attr]
+            return self._run_bounded(
+                lambda: self.runtime.screenshot(),  # type: ignore[union-attr]
+                where="screenshot",
+            )
         except Exception:  # noqa: BLE001 - capture is optional
             return None
 

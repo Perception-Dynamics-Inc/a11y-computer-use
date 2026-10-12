@@ -281,7 +281,7 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 
 | Field | Meaning |
 |---|---|
-| `status` | `success`, `failed`, `stuck`, `needs_human`, or `cancelled` |
+| `status` | `success`, `failed`, `stuck`, `timeout`, `needs_human`, or `cancelled` |
 | `answer` | The `done` answer, or `""` |
 | `steps` | Count of actions in `step_log` |
 | `elapsed_s` | Wall clock for the run |
@@ -290,7 +290,7 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 | `needs_human` | `{kind, message, ref, window}` or null. `kind` is `login`, `captcha`, `2fa`, `payment`, or `other` |
 | `trace_dir` | Directory of the trace |
 | `step_log` | One object per action |
-| `evidence` | For `status` `stuck`, `{subgoal, switches, steps_without_progress, elapsed_s, last_action}`. Otherwise null |
+| `evidence` | For `status` `stuck`, `{subgoal, switches, steps_without_progress, elapsed_s, last_action}`. For `status` `timeout`, `{limit_s, elapsed_s, where, action, abandoned}`. Otherwise null |
 
 Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`
 from the snapshot the model acted on, before the action renumbered refs),
@@ -298,7 +298,7 @@ from the snapshot the model acted on, before the action renumbered refs),
 `error`, `verified`, `duration_s`, `skipped` (later calls in that turn that
 did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 
-Exit codes: `0` success, `1` failed or `stuck` (including `max_steps`, `max_time`),
+Exit codes: `0` success, `1` failed, `stuck`, or `timeout` (including `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
 
 SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
@@ -321,8 +321,17 @@ terminate the process with `STATUS_CONTROL_C_EXIT` (`0xC000013A`).
 120. It is not the time left in `--max-time`. The loop checks the run budget
 before each step and again after the observation, before it calls the model.
 A model call that times out after that budget is already spent ends
-`reason` `max_time` (exit 1). A model timeout while the budget remains is
-`error: ModelError: ...` (exit 3).
+`reason` `max_time` with `status` `failed` (exit 1). A model timeout while the
+budget remains is `error: ModelError: ...` (exit 3). The model call is not
+cut short by `--max-time`; it keeps `--model-timeout`.
+
+`--max-time` is a hard deadline for a driver or tool call. Each snapshot,
+screenshot, crop, and tool call runs on a worker. When the budget is spent
+and that call is still blocked, the loop abandons it and stops. It does not
+wait for Chrome, AT-SPI, or any other driver to return. The result is
+`status` `timeout`, `reason` `max_time`, and `evidence` with `limit_s`,
+`elapsed_s`, `where` (`tool`, `observe`, or `screenshot`), `action`, and
+`abandoned: true`. That return is within a few seconds of the limit.
 
 `--display :N` sets `$DISPLAY` for the process before the runtime is created.
 The SDK equivalent is `Agent(display=":N")`.
@@ -606,6 +615,9 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - a subgoal stuck budget switches keyboard, then vision, then re-plan, records
   each switch in the trace, keeps an explicit `x`/`y` click, and stops with
   `status` `stuck` before `max_time`
+- a tool call that never returns is abandoned at `max_time`. The run ends
+  with `status` `timeout`, `reason` `max_time`, and evidence, within a second
+  of the limit (`tests/test_agent_core.py`)
 - a missing ref stays a click error and does not send Escape or Return
 - a no-op key does not turn the next chord into Return, a failed `type` does
   not become a click, and a failed `menu` does not become focus

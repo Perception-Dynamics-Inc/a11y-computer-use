@@ -369,8 +369,10 @@ def test_budget_is_checked_again_before_the_model_call():
     result, _events, _runtime, _agent = run(
         ScriptedModel(script), elements, runtime=runtime, max_time_s=0.02, model_timeout_s=30,
     )
-    assert result.status == "failed"
+    assert result.status == "timeout"
     assert result.reason == "max_time"
+    assert result.evidence["where"] == "observe"
+    assert result.evidence["abandoned"] is True
     assert called["n"] == 0
     assert result.steps == 0
 
@@ -426,6 +428,54 @@ def test_model_timeout_with_budget_left_stays_an_error():
     assert "timed out" in result.reason
     assert exit_code(result) == 3
     assert "error" in types(events)
+
+
+def test_hung_tool_stops_within_max_time(tmp_path):
+    """A tool that never returns is abandoned at max_time, not joined."""
+    import threading
+
+    from a11y_computer_use.agent.cli import exit_code
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    limit = 0.5
+
+    def call_tool(name, params, confirm=None):
+        del confirm
+        runtime.calls.append((name, dict(params)))
+        if name == "click":
+            threading.Event().wait(timeout=8)
+        return f"{name} ok"
+
+    runtime.call_tool = call_tool
+    started = time.perf_counter()
+    result, events, runtime, _agent = run(
+        ScriptedModel([turn(ToolCall("click", {"ref": "e2"}))]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_time_s=limit,
+        max_steps=10,
+    )
+    elapsed = time.perf_counter() - started
+    assert result.status == "timeout", result
+    assert result.reason == "max_time"
+    assert result.evidence["where"] == "tool"
+    assert result.evidence["action"] == "click"
+    assert result.evidence["abandoned"] is True
+    assert result.evidence["limit_s"] == limit
+    assert result.steps == 0
+    assert elapsed < limit + 1.0
+    assert exit_code(result) == 1
+    terminal = [event for event in events if event.type == "timeout"]
+    assert terminal[-1].data["terminal"] is True
+    assert terminal[-1].data["evidence"]["action"] == "click"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row.get("kind") == "timeout" for row in rows)
 
 
 def test_max_time_zero_stops_immediately():
