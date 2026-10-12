@@ -261,9 +261,11 @@ def test_move_caret_drops_the_cache() -> None:
 
 
 def test_linux_driver_run_caches_duplicate_getters(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _atspi_events
     from a11y_computer_use.drivers.linux import LinuxDriver
 
-    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
+    # This test runs the inline path. macOS and Windows CI have no gi.
+    monkeypatch.setattr(_atspi_events, "enabled", lambda: False)
     node = _Node()
 
     def work():
