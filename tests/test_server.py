@@ -1925,6 +1925,257 @@ def test_scroll_to_find_uses_in_page_find_on_a_tall_document(monkeypatch) -> Non
     assert scrolls == []
 
 
+def _short_overflow_list(head: int, *, found: str | None = None) -> Snapshot:
+    """A 520px list inside an 800px window. Synthetic snapshot, not Chrome."""
+    els = [
+        Element(ref="win", role="AXWindow", title="up371", value=None,
+                bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+        Element(ref="list", role="AXList", title="Rows", value=None,
+                bounds=Bounds(0, 20, 80, 400, 520), snapshot_id="s"),
+        Element(ref="tab", role="AXStaticText", title="Tab title", value=None,
+                bounds=Bounds(0, 20, 8, 120, 18), snapshot_id="s", parent="win"),
+    ]
+    for offset, number in enumerate(range(head, head + 8)):
+        els.append(Element(
+            ref=f"r{number}", role="AXListItem", title=f"ITEM-{number:03d} scroll-row",
+            value=None, bounds=Bounds(0, 24, 100 + offset * 18, 360, 18),
+            snapshot_id="s", parent="list",
+        ))
+    if found is not None:
+        els.append(Element(
+            ref="hit", role="AXStaticText", title=found, value=None,
+            bounds=Bounds(0, 24, 200, 360, 18), snapshot_id="s", parent="list",
+        ))
+    return Snapshot(
+        snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+        displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+    )
+
+
+def test_scroll_to_find_uses_in_page_find_on_a_short_overflow_list(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    An overflow list shorter than the window tries Ctrl+F before the
+    wheel. The early row is returned only after the find bar is closed
+    and a later snapshot still shows it. No wheel is sent.
+    """
+    from a11y_computer_use import server
+
+    chords: list[str] = []
+    scrolls: list[int] = []
+
+    class _D:
+        found = False
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(169, found="ITEM-020 scroll-row" if _D.found else None)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+
+        def key_chord(self, chord, **_kw):
+            chords.append(chord)
+            if chord == "Return":
+                _D.found = True
+
+        def type_text(self, text, **_kw):
+            chords.append(f"type:{text}")
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45)
+    assert "ITEM-020" in out
+    assert "found after 1 scroll" in out
+    assert "found after 0" not in out
+    assert chords[:3] == ["ctrl+f", "type:ITEM-020", "Return"]
+    assert "Escape" in chords
+    assert scrolls == []
+
+
+def test_scroll_to_find_names_static_text_rows_when_the_budget_stops(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Chrome paints an overflow row as static text under the list, not as
+    a list item. A zero-second budget still names those rows. A static
+    text outside the list is not one of them.
+    """
+    from a11y_computer_use import server
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            els = [
+                Element(ref="win", role="AXWindow", title="up371", value=None,
+                        bounds=Bounds(0, 0, 0, 1000, 800), snapshot_id="s"),
+                Element(ref="list", role="AXList", title="Rows", value=None,
+                        bounds=Bounds(0, 20, 80, 400, 520), snapshot_id="s"),
+                Element(ref="group", role="AXGroup", title="", value=None,
+                        bounds=Bounds(0, 24, 100, 360, 18), snapshot_id="s", parent="list"),
+                Element(ref="row", role="AXStaticText", title="ITEM-169 scroll-row", value=None,
+                        bounds=Bounds(0, 24, 100, 360, 18), snapshot_id="s", parent="group"),
+                Element(ref="tab", role="AXStaticText", title="Tab title", value=None,
+                        bounds=Bounds(0, 20, 8, 120, 18), snapshot_id="s", parent="win"),
+            ]
+            return Snapshot(
+                snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0.0,
+                displays=(Display(0, 1000, 800, 1.0, True),), elements=tuple(els),
+            )
+
+        def scroll(self, target, **kw):
+            raise AssertionError("a zero budget must not scroll")
+
+        def scroll_offset(self, _element):
+            return None
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=0)
+    assert out.startswith("not found after 0 scroll(s) (time budget 0s)")
+    assert "container: AXList 'Rows' ref=list" in out
+    assert "last_rows: ITEM-169 scroll-row" in out
+    assert "Tab title" not in out
+    assert "scroll_position: unknown" in out
+
+
+def test_scroll_to_find_keeps_going_while_a_list_makes_progress(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Each upward step takes ten seconds and reveals a new head. The 15s
+    figure is only the no-progress cap, so the search continues past it
+    and returns the row. A clock that does not move the rows stops on
+    that cap instead of using max_scrolls.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        head = 80
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(_D.head)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 10.0
+            _D.head -= 15
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert "ITEM-020" in out
+    assert "found after" in out
+    assert "time budget" not in out
+    assert scrolls == [-5, -5, -5, -5]
+    assert clock["t"] > 1015.0
+
+
+def test_scroll_to_find_stops_a_list_that_makes_no_progress(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The rows and the offset stay put. Fifteen seconds of that ends the
+    search even though max_scrolls is larger. The note still names the
+    rows that were on screen.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(169)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 20.0
+
+        def scroll_offset(self, _element):
+            return 40
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert out.startswith("not found after 1 scroll(s) (time budget 15s)")
+    assert "ITEM-169 scroll-row" in out
+    assert scrolls == [-5]
+
+
+def test_scroll_to_find_stops_at_the_hard_ceiling_while_still_moving(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    Every step reveals a new head, so the 15s no-progress cap keeps
+    resetting. The search still stops at the 120s ceiling instead of
+    running out max_scrolls.
+    """
+    from a11y_computer_use import server
+
+    clock = {"t": 1000.0}
+    scrolls: list[int] = []
+
+    class _D:
+        head = 400
+
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _short_overflow_list(_D.head)
+
+        def scroll(self, target, **kw):
+            scrolls.append(int(kw.get("dy") or 0))
+            clock["t"] += 10.0
+            _D.head -= 1
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+
+    out = rt.scroll_to_find("app", text="ITEM-020", direction="up", max_scrolls=45, budget_s=15)
+    assert out.startswith("not found after 12 scroll(s) (time budget 120s)")
+    assert "ITEM-388 scroll-row" in out
+    assert len(scrolls) == 12
+    assert clock["t"] == 1120.0
+
+
 def test_scroll_to_find_wheels_a_table_that_still_extends_past_the_window(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome page.
 

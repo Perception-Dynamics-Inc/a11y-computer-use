@@ -136,6 +136,11 @@ MAX_SCROLLS = 100
 # back toward, at most this many times, before the search gives up.
 _SCROLL_VERIFY_PAUSE_S = 0.15
 _SCROLL_VERIFY_BACKS = 3
+# ``budget_s`` is how long scroll_to_find may go without the on-screen
+# rows or the scroll offset changing. A step that changes either one
+# starts that clock again. This is the wall-clock ceiling even while
+# every step still moves the list.
+_SCROLL_FIND_HARD_S = 120.0
 
 _ACT_STEP_TYPES = ("click", "hover", "type", "key", "scroll", "drag", "wait_for")
 _ACT_STEP_LIST = "click/hover/type/key/scroll/drag/wait_for"
@@ -5479,11 +5484,16 @@ class Runtime:
         checks again. The ref and the bounds are from that confirming
         snapshot, not from the pre-scroll one.
 
-        The search stops when ``budget_s`` seconds have elapsed (15 by
-        default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). The note
-        names the scroll container, its scroll position, and the last rows
-        on screen. A document or a table is tried with Ctrl+F first. A
-        paginated or virtualized table that already fits in the window
+        The search stops after ``budget_s`` seconds with no progress (15
+        by default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). A step
+        that shows different on-screen rows, or that changes the
+        container's scroll offset, starts that clock again. The search
+        also stops at 120 seconds from the start. ``budget_s`` of 0 stops
+        before any scroll. The note names the scroll container, its
+        scroll position, and the last rows on screen. A document, a
+        table, or a list is tried with Ctrl+F first, including an
+        overflow list shorter than the window. A miss keeps the wheel.
+        A paginated or virtualized table that already fits in the window
         then steps with Page Down. A table that still runs past the
         window keeps the wheel, so the last rows can come on screen.
         ``page_unchanged`` is used only when that container's scroll
@@ -5649,24 +5659,87 @@ class Runtime:
             # this: its correction stays five lines.
             seen_document = False
             limit = max_scrolls
-            deadline = time.monotonic() + budget_s
+            started = time.monotonic()
+            stall_deadline = started + budget_s
+            hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
             page_mode = True
             find_tried = False
             same_rows = 0
             previous_rows: tuple[str, ...] | None = None
             last_anchor: Element | None = None
+            progress_rows: tuple[str, ...] | None = None
+            progress_offset = "unknown"
+            progress_seen = False
 
-            def row_names(shot: Snapshot) -> tuple[str, ...]:
+            def row_names(shot: Snapshot, anchor: Element | None = None) -> tuple[str, ...]:
+                under: set[str] = set()
+                if anchor is not None:
+                    children: dict[str, list[str]] = {}
+                    for el in shot.elements:
+                        if el.parent:
+                            children.setdefault(el.parent, []).append(el.ref)
+                    stack = [anchor.ref]
+                    while stack:
+                        ref = stack.pop()
+                        if ref in under:
+                            continue
+                        under.add(ref)
+                        stack.extend(children.get(ref, ()))
                 names: list[str] = []
                 for el in shot.elements:
-                    if el.role not in ("AXCell", "AXRow", "AXListItem"):
-                        continue
                     title = (el.title or "").strip()
                     if not title or not on_screen(el, shot):
+                        continue
+                    listed = el.role in ("AXCell", "AXRow", "AXListItem")
+                    in_list = (
+                        anchor is not None
+                        and el.ref in under
+                        and el.ref != anchor.ref
+                        and el.role == "AXStaticText"
+                    )
+                    if not listed and not in_list:
                         continue
                     if not names or names[-1] != title:
                         names.append(title)
                 return tuple(names)
+
+            def note_progress(shot: Snapshot, anchor: Element | None) -> None:
+                """Start the no-progress clock again when the list actually moves."""
+                nonlocal stall_deadline, progress_rows, progress_offset, progress_seen
+                names = row_names(shot, anchor)
+                if not progress_seen:
+                    progress_rows = names
+                    progress_offset = read_offset(anchor)
+                    progress_seen = True
+                    return
+                rows_moved = names != progress_rows
+                offset_moved = False
+                if rows_moved:
+                    progress_rows = names
+                else:
+                    offset = read_offset(anchor)
+                    offset_moved = offset != "unknown" and offset != progress_offset
+                    if offset != "unknown":
+                        progress_offset = offset
+                if budget_s > 0 and (rows_moved or offset_moved):
+                    stall_deadline = time.monotonic() + budget_s
+
+            def expired_cap() -> float | None:
+                """The cap that has run out, or None while the search may continue.
+
+                ``budget_s`` is only the no-progress cap. The hard ceiling
+                applies while rows or the offset keep changing. A zero
+                budget is already spent, and it is not reported as the
+                hard ceiling.
+                """
+                now = time.monotonic()
+                if budget_s <= 0:
+                    return budget_s if now >= stall_deadline else None
+                if now >= hard_deadline:
+                    return _SCROLL_FIND_HARD_S
+                if now >= stall_deadline:
+                    return budget_s
+                return None
 
             def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
                 """A paginated or virtualized table that already fits the window.
@@ -5698,13 +5771,14 @@ class Runtime:
                 visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
                 return visible <= 80
 
-            def wants_in_page_find(shot: Snapshot, anchor: Element | None) -> bool:
-                """Ctrl+F once before the wheel, for a document or a table.
+            def wants_in_page_find(_shot: Snapshot, anchor: Element | None) -> bool:
+                """Ctrl+F once before the wheel, for a document, a table, or a list.
 
-                An overflow list shorter than the window keeps the wheel,
-                including the walk back to an early row. A tall list, the
-                document group, or a viewport-sized scroll area is body
-                content, and find lands the row without a step per viewport.
+                An overflow list uses find first, including one shorter than
+                the window. A five-line wheel there is about five rows, and
+                the walk back to an early row does not fit in a no-progress
+                budget. A miss falls through to the wheel. A tall list, the
+                document group, or a scroll area is the same find.
                 """
                 if not text or "\n" in text or len(text) > 80 or anchor is None:
                     return False
@@ -5712,19 +5786,10 @@ class Runtime:
                     return False
                 if not callable(getattr(self.driver, "type_text", None)):
                     return False
-                if anchor.role in ("AXTable", "AXGrid", "AXOutline"):
+                if anchor.role in ("AXTable", "AXGrid", "AXOutline", "AXList", "AXScrollArea"):
                     return True
                 if document_anchor(anchor):
                     return True
-                box = viewport_box(shot)
-                if box is None:
-                    return False
-                _left, top, _right, bottom = box
-                window_h = bottom - top
-                if anchor.role == "AXList":
-                    return anchor.bounds.height > window_h + 8
-                if anchor.role == "AXScrollArea":
-                    return anchor.bounds.height > window_h * 0.7
                 return False
 
             def read_offset(anchor: Element | None) -> str:
@@ -5739,15 +5804,17 @@ class Runtime:
                     return "unknown"
                 return f"{float(value):g}"
 
-            def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool) -> str:
-                names = row_names(shot)
+            def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
+                           budget_cap: float | None = None) -> str:
+                names = row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
                     container = "unknown"
                 else:
                     title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
                     container = f"{anchor.role}{title} ref={anchor.ref}"
-                why = f" (time budget {budget_s:g}s)" if budget_hit else ""
+                shown_budget = budget_s if budget_cap is None else budget_cap
+                why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
                 return (
                     f"not found after {count} scroll(s){why}: "
                     f"no element matches text={text!r} role={role!r}\n"
@@ -5804,8 +5871,10 @@ class Runtime:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
-                if issued > 0 and time.monotonic() >= deadline:
-                    return unfinished(issued, snap, last_anchor, budget_hit=True)
+                note_progress(snap, last_anchor)
+                cap = expired_cap()
+                if cap is not None and (issued > 0 or budget_s <= 0):
+                    return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
                 if last_anchor is not None and last_anchor.role in ("AXTable", "AXGrid"):
                     seen = row_names(snap)
                     if issued > 0 and previous_rows is not None and seen == previous_rows:
@@ -5927,8 +5996,9 @@ class Runtime:
                         issued += 1
                         stalls = 0
                         continue
-                if time.monotonic() >= deadline:
-                    return unfinished(issued, snap, last_anchor, budget_hit=True)
+                cap = expired_cap()
+                if cap is not None:
+                    return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
@@ -8124,10 +8194,14 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. The search stops at budget_s
-        seconds (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S) and
-        reports the container, its scroll position, and the last rows seen.
-        A document or a table is searched with Ctrl+F first. A paginated
+        matching ref(s) or a not-found note. budget_s is how long the
+        search may go without the on-screen rows or the scroll offset
+        changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
+        A step that changes either one starts that clock again. The search
+        also stops at 120 seconds. It reports the container, its scroll
+        position, and the last rows seen. A document, a table, or a list
+        is searched with Ctrl+F first, including an overflow list shorter
+        than the window. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
         window keeps the wheel. page_unchanged is raised only when that
