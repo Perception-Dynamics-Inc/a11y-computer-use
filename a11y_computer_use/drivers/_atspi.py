@@ -3122,6 +3122,7 @@ class ATSPIAccessor:
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
             surface_name=surface_name,
+            note=outline_double_click_note(node) if role_str in _ROW_ROLE_NAMES else "",
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -12582,6 +12583,43 @@ def navigating_folder_row(acc) -> bool:
     elif parent_role not in {"tree", "tree table", "list", "list box"}:
         return False
     return folder_location(acc) is not None
+
+
+def outline_double_click_note(acc) -> str:
+    """``activates on double-click`` when a single click only selects the row.
+
+    A GTK tree or tree-table cell with no action interface, or with an
+    ``activate`` action that the single-click path does not run. A folder
+    row keeps its own navigation. Empty for every other node. This does not
+    perform the double-click or the activate action.
+    """
+    if acc is None:
+        return ""
+    try:
+        if _qt_app(acc) or "gtk" not in _toolkit_name(acc):
+            return ""
+        if _chromium_app(acc) or _gecko_app(acc):
+            return ""
+    except Exception:
+        return ""
+    parent, _index, _target = _selection_parent(acc)
+    if parent is None or _role_name(parent) not in {"tree", "tree table"}:
+        return ""
+    try:
+        if navigating_folder_row(acc):
+            return ""
+    except Exception:
+        return ""
+    names = _raw_action_names(acc)
+    if not names:
+        return "activates on double-click"
+    if "activate" not in names:
+        return ""
+    # select_contained_row performs a click or press action. expand, edit,
+    # and a later activate are not that click: the row is only selected.
+    if _first_press_action(acc) in _SELECTING_ACTION_NAMES:
+        return ""
+    return "activates on double-click"
 
 
 def navigation_gesture(acc) -> str | None:

@@ -11569,3 +11569,124 @@ def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     assert _linux_system.window_id_for_toplevel(
         title="Missing", pid=9, extents=None,
     ) is None
+
+
+def _outline_cell(name: str, actions: list[str]) -> _Acc:
+    cell = _Acc(
+        "table cell", name=name, width=180, height=21,
+        states=("SHOWING", "VISIBLE", "SELECTABLE", "ENABLED", "SENSITIVE"),
+    )
+    _place_row(cell, 48, 100, 180, 21)
+    cell.actions = list(actions)
+    if actions:
+        cell.get_action_iface = lambda cell=cell: cell
+        cell.get_n_actions = lambda cell=cell: len(cell.actions)
+        cell.get_action_name = lambda index, cell=cell: cell.actions[index]
+    return cell
+
+
+def _outline_window(*cells: _Acc, role: str = "tree table") -> _Acc:
+    """A GTK outline. Not a live Geany window."""
+    tree = _Acc(role, name="Symbols", width=220, height=320)
+    _bind_gtk_app(tree)
+    _place_row(tree, 40, 80, 220, 320)
+
+    def select_child(index: int) -> bool:
+        child = tree.children[index]
+        child.states.add("SELECTED")
+        return True
+
+    tree.select_child = select_child
+    tree.get_selection_iface = lambda: tree
+    _adopt(tree, *cells)
+    window = _Acc("frame", name="outline", width=640, height=480)
+    _place_row(window, 20, 20, 640, 480)
+    app = tree.get_application()
+    window.get_application = lambda: app
+    for cell in cells:
+        cell.get_application = lambda app=app: app
+    _adopt(window, tree)
+    return window
+
+
+def test_gtk_outline_row_says_it_activates_on_double_click(fake_atspi) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    A cell whose actions are expand, edit, then activate only selects on a
+    single click. The snapshot says the row activates on double-click. A
+    cell whose own action is click, and a cell in a plain table, do not.
+    """
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    bare = _outline_cell("plain_row", [])
+    clicking = _outline_cell("opens_on_click", ["click"])
+    _outline_window(symbol, bare, clicking)
+    assert _atspi.outline_double_click_note(symbol) == "activates on double-click"
+    assert _atspi.outline_double_click_note(bare) == "activates on double-click"
+    assert _atspi.outline_double_click_note(clicking) == ""
+    table = _Acc("table", name="grid")
+    _bind_gtk_app(table)
+    table.get_selection_iface = lambda: table
+    grid = _outline_cell("A1", [])
+    _adopt(table, grid)
+    grid.get_application = table.get_application
+    assert _atspi.outline_double_click_note(grid) == ""
+
+
+def test_click_on_an_outline_row_stays_a_single_click(
+    fake_atspi, monkeypatch, xtest_recorder, tmp_path
+) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    count=1 selects the row and says it activates on double-click. It does
+    not send a double-click and it does not run the activate action.
+    count=2 is the double-click the caller asked for.
+    """
+    from a11y_computer_use import observe, safety, server
+
+    events, _display = xtest_recorder
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    named: list[str] = []
+    real_named = _atspi.do_named_action
+
+    def record(acc, name: str) -> bool:
+        named.append(name)
+        return real_named(acc, name)
+
+    monkeypatch.setattr(_atspi, "do_named_action", record)
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(shot.app or "outline", safety.Tier.FULL)
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    runtime._current = shot
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    assert cell.note == "activates on double-click"
+    rendered = observe.render_matches(shot, (cell,))
+    assert "(activates on double-click)" in rendered
+    events.clear()
+    single = runtime.click(cell.ref)
+    assert "clicked" in single
+    assert "(activates on double-click)" in single
+    assert single.outcome == "partial"
+    assert single.evidence == "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) <= 1, events
+    assert named == []
+    events.clear()
+    named.clear()
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    runtime._current = shot
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    double = runtime.click(cell.ref, count=2)
+    assert "clicked" in double
+    assert "(activates on double-click)" not in double
+    assert double.outcome != "partial"
+    assert double.evidence != "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) == 2, events
+    assert named == []
