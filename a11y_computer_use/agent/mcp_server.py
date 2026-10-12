@@ -35,12 +35,18 @@ def build_agent_mcp(store: RunStore | None = None):
         max_steps: int = 50,
         max_time_s: float = 900,
         model_timeout_s: float = 120,
+        stuck_steps: int = 6,
+        stuck_time_s: float = 120,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
         allow_exec: bool = False,
         allow_payments: bool = False,
     ) -> dict:
         """Start one goal. Returns ``{"id": ...}``. 409 when that display is busy.
+
+        ``stuck_steps`` and ``stuck_time_s`` bound one tactic of the current
+        subgoal. The loop then switches keyboard, vision, and re-plan, and
+        stops with status ``stuck`` when those are used up.
 
         ``allow_payments`` lets a payment click wait for ``approve`` instead of
         stopping as ``needs_human``. It is off by default.
@@ -53,6 +59,8 @@ def build_agent_mcp(store: RunStore | None = None):
                 "max_steps": max_steps,
                 "max_time_s": max_time_s,
                 "model_timeout_s": model_timeout_s,
+                "stuck_steps": stuck_steps,
+                "stuck_time_s": stuck_time_s,
             },
             "allow_exec": allow_exec,
             "allow_payments": allow_payments,

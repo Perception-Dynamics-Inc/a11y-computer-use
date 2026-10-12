@@ -416,6 +416,8 @@ class RunStore:
             "max_steps": limits["max_steps"],
             "max_time_s": limits["max_time_s"],
             "model_timeout_s": limits["model_timeout_s"],
+            "stuck_steps": limits["stuck_steps"],
+            "stuck_time_s": limits["stuck_time_s"],
             "approve": lambda action, record=record: self._approve(record, action),
             "auto_deny": False,
             "allow_exec": allow_exec,
@@ -493,7 +495,13 @@ _RUN_FIELDS = {
     "allowed_domains",
     "blocked_domains",
 }
-_LIMIT_FIELDS = {"max_steps", "max_time_s", "model_timeout_s"}
+_LIMIT_FIELDS = {
+    "max_steps",
+    "max_time_s",
+    "model_timeout_s",
+    "stuck_steps",
+    "stuck_time_s",
+}
 
 
 def _unknown_field_message(given: dict, allowed: set[str], *, where: str = "") -> str | None:
@@ -536,6 +544,8 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
     max_steps = limits.get("max_steps", 50)
     max_time_s = limits.get("max_time_s", 900)
     model_timeout_s = limits.get("model_timeout_s", 120)
+    stuck_steps = limits.get("stuck_steps", 6)
+    stuck_time_s = limits.get("stuck_time_s", 120)
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1:
         raise ValueError("limits.max_steps must be a positive integer")
     if isinstance(max_time_s, bool) or not isinstance(max_time_s, (int, float)) or float(max_time_s) <= 0:
@@ -546,6 +556,14 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
         or float(model_timeout_s) <= 0
     ):
         raise ValueError("limits.model_timeout_s must be a positive number")
+    if isinstance(stuck_steps, bool) or not isinstance(stuck_steps, int) or stuck_steps < 1:
+        raise ValueError("limits.stuck_steps must be a positive integer")
+    if (
+        isinstance(stuck_time_s, bool)
+        or not isinstance(stuck_time_s, (int, float))
+        or float(stuck_time_s) <= 0
+    ):
+        raise ValueError("limits.stuck_time_s must be a positive number")
     if "allow_exec" in body and not isinstance(body.get("allow_exec"), bool):
         raise ValueError("allow_exec must be a boolean")
     if "allow_payments" in body and not isinstance(body.get("allow_payments"), bool):
@@ -562,6 +580,8 @@ def _parse_run_body(body: dict) -> tuple[str, str, str | None, dict, bool, bool,
             "max_steps": int(max_steps),
             "max_time_s": float(max_time_s),
             "model_timeout_s": float(model_timeout_s),
+            "stuck_steps": int(stuck_steps),
+            "stuck_time_s": float(stuck_time_s),
         },
         allow_exec,
         allow_payments,

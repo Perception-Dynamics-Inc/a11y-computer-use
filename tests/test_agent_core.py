@@ -8,6 +8,8 @@ import os
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from a11y_computer_use.agent import Agent, ReservedPermission, tool_schemas
 from a11y_computer_use.agent.actions import Action
 from a11y_computer_use.agent.core import (
@@ -367,8 +369,10 @@ def test_budget_is_checked_again_before_the_model_call():
     result, _events, _runtime, _agent = run(
         ScriptedModel(script), elements, runtime=runtime, max_time_s=0.02, model_timeout_s=30,
     )
-    assert result.status == "failed"
+    assert result.status == "timeout"
     assert result.reason == "max_time"
+    assert result.evidence["where"] == "observe"
+    assert result.evidence["abandoned"] is True
     assert called["n"] == 0
     assert result.steps == 0
 
@@ -424,6 +428,54 @@ def test_model_timeout_with_budget_left_stays_an_error():
     assert "timed out" in result.reason
     assert exit_code(result) == 3
     assert "error" in types(events)
+
+
+def test_hung_tool_stops_within_max_time(tmp_path):
+    """A tool that never returns is abandoned at max_time, not joined."""
+    import threading
+
+    from a11y_computer_use.agent.cli import exit_code
+
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    limit = 0.5
+
+    def call_tool(name, params, confirm=None):
+        del confirm
+        runtime.calls.append((name, dict(params)))
+        if name == "click":
+            threading.Event().wait(timeout=8)
+        return f"{name} ok"
+
+    runtime.call_tool = call_tool
+    started = time.perf_counter()
+    result, events, runtime, _agent = run(
+        ScriptedModel([turn(ToolCall("click", {"ref": "e2"}))]),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_time_s=limit,
+        max_steps=10,
+    )
+    elapsed = time.perf_counter() - started
+    assert result.status == "timeout", result
+    assert result.reason == "max_time"
+    assert result.evidence["where"] == "tool"
+    assert result.evidence["action"] == "click"
+    assert result.evidence["abandoned"] is True
+    assert result.evidence["limit_s"] == limit
+    assert result.steps == 0
+    assert elapsed < limit + 1.0
+    assert exit_code(result) == 1
+    terminal = [event for event in events if event.type == "timeout"]
+    assert terminal[-1].data["terminal"] is True
+    assert terminal[-1].data["evidence"]["action"] == "click"
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row.get("kind") == "timeout" for row in rows)
 
 
 def test_max_time_zero_stops_immediately():
@@ -3361,3 +3413,234 @@ def test_look_again_snaps_a_word_inside_a_line_not_the_line_center(tmp_path, mon
     assert note["snap"]["type"] == "ocr"
     assert note["snap"]["x"] == 120
     assert note["snap"]["text"] == "LEFT"
+
+
+def _strategy_switches(trace) -> list[dict]:
+    rows = []
+    path = trace / "trajectory.jsonl"
+    if not path.is_file():
+        return rows
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("kind") == "strategy_switch":
+            rows.append(row)
+    return rows
+
+
+def test_stuck_budget_switches_in_order_then_stops_early(tmp_path):
+    """One unverified step per tactic, then keyboard, vision, replan, then stuck."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    started = time.perf_counter()
+    result, events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=40,
+        max_time_s=600,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    elapsed = time.perf_counter() - started
+    assert result.status == "stuck", result
+    assert result.reason and result.reason.startswith("stuck: subgoal 1")
+    assert "keyboard, vision, replan" in result.reason
+    assert result.evidence["subgoal"] == 1
+    assert result.evidence["steps_without_progress"] == 4
+    assert result.evidence["switches"] == ["keyboard", "vision", "replan"]
+    assert len(runtime.calls) == 4
+    assert all(call == ("click", {"ref": "e2"}) for call in runtime.calls)
+    assert elapsed < 30
+    switches = _strategy_switches(tmp_path)
+    assert [row["switch"] for row in switches] == ["keyboard", "vision", "replan"]
+    assert switches[0]["order"] == ["keyboard", "vision", "replan"]
+    assert switches[0]["subgoal"] == 1
+    stuck = [event for event in events if event.type == "stuck"]
+    assert stuck[-1].data["terminal"] is True
+    assert stuck[-1].data["evidence"]["switches"] == ["keyboard", "vision", "replan"]
+    assert result.evidence == stuck[-1].data["evidence"]
+    from a11y_computer_use.agent.cli import exit_code
+
+    assert exit_code(result) == 1
+
+
+def test_verified_progress_resets_the_stuck_budget(tmp_path):
+    """A verified step starts a new subgoal, so the old tactic count does not carry over."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+
+    from a11y_computer_use.outcome import ActionResult
+
+    def call_tool(name, params, confirm=None):
+        del confirm
+        runtime.calls.append((name, dict(params)))
+        return ActionResult("click ok", outcome="confirmed", evidence="landed")
+
+    runtime.call_tool = call_tool
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=8,
+        stuck_steps=2,
+        stuck_time_s=600,
+    )
+    assert result.status == "failed"
+    assert result.reason and result.reason.startswith("max_steps")
+    assert len(runtime.calls) == 8
+    assert _strategy_switches(tmp_path) == []
+
+
+def test_stuck_time_budget_stops_before_the_run_clock(tmp_path):
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+
+    def script(_messages):
+        time.sleep(0.08)
+        return turn(ToolCall("click", {"ref": "e2"}))
+
+    started = time.perf_counter()
+    result, _events, runtime, _agent = run(
+        ScriptedModel(script),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=40,
+        max_time_s=30,
+        stuck_steps=100,
+        stuck_time_s=0.05,
+    )
+    elapsed = time.perf_counter() - started
+    assert result.status == "stuck", result
+    assert result.reason and "max_time" not in result.reason
+    assert result.evidence["switches"] == ["keyboard", "vision", "replan"]
+    assert elapsed < 5
+    assert len(runtime.calls) == 4
+
+
+def test_stuck_budget_rejects_a_non_positive_limit(tmp_path):
+    runtime = FakeRuntime(window())
+    agent = Agent(ScriptedModel([]), runtime=runtime, trace_dir=tmp_path)
+    assert agent.stuck_steps == 6
+    assert agent.stuck_time_s == 120.0
+    with pytest.raises(ValueError, match="stuck_steps"):
+        Agent(ScriptedModel([]), runtime=runtime, trace_dir=tmp_path, stuck_steps=0)
+    with pytest.raises(ValueError, match="stuck_time_s"):
+        Agent(ScriptedModel([]), runtime=runtime, trace_dir=tmp_path, stuck_time_s=0)
+
+
+def test_strategy_switch_does_not_rewrite_an_explicit_point_click(tmp_path):
+    """#333: a tactic change leaves an explicit x/y click on those pixels."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True))
+    runtime = FakeRuntime(elements)
+    point = {"x": 800, "y": 500, "display_id": 0}
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", point))),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        look_again=False,
+        max_steps=20,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert result.status == "stuck", result
+    assert runtime.calls == [("click", point)] * 4
+    assert all(call[1].get("chord") is None for call in runtime.calls)
+
+
+def test_keyboard_switch_keeps_the_same_effect(tmp_path):
+    """#308: keyboard is Return only for a focused click, never a different chord or effect."""
+    elements = window(el("e2", "AXButton", "Save", parent="e1", clickable=True, focused=True))
+    runtime = FakeRuntime(elements)
+    result, _events, runtime, _agent = run(
+        ScriptedModel(lambda _messages: turn(ToolCall("click", {"ref": "e2"}))),
+        elements,
+        runtime=runtime,
+        trace_dir=tmp_path,
+        max_steps=20,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert result.status == "stuck", result
+    assert runtime.calls[0] == ("click", {"ref": "e2"})
+    assert runtime.calls[1] == ("key", {"chord": "Return"})
+    assert runtime.calls[2:] == [("click", {"ref": "e2"}), ("click", {"ref": "e2"})]
+    assert [call[1].get("chord") for call in runtime.calls] == [None, "Return", None, None]
+
+    typed = FakeRuntime(window(el("e25", "AXTextField", "", parent="e1", editable=True)))
+
+    def type_turn(_messages):
+        return turn(ToolCall("type", {"ref": "e25", "text": "Rent"}))
+
+    result, _events, typed, _agent = run(
+        ScriptedModel(type_turn),
+        typed.elements,
+        runtime=typed,
+        trace_dir=tmp_path,
+        max_steps=20,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert result.status == "stuck", result
+    assert all(call[0] == "type" and call[1]["text"] == "Rent" for call in typed.calls)
+    assert len(typed.calls) == 4
+
+    escaped = FakeRuntime(window())
+
+    def escape(_messages):
+        return turn(ToolCall("key", {"chord": "Escape"}))
+
+    result, _events, escaped, _agent = run(
+        ScriptedModel(escape),
+        escaped.elements,
+        runtime=escaped,
+        trace_dir=tmp_path,
+        max_steps=20,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert result.status == "stuck", result
+    assert all(call == ("key", {"chord": "Escape"}) for call in escaped.calls)
+
+    menus = FakeRuntime(window())
+
+    def menu(_messages):
+        return turn(ToolCall("menu", {"path": ["File", "Save"]}))
+
+    result, _events, menus, _agent = run(
+        ScriptedModel(menu),
+        menus.elements,
+        runtime=menus,
+        trace_dir=tmp_path,
+        max_steps=20,
+        stuck_steps=1,
+        stuck_time_s=600,
+    )
+    assert result.status == "stuck", result
+    assert menus.calls
+    assert all(call[0] == "menu" for call in menus.calls)
+    assert all(call[1]["path"] == ["File", "Save"] for call in menus.calls)
+    assert all(call[1]["action"] == "press" for call in menus.calls)
+
+
+def test_run_limits_accept_a_stuck_budget():
+    from a11y_computer_use.agent.service import _parse_run_body
+
+    _goal, _model, _display, limits, *_rest = _parse_run_body({
+        "goal": "ping",
+        "model": "scripted:turns.json",
+        "limits": {"stuck_steps": 2, "stuck_time_s": 15},
+    })
+    assert limits["stuck_steps"] == 2
+    assert limits["stuck_time_s"] == 15.0
+    with pytest.raises(ValueError, match="stuck_steps"):
+        _parse_run_body({
+            "goal": "ping",
+            "model": "scripted:turns.json",
+            "limits": {"stuck_steps": 0},
+        })

@@ -52,6 +52,7 @@ _CLI_KEYS = {
     "needs_human",
     "trace_dir",
     "step_log",
+    "evidence",
 }
 
 
