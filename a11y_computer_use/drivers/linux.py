@@ -2381,6 +2381,48 @@ class LinuxDriver:
             return None
         return float(value) if isinstance(value, (int, float)) else None
 
+    def reveal_table_match(self, app: str, text: str):
+        """Scroll a named cell of a large GTK table into view.
+
+        ``(moved, on_screen)`` when the table model contains ``text``.
+        ``moved`` is true when the cell was off screen and AT-SPI
+        ``scroll_to`` or the vertical bar's row index brought it on screen.
+        None when the app is not GTK or no cell contains ``text``. Chromium
+        keeps its own wheel. A line scroll does not come through here.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def go():
+            root = _atspi.find_root(app, Scope.WINDOW)
+            if root is None:
+                return None
+            return _atspi.reveal_gtk_named_cell(root, text)
+
+        return self._run(go)
+
+    def scroll_viewport_page(self, target: Element, direction: int) -> bool:
+        """Page a large GTK table by one painted viewport. False otherwise.
+
+        ``direction`` is positive to go down. The vertical bar moves by the
+        painted row count. Chromium and a line-sized ``scroll`` stay on
+        the wheel.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        if not isinstance(target, Element) or not direction:
+            return False
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return False
+        if handle is None:
+            return False
+        try:
+            return bool(self._run(lambda: _atspi.scroll_gtk_viewport_page(handle, int(direction))))
+        except Exception:
+            return False
+
     def latch_chromium_find(self, app: str) -> bool:
         """Remember this Chrome process before the post-find snapshot.
 
