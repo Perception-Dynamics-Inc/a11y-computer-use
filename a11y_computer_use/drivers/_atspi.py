@@ -6220,8 +6220,29 @@ def _number_input(acc) -> bool:
     )
 
 
-def _value_range(acc) -> tuple[float, float] | None:
-    """(minimum, maximum) from the Value interface, or None when it has none."""
+def _value_interface_present(acc) -> bool:
+    """True when ``acc`` implements Value.
+
+    ``get_value_iface`` is how AT-SPI reports the interface. None means it
+    is missing, and minimum and maximum must not be read: that read returns
+    an uninitialized double (about ``6.93e-310``) after the bridge logs that
+    the object is not a Value. A test double with no ``get_value_iface``
+    method is not that report. Its numbers still come from ``Atspi.Value``.
+    """
+    if acc is None:
+        return False
+    getter = getattr(acc, "get_value_iface", None)
+    if not callable(getter):
+        return True
+    return _safe(lambda: getter()) is not None
+
+
+def _raw_value_bounds(acc) -> tuple[float, float] | None:
+    """Minimum and maximum as read, or None when either is not a finite number.
+
+    This does not decide that the Value interface exists. A missing
+    interface has to be rejected before this read.
+    """
     Atspi = _atspi()
     minimum = _safe(lambda: Atspi.Value.get_minimum_value(acc))
     maximum = _safe(lambda: Atspi.Value.get_maximum_value(acc))
@@ -6233,6 +6254,25 @@ def _value_range(acc) -> tuple[float, float] | None:
     if not math.isfinite(low) or not math.isfinite(high):
         return None
     return low, high
+
+
+def _uninitialized_bounds(low: float, high: float) -> bool:
+    """True when either end is the uninitialized double a missing Value returns."""
+    return _uninitialized_double(low) or _uninitialized_double(high)
+
+
+def _value_range(acc) -> tuple[float, float] | None:
+    """(minimum, maximum) from the Value interface, or None when it has none.
+
+    A missing interface is None and is not read. An uninitialized double is
+    also None: it is not a range a number can be checked against.
+    """
+    if not _value_interface_present(acc):
+        return None
+    span = _raw_value_bounds(acc)
+    if span is None or _uninitialized_bounds(*span):
+        return None
+    return span
 
 
 def _parse_number(value: str) -> float:
@@ -8999,6 +9039,8 @@ def control_kind(acc) -> str | None:
         # typing, not by Value.set_current_value. Checked before
         # ``_value_range``, which imports gi.
         return None
+    # A Draw shape panel has no Value interface. The bridge still answers
+    # minimum and maximum with an uninitialized double. That is not a range.
     if _value_range(acc) is not None:
         return "value"
     return None
@@ -9994,8 +10036,10 @@ def set_numeric_value(acc, value: str) -> bool | str:
 
     A non-number or a number outside minimum..maximum raises ValueError before
     the write. The message includes the minimum and maximum. The current value
-    is read back and must match. False means ``value`` is a finite number and
-    this control has no Value interface, so the caller may use ``set_text``.
+    is read back and must match. False means this control has no Value
+    interface, or the bounds are an uninitialized double. The text is not
+    parsed in that case, so a word is not rejected as a number and the
+    garbage minimum is not reported. The caller may use ``set_text``.
     An empty string on an ``<input type=number>`` clears the field. When the
     control has EditableText, ``set_text`` clears it. Chrome's number input
     has no EditableText: a click places the caret, then ctrl+a, BackSpace,
@@ -10013,7 +10057,14 @@ def set_numeric_value(acc, value: str) -> bool | str:
             "the number field could not be cleared",
             expected="",
         )
-    span = _value_range(acc)
+    # A missing interface returns before any number check. Reading minimum
+    # on that node is the uninitialized double, and parsing the text would
+    # report that double as the minimum.
+    if not _value_interface_present(acc):
+        return False
+    span = _raw_value_bounds(acc)
+    if span is not None and _uninitialized_bounds(*span):
+        return False
     low = high = None
     open_upper = False
     if span is not None:

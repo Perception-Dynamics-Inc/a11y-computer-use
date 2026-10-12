@@ -8362,6 +8362,75 @@ def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch
     assert _atspi.writer_cell_text(cell) == "NEWB2-1"
 
 
+def test_missing_value_interface_is_not_numeric_and_a_real_range_still_is(
+    fake_atspi, monkeypatch,
+) -> None:
+    """A node with no Value interface is not checked as a number.
+
+    AT-SPI reports the interface missing. Minimum and maximum are not read:
+    that read is an uninitialized double, about 6.93e-310. set_numeric_value
+    returns false before parsing, and set_value on the group is not_editable.
+    The same double is not a range when an interface object is handed back.
+    A panel whose minimum and maximum are a real range stays numeric.
+    """
+    junk = 6.93985e-310
+    panel = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    panel.get_value_iface = lambda: None
+    probed = {"n": 0}
+    original_min = fake_atspi.Value.get_minimum_value
+    original_max = fake_atspi.Value.get_maximum_value
+
+    def counting_min(acc):
+        probed["n"] += 1
+        return original_min(acc)
+
+    def counting_max(acc):
+        probed["n"] += 1
+        return original_max(acc)
+
+    fake_atspi.Value.get_minimum_value = staticmethod(counting_min)
+    fake_atspi.Value.get_maximum_value = staticmethod(counting_max)
+    try:
+        assert _atspi._value_interface_present(panel) is False
+        assert _atspi._value_range(panel) is None
+        assert _atspi.control_kind(panel) is None
+        assert _atspi.set_numeric_value(panel, "NOPE") is False
+        assert probed["n"] == 0
+    finally:
+        fake_atspi.Value.get_minimum_value = staticmethod(original_min)
+        fake_atspi.Value.get_maximum_value = staticmethod(original_max)
+
+    handed = _Acc("panel", name="EllipseB", value=junk, minimum=junk, maximum=junk)
+    handed.get_value_iface = lambda: handed
+    assert _atspi._value_range(handed) is None
+    assert _atspi.control_kind(handed) is None
+    assert _atspi.set_numeric_value(handed, "NOPE") is False
+
+    box = Bounds(0, 100, 80, 100, 80)
+    element = Element("e25", "AXGroup", "EllipseB", None, box, "snap-1")
+    target = {"node": handed}
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: target["node"])
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    with pytest.raises(ComputerUseError) as group_exc:
+        driver.set_value(element, "NOPE")
+    assert group_exc.value.detail["reason"] == "not_editable", group_exc.value
+    assert "not a number" not in str(group_exc.value)
+    assert "e-310" not in str(group_exc.value)
+    target["node"] = panel
+    with pytest.raises(ComputerUseError) as missing_exc:
+        driver.set_value(element, "NOPE")
+    assert missing_exc.value.detail["reason"] == "not_editable", missing_exc.value
+    assert "e-310" not in str(missing_exc.value)
+
+    meter = _Acc("filler", name="Meter", value=1.0, minimum=0.0, maximum=10.0)
+    assert _atspi.control_kind(meter) == "value"
+    with pytest.raises(ValueError, match="not a number") as numeric:
+        _atspi.set_numeric_value(meter, "NOPE")
+    assert "0" in str(numeric.value) and "10" in str(numeric.value)
+    assert "e-310" not in str(numeric.value)
+
+
 def test_dialog_and_checkbox_drop_uninitialized_doubles_and_keep_small_values(fake_atspi) -> None:
     """Synthetic AT-SPI nodes. Not a live LibreOffice.
 
