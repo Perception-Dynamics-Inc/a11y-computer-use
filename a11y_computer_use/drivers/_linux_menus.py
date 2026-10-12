@@ -8,11 +8,12 @@ prefixes still go through `menus.match_title`.
 
 Listing reads the tree and does not press when the rows are already there. A
 menu that is empty until it is shown is opened and then closed. Pressing opens
-each level and activates the leaf with the item's ``click`` action. An open
-menu is one whose item is ``SELECTED`` or whose popup is ``SHOWING``. Close
-sends Escape and succeeds only after that menu is gone. A shortcut is the
-accelerator in the AT-SPI binding: a tagged chord, or a bare key name such
-as F11, not the Alt mnemonic letter.
+each level and activates the leaf with the item's ``click`` action. A menu
+whose only action has an empty name (LibreOffice menu-bar entries) is opened
+with that action. An open menu is one whose item is ``SELECTED`` or whose
+popup is ``SHOWING``. Close sends Escape and succeeds only after that menu is
+gone. A shortcut is the accelerator in the AT-SPI binding: a tagged chord, or
+a bare key name such as F11, not the Alt mnemonic letter.
 
 This module does not import ``gi``. Tests drive it with fake accessibles.
 ``file_dialog`` is not implemented here.
@@ -270,12 +271,33 @@ def classify_leaf_press(result: object, *, failed: bool, elapsed: float) -> str:
     return "refused"
 
 
+def _action_name(action: object, index: int) -> str:
+    name_method = getattr(action, "get_action_name", None) or getattr(action, "get_name", None)
+    if name_method is None:
+        return ""
+    return str(name_method(index) or "").lower()
+
+
+def _do_action(action: object, index: int) -> bool:
+    do = getattr(action, "do_action", None) or getattr(action, "doAction", None)
+    if do is None:
+        return False
+    return bool(do(index))
+
+
 def _invoke_press(node: object) -> bool:
     """Run the node's activating action. D-Bus errors propagate.
 
     ``_press`` turns those errors into false so a parent menu that cannot
     open still reports a refusal. The leaf classifier needs the exception
     and the elapsed time to tell a timeout from a real refusal.
+
+    A named press action (``click``, ``press``, and the rest of
+    `_PRESS_ACTIONS`) wins. LibreOffice menu-bar entries are role ``menu``
+    and publish exactly one action whose name is the empty string.
+    ``do_action(0)`` on that node opens the menu. A single unnamed action
+    on any other role is not pressed, and a menu with more than one action
+    is not guessed.
     """
     getter = None
     for name in ("get_action_iface", "get_action"):
@@ -296,14 +318,12 @@ def _invoke_press(node: object) -> bool:
     except (TypeError, ValueError):
         return False
     for index in range(total):
-        name_method = getattr(action, "get_action_name", None) or getattr(action, "get_name", None)
-        raw = str(name_method(index) or "").lower() if name_method is not None else ""
-        if raw not in _PRESS_ACTIONS:
+        if _action_name(action, index) not in _PRESS_ACTIONS:
             continue
-        do = getattr(action, "do_action", None) or getattr(action, "doAction", None)
-        if do is None:
-            return False
-        return bool(do(index))
+        return _do_action(action, index)
+    # LibreOffice: role menu, one action, name "". Items inside still use click.
+    if total == 1 and _role(node) == "menu" and _action_name(action, 0) == "":
+        return _do_action(action, 0)
     return False
 
 
