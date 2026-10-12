@@ -3382,6 +3382,9 @@ def test_window_list_for_a_named_app_is_gated_against_it_and_filtered(tmp_path, 
 
 
 def test_auto_ocr_escalation_runs_when_cropped_even_if_not_frontmost(tmp_path, monkeypatch) -> None:
+    # AUTO_OCR defaults off. This case is the opt-in path: a crop of the named
+    # app's window still reads that app even when another app is frontmost.
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     rt = _granted_runtime(tmp_path, monkeypatch)
     note = rt._auto_ocr_note("org.krita", None)
     assert "Brush" in note and "cropped" in note
