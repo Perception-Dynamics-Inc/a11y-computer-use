@@ -22,6 +22,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 
 from __future__ import annotations
 
+import html
 import math
 import os
 import re
@@ -1394,6 +1395,87 @@ def _strip_objects(text: str) -> str:
     return text.replace(_OBJECT_REPLACEMENT, "").strip()
 
 
+# Qt rich-text names (FeatherPad's word-count control) are HTML. Only these
+# names are tags. ``<not-a-tag>`` and ``a < b`` are text and stay.
+_HTML_TAG_NAMES = (
+    "a|b|i|u|s|p|br|hr|img|div|span|em|strong|font|qt|html|body|head|title|"
+    "table|thead|tbody|tfoot|tr|td|th|ul|ol|li|pre|blockquote|center|big|small|"
+    "sub|sup|tt|nobr|code|meta|style|script|h1|h2|h3|h4|h5|h6|dl|dt|dd|caption"
+)
+# The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
+# not a tag: HTML does not allow a space between ``<`` and the name.
+_HTML_TAG_RE = re.compile(
+    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    re.IGNORECASE,
+)
+_HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
+_HTML_BLOCK_TAGS = frozenset({
+    "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "qt", "html",
+    "body", "pre", "blockquote", "ul", "ol", "table", "head", "title", "dl",
+    "dt", "dd", "caption",
+})
+
+
+def _html_markup(tags: list[re.Match[str]]) -> bool:
+    """True when ``tags`` are rich text, not a lone ``<a>`` or ``<not-a-tag>``.
+
+    A tag with attributes, a void tag, or an open/close pair is markup.
+    ``<a>`` with no attributes and no closer is left alone, and so is any
+    name that is not an HTML tag.
+    """
+    opened: set[str] = set()
+    closed: set[str] = set()
+    for match in tags:
+        name = match.group(2).lower()
+        rest = (match.group(3) or "").strip(" /")
+        if name in _HTML_VOID_TAGS or rest:
+            return True
+        if match.group(1):
+            closed.add(name)
+        else:
+            opened.add(name)
+    return bool(opened & closed)
+
+
+def _strip_known_markup(text: str) -> str:
+    """Remove rich-text tags. Text that is not markup is returned unchanged."""
+    tags = list(_HTML_TAG_RE.finditer(text))
+    if not _html_markup(tags):
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(2).lower()
+        if name in _HTML_VOID_TAGS or (match.group(1) and name in _HTML_BLOCK_TAGS):
+            return " "
+        return ""
+
+    cleaned = _HTML_TAG_RE.sub(replace, text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+    return cleaned.strip()
+
+
+def _plain_accessible_name(text: str) -> str:
+    """Accessible name with rich-text markup removed and entities decoded.
+
+    ``<p style='white-space:pre'>Calculate number of words</p>`` becomes
+    ``Calculate number of words``. ``&amp;`` becomes ``&``. ``<not-a-tag>``,
+    ``a < b``, and a bare ``<a>`` are not markup and are kept. A name with
+    no ``<`` and no ``&`` is returned unchanged.
+    """
+    if "<" not in text and "&" not in text:
+        return text
+    current = text
+    for _ in range(3):
+        decoded = html.unescape(current)
+        if decoded != current:
+            decoded = decoded.replace("\xa0", " ")
+        stripped = _strip_known_markup(decoded)
+        if stripped == current:
+            return current
+        current = stripped
+    return current
+
+
 def _is_choice_role(role: str, role_name: str) -> bool:
     return role in _CHOICE_ROLES or role_name in _CHOICE_ROLE_NAMES
 
@@ -2688,7 +2770,7 @@ class ATSPIAccessor:
         # SHOWING. expanded follows the menu, including after it closes.
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
-        name = _call_first(node, ("get_name",), default="") or ""
+        name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
         description = _call_first(node, ("get_description",), default="") or ""
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
