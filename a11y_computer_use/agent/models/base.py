@@ -400,8 +400,18 @@ def hostname_of(url: str) -> str:
     return (urlparse(url).hostname or "").lower()
 
 
-def make_model(spec: str | Model) -> Model:
+def make_model(
+    spec: str | Model,
+    *,
+    temperature: float | None = None,
+    seed: int | None = None,
+) -> Model:
     """Build a `Model` from a spec string, or return a `Model` unchanged.
+
+    ``temperature`` and ``seed`` override the defaults (0 and 0) for a spec
+    string. A provider that cannot send one of them leaves it off the request
+    and records that on ``model.sampling``. Passing either override with an
+    existing `Model` is an error: that instance already has its sampling.
 
     Specs (provider prefix is case-insensitive; the model id is not)::
 
@@ -419,6 +429,10 @@ def make_model(spec: str | Model) -> Model:
     and extra colons (Ollama tags) are preserved. See ``docs/agent-models.md``.
     """
     if isinstance(spec, Model):
+        if temperature is not None or seed is not None:
+            raise ModelError(
+                "temperature and seed apply to a model spec string; this Model was already built"
+            )
         return spec
     if not isinstance(spec, str):
         raise ModelError(f"make_model expected a spec string or a Model, got {type(spec).__name__}")
@@ -437,31 +451,31 @@ def make_model(spec: str | Model) -> Model:
             raise ModelError("command spec is missing a path")
         from a11y_computer_use.agent.models.command import CommandModel
 
-        return CommandModel(rest)
+        return CommandModel(rest, temperature=temperature, seed=seed)
     if key == "scripted":
         if not rest:
             raise ModelError("scripted spec is missing a path")
         from a11y_computer_use.agent.models.scripted import ScriptedModel
 
-        return ScriptedModel(path=rest)
+        return ScriptedModel(path=rest, temperature=temperature, seed=seed)
     if key in {"openai", "xai", "ollama", "vllm"}:
         if not rest:
             raise ModelError(f"{key} spec is missing a model name")
         from a11y_computer_use.agent.models.openai_compat import open_ai_compatible
 
-        return open_ai_compatible(key, rest)
+        return open_ai_compatible(key, rest, temperature=temperature, seed=seed)
     if key == "anthropic":
         if not rest:
             raise ModelError("anthropic spec is missing a model name")
         from a11y_computer_use.agent.models.anthropic import AnthropicModel
 
-        return AnthropicModel(rest)
+        return AnthropicModel(rest, temperature=temperature, seed=seed)
     if key == "gemini":
         if not rest:
             raise ModelError("gemini spec is missing a model name")
         from a11y_computer_use.agent.models.gemini import GeminiModel
 
-        return GeminiModel(rest)
+        return GeminiModel(rest, temperature=temperature, seed=seed)
     raise ModelError(
         f"unknown model spec {spec!r}; expected openai, xai, ollama, vllm, "
         "anthropic, gemini, command, or scripted"

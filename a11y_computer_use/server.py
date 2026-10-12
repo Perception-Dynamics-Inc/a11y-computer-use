@@ -645,11 +645,11 @@ def text_click_control(elements, target: Element) -> Element | None:
 #: unconfirmed. Set ``A11Y_COMPUTER_USE_CONFIRM=0`` to disable the gate entirely.
 CONFIRMATION_GATE = os.environ.get("A11Y_COMPUTER_USE_CONFIRM", "1") != "0"
 
-#: When a snapshot exposes no actionable element, run on-device OCR of the
-#: display right away and append the text lines as ``o`` refs, so the planner
-#: gets something to target in the same round-trip (`ocr.py`). Set
-#: ``A11Y_COMPUTER_USE_AUTO_OCR=0`` to keep snapshots pure.
-AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "1") != "0"
+#: Empty snapshots stay on the accessibility tree. On-device OCR of that
+#: snapshot is opt-in: set ``A11Y_COMPUTER_USE_AUTO_OCR=1`` to append ``o``
+#: refs in the same reply (`ocr.py`). ``screen_text`` and ``find(ocr=true)``
+#: are unchanged. ``crop`` still reads text in the crop.
+AUTO_OCR = os.environ.get("A11Y_COMPUTER_USE_AUTO_OCR", "0") == "1"
 
 #: Re-OCR the display when an ``o`` ref is acted on and re-resolve the ref by
 #: text near its old position (the OCR analogue of re-resolving an ``e`` ref
@@ -740,7 +740,10 @@ _PAGE_GROUP_ROLES = ("AXGroup", "AXWebArea")
 
 
 def _element_area(el) -> int:
-    return el.bounds.width * el.bounds.height
+    bounds = el.bounds
+    if bounds is None:
+        return 0
+    return bounds.width * bounds.height
 
 
 def _scroll_reference_area(snap) -> int:
@@ -952,9 +955,11 @@ def _permission_app_id(identifier: str) -> str:
     """The id a grant is stored under.
 
     macOS: the installed bundle id when a display name matches one, else the
-    identifier. Windows: the identifier. Linux: the process comm of a running
-    window, so ``google-chrome`` and "Google Chrome" key as ``chrome``, the
-    same id ``snapshot`` gates on. An unmatched name is stored as given so a
+    identifier. Windows: the identifier. Linux: the full program name of a
+    running window when the kernel comm is that name's 15-byte cut, and the
+    process comm otherwise. ``gnome-text-editor`` stays ``gnome-text-editor``;
+    ``google-chrome`` and "Google Chrome" still key as ``chrome``, the same
+    id ``snapshot`` gates on. An unmatched name is stored as given so a
     grant can precede launch.
     """
     installed = _installed_bundle_id(identifier)
@@ -3239,6 +3244,32 @@ class Runtime:
             return
         self._display_named(display_id)
 
+    def _require_window_move_point(self, x: object, y: object) -> tuple[int, int]:
+        """Reject a move coordinate before any window lookup or client message.
+
+        ``x`` and ``y`` are integers. A bool is not an integer here, and a
+        float is not truncated: truncating would move the window to a
+        different point. When the driver can name display 0, the point has
+        to be one of its pixels (0..width-1, 0..height-1), the same range
+        as click. Otherwise it has to be a non-negative signed 32-bit
+        value. The window is not moved, and the coordinate is not clamped.
+        """
+        if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+            raise ValueError(f"window move x and y must be integers, got ({x!r}, {y!r})")
+        display = self._display_named(0)
+        if display is None:
+            limit = (1 << 31) - 1
+            if x < 0 or y < 0 or x > limit or y > limit:
+                raise ValueError(
+                    f"window move ({x}, {y}) is outside the signed screen range "
+                    f"(valid x and y are 0..{limit})"
+                )
+            return x, y
+        detail = point_outside_display(x, y, display, where="window move")
+        if detail is not None:
+            raise ValueError(detail)
+        return x, y
+
     def _require_point(self, x: object, y: object, display_id: int | None, *, where: str = "point") -> None:
         """Reject a coordinate outside the target display before any input."""
         display = self._display_named(display_id)
@@ -3722,7 +3753,7 @@ class Runtime:
         best: Element | None = None
         for el in snap.elements:
             b = el.bounds
-            if b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
+            if b is None or b.display_id != point.display_id or b.width <= 0 or b.height <= 0:
                 continue
             if b.x <= point.x < b.x + b.width and b.y <= point.y < b.y + b.height:
                 if best is None or b.width * b.height < best.bounds.width * best.bounds.height:
@@ -4177,6 +4208,12 @@ class Runtime:
         from a11y_computer_use import capture
 
         bounds = element.bounds
+        if bounds is None:
+            raise ComputerUseError(
+                ErrorCode.NOT_VISIBLE,
+                f"{ref} is off-screen: the ref has no bounds",
+                detail={"ref": ref, "reason": "off_screen"},
+            )
         if bounds.width < 1 or bounds.height < 1:
             raise _not_visible(ref, "off_screen", bounds, "the ref has no on-screen size")
         display = self._display_for_bounds(bounds)
@@ -4439,10 +4476,16 @@ class Runtime:
         activated: list[Element] = []
         # Fallback content inside a canvas. A pointer click lands on the canvas.
         canvas_fallback: list[Element] = []
+        # A hidden notebook tab has a name and no box. A pointer click at an
+        # invented point would land on the page or the menu.
+        unbound: list[Element] = []
 
         def execute() -> None:
             self._refuse_disabled(target, verb="click")
             self._refuse_secure(target)  # audited refusal, every driver
+            if isinstance(target, Element) and target.bounds is None:
+                unbound.append(target)
+                return
             act: Target = target
             if isinstance(target, Element) and self._current is not None:
                 proxy = text_click_control(self._current.elements, target)
@@ -4507,6 +4550,18 @@ class Runtime:
         if isinstance(target, Element):
             nav_before = self._navigating_row_location(target)
         self._run_gated(action, app, execute, confirm=confirm)
+        if unbound:
+            el = unbound[0]
+            title = f" {el.title!r}" if el.title else ""
+            return self._conclude(
+                f"{el.ref} ({el.role}{title}) is hidden and has no bounds; no click was sent",
+                tool="click",
+                app=app,
+                before=before,
+                element=el,
+                had_ref=ref is not None,
+                verdict=("suspected_noop", "not_actionable"),
+            )
         control_note = ""
         if activated:
             control = activated[0]
@@ -5869,7 +5924,7 @@ class Runtime:
             the center has to be inside the window.
             """
             bounds = el.bounds
-            if bounds.width < 1 or bounds.height < 1:
+            if bounds is None or bounds.width < 1 or bounds.height < 1:
                 return False
             box = viewport_box(snap)
             if box is None:
@@ -5894,15 +5949,16 @@ class Runtime:
             already left the viewport, so a name in the tree is not a hit.
             """
             found = observe.find_elements(snap, text=text, role=role)
-            if not found:
+            located = [el for el in found if el.bounds is not None]
+            if not located:
                 return "missing"
-            if any(on_screen(el, snap) for el in found):
+            if any(on_screen(el, snap) for el in located):
                 return "visible"
             box = viewport_box(snap)
             if box is None:
                 return "visible"
             _left, top, _right, bottom = box
-            center_y = min(el.bounds.y + el.bounds.height / 2 for el in found)
+            center_y = min(el.bounds.y + el.bounds.height / 2 for el in located)
             if center_y < top:
                 return "above"
             if center_y >= bottom:
@@ -7519,6 +7575,10 @@ class Runtime:
             raise ValueError("window resize requires width and height")
         if verb is WindowVerb.RESIZE and (int(width) < 1 or int(height) < 1):
             raise ValueError("window resize requires a positive width and height")
+        if verb is WindowVerb.MOVE:
+            # Before the owner lookup and the grant: a bad coordinate is not
+            # an audited move, and it is not clamped onto the screen.
+            x, y = self._require_window_move_point(x, y)
         # The owner is the grant key. An empty name is not a grant target:
         # asking the user to grant "" is the bug this rejects.
         owner = self.driver.window_owner(int(window_id))
@@ -7534,14 +7594,14 @@ class Runtime:
                     "hint": "There is no app name for this window, so there is nothing to grant.",
                 },
             )
-        position = Point(display_id=0, x=int(x), y=int(y)) if verb is WindowVerb.MOVE else None
+        position = Point(display_id=0, x=x, y=y) if verb is WindowVerb.MOVE else None
         size = (int(width), int(height)) if verb is WindowVerb.RESIZE else None
         op = WindowOp(verb=verb, window_id=int(window_id), position=position, size=size)
 
         def act() -> None:
             self._guard_user(owner_name)
             if verb is WindowVerb.MOVE:
-                method(int(window_id), int(x), int(y))
+                method(int(window_id), x, y)
             elif verb is WindowVerb.RESIZE:
                 method(int(window_id), int(width), int(height))
             else:
@@ -7549,7 +7609,7 @@ class Runtime:
 
         self._run_gated(op, owner_name, act)
         if verb is WindowVerb.MOVE:
-            text = f"moved window {window_id} to ({int(x)}, {int(y)}) ({owner_name})"
+            text = f"moved window {window_id} to ({x}, {y}) ({owner_name})"
         elif verb is WindowVerb.RESIZE:
             text = f"resized window {window_id} to {int(width)}x{int(height)} ({owner_name})"
         else:
@@ -8815,7 +8875,12 @@ def build_server(
         not the outer frame. A move to (100, 80) lists the client at
         (100, 80). raise, focus, minimize, maximize, move, resize, and close
         are gated at tier 'click' against the owning app, the same grant as
-        raise. move requires x and y; resize requires width and height. On
+        raise. move requires x and y, both integers on the display
+        (0..width-1 and 0..height-1, the same pixels as click). A float, a
+        bool, a negative, or a point past that edge is invalid_arguments
+        and the window is not moved; the coordinate is not clamped. A point
+        inside the title bar is still that point: the frame origin is sent
+        as a signed coordinate. resize requires width and height. On
         Linux X11 those verbs send EWMH or ICCCM client messages. A backend
         that cannot perform a verb returns unsupported and names the platform.
         A window whose owner cannot be identified returns unsupported with
@@ -8852,13 +8917,15 @@ def build_server(
         'File > Export > Add to Render Queue' (case-insensitive, trailing
         ellipsis ignored, unique prefixes accepted). action='list' returns the
         items of the menu at path as JSON (title, enabled, shortcut, submenu,
-        checked); omit path to list the top-level menus. action='state' reports
+        checked, mnemonic); omit path to list the top-level menus. mnemonic is
+        the underlined letter, or null when the item has none. action='state' reports
         whether a menu is open and its path; action='close' dismisses it.
         click and type close an open menu first and say so. key does not:
         the chord is delivered to the open menu. alt+letter while a menu is
         open switches to the top-level menu with that mnemonic. On Linux, close sends Escape and errors if the menu is
-        still open, and a listed shortcut is the accelerator (a tagged chord
-        or a bare key such as F11) rather than the Alt mnemonic letter. Destructive labels (Delete, Move to Trash, Discard) ask the
+        still open, and a listed shortcut is the accelerator field (a tagged chord
+        or a bare key such as F11). A mnemonic with no accelerator is null there
+        and is reported as mnemonic. Destructive labels (Delete, Move to Trash, Discard) ask the
         host for confirmation. Tier 'read' to list or state, 'click' to press or
         close; gated against app. Implemented on macOS (AX menu bar) and Linux
         (AT-SPI menu bar). Windows and the browser return unsupported. The text

@@ -60,7 +60,8 @@ def make_runtime(tmp_path, driver, engine):
                           driver=driver, ocr_engine=engine)
 
 
-def test_escalation_crops_to_the_window_and_offsets_the_refs(tmp_path) -> None:
+def test_escalation_crops_to_the_window_and_offsets_the_refs(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     # A word at the top-left of the CROPPED image sits at the window's origin on screen.
     engine = RecordingOcr((_box("Saved Messages", 0, 0, w=300, h=40),))
     rt = make_runtime(tmp_path, WindowedDriver(), engine)
@@ -72,7 +73,8 @@ def test_escalation_crops_to_the_window_and_offsets_the_refs(tmp_path) -> None:
     assert (line.bounds.x, line.bounds.y) == (WINDOW.x, WINDOW.y)
 
 
-def test_escalation_unions_several_windows(tmp_path) -> None:
+def test_escalation_unions_several_windows(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     engine = RecordingOcr(())
     rt = make_runtime(tmp_path, WindowedDriver((WINDOW, SECOND)), engine)
     text = rt.desktop_snapshot(APP)
@@ -81,8 +83,9 @@ def test_escalation_unions_several_windows(tmp_path) -> None:
     assert "(OCR cropped to this app's windows)" in text
 
 
-def test_escalation_without_a_window_rect_skips_ocr_instead_of_reading_the_display(tmp_path) -> None:
+def test_escalation_without_a_window_rect_skips_ocr_instead_of_reading_the_display(tmp_path, monkeypatch) -> None:
     """Issue #10: a whole-display OCR under one app's grant returned another app's text."""
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     engine = RecordingOcr(())
     rt = make_runtime(tmp_path, WindowedDriver(()), engine)  # no window elements, no window rows
     text = rt.desktop_snapshot(APP)
@@ -90,7 +93,8 @@ def test_escalation_without_a_window_rect_skips_ocr_instead_of_reading_the_displ
     assert "OCR skipped rather than read the whole display" in text
 
 
-def test_escalation_uses_the_driver_window_list_when_the_tree_has_no_windows(tmp_path) -> None:
+def test_escalation_uses_the_driver_window_list_when_the_tree_has_no_windows(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server, "AUTO_OCR", True)
     rows = [{"app": APP, "bounds": {"display_id": 1, "x": 50, "y": 60, "width": 400, "height": 300}},
             {"app": "com.other", "bounds": {"display_id": 1, "x": 0, "y": 0, "width": 1600, "height": 1000}}]
     engine = RecordingOcr(())

@@ -161,6 +161,25 @@ _CLICKABLE_ROLES = frozenset(
 _EDITABLE_ROLES = frozenset(
     {"AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
+#: Controls kept when a Chromium page is already at ``MAX_DEPTH``. A named
+#: group is not one of these: it is walked through and not kept. Static text
+#: is not one either, so a buried label stays elided.
+_BURIED_CONTROL_ROLES = frozenset(
+    {
+        "AXButton",
+        "AXCheckBox",
+        "AXComboBox",
+        "AXLink",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXSearchField",
+        _SECURE_ROLE,
+        "AXSlider",
+        "AXSpinButton",
+        "AXTextArea",
+        "AXTextField",
+    }
+)
 
 #: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
 #: is the same snapshot (same elements, same refs) rendered down to what an agent
@@ -262,6 +281,10 @@ class RawNode:
     #: when the driver could not separate the screen from the buffer. The
     #: snapshot shows this text; ``find`` still searches ``value``.
     screen_text: str | None = None
+    #: A control the toolkit did not allocate, such as a notebook page tab
+    #: while the tab bar is hidden. The snapshot keeps the name and does not
+    #: invent a box. Default false, so every other node is unchanged.
+    unallocated: bool = False
 
 
 class TreeAccessor(Protocol):
@@ -1170,8 +1193,8 @@ def render_matches(
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
         line = _render_line(el)
-        if el.parent is not None:  # _render_line prints bounds only for roots
-            b = el.bounds
+        b = el.bounds
+        if b is not None and el.parent is not None:  # _render_line prints bounds only for roots
             line += f" [{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]"
         note = _terminal_match_note(snap, el, text)
         if note:
@@ -1241,7 +1264,13 @@ def _state_changes(a: Element, b: Element) -> dict[str, tuple]:
         if av != bv:
             changes[attr] = (av, bv)
     ab, bb = a.bounds, b.bounds
-    if (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
+    if ab is None or bb is None:
+        if (ab is None) != (bb is None):
+            changes["bounds"] = (
+                None if ab is None else (ab.x, ab.y),
+                None if bb is None else (bb.x, bb.y),
+            )
+    elif (ab.x, ab.y, ab.width, ab.height) != (bb.x, bb.y, bb.width, bb.height):
         changes["bounds"] = ((ab.x, ab.y), (bb.x, bb.y))
     return changes
 
@@ -1353,7 +1382,7 @@ class _PNode:
     """One kept node of the pruned tree, pre-flattening."""
 
     raw: RawNode
-    bounds: Bounds
+    bounds: Bounds | None
     children: list[_PNode]
     elided: int  #: direct children hidden by the depth/fan-out caps
     has_interactive: bool  #: self or any kept descendant is interactive
@@ -1421,7 +1450,7 @@ def _target_flags(raw: RawNode) -> tuple[bool, bool, bool]:
     if raw.role == OPAQUE_ROLE:
         return True, False, False
     clickable, editable, secure = _flags(raw)
-    if _plain_zero_wrapper(raw):
+    if _plain_zero_wrapper(raw) or raw.unallocated:
         clickable = False
     return clickable, editable, secure
 
@@ -1503,6 +1532,13 @@ def _prune_inner(
         child_web_depth = 0
 
     bounds = _to_bounds(raw.position, raw.size, geometry)
+    if raw.unallocated:
+        # A hidden notebook tab has a name and no box. Do not adopt the
+        # page as its bounds, and do not drop the name. The page is hoisted
+        # onto the tab list, so this node keeps no children.
+        return _PNode(
+            raw=raw, bounds=None, children=[], elided=0, has_interactive=False, node=node,
+        )
     # An empty label or paragraph is decorative static text. Returning here
     # used to drop the checkbox, button, or field inside it (#124, #136).
     # Walk those children. A childless empty text node is still dropped below.
@@ -1632,12 +1668,16 @@ def _prune_inner(
     if hollow:
         if not kept:
             return None  # zero-size and nothing visible below it
-        bounds = _union_bounds([c.bounds for c in kept])
+        rects = [c.bounds for c in kept if c.bounds is not None]
+        if not rects:
+            return None
+        bounds = _union_bounds(rects)
     if text_container:
         if not kept:
             return None  # empty static text with nothing under it stays decorative
         if bounds is None:
-            bounds = _union_bounds([c.bounds for c in kept])
+            rects = [c.bounds for c in kept if c.bounds is not None]
+            bounds = _union_bounds(rects) if rects else None
         # One control replaces the empty label, the same way a wrapper
         # collapses. Several controls stay parented so none of them is dropped.
         if len(kept) == 1 and elided == 0:
@@ -1657,6 +1697,30 @@ def _prune_inner(
     )
 
 
+def _web_scan_identity(node: object) -> object:
+    """Identity of one node in the buried web scan.
+
+    ``get_child_at_index`` returns a new proxy. After a leaf is handled,
+    nothing else referenced it, so it was collected and CPython reused its
+    ``id()`` for a later control. A seen-set of those ids then skipped the
+    control (a settings button under a named group never reached
+    ``_prune_inner``). The AT-SPI bus name and object path stay on the C
+    object and do not call D-Bus. A synthetic node has no GObject pointer
+    and uses ``id()``. The scan also retains every proxy, so that fallback
+    cannot collide with a collected leaf.
+    """
+    if getattr(node, "__gpointer__", None) is not None:
+        try:
+            from a11y_computer_use.drivers._atspi import _atspi_wrapper_key
+
+            stable = _atspi_wrapper_key(node)
+        except Exception:
+            stable = None
+        if stable is not None:
+            return stable
+    return id(node)
+
+
 def _open_nested_frames(
     raw_children: Sequence[object],
     accessor: TreeAccessor,
@@ -1668,12 +1732,17 @@ def _open_nested_frames(
     *,
     parent_bounds: Bounds | None = None,
 ) -> tuple[list[_PNode], int]:
-    """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
+    """Past ``MAX_DEPTH`` inside web content, open a nested frame or a control.
 
-    Descend only through non-interactive wrappers, spending ``web.scan_reads``.
-    A found ``internal frame`` (or a ``document web`` already inside a page)
-    is pruned with a restarted kept-depth budget. Other children stay elided,
-    so the scan does not pull a whole deep page into the snapshot.
+    Descend through wrappers, including a named group, spending
+    ``web.scan_reads``. A found ``internal frame`` (or a ``document web``
+    already inside a page) is pruned with a restarted kept-depth budget. A
+    button, field, link, or other control is kept at the cap, so a phone
+    entry or a settings control under a named group is not dropped. The
+    group itself is not kept. Static text stays elided. ``MAX_DEPTH`` and
+    ``web.scan_reads`` are not raised. Proxies stay referenced for the
+    whole scan, and the seen-set uses `_web_scan_identity` rather than a
+    bare ``id()``.
     """
     kept: list[_PNode] = []
     elided = 0
@@ -1681,13 +1750,17 @@ def _open_nested_frames(
         (child, depth + 1, in_page, in_web) for child in raw_children[:_MAX_WALK_CHILDREN]
     ]
     elided += max(0, len(raw_children) - len(pending))
-    seen: set[int] = set()
+    # Keep every proxy alive. Dropping a leaf lets its id be reused for a
+    # control that has not been walked; the seen-set would then skip it.
+    pinned: list[object] = []
+    seen: set[object] = set()
     while pending and web.scan_reads > 0 and len(kept) < MAX_CHILDREN:
         child, child_depth, page, web_here = pending.pop(0)
+        pinned.append(child)
         if child_depth >= _MAX_RAW_DEPTH:
             elided += 1
             continue
-        marker = id(child)
+        marker = _web_scan_identity(child)
         if marker in seen:
             continue
         seen.add(marker)
@@ -1711,10 +1784,31 @@ def _open_nested_frames(
             if pruned is not None:
                 kept.append(pruned)
             continue
+        if child_raw.role in _BURIED_CONTROL_ROLES:
+            # kept_depth stays at the cap, so this control's own children
+            # are still scanned under the same ``web.scan_reads`` budget.
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                child_depth,
+                MAX_DEPTH,
+                in_page=page,
+                in_web=web_here,
+                web=web,
+                parent_bounds=parent_bounds,
+            )
+            if pruned is not None:
+                kept.append(pruned)
+            else:
+                elided += 1
+            continue
         if (
             _noninteractive_wrapper(child_raw)
             or _plain_zero_wrapper(child_raw)
             or kind in ("docframe", "page", "iframe")
+            or child_raw.role in _WRAPPER_ROLES
         ):
             kids = tuple(accessor.children(child))
             room = kids[:_MAX_WALK_CHILDREN]
@@ -1722,6 +1816,7 @@ def _open_nested_frames(
             next_page = page or kind in ("page", "iframe")
             next_web = web_here or kind in ("page", "docframe", "iframe")
             for kid in room:
+                pinned.append(kid)
                 pending.append((kid, child_depth + 1, next_page, next_web))
             continue
         elided += 1
@@ -2169,6 +2264,7 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
             ("collapsed", el.expanded is False),
             ("focus", el.focused),
             ("disabled", not el.enabled),
+            ("hidden", el.bounds is None),
         )
         if on
     ]
@@ -2176,8 +2272,9 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         parts.append(f"({','.join(flags)})")
     # An opaque region is addressed by its box. Always print the bounds, in
     # both views, so a coordinate click does not have to guess the size.
-    if bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None):
-        b = el.bounds
+    # A hidden control has no box. Printing one would invent a click target.
+    b = el.bounds
+    if b is not None and (bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None)):
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
     return " ".join(parts)
 
@@ -2424,7 +2521,9 @@ def _match_anchor(anchor: Element, live: Snapshot) -> tuple[Element | None, str]
     return pool[0][1], ""
 
 
-def _center_distance(a: Bounds, b: Bounds) -> float:
+def _center_distance(a: Bounds | None, b: Bounds | None) -> float:
+    if a is None or b is None:
+        return 0.0 if a is None and b is None else math.inf
     ca, cb = a.center, b.center
     if ca.display_id != cb.display_id:
         return math.inf
