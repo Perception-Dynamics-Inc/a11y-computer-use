@@ -6134,7 +6134,8 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
     The rectangle and the ellipse each expose a paragraph. The role stays
     static text and the snapshot says edit. set_value replaces the rectangle
     through EditableText. type(ref) inserts into the ellipse. The shape
-    group is not an entry. A missing Draw binary fails the test.
+    group is in the snapshot and is not an entry: set_value on it is
+    not_editable. A missing Draw binary fails the test.
     """
     from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
@@ -6217,10 +6218,11 @@ def test_linux_draw_shape_text_set_value_and_type_ref(tmp_path) -> None:
             (el for el in current.elements if el.role == "AXGroup" and el.title == "EllipseB"),
             None,
         )
-        if group is not None:
-            with pytest.raises(ComputerUseError) as group_exc:
-                runtime.set_value(group.ref, "NOPE")
-            assert group_exc.value.detail.get("reason") == "not_editable", group_exc.value
+        assert group is not None, observe.render_text(current)[:1600]
+        with pytest.raises(ComputerUseError) as group_exc:
+            runtime.set_value(group.ref, "NOPE")
+        assert group_exc.value.detail.get("reason") == "not_editable", group_exc.value
+        assert "not a number" not in str(group_exc.value)
         replaced = runtime.set_value(rect.ref, "RECT_SET")
         assert replaced.outcome == "confirmed", (replaced, replaced.evidence)
         assert "RECT_SET" in replaced.evidence
@@ -11742,3 +11744,87 @@ def test_linux_thunar_side_pane_click_changes_the_location(tmp_path) -> None:
     finally:
         _stop_group(proc)
         _kill_thunar()
+
+
+_VTE_SCREEN = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Vte", "2.91")
+    from gi.repository import GLib, Gtk, Vte
+    GLib.set_prgname("cuvte386")
+    win = Gtk.Window(title="cuvte386")
+    term = Vte.Terminal()
+    term.set_size(80, 16)
+    # The marker sits past the first 48 characters of the screen. A head
+    # clip of the textarea value would hide it; the tail of the screen
+    # still shows it.
+    screen = (
+        "user@host:~$ " + ("H" * 60) + "\\r\\n"
+        + "".join("mid-%02d %s\\r\\n" % (i, "m" * 40) for i in range(4))
+        + "MARKER386 tail-output\\r\\n"
+    )
+    def _feed():
+        term.feed(screen.encode())
+        return False
+    win.add(term)
+    win.set_default_size(720, 420)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    GLib.idle_add(_feed)
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_vte_snapshot_shows_the_screen_tail_and_find_matches_it(tmp_path) -> None:
+    """Live VTE. The terminal textarea shows the on-screen output, not its first 48 characters.
+
+    xfce4-terminal is this widget. The marker is past character 48 of the
+    buffer. The snapshot line contains it, and find matches that same
+    textarea. The hermetic suite has no display, so the test skips there.
+    The live AT-SPI step sets DISPLAY and runs it. A missing accessibility
+    bus fails the test.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("no DISPLAY/WAYLAND_DISPLAY: the VTE widget cannot open a window")
+    driver = LinuxDriver()
+    driver.ensure_trusted()
+    script = tmp_path / "cuvte386.py"
+    script.write_text(_VTE_SCREEN)
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cuvte386")
+            except ComputerUseError as exc:
+                last = exc.message
+                snap = None
+            else:
+                last = observe.render_text(snap)
+                if "MARKER386" in last:
+                    break
+            time.sleep(0.25)
+        assert snap is not None, last
+        area = next(el for el in snap.elements if el.role == "AXTextArea" and el.subrole == "terminal")
+        assert area.value is not None and "MARKER386" in area.value, last
+        assert "MARKER386" in last, last
+        matches = observe.find_elements(snap, text="MARKER386")
+        assert [el.ref for el in matches] == [area.ref], last
+        assert "MARKER386" in observe.render_matches(snap, matches)
+    finally:
+        _stop_group(proc)

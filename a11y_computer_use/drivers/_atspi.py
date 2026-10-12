@@ -1653,6 +1653,91 @@ def _aria_spin_value(acc) -> str | None:
     return f"{shown} (min {_format_bound(low)}, max {_format_bound(high)})"
 
 
+def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
+    """Whether ``rect`` intersects ``box``, or None when the rect is unreadable.
+
+    A zero-size glyph is off the widget. Coordinates are the same space as
+    ``box`` (screen pixels).
+    """
+    if rect is None:
+        return None
+    try:
+        x = float(getattr(rect, "x"))
+        y = float(getattr(rect, "y"))
+        width = float(getattr(rect, "width"))
+        height = float(getattr(rect, "height"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if width <= 0 or height <= 0:
+        return False
+    left, top, box_w, box_h = box
+    return y < top + box_h and y + height > top and x < left + box_w and x + width > left
+
+
+def _terminal_on_screen(acc, full: str) -> str:
+    """The on-screen slice of a VTE buffer.
+
+    ``Text.get_text`` is the scrollback plus the screen on some builds and
+    only the screen on others. Characters above the widget are omitted and
+    a leading ellipsis marks that cut. When a character cannot be placed,
+    the whole buffer is returned and the snapshot cap keeps its tail.
+    """
+    text = full
+    count = len(text)
+    if count <= 1:
+        return text
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return text
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+
+    def on_screen(offset: int) -> bool | None:
+        rect = _safe(lambda index=offset: Atspi.Text.get_character_extents(acc, index, coord))
+        return _rect_hits_box(rect, box)
+
+    first = on_screen(0)
+    last = on_screen(count - 1)
+    if first is None or last is None:
+        return text
+    start = 0
+    end = count
+    if not first:
+        if not last:
+            return text
+        lo, hi = 0, count - 1
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                hi = mid
+            else:
+                lo = mid
+        start = hi
+    if not last:
+        lo, hi = start, count - 1
+        if not (0 <= start < count - 1):
+            return text
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            flag = on_screen(mid)
+            if flag is None:
+                return text
+            if flag:
+                lo = mid
+            else:
+                hi = mid
+        end = lo + 1
+    screen = text[start:end]
+    if not screen:
+        return text
+    if start > 0 and not screen.startswith("…"):
+        return "…" + screen
+    return screen
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -1707,6 +1792,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
                     if expanded:
                         return expanded
             else:
+                # A terminal keeps the whole buffer here. ``read`` records
+                # the on-screen slice separately so the snapshot can show
+                # that text while find still searches this string.
                 return got
         handled, choice = _choice_value(acc, role, role_name)
         if handled:
@@ -2120,9 +2208,12 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        screen_text = None
+        if role_str == "terminal" and isinstance(value, str) and value:
+            screen_text = _terminal_on_screen(node, value)
         return RawNode(
             role=role,
-            subrole=None,
+            subrole="terminal" if role_str == "terminal" else None,
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -2146,6 +2237,7 @@ class ATSPIAccessor:
             # Only a group can be suppressed as browser chrome. A button,
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
+            screen_text=screen_text,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
@@ -3896,6 +3988,72 @@ def _application_bar_frame(app):
     return None
 
 
+def _sparse_untitled_chrome_frame(frame) -> bool:
+    """True for an empty cached Chrome frame, not a real window.
+
+    Beside the page, Chrome keeps untitled frames whose only child is an
+    empty panel. After find-in-page that frame can be the active root.
+    Its snapshot is an untitled group with no rows, and ``scroll_to_find``
+    then stops before the wheel. A named window, the open find bar, and a
+    frame that already holds a document are not this.
+    """
+    if frame is None or _is_browser_bar_frame(frame):
+        return False
+    if (_node_name(frame) or "").strip():
+        return False
+    try:
+        count = _child_count(frame)
+    except Exception:
+        return False
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or count > 2:
+        return False
+    for index in range(int(count)):
+        child = _child_at(frame, index)
+        if child is None:
+            continue
+        role = _role_name(child)
+        if role in {"document web", "document frame", "internal frame"}:
+            return False
+        if (_node_name(child) or "").strip():
+            return False
+        try:
+            kids = _child_count(child)
+        except Exception:
+            kids = 0
+        if isinstance(kids, int) and not isinstance(kids, bool) and kids > 2:
+            return False
+    return True
+
+
+def _chrome_page_window(app, root):
+    """The named page window when ``root`` is an empty untitled frame.
+
+    ``root`` is unchanged when it already has a title, or when no titled
+    sibling exists. A showing titled window wins over one that is not.
+    """
+    if app is None or root is None or not _sparse_untitled_chrome_frame(root):
+        return root
+    count = _child_count(app)
+    if count < 0:
+        count = 0
+    named = []
+    for index in range(min(int(count), 8)):
+        frame = _child_at(app, index)
+        if frame is None or _is_browser_bar_frame(frame):
+            continue
+        if _role_name(frame) == "alert":
+            continue
+        if not (_node_name(frame) or "").strip():
+            continue
+        named.append(frame)
+    if not named:
+        return root
+    for frame in named:
+        if _state_has(frame, "ACTIVE") or _state_has(frame, "SHOWING"):
+            return frame
+    return named[0]
+
+
 def chromium_snapshot_root(root):
     """Page frame for a Chrome snapshot after the find bar or omnibox was open.
 
@@ -3905,7 +4063,9 @@ def chromium_snapshot_root(root):
     or omnibox frame is not the root. The frame that holds the selected tab
     is. Reload then reads the new document instead of the cached bar. The
     open bar itself stays the root the first time it is active, so Find and
-    Close find bar stay in that snapshot.
+    Close find bar stay in that snapshot. An empty untitled frame cached
+    beside the page is not the root either: that walk is an untitled group
+    with no rows, and ``scroll_to_find`` stops before the wheel.
     """
     if root is None or not _chromium_app(root):
         return root
@@ -3919,7 +4079,7 @@ def chromium_snapshot_root(root):
         # window is the root and the bar frame is only a cached sibling.
         # The document walk is then the empty cached tree.
         if _application_bar_frame(app) is None:
-            return root
+            return _chrome_page_window(app, root)
     else:
         try:
             pid = pid_of(root)
@@ -3934,7 +4094,7 @@ def chromium_snapshot_root(root):
             and _application_bar_frame(app) is None
             and not _is_browser_bar_frame(root)
         ):
-            return root
+            return _chrome_page_window(app, root)
     _clear_browser_bar_cache(app)
     try:
         pid = pid_of(root)
@@ -3943,7 +4103,7 @@ def chromium_snapshot_root(root):
     if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
         _BROWSER_BAR_CLEARED.add(int(pid))
     if not latched or not _is_browser_bar_frame(root):
-        return root
+        return _chrome_page_window(app, root)
     count = _child_count(app)
     if count < 0:
         count = 0
@@ -3954,6 +4114,9 @@ def chromium_snapshot_root(root):
             continue
         if _role_name(frame) == "alert":
             continue
+        # An empty cached frame can be ACTIVE. It is not the page.
+        if _sparse_untitled_chrome_frame(frame):
+            continue
         pages.append(frame)
     for frame in pages:
         if _state_has(frame, "ACTIVE"):
@@ -3961,7 +4124,7 @@ def chromium_snapshot_root(root):
     for frame in pages:
         if _selected_tab_name(frame):
             return frame
-    return pages[0] if pages else root
+    return pages[0] if pages else _chrome_page_window(app, root)
 
 
 def _chrome_rewrite_field(acc) -> bool:
@@ -6276,8 +6439,29 @@ def _number_input(acc) -> bool:
     )
 
 
-def _value_range(acc) -> tuple[float, float] | None:
-    """(minimum, maximum) from the Value interface, or None when it has none."""
+def _value_interface_present(acc) -> bool:
+    """True when ``acc`` implements Value.
+
+    ``get_value_iface`` is how AT-SPI reports the interface. None means it
+    is missing, and minimum and maximum must not be read: that read returns
+    an uninitialized double (about ``6.93e-310``) after the bridge logs that
+    the object is not a Value. A test double with no ``get_value_iface``
+    method is not that report. Its numbers still come from ``Atspi.Value``.
+    """
+    if acc is None:
+        return False
+    getter = getattr(acc, "get_value_iface", None)
+    if not callable(getter):
+        return True
+    return _safe(lambda: getter()) is not None
+
+
+def _raw_value_bounds(acc) -> tuple[float, float] | None:
+    """Minimum and maximum as read, or None when either is not a finite number.
+
+    This does not decide that the Value interface exists. A missing
+    interface has to be rejected before this read.
+    """
     Atspi = _atspi()
     minimum = _safe(lambda: Atspi.Value.get_minimum_value(acc))
     maximum = _safe(lambda: Atspi.Value.get_maximum_value(acc))
@@ -6289,6 +6473,25 @@ def _value_range(acc) -> tuple[float, float] | None:
     if not math.isfinite(low) or not math.isfinite(high):
         return None
     return low, high
+
+
+def _uninitialized_bounds(low: float, high: float) -> bool:
+    """True when either end is the uninitialized double a missing Value returns."""
+    return _uninitialized_double(low) or _uninitialized_double(high)
+
+
+def _value_range(acc) -> tuple[float, float] | None:
+    """(minimum, maximum) from the Value interface, or None when it has none.
+
+    A missing interface is None and is not read. An uninitialized double is
+    also None: it is not a range a number can be checked against.
+    """
+    if not _value_interface_present(acc):
+        return None
+    span = _raw_value_bounds(acc)
+    if span is None or _uninitialized_bounds(*span):
+        return None
+    return span
 
 
 def _parse_number(value: str) -> float:
@@ -9055,6 +9258,8 @@ def control_kind(acc) -> str | None:
         # typing, not by Value.set_current_value. Checked before
         # ``_value_range``, which imports gi.
         return None
+    # A Draw shape panel has no Value interface. The bridge still answers
+    # minimum and maximum with an uninitialized double. That is not a range.
     if _value_range(acc) is not None:
         return "value"
     return None
@@ -10050,8 +10255,10 @@ def set_numeric_value(acc, value: str) -> bool | str:
 
     A non-number or a number outside minimum..maximum raises ValueError before
     the write. The message includes the minimum and maximum. The current value
-    is read back and must match. False means ``value`` is a finite number and
-    this control has no Value interface, so the caller may use ``set_text``.
+    is read back and must match. False means this control has no Value
+    interface, or the bounds are an uninitialized double. The text is not
+    parsed in that case, so a word is not rejected as a number and the
+    garbage minimum is not reported. The caller may use ``set_text``.
     An empty string on an ``<input type=number>`` clears the field. When the
     control has EditableText, ``set_text`` clears it. Chrome's number input
     has no EditableText: a click places the caret, then ctrl+a, BackSpace,
@@ -10069,7 +10276,14 @@ def set_numeric_value(acc, value: str) -> bool | str:
             "the number field could not be cleared",
             expected="",
         )
-    span = _value_range(acc)
+    # A missing interface returns before any number check. Reading minimum
+    # on that node is the uninitialized double, and parsing the text would
+    # report that double as the minimum.
+    if not _value_interface_present(acc):
+        return False
+    span = _raw_value_bounds(acc)
+    if span is not None and _uninitialized_bounds(*span):
+        return False
     low = high = None
     open_upper = False
     if span is not None:
