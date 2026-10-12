@@ -19,7 +19,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux backend")
 
-from a11y_computer_use.schema import ComputerUseError, Scope  # noqa: E402
+from a11y_computer_use.schema import ComputerUseError, ErrorCode, Scope  # noqa: E402
 
 
 def _require_bus(driver) -> None:
@@ -142,11 +142,32 @@ def test_gtk4_calculator_click_lands_on_the_button(tmp_path) -> None:
         _stop_group(proc)
 
 
+def _largest_editable(elements):
+    """The document, not a smaller field that appears while the window is opening."""
+    areas = [el for el in elements if el.role == "AXTextArea" and el.editable]
+    if not areas:
+        return None
+    return max(areas, key=lambda el: el.bounds.width * el.bounds.height)
+
+
+def _same_box(left, right) -> bool:
+    if left is None or right is None or left.path != right.path:
+        return False
+    return (
+        abs(left.bounds.x - right.bounds.x) < 8
+        and abs(left.bounds.y - right.bounds.y) < 8
+        and abs(left.bounds.width - right.bounds.width) < 8
+        and abs(left.bounds.height - right.bounds.height) < 8
+    )
+
+
 def test_gtk4_text_editor_set_value_is_not_covered(tmp_path) -> None:
     """An empty document is not reported covered because its box was (0, 0).
 
     The editor is moved off the origin. set_value writes through
-    EditableText, and the covered check uses the recovered box.
+    EditableText, and the covered check uses the recovered box. The
+    document has to keep the same path and box across two snapshots:
+    the first tree while the window is opening does not rematch.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -163,17 +184,40 @@ def test_gtk4_text_editor_set_value_is_not_covered(tmp_path) -> None:
         driver.focus_window(int(row["window_id"]))
         runtime = _runtime(tmp_path, driver)
         area = None
+        previous = None
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and area is None:
+        while time.monotonic() < deadline:
             runtime.desktop_snapshot("gnome-text-editor")
             current = runtime._current
-            if current is not None:
-                area = next((el for el in current.elements if el.role == "AXTextArea" and el.editable), None)
+            found_area = _largest_editable(current.elements) if current is not None else None
+            if _same_box(found_area, previous):
+                area = found_area
+                break
+            previous = found_area
             time.sleep(0.25)
-        assert area is not None
+        assert area is not None, [
+            (el.role, el.path, el.bounds.x, el.bounds.y, el.bounds.width, el.bounds.height, el.editable)
+            for el in (runtime._current.elements if runtime._current else [])
+            if el.role == "AXTextArea"
+        ]
         assert not (area.bounds.x == 0 and area.bounds.y == 0), area.bounds
         assert driver.occlusion(area, "gnome-text-editor") is None
-        runtime.set_value(area.ref, "hello")
+
+        def write() -> None:
+            runtime.desktop_snapshot("gnome-text-editor")
+            current = runtime._current
+            assert current is not None
+            target = _largest_editable(current.elements)
+            assert target is not None
+            assert not (target.bounds.x == 0 and target.bounds.y == 0), target.bounds
+            runtime.set_value(target.ref, "hello")
+
+        try:
+            write()
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.STALE_REF:
+                raise
+            write()
         shot = driver.snapshot(Scope.WINDOW, "gnome-text-editor")
         shown = next(el for el in shot.elements if el.role == "AXTextArea" and el.editable)
         assert shown.value == "hello", shown.value
