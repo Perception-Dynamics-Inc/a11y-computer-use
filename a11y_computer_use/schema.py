@@ -280,8 +280,9 @@ class Element:
     instance_id: str | None = None
     document_id: str | None = None
     #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
-    #: text, or the tail of a longer buffer, and ``find`` searches that same
-    #: string. None for every other role.
+    #: text, or the tail of a longer buffer, with a leading ellipsis when
+    #: older output was omitted. ``find`` still searches the whole buffer.
+    #: None for every other role.
     subrole: str | None = None
 
     @property

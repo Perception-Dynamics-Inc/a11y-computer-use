@@ -102,7 +102,8 @@ _MAX_WALK_CHILDREN = 200
 _MAX_VALUE_CHARS = 200  #: Element.value cap the model reads (anchors never use value)
 _RENDER_VALUE_CHARS = 48  #: value cap in the text rendering
 #: A VTE screen is kept whole up to this many characters. Past it, the
-#: snapshot and find both keep the tail and a leading ellipsis marks the cut.
+#: snapshot shows the tail and a leading ellipsis marks the cut. ``find``
+#: still searches the whole buffer.
 _TERMINAL_VALUE_CHARS = 4000
 _MAX_EPOCHS = 8  #: snapshot epochs kept in the render registry
 _AMBIGUITY_PX = 2.0  #: distance tie window that makes re-resolution ambiguous
@@ -256,6 +257,11 @@ class RawNode:
     #: macOS, Windows, GTK, and page content are unchanged. A childless group
     #: with this flag is the browser frame, not a page region.
     browser_chrome: bool = False
+    #: VTE only. The on-screen slice of ``value``, with a leading ellipsis
+    #: when characters sit above the widget. None on every other node, and
+    #: when the driver could not separate the screen from the buffer. The
+    #: snapshot shows this text; ``find`` still searches ``value``.
+    screen_text: str | None = None
 
 
 class TreeAccessor(Protocol):
@@ -1111,9 +1117,11 @@ def find_elements(
         text: case-insensitive substring matched against an element's title or
             its full value (either may contain it). ``Element.value`` is capped
             at `_MAX_VALUE_CHARS` for the text the model reads; a snapshot built
-            here is still searched past that cap. A VTE terminal is the
-            exception: its value is the on-screen text, or the tail when the
-            buffer is longer, and find searches that same string.
+            here is still searched past that cap. A VTE terminal's snapshot
+            value is the on-screen text, or the tail when that text is longer,
+            with a leading ellipsis when older output was omitted. Find still
+            searches the whole buffer, including text that has scrolled above
+            the view.
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
             and ``"AXTextField"`` matches exactly.
@@ -1146,10 +1154,17 @@ def find_elements(
     return tuple(out)
 
 
-def render_matches(snap: Snapshot, matches: Sequence[Element]) -> str:
+def render_matches(
+    snap: Snapshot, matches: Sequence[Element], *, text: str | None = None,
+) -> str:
     """Render `find_elements` results as compact lines — one per match with its
     ref, role, title, value, flags, and bounds (unlike the tree render, bounds
-    show on every match since results are a flat list, not a nested tree)."""
+    show on every match since results are a flat list, not a nested tree).
+
+    ``text`` is the substring ``find`` searched for. A VTE match that sits only
+    in the buffer, not in the on-screen value, is marked above the view or
+    off-screen.
+    """
     if not matches:
         return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match"
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
@@ -1158,8 +1173,46 @@ def render_matches(snap: Snapshot, matches: Sequence[Element]) -> str:
         if el.parent is not None:  # _render_line prints bounds only for roots
             b = el.bounds
             line += f" [{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]"
+        note = _terminal_match_note(snap, el, text)
+        if note:
+            line += f" ({note})"
         lines.append("  " + line)
     return "\n".join(lines)
+
+
+def _terminal_match_note(snap: Snapshot, el: Element, text: str | None) -> str | None:
+    """Where a terminal match sits when it is not in the snapshot value.
+
+    ``above the view`` is scrollback (or the omitted head of a long buffer).
+    ``off-screen`` is a match the snapshot value does not show and that is
+    not above that value. None when the match is on screen, or when ``text``
+    was not the query.
+    """
+    if not text or el.subrole != "terminal":
+        return None
+
+    def fold(value: str) -> str:
+        return value.replace("\u00a0", " ").lower()
+
+    needle = fold(text)
+    if not needle:
+        return None
+    if needle in fold(el.title or ""):
+        return None
+    shown = el.value or ""
+    if needle in fold(shown):
+        return None
+    full = _FULL_VALUES.get(snap.snapshot_id, {}).get(el.ref, shown)
+    folded_full = fold(str(full))
+    at = folded_full.find(needle)
+    if at < 0:
+        return None
+    body = shown[1:] if shown.startswith("…") else shown
+    folded_body = fold(body)
+    where = folded_full.rfind(folded_body) if folded_body else len(folded_full)
+    if where >= 0 and at + len(needle) <= where:
+        return "above the view"
+    return "off-screen"
 
 
 # ---------------------------------------------------------------------------
@@ -1940,9 +1993,12 @@ def _flatten(
     if node.raw.value is not None and not secure:  # secure fields never leak values
         raw_value = str(node.raw.value)
         if terminal:
-            # The rendered line and find both use this string. A longer
-            # scrollback is not kept beside it.
-            value = _terminal_value(raw_value)
+            # The snapshot shows the on-screen slice, or the tail of a
+            # longer screen. The full buffer stays searchable.
+            source = node.raw.screen_text if node.raw.screen_text else raw_value
+            value = _terminal_value(source)
+            if raw_value != value:
+                full_values[ref] = raw_value
         else:
             value = _clip(raw_value, _MAX_VALUE_CHARS)
             if raw_value != value:
@@ -2093,8 +2149,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         parts.append(f'"{el.title}"')
     if el.value is not None:
         flat = el.value.replace(chr(10), " ")
-        # A terminal value is already the visible tail. Clipping its head
-        # would hide the output find matches.
+        # A terminal value is already the on-screen text, or its tail.
+        # Clipping that head would hide the output the snapshot is showing.
         shown = flat if el.subrole == "terminal" else _clip(flat, _RENDER_VALUE_CHARS)
         parts.append(f'="{shown}"')
     elif el.placeholder and not el.title:  # blank field: show its prompt for identity
@@ -2133,9 +2189,9 @@ def _clip(text: str, limit: int) -> str:
 def _terminal_value(text: str) -> str:
     """On-screen terminal text, or the tail of a longer buffer.
 
-    Trailing blank rows are the unused part of the screen. When the buffer
+    Trailing blank rows are the unused part of the screen. When the text
     is longer than ``_TERMINAL_VALUE_CHARS``, the head is omitted and a
-    leading ellipsis marks the cut. ``find`` searches this same string.
+    leading ellipsis marks the cut. ``find`` still searches the full buffer.
     """
     body = str(text).rstrip("\n")
     limit = _TERMINAL_VALUE_CHARS

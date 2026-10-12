@@ -1792,8 +1792,9 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
                     if expanded:
                         return expanded
             else:
-                if role_name == "terminal":
-                    return _terminal_on_screen(acc, got)
+                # A terminal keeps the whole buffer here. ``read`` records
+                # the on-screen slice separately so the snapshot can show
+                # that text while find still searches this string.
                 return got
         handled, choice = _choice_value(acc, role, role_name)
         if handled:
@@ -2207,6 +2208,9 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        screen_text = None
+        if role_str == "terminal" and isinstance(value, str) and value:
+            screen_text = _terminal_on_screen(node, value)
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -2233,6 +2237,7 @@ class ATSPIAccessor:
             # Only a group can be suppressed as browser chrome. A button,
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
+            screen_text=screen_text,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:

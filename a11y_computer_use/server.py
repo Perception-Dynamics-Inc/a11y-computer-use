@@ -3892,7 +3892,7 @@ class Runtime:
             matches = observe.find_elements(
                 snap, text=text, role=role, editable=editable, clickable=clickable
             )
-            return observe.render_matches(snap, matches)
+            return observe.render_matches(snap, matches, text=text)
 
         return self._fence_ui(self._run_gated(ObserveOp(verb=ObserveVerb.SNAPSHOT, app=bundle), bundle, execute))
 
@@ -7976,7 +7976,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches); role =
+        (text past the 200 characters kept on the element still matches). A
+        terminal's shown value is the on-screen text; a match only in the
+        scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
         'checkbox', 'link'); editable/clickable = keep only elements with that
         capability. Give at least one filter. Returns each match's ref, role,

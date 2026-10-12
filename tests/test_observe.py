@@ -1045,7 +1045,8 @@ def test_terminal_snapshot_shows_the_screen_and_find_matches_it() -> None:
 def test_terminal_over_the_cap_keeps_the_tail_for_find() -> None:
     """A buffer longer than the terminal cap shows its tail, with a leading ellipsis.
 
-    Find searches that same tail. The omitted head is not a match.
+    Find still searches the omitted head. That match is above the view.
+    The on-screen marker is not.
     """
     dropped = "DROPPEDHEAD"
     marker = "TAILMARKER"
@@ -1069,7 +1070,53 @@ def test_terminal_over_the_cap_keeps_the_tail_for_find() -> None:
     rendered = observe.render_text(snap)
     assert marker in rendered and dropped not in rendered
     assert [el.ref for el in observe.find_elements(snap, text=marker)] == [area.ref]
-    assert observe.find_elements(snap, text=dropped) == ()
+    assert [el.ref for el in observe.find_elements(snap, text=dropped)] == [area.ref]
+    hidden = observe.render_matches(snap, observe.find_elements(snap, text=dropped), text=dropped)
+    assert "above the view" in hidden and dropped not in (area.value or "")
+    shown = observe.render_matches(snap, observe.find_elements(snap, text=marker), text=marker)
+    assert marker in shown and "above the view" not in shown and "off-screen" not in shown
+
+
+def test_terminal_find_matches_text_only_in_the_scrolled_off_head() -> None:
+    """Find still matches a token that exists only above the terminal view.
+
+    The snapshot value is the on-screen text, with a leading ellipsis. The
+    scrolled-off head is not in that value or in the rendered tree. Find
+    returns the terminal and says the match is above the view. A marker on
+    the screen does not get that note.
+    """
+    scrolled = "SCROLLEDHEAD"
+    marker = "MARKER386"
+    screen = "visible row\n" + marker + "\n"
+    body = scrolled + "\n" + ("older line\n" * 30) + screen
+    assert scrolled not in screen and marker not in body[: len(scrolled) + 1]
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal",
+                value=body, screen_text="…" + screen,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.subrole == "terminal"
+    assert area.value is not None
+    assert area.value.startswith("…")
+    assert marker in area.value
+    assert scrolled not in area.value
+    rendered = observe.render_text(snap)
+    assert marker in rendered and scrolled not in rendered
+    hidden = observe.find_elements(snap, text=scrolled)
+    assert [el.ref for el in hidden] == [area.ref]
+    hidden_line = observe.render_matches(snap, hidden, text=scrolled)
+    assert "above the view" in hidden_line and scrolled not in (area.value or "")
+    shown = observe.render_matches(
+        snap, observe.find_elements(snap, text=marker), text=marker,
+    )
+    assert marker in shown and "above the view" not in shown and "off-screen" not in shown
 
 
 # ---------------------------------------------------------------------------
