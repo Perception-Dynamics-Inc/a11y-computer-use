@@ -1989,6 +1989,26 @@ def _descendant_titles(snap: Snapshot, ref: str) -> set[str]:
     return titles
 
 
+def _snapshot_text_wake():
+    """Wake for a snapshot-text wait, or None when AT-SPI events are off.
+
+    The callable blocks until a structural accessibility event or the given
+    seconds. A caret blink does not finish the wait. None keeps the poll sleep.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    if not _atspi_events.enabled():
+        return None
+
+    def wake(seconds: float) -> bool:
+        found = _atspi_events.wait_for_structural(
+            _atspi_events.current_seq(), timeout=seconds,
+        )
+        return found is not None
+
+    return wake
+
+
 class Runtime:
     """Executes the tool surface: resolve targets, gate, act, audit.
 
@@ -7923,6 +7943,7 @@ class Runtime:
         checker = self._checker()
         stop = getattr(self, "_agent_stop", None)
         on_interrupt = getattr(self, "_agent_interrupt", None)
+        wake = _snapshot_text_wake() if kind == "snapshot_text" else None
         return self._run_gated(
             ObserveOp(verb=ObserveVerb.WAIT_UNTIL, app=gated_app),
             gated_app,
@@ -7932,6 +7953,7 @@ class Runtime:
                 poll_s=poll_s,
                 stop=stop if callable(stop) else None,
                 on_interrupt=on_interrupt if callable(on_interrupt) else None,
+                wake=wake,
             )),
         )
 

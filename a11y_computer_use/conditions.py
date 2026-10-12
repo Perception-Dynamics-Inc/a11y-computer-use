@@ -732,12 +732,17 @@ class Checker:
         poll_s: float = 2.0,
         stop: Callable[[], bool] | None = None,
         on_interrupt: Callable[[], None] | None = None,
+        wake: Callable[[float], bool] | None = None,
     ) -> dict:
         """Poll until the condition holds; raise ``timeout`` otherwise.
 
         Returns ``{"matched": description, "waited_s": seconds, "polls": n}``.
         ``stop`` ends the wait on the next poll (a cancel). ``on_interrupt``
         runs when the sleep is interrupted, before that cancel is observed.
+        ``wake``, when set, replaces the sleep. It must block until something
+        worth reading has happened or ``poll_s`` has passed, then return.
+        The next loop probes either way, so an early return shortens the poll
+        and a timeout still probes at ``poll_s``.
         """
         kind_of(condition)  # validate before waiting
         if not (0 <= timeout_s <= MAX_WAIT_UNTIL_S):
@@ -776,7 +781,10 @@ class Checker:
             if remaining <= 0:
                 self._raise_timeout(condition, started, polls, state, timeout_s)
             try:
-                _sleep(min(poll_s, remaining), on_interrupt)
+                if wake is not None:
+                    wake(min(poll_s, remaining))
+                else:
+                    _sleep(min(poll_s, remaining), on_interrupt)
             except InterruptedError:
                 if stop is not None and stop():
                     return _stopped()

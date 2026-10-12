@@ -3771,10 +3771,14 @@ class LinuxDriver:
 
         events_on = _atspi_events.enabled()
         deadline = time.monotonic() + timeout_s
+        # The first pass always reads the tree. After that, a quiet event
+        # wait is not a reason to snapshot again.
+        check = True
         while True:
-            result = checker(target, condition)
-            if result is not None:
-                return result
+            if check:
+                result = checker(target, condition)
+                if result is not None:
+                    return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ComputerUseError(
@@ -3783,11 +3787,15 @@ class LinuxDriver:
                     detail={"ref": target.ref, "condition": condition.value, "timeout_s": timeout_s},
                 )
             if events_on:
-                # wake the instant the UI changes (any standing a11y event), with
-                # a short safety tick — far lower latency than fixed polling.
-                _atspi_events.wait_for_event(_atspi_events.current_seq(), timeout=min(0.4, remaining))
+                # An event re-reads the tree. A timeout does not: the next
+                # loop waits again until the deadline.
+                woke = _atspi_events.wait_for_event(
+                    _atspi_events.current_seq(), timeout=min(0.4, remaining),
+                )
+                check = woke is not None
             else:
                 time.sleep(min(0.1, remaining))
+                check = True
 
     def displays(self):
         """The X screen as one display, id 0. Coordinates are root-window pixels."""

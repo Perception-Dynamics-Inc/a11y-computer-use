@@ -72,6 +72,49 @@ def wait_for_event(since_seq: int = 0, timeout: float = 0.5):
         return _newest()
 
 
+_STRUCTURAL_MARKERS = (
+    "children-changed",
+    "load-complete",
+    "property-change",
+    "window:activate",
+)
+
+
+def event_is_structural(event: tuple) -> bool:
+    """True for a tree, load, name, or window event.
+
+    State and text changes are ignored. A caret blink is one of those, and
+    treating it as a wake would snapshot on every blink.
+    """
+    kind = str(event[1] if len(event) > 1 else "")
+    return any(marker in kind for marker in _STRUCTURAL_MARKERS)
+
+
+def wait_for_structural(since_seq: int = 0, timeout: float = 0.5):
+    """Block until a structural event with seq > ``since_seq``, or ``timeout``.
+
+    A state or text event already in the queue does not end the wait. The
+    call keeps blocking until a structural event arrives or the timeout
+    passes. Returns that event, or None.
+    """
+    import time
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    with _events_cv:
+        while True:
+            found = None
+            for event in _events:
+                if event[0] > since_seq and event_is_structural(event):
+                    found = event
+                    break
+            if found is not None:
+                return found
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            _events_cv.wait(remaining)
+
+
 def _on_event(event) -> bool:
     global _seq
     with _events_cv:
