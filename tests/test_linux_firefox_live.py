@@ -1284,12 +1284,37 @@ def _gecko_entry_facts(driver, name: str) -> dict | None:
     return driver._run(collect)
 
 
+def _focus_window_titled(driver, needle: str) -> None:
+    """Raise the X window whose title contains ``needle``. A miss does nothing.
+
+    The suite can already have a Firefox window in front. ``find`` follows
+    the active frame, so this page has to be that frame before the snapshot.
+    """
+    try:
+        rows = driver.windows()
+    except ComputerUseError:
+        return
+    for row in rows:
+        if needle not in str(row.get("title") or ""):
+            continue
+        window_id = row.get("window_id")
+        if isinstance(window_id, bool) or not isinstance(window_id, int):
+            return
+        try:
+            driver.focus_window(window_id)
+        except ComputerUseError:
+            return
+        return
+
+
 def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
     """Live Firefox ESR. A ``<textarea>`` snapshots as textarea.
 
     Gecko exposes it as AT-SPI ``entry`` with MULTI_LINE. A single-line
     ``<input>`` on the same page stays a text field. A missing Firefox
-    binary fails. This test does not skip for a missing browser.
+    binary fails. This test does not skip for a missing browser. Another
+    Firefox window that also has Name and Notes is not this page: the
+    snapshot has to be the ``fftextarea432`` window.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -1307,6 +1332,7 @@ def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
             if proc.poll() is not None:
                 log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
                 raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            _focus_window_titled(driver, "fftextarea432")
             try:
                 runtime.find("firefox", text="Name")
             except ComputerUseError as exc:
@@ -1317,7 +1343,7 @@ def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
                 snap = runtime._current
                 last = observe.render_text(snap)
                 titles = {el.title for el in snap.elements}
-                if {"Name", "Notes"} <= titles:
+                if "fftextarea432" in last and {"Name", "Notes"} <= titles:
                     break
             time.sleep(0.4)
         else:
