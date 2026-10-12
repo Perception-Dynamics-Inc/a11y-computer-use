@@ -1918,6 +1918,149 @@ def test_linux_chrome_optgroup_select_click_closes_the_popup(tmp_path) -> None:
         shutil.rmtree(profile, ignore_errors=True)
 
 
+_GTK_COMBO = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cucombo363")
+    win = Gtk.Window(title="cucombo363")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    combo = Gtk.ComboBoxText.new()
+    for name in ("None", "Classic", "Cobalt", "Kate"):
+        combo.append_text(name)
+    combo.set_active(0)
+    combo.get_accessible().set_name("Color")
+    button = Gtk.Button(label="Next action")
+    echo = Gtk.Label(label="next:none")
+    button.connect("clicked", lambda _b: echo.set_text("next:ok"))
+    box.pack_start(combo, False, False, 0)
+    box.pack_start(button, False, False, 0)
+    box.pack_start(echo, False, False, 0)
+    win.add(box)
+    win.set_default_size(320, 240)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def test_linux_gtk_combo_popup_lists_options_under_the_combo(tmp_path) -> None:
+    """Live GTK3: a combo click lists the popup under the combo.
+
+    The popup is its own window. The window snapshot keeps the combo,
+    reports it expanded, and nests the menu items with their names and the
+    selected state. Clicking an option by ref selects it and collapses the
+    combo, the same way a Chrome select option does. The next control on
+    the window still receives a click.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    script = tmp_path / "cucombo363.py"
+    script.write_text(_GTK_COMBO)
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [sys.executable, str(script)],
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 15
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                snap = driver.snapshot(Scope.WINDOW, "cucombo363")
+            except ComputerUseError as exc:
+                last = exc.message
+                snap = None
+            else:
+                last = observe.render_text(snap)
+                if any(el.role == "AXComboBox" and el.title == "Color" for el in snap.elements):
+                    break
+            time.sleep(0.25)
+        assert snap is not None and any(
+            el.role == "AXComboBox" and el.title == "Color" for el in snap.elements
+        ), last
+        combo = next(el for el in snap.elements if el.role == "AXComboBox" and el.title == "Color")
+        assert combo.expanded is not True, last
+        runtime = _runtime_for(tmp_path, driver, "cucombo363")
+        runtime._current = snap
+        runtime.click(combo.ref)
+        deadline = time.monotonic() + 4
+        opened = snap
+        while time.monotonic() < deadline:
+            opened = driver.snapshot(Scope.WINDOW, "cucombo363")
+            shown = observe.render_text(opened)
+            combo = next(
+                (el for el in opened.elements if el.role == "AXComboBox" and el.title == "Color"),
+                None,
+            )
+            cobalt = next(
+                (
+                    el for el in opened.elements
+                    if el.role == "AXMenuItem" and el.title == "Cobalt" and el.clickable
+                ),
+                None,
+            )
+            if combo is not None and combo.expanded is True and cobalt is not None:
+                break
+            time.sleep(0.25)
+        shown = observe.render_text(opened)
+        assert combo is not None and combo.expanded is True, shown
+        by_ref = {el.ref: el for el in opened.elements}
+        names = []
+        for el in opened.elements:
+            if el.role != "AXMenuItem":
+                continue
+            ancestor = el
+            while ancestor.parent is not None and ancestor.ref != combo.ref:
+                ancestor = by_ref[ancestor.parent]
+            if ancestor.ref == combo.ref:
+                names.append(el.title)
+        assert names == ["None", "Classic", "Cobalt", "Kate"], shown
+        chosen = next(el for el in opened.elements if el.role == "AXMenuItem" and el.title == "None")
+        assert chosen.selected is True, shown
+        assert 'menuitem "Cobalt"' in shown, shown
+        runtime._current = opened
+        result = runtime.click(cobalt.ref)
+        assert str(result).startswith("clicked "), result
+        deadline = time.monotonic() + 4
+        last_shot = opened
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "cucombo363")
+            shown = observe.render_text(last_shot)
+            combo = next(el for el in last_shot.elements if el.role == "AXComboBox" and el.title == "Color")
+            if combo.value == "Cobalt" and combo.expanded is False and 'menuitem "Cobalt"' not in shown:
+                break
+            time.sleep(0.25)
+        assert combo.value == "Cobalt", shown
+        assert combo.expanded is False, shown
+        assert 'menuitem "Cobalt"' not in shown, shown
+        button = next(el for el in last_shot.elements if el.title == "Next action" and el.clickable)
+        runtime._current = last_shot
+        runtime.click(button.ref)
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            last_shot = driver.snapshot(Scope.WINDOW, "cucombo363")
+            shown = observe.render_text(last_shot)
+            if "next:ok" in shown:
+                break
+            time.sleep(0.25)
+        assert "next:ok" in shown, shown
+        combo = next(el for el in last_shot.elements if el.role == "AXComboBox" and el.title == "Color")
+        assert combo.value == "Cobalt" and combo.expanded is False, shown
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_set_value_does_not_leak_keystrokes(tmp_path) -> None:
     """Live Chrome. A page script steals focus during set_value.
 
