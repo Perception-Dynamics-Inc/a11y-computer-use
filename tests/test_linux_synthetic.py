@@ -960,6 +960,124 @@ def test_hollow_page_tab_keeps_the_document_below_it() -> None:
     assert not [el for el in snap.elements if el.title in ("hidden", "Inside")]
 
 
+class _PageNode:
+    """A notebook accessible with an explicit box. No gi."""
+
+    def __init__(self, role, name="", box=None, children=()):
+        self.role = role
+        self.name = name
+        self.box = box
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+
+def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch) -> None:
+    """A notebook page with no allocation is a small named tab, not the page.
+
+    GTK reports (-1, -1, -1, -1) and an empty name for the lone page tab.
+    The frame name is the page label. The page content is hoisted to the
+    tab list, and the tab's box stays tab-sized. A page tab that already
+    has a box and a name is left on that box.
+    """
+    def extents(acc, *, keep_zero=False):
+        box = getattr(acc, "box", None)
+        if box is not None:
+            return box
+        return (0.0, 0.0), (10.0, 10.0)
+
+    monkeypatch.setattr(_atspi, "_extents", extents)
+    monkeypatch.setattr(
+        _atspi, "_state_flags",
+        lambda _acc: (True, False, None, True, None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_value_text", lambda *_args, **_kwargs: None)
+
+    frame = _PageNode("frame", "Probe Title", box=((100.0, 100.0), (800.0, 500.0)))
+    hidden = _PageNode("page tab", "", box=((-1.0, -1.0), (-1.0, -1.0)))
+    page = _PageNode("panel", "", box=((110.0, 160.0), (780.0, 420.0)))
+    terminal = _PageNode("terminal", "Terminal", box=((110.0, 160.0), (760.0, 420.0)))
+    page.children = [terminal]
+    terminal.parent = page
+    tabs = _PageNode("page tab list", "", box=((110.0, 160.0), (780.0, 420.0)), children=[hidden])
+    hidden.children = [page]
+    page.parent = hidden
+    frame.children = [tabs]
+    tabs.parent = frame
+
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(hidden)
+    assert raw.role == "AXButton"
+    assert raw.title == "Probe Title"
+    assert raw.selected is True
+    assert raw.size is not None and raw.size[1] == 19
+    assert raw.size[0] <= 160
+    assert raw.position is not None
+    assert raw.position[1] + raw.size[1] == 160
+    assert raw.position[0] + raw.size[0] == 110 + 780
+    assert accessor.children(hidden) == []
+    assert accessor.children(tabs) == [hidden, page]
+
+    labelled = _PageNode("page tab", "Kept Label", box=((-1.0, -1.0), (-1.0, -1.0)))
+    labelled.parent = tabs
+    labelled_raw = accessor.read(labelled)
+    assert labelled_raw.title == "Kept Label"
+    assert labelled_raw.size is not None and labelled_raw.size[1] == 19
+
+    visible = _PageNode("page tab", "Alpha Title", box=((565.0, 402.0), (74.0, 19.0)))
+    visible_page = _PageNode("panel", "", box=((551.0, 429.0), (818.0, 420.0)))
+    visible.children = [visible_page]
+    visible_page.parent = visible
+    visible_tabs = _PageNode("page tab list", "", children=[visible])
+    visible.parent = visible_tabs
+    assert accessor.read(visible).title == "Alpha Title"
+    assert accessor.read(visible).size == (74.0, 19.0)
+    assert accessor.children(visible) == [visible_page]
+    assert accessor.children(visible_tabs) == [visible]
+
+    snap = build_snapshot(
+        frame, accessor, scope=Scope.WINDOW, app="xfce4-terminal", pid=1, geometry=_geometry(),
+    )
+    buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
+    assert len(buttons) == 1
+    tab = buttons[0]
+    assert tab.bounds.height == 19
+    assert tab.bounds.width <= 160
+    text = [el for el in snap.elements if el.role == "AXTextArea" and el.title == "Terminal"]
+    assert len(text) == 1
+    area = text[0]
+    center_x = area.bounds.x + area.bounds.width / 2
+    center_y = area.bounds.y + area.bounds.height / 2
+    assert not (
+        tab.bounds.x <= center_x < tab.bounds.x + tab.bounds.width
+        and tab.bounds.y <= center_y < tab.bounds.y + tab.bounds.height
+    )
+    by_ref = {el.ref: el for el in snap.elements}
+    parent = area.parent
+    while parent is not None:
+        assert by_ref[parent].ref != tab.ref
+        parent = by_ref[parent].parent
+
+
 def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> None:
     """The snapshot read keeps a zero box and marks an internal frame.
     Hit-testing still asks for the default extents, which drop that box."""
