@@ -89,7 +89,18 @@ def test_listener_stays_off_without_a_display(monkeypatch) -> None:
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     assert _atspi_events.enabled() is False
+    # The Linux default starts the thread on the first driver call, so a
+    # full-suite process can already be listening. A missing display must
+    # still refuse to start one that is down.
+    monkeypatch.setattr(_atspi_events._listening, "is_set", lambda: False)
+    monkeypatch.setattr(_atspi_events, "_listener_failed", False)
+    started: list[int] = []
+    monkeypatch.setattr(_atspi_events, "_ensure", lambda: started.append(1))
     assert _atspi_events.ensure_started() is False
+    assert started == []
+    monkeypatch.setattr(_atspi_events._listening, "is_set", lambda: True)
+    assert _atspi_events.ensure_started() is True
+    assert started == []
     assert _actionable.FALLBACK_POLL_S <= 0.1
     assert _actionable.EVENT_WAIT_CAP_S <= 0.4
     assert _actionable.FALLBACK_POLL_S == 0.1
