@@ -161,6 +161,25 @@ _CLICKABLE_ROLES = frozenset(
 _EDITABLE_ROLES = frozenset(
     {"AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
+#: Controls kept when a Chromium page is already at ``MAX_DEPTH``. A named
+#: group is not one of these: it is walked through and not kept. Static text
+#: is not one either, so a buried label stays elided.
+_BURIED_CONTROL_ROLES = frozenset(
+    {
+        "AXButton",
+        "AXCheckBox",
+        "AXComboBox",
+        "AXLink",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXSearchField",
+        _SECURE_ROLE,
+        "AXSlider",
+        "AXSpinButton",
+        "AXTextArea",
+        "AXTextField",
+    }
+)
 
 #: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
 #: is the same snapshot (same elements, same refs) rendered down to what an agent
@@ -1668,12 +1687,15 @@ def _open_nested_frames(
     *,
     parent_bounds: Bounds | None = None,
 ) -> tuple[list[_PNode], int]:
-    """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
+    """Past ``MAX_DEPTH`` inside web content, open a nested frame or a control.
 
-    Descend only through non-interactive wrappers, spending ``web.scan_reads``.
-    A found ``internal frame`` (or a ``document web`` already inside a page)
-    is pruned with a restarted kept-depth budget. Other children stay elided,
-    so the scan does not pull a whole deep page into the snapshot.
+    Descend through wrappers, including a named group, spending
+    ``web.scan_reads``. A found ``internal frame`` (or a ``document web``
+    already inside a page) is pruned with a restarted kept-depth budget. A
+    button, field, link, or other control is kept at the cap, so a phone
+    entry or a settings control under a named group is not dropped. The
+    group itself is not kept. Static text stays elided. ``MAX_DEPTH`` and
+    ``web.scan_reads`` are not raised.
     """
     kept: list[_PNode] = []
     elided = 0
@@ -1711,10 +1733,31 @@ def _open_nested_frames(
             if pruned is not None:
                 kept.append(pruned)
             continue
+        if child_raw.role in _BURIED_CONTROL_ROLES:
+            # kept_depth stays at the cap, so this control's own children
+            # are still scanned under the same ``web.scan_reads`` budget.
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                child_depth,
+                MAX_DEPTH,
+                in_page=page,
+                in_web=web_here,
+                web=web,
+                parent_bounds=parent_bounds,
+            )
+            if pruned is not None:
+                kept.append(pruned)
+            else:
+                elided += 1
+            continue
         if (
             _noninteractive_wrapper(child_raw)
             or _plain_zero_wrapper(child_raw)
             or kind in ("docframe", "page", "iframe")
+            or child_raw.role in _WRAPPER_ROLES
         ):
             kids = tuple(accessor.children(child))
             room = kids[:_MAX_WALK_CHILDREN]
