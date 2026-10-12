@@ -2033,6 +2033,27 @@ def _refine_web_role(role: str, attrs: dict) -> str:
     return role
 
 
+def _entry_is_multiline(node, attrs: dict) -> bool:
+    """True when an AT-SPI ``entry`` is multi-line text.
+
+    Chromium exposes ``<input>`` and ``<textarea>`` as role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE``. A bridge that publishes the
+    same fact as ``multiline`` or ``aria-multiline`` is the same control.
+    A single-line input is not.
+    """
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    for key in ("multiline", "aria-multiline"):
+        flag = attrs.get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
 def _stable_id(acc, attrs: dict | None = None) -> str | None:
     """A layout-independent id for ``acc``: the AT-SPI ``accessible-id``, else a
     web element's DOM id from the object attributes (Chromium exposes 'id').
@@ -2225,6 +2246,10 @@ class ATSPIAccessor:
         if role_str == "text" and _state_has(node, "SINGLE_LINE") and not _state_has(node, "MULTI_LINE"):
             role = "AXTextField"
         attrs = _get_attributes(node)  # one D-Bus fetch, reused for role + id
+        # Chromium maps <input> and <textarea> both to entry. MULTI_LINE,
+        # or a multiline attribute, is the textarea.
+        if role_str == "entry" and _entry_is_multiline(node, attrs):
+            role = "AXTextArea"
         role = _refine_web_role(role, attrs)
         role = _opaque_surface_role(role, role_str, attrs)
         # A custom role=spinbutton is an AT-SPI spin button, which this map
