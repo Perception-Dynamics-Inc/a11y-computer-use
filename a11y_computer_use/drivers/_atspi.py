@@ -768,9 +768,22 @@ def _call_first(obj, names, *args, default=None):
 
     Inside ``read_cache``, a successful stable getter is remembered for
     this object and these arguments. A mutator drops that memory first.
+
+    While ``event_main`` is running, the call moves onto that thread.
+    libatspi is not safe from the caller and the loop at once.
     """
     if obj is None:
         return default
+
+    def invoke():
+        return _call_first_inline(obj, names, *args, default=default)
+
+    from a11y_computer_use.drivers import _atspi_events
+
+    return _atspi_events.run(invoke)
+
+
+def _call_first_inline(obj, names, *args, default=None):
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
@@ -9798,11 +9811,68 @@ def _find_cell_editor(node, budget: list[int]):
     return None
 
 
+def _cache_masks():
+    """``(none, undefined)`` for ``set_cache_mask``.
+
+    ``none`` is ``0`` when the typelib has no ``Cache`` enum, which is the
+    same value as ``Atspi.Cache.NONE``. ``undefined`` is missing on a test
+    double; the caller then leaves the mask alone after the read.
+    """
+    none = 0
+    undefined = None
+    try:
+        cache = getattr(_atspi(), "Cache", None)
+    except Exception:
+        return none, undefined
+    if cache is None:
+        return none, undefined
+    member = getattr(cache, "NONE", None)
+    if member is not None:
+        none = member
+    return none, getattr(cache, "UNDEFINED", None)
+
+
+def _without_child_cache(node, fn):
+    """Run ``fn`` without trusting this application's child cache.
+
+    ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
+    children array in place. The next D-Bus call reenters the event loop.
+    A cache event then sets the children flag again, and
+    ``get_child_at_index`` returns that stale array. LibreOffice opens the
+    cell editor as a new sibling of the sheet. The pre-edit children do not
+    contain it, so the grid never sends Return. While that editor is open
+    every other cell's text interface stays empty, and A1 reads back as a
+    mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
+    the flag comes back. The desktop default is restored afterwards.
+    A node without ``set_cache_mask`` is a test double and is walked as it is.
+    """
+    app = _call_first(node, ("get_application", "getApplication"))
+    target = app if app is not None else node
+    setter = getattr(target, "set_cache_mask", None)
+    if setter is None:
+        return fn()
+    none, undefined = _cache_masks()
+    try:
+        setter(none)
+    except Exception:
+        return fn()
+    try:
+        return fn()
+    finally:
+        if undefined is not None:
+            try:
+                setter(undefined)
+            except Exception:
+                pass
+
+
 def sheet_editor_text(app: str) -> str | None:
     """Paragraph text of the open cell editor, or None.
 
     Only LibreOffice. The panel is a sibling of the sheet, named ``Cell F1``,
     and its paragraph is the in-progress string. Absent when no edit is open.
+    The walk does not trust the child cache: the editor is created when the
+    edit starts, and a stale children array still lists the sheet alone.
     """
     if not libreoffice_app(app):
         return None
@@ -9814,18 +9884,22 @@ def sheet_editor_text(app: str) -> str | None:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is None:
+                continue
+            text = _full_text(child)
+            if text:
+                return text
         return None
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is None:
-            continue
-        text = _full_text(child)
-        if text:
-            return text
-    return None
+
+    return _without_child_cache(root, read)
 
 
 def _cell_editor_is_secure(app: str) -> bool | None:
@@ -9846,17 +9920,21 @@ def _cell_editor_is_secure(app: str) -> bool | None:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
-        return None
-    if is_secure(panel):
-        return True
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is not None and is_secure(child):
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        if is_secure(panel):
             return True
-    return False
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is not None and is_secure(child):
+                return True
+        return False
+
+    return _without_child_cache(root, read)
 
 
 def _selected_sheet_cell(app: str):
@@ -16367,13 +16445,20 @@ def _drop_cached_properties(acc) -> None:
 
     if not _atspi_events.listening():
         return
-    _reply_local.dropping_properties = True
-    try:
-        method()
-    except Exception:
-        return
-    finally:
-        _reply_local.dropping_properties = False
+
+    def drop() -> None:
+        # The guard is thread-local. It has to be set on the thread that
+        # actually calls libatspi, which is the event thread when the loop
+        # is up.
+        _reply_local.dropping_properties = True
+        try:
+            method()
+        except Exception:
+            return
+        finally:
+            _reply_local.dropping_properties = False
+
+    _atspi_events.run(drop)
 
 
 def _invalidate_tree_cache(acc) -> None:

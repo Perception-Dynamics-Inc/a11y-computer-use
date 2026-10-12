@@ -11,8 +11,9 @@ This module runs that loop on ONE dedicated daemon thread that owns libatspi, an
 ``submit(fn)`` marshals a whole driver operation onto it via ``GLib.idle_add``
 (safe to call from any thread), blocking the caller for the result. libatspi
 stays single-threaded. Once the loop is running, the driver routes AT-SPI calls
-through here. A call that is already on the event thread runs inline, so a
-snapshot submitted from the caller cannot deadlock on a nested submit.
+through here, and ``run(fn)`` does the same for a single call that did not go
+through the driver's ``_run``. A call that is already on the event thread runs
+inline, so a snapshot submitted from the caller cannot deadlock on a nested submit.
 
 On Linux, ``enabled()`` is true when the variable is unset and the AT-SPI
 typelib imports. ``0``, ``false``, ``no``, and ``off`` force the inline path.
@@ -131,6 +132,26 @@ def listening() -> bool:
 def on_event_thread() -> bool:
     """True when the caller is the thread that runs ``Atspi.event_main``."""
     return _thread is not None and threading.current_thread() is _thread
+
+
+def run(fn):
+    """Run ``fn`` on the event thread when that thread is inside ``event_main``.
+
+    A caller already on the thread runs inline, so a nested read cannot
+    deadlock the loop. A listener that was never started runs inline too:
+    a test that only reports ``listening()`` must not boot the loop.
+    libatspi is not safe from a second thread while the loop is up. A
+    child walk on the caller then segfaults inside ``event_main``.
+    """
+    thread = _thread
+    if (
+        thread is None
+        or not thread.is_alive()
+        or not _listening.is_set()
+        or on_event_thread()
+    ):
+        return fn()
+    return submit(fn)
 
 
 def ensure_started() -> bool:
