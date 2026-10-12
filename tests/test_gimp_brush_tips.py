@@ -86,6 +86,8 @@ def _patch(monkeypatch) -> None:
 
     monkeypatch.setattr(_atspi, "_state_flags", flags)
     monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: acc.box)
+    # A label's value read imports PyGObject. macOS and Windows CI have no gi.
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args, **kwargs: None)
 
 
 def _grid(labels, *, selected_name=""):
