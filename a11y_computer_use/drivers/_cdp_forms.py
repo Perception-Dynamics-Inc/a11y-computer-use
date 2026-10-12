@@ -296,6 +296,22 @@ class FormControl:
                 raise ValueError("minimum and maximum must be finite numbers or None")
 
 
+def _argv_cmdline(raw: bytes) -> bytes:
+    """NUL-separated arguments, including a title Chrome rewrote with spaces.
+
+    ``/proc/<pid>/cmdline`` is NUL-separated. Chrome replaces those NULs
+    with spaces when it sets the process title, so a NUL split never sees
+    ``--remote-debugging-port``. A buffer with no interior NUL is that
+    title: split it on spaces and put the NULs back. A buffer that still
+    has an interior NUL is the kernel's argv and is left alone, because an
+    argument can contain a space.
+    """
+    body = raw.rstrip(b"\x00")
+    if b"\x00" in body or not body:
+        return raw
+    return b"\x00".join(body.split(b" ")) + b"\x00"
+
+
 def debug_port_from_cmdline(raw: object) -> int | None:
     """The DevTools port on this process command line, or None.
 
@@ -308,7 +324,7 @@ def debug_port_from_cmdline(raw: object) -> int | None:
     """
     if not isinstance(raw, (bytes, bytearray)):
         raise TypeError("cmdline must be bytes")
-    blob = bytes(raw)
+    blob = _argv_cmdline(bytes(raw))
     flags = list(_PORT_FLAG.finditer(blob))
     if not flags:
         return None
@@ -378,6 +394,7 @@ def ports_for_pid(pid: object) -> tuple[int, ...]:
 
 def _ports_on_cmdline(raw: bytes) -> tuple[int, ...]:
     """Ports this command line opted into, active profile file first."""
+    raw = _argv_cmdline(raw)
     flags = list(_PORT_FLAG.finditer(raw))
     if not flags:
         return ()

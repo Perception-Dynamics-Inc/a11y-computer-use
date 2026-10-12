@@ -307,6 +307,30 @@ def test_write_tries_the_next_port_when_the_first_page_misses(monkeypatch) -> No
     assert calls == [9222, 9333]
 
 
+def test_space_separated_cmdline_still_names_the_debug_port(tmp_path, monkeypatch) -> None:
+    """Chrome's process title stores argv separated by spaces, not NULs.
+
+    A NUL split then misses ``--remote-debugging-port``. The last flag is
+    the bound port. The profile file is still first when the directory
+    survived the space split.
+    """
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("56643\n/devtools/browser/x\n", encoding="utf-8")
+    raw = (
+        f"chrome --remote-debugging-port=9222 --user-data-dir={profile} "
+        f"--remote-debugging-port=42901"
+    ).encode()
+    assert b"\x00" not in raw
+    monkeypatch.setattr(_cdp_forms, "_cmdline_chain", lambda pid: (raw,))
+    assert _cdp_forms.ports_for_pid(9) == (56643, 42901)
+    assert _cdp_forms.debug_port_from_cmdline(raw) == 42901
+    spaced = b"chrome --remote-debugging-port=42901\x00"
+    assert _cdp_forms.debug_port_from_cmdline(spaced) == 42901
+    intact = b"chrome\x00--user-data-dir=/tmp/my profile\x00--remote-debugging-port=9333\x00"
+    assert _cdp_forms.debug_port_from_cmdline(intact) == 9333
+
+
 def test_ports_try_the_profile_file_before_a_launcher_flag(tmp_path, monkeypatch) -> None:
     profile = tmp_path / "profile"
     profile.mkdir()
