@@ -1601,6 +1601,25 @@ def test_several_windows_share_a_budget_and_mark_the_active_one() -> None:
     assert any("(active)" in ln and "Editor" in ln for ln in cut.splitlines())
 
 
+def test_discarded_window_epochs_do_not_evict_the_merged_handles() -> None:
+    snaps = []
+    for index in range(6):
+        snaps.append(snap_of(ax(
+            "AXWindow", title=f"W{index}", at=(0.0, 0.0), size=(200.0, 100.0),
+            children=[button(f"B{index}", (10.0, 10.0))],
+        )))
+    merged = observe.merge_window_snapshots(
+        snaps, scope=Scope.WINDOW, app="app", pid=1,
+    )
+    for snap in snaps:
+        observe.discard_epoch(snap.snapshot_id)
+    kept = next(el for el in merged.elements if el.title == "B5")
+    for _ in range(observe._MAX_EPOCHS - 1):
+        snap_of(ax("AXWindow", title="later", at=(0.0, 0.0), size=(100.0, 80.0)))
+    assert observe.ax_handle_for(merged.snapshot_id, kept.ref)["title"] == "B5"
+    assert observe.ax_handle_for(snaps[0].snapshot_id, snaps[0].elements[0].ref) is None
+
+
 def test_render_text_rejects_unknown_mode() -> None:
     snap = snap_of(save_window())
     with pytest.raises(ValueError):

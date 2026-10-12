@@ -5183,12 +5183,12 @@ _GTK_TWO = textwrap.dedent(
 def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
     """Two GTK windows in one process. Beta is in front.
 
-    set_value on Field A writes the text. A window-scope snapshot does not
-    contain that field, which used to make the outcome unverifiable. The ref
-    came from find(scope='app'), and that read-back matches, so the outcome
-    is confirmed. This is not the covered-window case: nothing is on top of
-    Alpha, and a read-back that did not match would not be confirmed.
+    The window snapshot lists both windows, Beta first. set_value on Field A
+    writes that field and is confirmed. The ref came from find(scope='app').
+    This is not the covered-window case: nothing is on top of Alpha, and a
+    read-back that did not match would not be confirmed.
     """
+    from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
@@ -5218,9 +5218,12 @@ def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
         assert any(el.title == "Field B" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
-        assert not any(el.title == "Field A" for el in front.elements), [
+        assert any(el.title == "Field A" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
+        text = observe.render_text(front)
+        assert text.index("Beta Window") < text.index("Alpha Window"), text[:1200]
+        assert any("(active)" in line and "Beta Window" in line for line in text.splitlines()), text[:1200]
         runtime = _runtime_for(tmp_path, driver, _TWO_APP, "python3")
         runtime.find(_TWO_APP, text="Field A", scope="app")
         current = runtime._current

@@ -2895,6 +2895,19 @@ def _note_active_root(snapshot_id: str, ref: str) -> None:
         _ACTIVE_ROOTS.popitem(last=False)
 
 
+def discard_epoch(snapshot_id: str) -> None:
+    """Forget one snapshot's render metadata.
+
+    A merged window snapshot copies handles out of the per-window epochs.
+    Those epochs then only consume the FIFO, and the next few snapshots
+    evict the merge the caller is still acting on.
+    """
+    _EPOCHS.pop(snapshot_id, None)
+    _HANDLES.pop(snapshot_id, None)
+    _FULL_VALUES.pop(snapshot_id, None)
+    _ACTIVE_ROOTS.pop(snapshot_id, None)
+
+
 def _register_epoch(
     snapshot_id: str,
     elisions: dict[str, int],

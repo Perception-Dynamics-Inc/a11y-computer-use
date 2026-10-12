@@ -1499,7 +1499,13 @@ class LinuxDriver:
                 )
                 roots = [root]
                 if all_windows:
-                    listed = _atspi.showing_toplevels(root)
+                    # A find bar or omnibox popup is a showing frame, but it is
+                    # browser chrome. Merging it beside the page is what made
+                    # a page ref resolve to Reload or the address bar.
+                    listed = [
+                        item for item in _atspi.showing_toplevels(root)
+                        if not _atspi._is_browser_bar_frame(item)
+                    ]
                     if len(listed) > 1:
                         roots = listed
                 # LibreOffice 25.2 reports content a title bar high until the
@@ -1551,9 +1557,15 @@ class LinuxDriver:
                     snaps.append(snap)
                 if len(snaps) == 1:
                     return snaps[0]
-                return observe.merge_window_snapshots(
+                merged = observe.merge_window_snapshots(
                     snaps, scope=scope, app=app, pid=watch.pid,
                 )
+                # The per-window epochs were copied into the merge. Dropping
+                # them keeps one snapshot as one epoch, so a later click does
+                # not evict the handles the caller still holds.
+                for snap in snaps:
+                    observe.discard_epoch(snap.snapshot_id)
+                return merged
 
         return self._run(_do)
 
