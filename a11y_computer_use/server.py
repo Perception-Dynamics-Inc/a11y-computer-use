@@ -5459,9 +5459,13 @@ class Runtime:
         jumps over that row. Five lines stays inside the rows already on
         screen, so the return still overlaps. If the return does not move
         either, the still-page error stands. The still grab does not
-        install a new head. A scroll that moved the pixels while the
-        in-scroll row read was still the old head (``rows_stale``) is not
-        the end of the search either: the page did move, and the next
+        install a new head. A document wheel that does not move the page
+        (``surface=document``) is the end of that document. The same
+        direction is tried once more. A second still document is not found:
+        the search does not turn around, so the page stays at the end, and
+        the still-page error is not raised. A scroll that moved the pixels
+        while the in-scroll row read was still the old head (``rows_stale``)
+        is not the end of the search either: the page did move, and the next
         iteration snapshots the tree again instead of aborting or turning
         around.
 
@@ -5785,6 +5789,11 @@ class Runtime:
                             limit = issued + 1
                         continue
                     stalls = 0
+                    if exc.detail.get("surface") == "document":
+                        # The document did not move. The name was never on
+                        # this page. Turning around would leave the end and
+                        # then raise page_unchanged. Stay here.
+                        break
                     if turned:
                         raise
                     turned = True

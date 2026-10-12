@@ -11583,6 +11583,39 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
     return None
 
 
+def list_scrolls_with_document(container) -> bool:
+    """True when a Chromium list is body content and the document scrolls.
+
+    A short table can be shorter than the screen and still longer than
+    the window. Its box is the content, not a scrollport. After the
+    document moves, the top sits above the page or the bottom still runs
+    past it, and the box stays no taller than the screen. A fixed-height
+    overflow list sits inside the document. A list taller than the screen
+    keeps the list wheel. No document edges means the caller keeps the
+    list's own bar.
+    """
+    if container is None or _role_name(container) not in _LIST_ROLES:
+        return False
+    if not _chromium_app(container):
+        return False
+    if _overflow_ancestor_edges(container) is not None:
+        return False
+    pos, size = _extents(container)
+    if pos is None or size is None or float(size[1]) < 4:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh:
+        return False
+    page = _page_edges(container)
+    if page is None:
+        return False
+    top = float(pos[1])
+    bottom = top + float(size[1])
+    if bottom > page[3] + 8:
+        return True
+    return top < page[1] - 8
+
+
 def overflow_ancestor_box(container) -> tuple[int, int, int, int] | None:
     """``(x, y, width, height)`` of the overflow wrapper, or None.
 

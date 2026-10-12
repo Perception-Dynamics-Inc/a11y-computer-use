@@ -4938,6 +4938,48 @@ def test_overflow_bar_at_rest_does_not_scroll_up(
     assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
 
 
+def test_short_table_past_the_document_wheels_the_page(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic body-scroll table that fits on the screen, not a live window.
+
+    The list is shorter than the screen and still extends past the document,
+    which is the short ticket table. The scroll uses the document wheel. It
+    does not write a viewport bar.
+    """
+    import a11y_computer_use.drivers.linux as linux_mod
+
+    window, listing, hit, rows = _document_scroll_page()
+    # Document is y=90, height 680, bottom 770. The list stays inside the
+    # 800px screen and runs past that document.
+    hit.x, hit.y, hit.width, hit.height = 40, 120, 400, 670
+    _show_page_rows(listing, rows, 1)
+    _wire_chrome_list(monkeypatch, window, hit, stuck=False)
+    called = {"wheel": 0, "nudge": 0}
+
+    def wheel(*_args, **_kwargs):
+        called["wheel"] += 1
+
+    def nudge(*_args, **_kwargs):
+        called["nudge"] += 1
+        return "absent", None
+
+    monkeypatch.setattr(linux_mod, "_wheel_chromium_document", wheel)
+    monkeypatch.setattr(_atspi, "nudge_viewport_scrollbar", nudge)
+    driver = LinuxDriver()
+    snap = driver.snapshot(Scope.WINDOW, "chrome")
+    listing_el = next(el for el in snap.elements if el.role == "AXList")
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 1
+    assert called["nudge"] == 0
+    # After the document moves, the list's top is above the page and the
+    # box no longer sits on the screen. It is still body content.
+    hit.y = -22
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 2
+    assert called["nudge"] == 0
+
+
 def test_content_height_line_scroll_does_not_write_the_scroll_bar(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:

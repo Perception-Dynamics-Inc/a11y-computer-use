@@ -7265,6 +7265,112 @@ def test_linux_chrome_document_scroll_to_find_item_180_is_quick(tmp_path) -> Non
         _stop_group(proc)
 
 
+def test_linux_chrome_short_page_scroll_to_find_stops_at_the_end(tmp_path) -> None:
+    """A short ticket table stops at the end with not-found, quickly.
+
+    Live Chrome, not a synthetic list. Twenty-five rows and a Next link.
+    The table fits on a tall screen and still runs past the window, so the
+    last rows start below the fold. ``4711`` is not on the page.
+    ``scroll_to_find`` has to bring the last row and Next onto the screen
+    and return not found. It must not raise page_unchanged, and it must
+    finish well under the minute a stuck list-scroll used to take. Skips
+    when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the short-page scroll test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        "<tr>"
+        f"<td>{4000 + i}</td><td>Ticket {i}</td><td>owner {i}</td><td>open</td>"
+        "</tr>"
+        for i in range(1, 26)
+    )
+    page = tmp_path / "tickets346.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>tickets</title>"
+        "<style>body{margin:8px;font:16px/22px sans-serif}"
+        "table{border-collapse:collapse}td,th{padding:4px 8px}</style>"
+        "<h1>Tickets</h1>"
+        "<table><caption>Tickets</caption>"
+        "<tr><th>id</th><th>title</th><th>owner</th><th>status</th></tr>"
+        f"{rows}</table><p><a href='#next'>Next</a></p>"
+    )
+    profile = tmp_path / "chrome-tickets346-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the ticket table"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = _titles(shot)
+                if "4001" in titles and "4025" not in titles:
+                    ready = shot
+                    break
+            time.sleep(0.3)
+        assert ready is not None, "Chrome did not show the top of the ticket table"
+        table = next(el for el in ready.elements if el.role == "AXTable")
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        runtime._current = ready
+        started = time.monotonic()
+        found = runtime.scroll_to_find(
+            "chrome", text="4711", role="cell", direction="down", max_scrolls=30,
+            ref=table.ref,
+        )
+        elapsed = time.monotonic() - started
+        assert found.startswith("not found after"), found
+        assert "page_unchanged" not in found, found
+        assert elapsed < 12.0, f"short page took {elapsed:.2f}s: {found.splitlines()[0]}"
+        shown = driver.snapshot(Scope.WINDOW, "chrome")
+        windows = [
+            el for el in shown.elements
+            if el.role == "AXWindow" and el.bounds.width > 40 and el.bounds.height > 40
+        ]
+        assert windows, "no window in the snapshot after the search"
+        win = max(windows, key=lambda el: el.bounds.width * el.bounds.height)
+
+        def on_screen(title: str) -> bool:
+            for el in shown.elements:
+                if el.title != title or el.bounds.width < 1 or el.bounds.height < 1:
+                    continue
+                cx = el.bounds.x + el.bounds.width / 2
+                cy = el.bounds.y + el.bounds.height / 2
+                if (
+                    win.bounds.x <= cx < win.bounds.x + win.bounds.width
+                    and win.bounds.y <= cy < win.bounds.y + win.bounds.height
+                ):
+                    return True
+            return False
+
+        assert on_screen("4025"), "the last row never reached the window"
+        assert on_screen("Next"), "Next never reached the window"
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> None:
     """Scroll a long overflow list to the bottom, then find a row above it.
 

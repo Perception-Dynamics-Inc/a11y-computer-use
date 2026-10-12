@@ -1703,6 +1703,53 @@ def test_scroll_to_find_reaches_an_early_row_by_stepping_back_up(monkeypatch) ->
     assert -1 not in scrolls
 
 
+def test_scroll_to_find_stops_at_the_document_end_without_turning_around(monkeypatch) -> None:
+    """Synthetic snapshots, not a live Chrome page.
+
+    The target is not on the page. Each document wheel reports that the
+    page did not move. The search retries once and then returns not found.
+    It does not turn around, and it does not raise page_unchanged.
+    """
+    from a11y_computer_use import server
+
+    scrolls: list[int] = []
+
+    class _D:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return _item_window(1)
+
+        def scroll(self, target, **kw):
+            dy = int(kw.get("dy") or 0)
+            scrolls.append(dy)
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "the document did not move after the wheel scroll",
+                detail={
+                    "reason": "page_unchanged",
+                    "surface": "document",
+                    "unit": "lines",
+                    "dx": 0,
+                    "dy": dy,
+                },
+            )
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _D()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+
+    out = rt.scroll_to_find("app", text="4711", role="AXCell", max_scrolls=30)
+    assert out.startswith("not found after 2 scroll(s)")
+    assert "4711" in out
+    assert scrolls == [5, 5]
+    assert -5 not in scrolls
+
+
 def test_scroll_to_find_does_not_return_a_row_the_page_has_scrolled_past(monkeypatch) -> None:
     """Synthetic snapshots, not a live Chrome table.
 

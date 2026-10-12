@@ -881,6 +881,25 @@ def _name_source(run, handle):
     return source, before
 
 
+def _document_did_not_move(dx: int, dy: int) -> ComputerUseError:
+    """The document wheel ran and the on-screen rows stayed put.
+
+    ``surface=document`` tells ``scroll_to_find`` this is the end of the
+    page. A list that did not move does not set it, and still turns around.
+    """
+    return ComputerUseError(
+        ErrorCode.UNSUPPORTED,
+        "the document did not move after the wheel scroll",
+        detail={
+            "reason": "page_unchanged",
+            "surface": "document",
+            "unit": "lines",
+            "dx": int(dx),
+            "dy": int(dy),
+        },
+    )
+
+
 def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> None:
     """Wheel a document by the requested notches, then wait until the tree says so.
 
@@ -898,7 +917,8 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
     more notches go out one at a time until the head has moved by about
     that many names, or a notch leaves the names unchanged. A head that
     has already left the sample took the viewport step; more notches are
-    not added on top of it.
+    not added on top of it. A burst whose rows never change raises
+    ``page_unchanged`` with ``surface=document``: the page is at its end.
     """
     from a11y_computer_use.drivers import _atspi, _linux_input
 
@@ -978,8 +998,11 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
             break
         time.sleep(0.05)
     # No measurable move, or the head already left the sample. The burst
-    # is the step. A short move still inside the old sample is the
-    # collapsed burst: top it up.
+    # is the step. A sample that never changed is the end of the document:
+    # the wheel landed and the rows stayed. A short move still inside the
+    # old sample is the collapsed burst: top it up.
+    if not changed:
+        raise _document_did_not_move(dx, dy)
     if not (0 < abs(moved) < burst) or _names_parted(before, after):
         return
     for _extra in range(wanted * 2):
@@ -2167,6 +2190,29 @@ class LinuxDriver:
         box = self._run(lambda: _atspi.list_screen_box(container))
         raw_box = box
         ancestor_box = self._run(lambda: _atspi.overflow_ancestor_box(container))
+        # A short body-scroll table is content, not a scrollport. It can
+        # fit on a tall screen and still run past the document, and after
+        # the page moves its top is above the document. The bar, the track,
+        # and a list-judged wheel do not move it, and that stall is reported
+        # as unchanged while the document can still scroll. Hover first so
+        # the wheel lands on the focused page.
+        if (
+            ancestor_box is None
+            and raw_box is not None
+            and int(dy)
+            and self._run(lambda: _atspi.list_scrolls_with_document(container))
+        ):
+            display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+            self.hover(Point(display_id, x, y))
+            if not _cdp_scroll_pixels(
+                x, y,
+                dx=int(dx) * _PIXELS_PER_LINE,
+                dy=int(dy) * _PIXELS_PER_LINE,
+            ):
+                _wheel_chromium_document(self._run, handle, x, y, dx=int(dx), dy=int(dy))
+            elif handle is not None:
+                _settle_shown_names(self._run, handle)
+            return None
         if ancestor_box is not None:
             painted = _clip_box_to_screen(ancestor_box)
             box = painted if painted is not None else ancestor_box
