@@ -14295,15 +14295,21 @@ def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) ->
 
 
 def _cell_matches_needle(cell, needle: str) -> bool:
-    """True when the cell or a close descendant is named ``needle``.
+    """True when the cell, or an unnamed cell's child, is named ``needle``.
 
-    A Swing cell's text lives on a child. The cell's own name is empty.
+    A GTK cell carries the row text on itself. Opening every child of a
+    miss is what made a 10k TreeView find exceed the event-thread budget.
+    Swing leaves the cell unnamed and puts the text on a child. That is
+    the only miss that looks one level down.
     """
     if cell is None:
         return False
-    if _seek_hit(cell, needle) is not None:
-        return True
-    return _contains_needle(cell, needle)
+    name = str(_call_first(cell, ("get_name", "getName"), default="") or "")
+    folded = needle.replace("\u00a0", " ").casefold()
+    haystack = name.replace("\u00a0", " ").casefold()
+    if name.strip():
+        return folded in haystack
+    return _seek_hit(cell, needle) is not None
 
 
 def _bring_gtk_cell_into_view(cell, screen: tuple[int, int], row: int, rows: int) -> bool:
