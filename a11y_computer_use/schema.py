@@ -296,6 +296,10 @@ class Element:
     #: ``activates on double-click`` is a GTK tree or tree-table row. None
     #: for every other element. A click is not rewritten into that double-click.
     note: str | None = None
+    #: Set when a canvas has no accessible text and no children. The
+    #: snapshot and a find that misses print this sentence. Empty when the
+    #: toolkit exposed the content, and on every other role. It is not a box.
+    content_note: str = ""
 
     @property
     def actionable(self) -> bool:

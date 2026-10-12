@@ -6461,12 +6461,14 @@ class Runtime:
                     container = f"{anchor.role}{title} ref={anchor.ref}"
                 shown_budget = budget_s if budget_cap is None else budget_cap
                 why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
+                canvas = next((el.content_note for el in shot.elements if el.content_note), "")
+                canvas_line = f"\n{canvas}" if canvas else ""
                 return (
                     f"not found after {count} scroll(s){why}: "
                     f"no element matches text={text!r} role={role!r}\n"
                     f"container: {container}\n"
                     f"scroll_position: {read_offset(anchor)}\n"
-                    f"last_rows: {tail}"
+                    f"last_rows: {tail}{canvas_line}"
                 )
 
             def page_frame_missing(shot: Snapshot, anchor: Element | None) -> bool:

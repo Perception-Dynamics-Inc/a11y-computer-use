@@ -302,6 +302,11 @@ class RawNode:
     #: GTK outline row only selects it. Empty everywhere else. The click is
     #: not turned into that double-click.
     note: str = ""
+    #: Linux only. A sentence such as ``canvas content isn't accessible``
+    #: when a drawing area has no text and no children. Empty when the
+    #: toolkit exposed that content. The pruner copies it onto the element.
+    #: It does not invent a box for a shape inside the canvas.
+    content_note: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -933,12 +938,29 @@ def _children_map(snap: Snapshot) -> dict[str | None, list[Element]]:
     return children
 
 
+def _canvas_note_lines(snap: Snapshot) -> list[tuple[str, bool]]:
+    """One line per distinct canvas note, so a miss is not silent.
+
+    The same sentence is also on the canvas element. A snapshot with no
+    such canvas contributes nothing.
+    """
+    seen: list[str] = []
+    for el in snap.elements:
+        note = el.content_note
+        if note and note not in seen:
+            seen.append(note)
+    return [(note, False) for note in seen]
+
+
 def _full_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str, bool]]:
     """(line, is_element_line) pairs for the full view."""
     elisions = _EPOCHS.get(snap.snapshot_id, {})
     children = _children_map(snap)
     bounds: bool | None = True if include_bounds else None
-    entries = [(f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})", False)]
+    entries = [
+        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value})", False),
+        *_canvas_note_lines(snap),
+    ]
 
     def emit(el: Element, depth: int) -> None:
         entries.append(("  " * depth + _render_line(el, bounds=bounds), True))
@@ -1029,7 +1051,8 @@ def _interactive_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str
     kept = interactive_view(snap)
     kept_refs = {el.ref for el in kept}
     entries = [
-        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value}) interactive", False)
+        (f"[{snap.snapshot_id}] {snap.app or 'display'} ({snap.scope.value}) interactive", False),
+        *_canvas_note_lines(snap),
     ]
 
     def folded_text(el: Element) -> tuple[list[str], int, int]:
@@ -1347,10 +1370,13 @@ def render_matches(
 
     ``text`` is the substring ``find`` searched for. A VTE match that sits only
     in the buffer, not in the on-screen value, is marked above the view or
-    off-screen.
+    off-screen. A snapshot whose canvas has no accessible content says so
+    when nothing matched, instead of a bare miss.
     """
     if not matches:
-        return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match"
+        note = next((el.content_note for el in snap.elements if el.content_note), "")
+        suffix = f" ({note})" if note else ""
+        return f"[{snap.snapshot_id}] {snap.app or 'display'}: no elements match{suffix}"
     lines = [f"[{snap.snapshot_id}] {snap.app or 'display'}: {len(matches)} match(es)"]
     for el in matches:
         line = _render_line(el)
@@ -2681,6 +2707,7 @@ def _flatten(
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,
+            content_note=node.raw.content_note,
         )
     )
     if node.elided:
@@ -2867,6 +2894,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     b = el.bounds
     if b is not None and (bounds is True or el.role == OPAQUE_ROLE or (bounds is None and el.parent is None)):
         parts.append(f"[{b.width}x{b.height} @{b.display_id}:{b.x},{b.y}]")
+    if el.content_note:
+        parts.append(f"({el.content_note})")
     return " ".join(parts)
 
 
