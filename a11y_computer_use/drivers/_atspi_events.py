@@ -1,4 +1,4 @@
-"""AT-SPI event thread. On by default on Linux when the typelib imports.
+"""AT-SPI event thread. Linux-only.
 
 libatspi keeps a full client-side cache of each accessible (role, name, states,
 attributes, parent, children) but only *serves reads from it* when a GLib main
@@ -14,14 +14,10 @@ stays single-threaded. Once the loop is running, the driver routes AT-SPI calls
 through here. A call that is already on the event thread runs inline, so a
 snapshot submitted from the caller cannot deadlock on a nested submit.
 
-On Linux, ``enabled()`` is true when the variable is unset and the AT-SPI
-typelib imports. ``0``, ``false``, ``no``, and ``off`` force the inline path.
-``1``, ``true``, ``yes``, and ``on`` turn the thread on. Any other value is
-ignored, with a warning, and the unset default is used. Other platforms stay
-inline when the variable is unset, so constructing a Linux driver there does
-not start it.
-Actionability waits call ``ensure_started`` themselves, so on a Linux display
-the listener is on even when the variable forces the inline path. The standing
+``enabled()`` is still the opt-in that routes every driver call through the
+cache thread from the first operation (``A11Y_COMPUTER_USE_ATSPI_EVENTS`` set
+to a non-empty value). Actionability waits call ``ensure_started`` themselves,
+so on a Linux display the listener is on without that variable. The standing
 registrations are ``object:state-changed``, ``object:children-changed``,
 ``object:bounds-changed``, and ``focus:``, plus the text, name, document, and
 window events the cache path already watched.
@@ -32,7 +28,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import warnings
 from collections import deque
 
 _STANDING_EVENTS = (
@@ -57,65 +52,13 @@ _events_cv = threading.Condition()
 _seq = 0
 
 
-_ON = frozenset({"1", "true", "yes", "on"})
-_OFF = frozenset({"0", "false", "no", "off"})
-_typelib_ok: bool | None = None
-_warned_values: set[str] = set()
-
-
-def typelib_imports() -> bool:
-    """True when PyGObject can import ``Atspi`` 2.0. Does not start a main loop."""
-    global _typelib_ok
-    if _typelib_ok is not None:
-        return _typelib_ok
-    if not sys.platform.startswith("linux"):
-        _typelib_ok = False
-        return False
-    try:
-        import gi
-
-        gi.require_version("Atspi", "2.0")
-        from gi.repository import Atspi  # noqa: F401
-    except Exception:
-        _typelib_ok = False
-        return False
-    _typelib_ok = True
-    return True
-
-
-def _default_enabled() -> bool:
-    """Unset means on for a Linux process that can import the typelib."""
-    return sys.platform.startswith("linux") and typelib_imports()
-
-
 def enabled() -> bool:
-    """True when libatspi calls should run on the event thread.
+    """True when the cache thread is opted in via ``A11Y_COMPUTER_USE_ATSPI_EVENTS``.
 
-    Unset on Linux is on when the typelib imports. ``0``, ``false``, ``no``,
-    and ``off`` are off. ``1``, ``true``, ``yes``, and ``on`` are on. Any
-    other value warns once and uses that unset default. Comparison ignores
-    case and surrounding whitespace. Actionability waits do not use this
-    flag; they call `ensure_started`.
+    Any non-empty value is on, including ``"0"``. An unset variable is off.
+    Actionability waits do not use this flag; they call `ensure_started`.
     """
-    raw = os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS")
-    if raw is None:
-        return _default_enabled()
-    value = raw.strip().lower()
-    if value in _ON:
-        return True
-    if value in _OFF:
-        return False
-    if value not in _warned_values:
-        _warned_values.add(value)
-        default_on = _default_enabled()
-        warnings.warn(
-            f"A11Y_COMPUTER_USE_ATSPI_EVENTS={raw!r} is not 0/false/no/off or "
-            "1/true/yes/on; using the default "
-            f"({'on' if default_on else 'off'})",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    return _default_enabled()
+    return bool(os.environ.get("A11Y_COMPUTER_USE_ATSPI_EVENTS"))
 
 
 def event_names() -> tuple[str, ...]:

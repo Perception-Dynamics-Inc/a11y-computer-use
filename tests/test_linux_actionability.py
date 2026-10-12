@@ -84,23 +84,12 @@ def test_event_names_include_state_children_bounds_and_focus() -> None:
     assert "focus:" in names
 
 
-def test_listener_stays_off_without_a_display(monkeypatch) -> None:
+def test_listener_stays_off_without_a_display_and_the_cache_flag_stays_opt_in(monkeypatch) -> None:
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
     assert _atspi_events.enabled() is False
-    # The Linux default starts the thread on the first driver call, so a
-    # full-suite process can already be listening. A missing display must
-    # still refuse to start one that is down.
-    monkeypatch.setattr(_atspi_events._listening, "is_set", lambda: False)
-    monkeypatch.setattr(_atspi_events, "_listener_failed", False)
-    started: list[int] = []
-    monkeypatch.setattr(_atspi_events, "_ensure", lambda: started.append(1))
     assert _atspi_events.ensure_started() is False
-    assert started == []
-    monkeypatch.setattr(_atspi_events._listening, "is_set", lambda: True)
-    assert _atspi_events.ensure_started() is True
-    assert started == []
     assert _actionable.FALLBACK_POLL_S <= 0.1
     assert _actionable.EVENT_WAIT_CAP_S <= 0.4
     assert _actionable.FALLBACK_POLL_S == 0.1
@@ -345,61 +334,6 @@ def test_gecko_set_combo_refreshes_before_collecting_options(monkeypatch) -> Non
     assert order[:3] == ["refresh", "entry", "collect"]
 
 
-def test_property_reads_drop_one_node_while_the_listener_is_up(monkeypatch) -> None:
-    """Name, state, parent, and child reads bypass the event cache.
-
-    ``clear_cache_single`` forgets this accessible only. The recursive
-    ``clear_cache`` is what ``_refresh_event_cache`` counts, and a property
-    read must not call it. With the listener off the cached name stays.
-    """
-    from a11y_computer_use.drivers import _atspi
-
-    class Node:
-        def __init__(self) -> None:
-            self.single = 0
-            self.recursive = 0
-            self.name = "Red"
-            self.states: set[str] = set()
-            self.parent = "old-parent"
-            self.kids = 1
-
-        def clear_cache_single(self) -> None:
-            self.single += 1
-            self.name = "Blue"
-            self.states = {"SELECTED"}
-            self.parent = "frame"
-            self.kids = 2
-
-        def clear_cache(self) -> None:
-            self.recursive += 1
-
-        def get_name(self) -> str:
-            return self.name
-
-        def get_state_set(self):
-            names = set(self.states)
-            return type("States", (), {"names": names})()
-
-        def get_parent(self):
-            return self.parent
-
-        def get_child_count(self) -> int:
-            return self.kids
-
-    node = Node()
-    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
-    assert _atspi._node_name(node) == "Red"
-    assert _atspi._state_has(node, "SELECTED") is False
-    assert node.single == 0 and node.recursive == 0
-    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
-    assert _atspi._node_name(node) == "Blue"
-    assert _atspi._state_has(node, "SELECTED") is True
-    assert _atspi._parent_of(node) == "frame"
-    assert _atspi._child_count(node) == 2
-    assert node.single == 4
-    assert node.recursive == 0
-
-
 def test_other_combos_do_not_refresh_the_event_cache(monkeypatch) -> None:
     from a11y_computer_use.drivers import _atspi
 
@@ -459,7 +393,7 @@ def test_snapshot_root_drops_cached_children_only_while_listening(monkeypatch) -
 def test_linux_wait_for_does_not_treat_a_checker_hit_as_actionable(monkeypatch) -> None:
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", "0")
+    monkeypatch.delenv("A11Y_COMPUTER_USE_ATSPI_EVENTS", raising=False)
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     target = _element()

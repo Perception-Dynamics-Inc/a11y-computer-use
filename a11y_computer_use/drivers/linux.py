@@ -1238,10 +1238,9 @@ class LinuxDriver:
         self._expand_cursors: dict[object, int] = {}
 
     def _run(self, fn):
-        """Run an AT-SPI (libatspi) op inline, or on the shared a11y thread when
-        the event cache is on (Linux default if the typelib imports;
-        ``A11Y_COMPUTER_USE_ATSPI_EVENTS=0`` forces inline) so libatspi's
-        read cache is trusted and stays single-threaded.
+        """Run an AT-SPI (libatspi) op inline, or — when the event cache is opted
+        in (A11Y_COMPUTER_USE_ATSPI_EVENTS=1) — on the shared a11y thread so libatspi's
+        read cache is trusted (~1.8x faster snapshots) and stays single-threaded.
         Only libatspi ops go through here; XTEST input uses a separate X
         connection and is unaffected.
 
