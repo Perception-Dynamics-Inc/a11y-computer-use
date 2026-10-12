@@ -230,9 +230,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor
           command -v gnome-calculator
           command -v gnome-text-editor
-      # evince is the side-pane thumbnail live test. A separate step, so the
-      # shared apt line stays as it is. The test skips when the binary
-      # is absent.
+      # evince is the PDF page-text and side-pane thumbnail live tests.
+      # A separate step, so the shared apt line stays as it is. The tests
+      # skip when the binary is absent.
       - name: install Evince
         run: |
           sudo apt-get install -y --no-install-recommends evince
@@ -367,7 +367,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py -v -rs --tb=line -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py tests/test_evince_page_text.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:

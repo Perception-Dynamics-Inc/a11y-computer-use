@@ -61,6 +61,12 @@ _ROLE = {
     "text": "AXTextArea",
     "document text": "AXTextArea",
     "terminal": "AXTextArea",  # VTE (gnome-terminal, tilix): its Text iface is the screen contents
+    # ATSPI_ROLE_PAGE. Evince puts the PDF page on this role: an empty name
+    # and a Text interface that holds the page. The AXGroup fallback never
+    # reads that text, and the pruner then publishes the page as an unnamed
+    # opaque_region. AXStaticText is not an editable field. A blank page is
+    # put back to a group while reading, so the box is not dropped.
+    "page": "AXStaticText",
     "document frame": "AXGroup",
     "document web": "AXGroup",
     "document email": "AXGroup",
@@ -2345,6 +2351,44 @@ def _terminal_on_screen(acc, full: str) -> str:
     return screen
 
 
+# Characters taken from a page's Text interface. The snapshot still clips
+# what the model reads (`observe._MAX_VALUE_CHARS`) and what the line shows
+# (`observe._RENDER_VALUE_CHARS`). Find searches this string, including the
+# part past those caps. A longer page is cut here. This does not raise a
+# walk, depth, or child cap, and ``get_text`` is not asked for ``-1``.
+_PAGE_TEXT_CHARS = 4000
+
+
+def _page_text(acc) -> str | None:
+    """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
+
+    Evince (and poppler) expose each PDF page as AT-SPI role ``page``. The
+    name is empty. The words are ``Text.get_text`` from the start through
+    the character count, or through ``_PAGE_TEXT_CHARS`` when the page is
+    longer. ``None`` is a missing interface or a blank page. An embedded
+    object character is expanded the same way a paragraph's is.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return None
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    limit = min(int(count), _PAGE_TEXT_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str) or not got:
+        return None
+    if _OBJECT_REPLACEMENT in got:
+        expanded = _expand_embedded(acc, got)
+        if expanded.strip():
+            got = expanded
+        else:
+            got = got.replace(_OBJECT_REPLACEMENT, "")
+    text = got.replace("\u00a0", " ").strip()
+    return text or None
+
+
 def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     """The node's current value: text contents for text roles, numeric value
     for sliders/progress. Secure fields never have their value read here (the
@@ -2911,9 +2955,20 @@ class ATSPIAccessor:
         # the inline sentence; reading that one string is what find matches.
         # A file chooser is a dialog, but its name is the title. Probing Value
         # used to be skipped when the role was a window.
-        value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
-            node, role, role_str,
-        )
+        # A PDF page is the exception: its Text interface is the page, and
+        # the name is empty. The read is bounded. A blank page stays a group
+        # so a childless on-screen page is still a region, not a dropped label.
+        if role_str == "page":
+            page_text = _page_text(node)
+            if page_text:
+                value = page_text
+            else:
+                role = "AXGroup"
+                value = None
+        else:
+            value = None if role in _NO_VALUE_ROLES or role_str == "file chooser" else _value_text(
+                node, role, role_str,
+            )
         if (
             role_str == "section"
             and role in {"AXTextField", "AXTextArea"}
@@ -5232,6 +5287,15 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    # A PDF page's Text interface is the document, not a field. Evince
+    # leaves that page focused while Ctrl+F types into the find bar. Using
+    # the page as the read-back makes the type look like a mismatch and
+    # scroll_to_find never confirms the hit.
+    try:
+        if _role_name(acc) == "page":
+            return None
+    except Exception:
+        return None
     try:
         return _readable_text(acc)
     except Exception:
@@ -6554,6 +6618,7 @@ _STATIC_REPLACE_ROLES = frozenset({
     "paragraph", "heading", "label", "static", "caption",
     "panel", "grouping", "filler",
     "document web", "document frame", "document email",
+    "page",
     "combo box", "combo-box",
 })
 _ENTRY_ROLE_NAMES = frozenset({
