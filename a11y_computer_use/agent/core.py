@@ -1847,7 +1847,10 @@ class Agent:
         Any action that already has both ``x`` and ``y`` is returned
         unchanged, including ``click``, a pointer gesture normalized to
         ``click``, and ``scroll``. A gesture is normalized before this runs,
-        so a double-click keeps count 2.
+        so a double-click keeps count 2. That point is permanent: look-again,
+        a snap to a ref or an OCR word, escalation, and retry may record
+        another target, but they do not replace this ``x`` and ``y``. Goal
+        text that names a different element is not a target.
         """
         args = action.args
         if args.get("x") is not None and args.get("y") is not None:
@@ -2772,7 +2775,8 @@ def forced_method(
     Level 0 is the model's action. A higher level may retry that action or
     switch method only when the target and the payload stay the same: another
     ref with the same role and name, a coordinate click on that element, or
-    Return when the focused element is that click. Typing is retyped. A key
+    Return when the focused element is that click. A click that already has
+    both ``x`` and ``y`` is not replaced. Typing is retyped. A key
     is never a different chord. A type is never a bare click. A menu is never
     focus. A missing ref stays the click. ``crop`` stays a crop. When no
     same-intent method remains, the model's action is returned unchanged.
@@ -2863,8 +2867,12 @@ def alternate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str
 
 
 def coordinate_action(action: Action, snap: Snapshot | None) -> tuple[Action, str] | None:
-    """A click at the same element's center. Not a substitute for type or menu."""
-    if action.name != "click":
+    """A click at the same element's center. Not a substitute for type or menu.
+
+    An explicit ``x``/``y`` click is already on its point. Escalation does
+    not move it to the center of the element under that point.
+    """
+    if action.name != "click" or _is_coordinate_click(action):
         return None
     element = _element_for(action, snap)
     if element is None or element.bounds is None:
@@ -2889,9 +2897,12 @@ def keyboard_action(action: Action, snap: Snapshot | None = None) -> tuple[Actio
     Typing actions become ``type`` and keep a requested ref. A click becomes
     Return only when the focused element is that click's target. The click
     was already approved as a click on that element, and Return is that
-    activation. A missing or stale ref, an unfocused target, and any other
-    action do not become a key: Return is not sent to whatever has focus.
+    activation. A missing or stale ref, an unfocused target, an explicit
+    ``x``/``y`` click, and any other action do not become a key: Return is
+    not sent to whatever has focus.
     """
+    if _is_coordinate_click(action):
+        return None
     if action.name in {"type", "set_value", "select"}:
         text = action.args.get("text", action.args.get("value", ""))
         args = {"text": "" if text is None else str(text)}
