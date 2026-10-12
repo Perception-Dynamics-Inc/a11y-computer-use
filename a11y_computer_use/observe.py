@@ -101,6 +101,9 @@ _MAX_WALK_CHILDREN = 200
 
 _MAX_VALUE_CHARS = 200  #: Element.value cap the model reads (anchors never use value)
 _RENDER_VALUE_CHARS = 48  #: value cap in the text rendering
+#: A VTE screen is kept whole up to this many characters. Past it, the
+#: snapshot and find both keep the tail and a leading ellipsis marks the cut.
+_TERMINAL_VALUE_CHARS = 4000
 _MAX_EPOCHS = 8  #: snapshot epochs kept in the render registry
 _AMBIGUITY_PX = 2.0  #: distance tie window that makes re-resolution ambiguous
 _WEAK_ANCHOR_DRIFT_PX = 400.0  #: max drift when only one of title/path matches
@@ -1108,7 +1111,9 @@ def find_elements(
         text: case-insensitive substring matched against an element's title or
             its full value (either may contain it). ``Element.value`` is capped
             at `_MAX_VALUE_CHARS` for the text the model reads; a snapshot built
-            here is still searched past that cap.
+            here is still searched past that cap. A VTE terminal is the
+            exception: its value is the on-screen text, or the tail when the
+            buffer is longer, and find searches that same string.
         role: case-insensitive substring of the role, with an optional ``AX``
             prefix ignored, so ``"button"`` matches ``AXButton``/``AXMenuButton``
             and ``"AXTextField"`` matches exactly.
@@ -1931,11 +1936,17 @@ def _flatten(
     if node.node is not None:  # retain the live handle for act-time AX actions
         handles[ref] = node.node
     value: str | None = None
+    terminal = node.raw.subrole == "terminal"
     if node.raw.value is not None and not secure:  # secure fields never leak values
         raw_value = str(node.raw.value)
-        value = _clip(raw_value, _MAX_VALUE_CHARS)
-        if raw_value != value:
-            full_values[ref] = raw_value
+        if terminal:
+            # The rendered line and find both use this string. A longer
+            # scrollback is not kept beside it.
+            value = _terminal_value(raw_value)
+        else:
+            value = _clip(raw_value, _MAX_VALUE_CHARS)
+            if raw_value != value:
+                full_values[ref] = raw_value
     out.append(
         Element(
             ref=ref,
@@ -1958,6 +1969,7 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             instance_id=instance_id,
             document_id=document_id,
+            subrole="terminal" if terminal else None,
         )
     )
     if node.elided:
@@ -2080,7 +2092,11 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     if el.title:
         parts.append(f'"{el.title}"')
     if el.value is not None:
-        parts.append(f'="{_clip(el.value.replace(chr(10), " "), _RENDER_VALUE_CHARS)}"')
+        flat = el.value.replace(chr(10), " ")
+        # A terminal value is already the visible tail. Clipping its head
+        # would hide the output find matches.
+        shown = flat if el.subrole == "terminal" else _clip(flat, _RENDER_VALUE_CHARS)
+        parts.append(f'="{shown}"')
     elif el.placeholder and not el.title:  # blank field: show its prompt for identity
         parts.append(f'~"{_clip(el.placeholder, _RENDER_VALUE_CHARS)}"')
     show_click = el.clickable and not (compact and el.role in _IMPLICIT_CLICK_ROLES)
@@ -2112,6 +2128,29 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _terminal_value(text: str) -> str:
+    """On-screen terminal text, or the tail of a longer buffer.
+
+    Trailing blank rows are the unused part of the screen. When the buffer
+    is longer than ``_TERMINAL_VALUE_CHARS``, the head is omitted and a
+    leading ellipsis marks the cut. ``find`` searches this same string.
+    """
+    body = str(text).rstrip("\n")
+    limit = _TERMINAL_VALUE_CHARS
+    if len(body) <= limit:
+        return body
+    room = max(1, limit - 1)
+    tail = body[-room:]
+    # Drop a partial first line when the cut landed just after a newline.
+    # A newline near the end of the tail is a real row, not the cut.
+    newline = tail.find("\n")
+    if 0 <= newline <= 120 and newline < len(tail) - 1:
+        tail = tail[newline + 1 :]
+    if tail.startswith("…"):
+        return tail
+    return "…" + tail
 
 
 # ---------------------------------------------------------------------------

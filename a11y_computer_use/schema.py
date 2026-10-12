@@ -279,6 +279,10 @@ class Element:
     stable_id: str | None = None
     instance_id: str | None = None
     document_id: str | None = None
+    #: ``terminal`` for a VTE screen. The snapshot value is the on-screen
+    #: text, or the tail of a longer buffer, and ``find`` searches that same
+    #: string. None for every other role.
+    subrole: str | None = None
 
     @property
     def actionable(self) -> bool:

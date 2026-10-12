@@ -194,6 +194,9 @@ jobs:
       # pcmanfm, not thunar: thunar pulls libxfce4ui and xfconf, and the live
       # step on that image never saw a Firefox AT-SPI tree. mousepad is the
       # key-outcome check: its document sits under a tab group.
+      # gir1.2-vte-2.91 is the VTE widget the terminal snapshot test feeds.
+      # xfce4-terminal is that same widget inside an Xfce window; it is not
+      # installed here because it pulls libxfce4ui and xfconf.
       - name: install AT-SPI2 / GTK / X11 system deps
         run: |
           sudo apt-get update
@@ -203,7 +206,7 @@ jobs:
             libreoffice-draw \
             xvfb dbus dbus-x11 openbox xdotool x11-utils xclip tesseract-ocr \
             curl xz-utils libdbus-glib-1-2 libxt6t64 libasound2t64 \
-            pcmanfm xterm mousepad
+            pcmanfm xterm mousepad gir1.2-vte-2.91
       # Writer, Calc, and Impress do not install sdraw. The shape-text test
       # fails when Draw is absent, so install the component when the binary
       # is not already on the image.

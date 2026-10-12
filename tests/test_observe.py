@@ -1011,6 +1011,67 @@ def test_find_matches_text_past_the_value_clip() -> None:
     assert "1 match" in rendered and token not in rendered
 
 
+def test_terminal_snapshot_shows_the_screen_and_find_matches_it() -> None:
+    """A VTE value past the 48-character render cap stays in the snapshot.
+
+    The marker sits past the old head clip. The rendered line and find
+    both see it. A normal text area is still clipped at the head.
+    """
+    marker = "MARKER386"
+    head = "user@host:~$ " + ("H" * 40) + "\n"
+    body = head + "echo " + marker + "\n" + marker + "\n" + ("\n" * 12)
+    assert marker not in body[: observe._RENDER_VALUE_CHARS]
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal", value=body,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.subrole == "terminal"
+    assert area.value is not None and marker in area.value
+    assert not area.value.endswith("\n")
+    rendered = observe.render_text(snap)
+    assert marker in rendered
+    matches = observe.find_elements(snap, text=marker)
+    assert [el.ref for el in matches] == [area.ref]
+    assert marker in observe.render_matches(snap, matches)
+
+
+def test_terminal_over_the_cap_keeps_the_tail_for_find() -> None:
+    """A buffer longer than the terminal cap shows its tail, with a leading ellipsis.
+
+    Find searches that same tail. The omitted head is not a match.
+    """
+    dropped = "DROPPEDHEAD"
+    marker = "TAILMARKER"
+    body = dropped + "\n" + ("x" * observe._TERMINAL_VALUE_CHARS) + "\n" + marker
+    window = ax(
+        "AXWindow", title="cuvte386", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Terminal", subrole="terminal", value=body,
+                at=(10.0, 40.0), size=(760.0, 500.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    area = next(el for el in snap.elements if el.role == "AXTextArea")
+    assert area.value is not None
+    assert area.value.startswith("…")
+    assert marker in area.value
+    assert dropped not in area.value
+    assert len(area.value) <= observe._TERMINAL_VALUE_CHARS
+    rendered = observe.render_text(snap)
+    assert marker in rendered and dropped not in rendered
+    assert [el.ref for el in observe.find_elements(snap, text=marker)] == [area.ref]
+    assert observe.find_elements(snap, text=dropped) == ()
+
+
 # ---------------------------------------------------------------------------
 # Rich element states (checked / selected / expanded / placeholder)
 # ---------------------------------------------------------------------------
