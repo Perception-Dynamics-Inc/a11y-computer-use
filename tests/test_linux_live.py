@@ -8259,6 +8259,92 @@ def test_linux_chrome_scroll_to_find_comes_back_up_to_an_early_row(tmp_path) -> 
         _stop(proc)
 
 
+def test_linux_chrome_overflow_list_scroll_to_find_up_is_quick(tmp_path) -> None:
+    """An overflow list finds a row far above the window inside the default budget.
+
+    Live Chrome, not a synthetic list. Two hundred 18px rows in a 520px
+    overflow box, opened already scrolled so the window starts near
+    ITEM-169. ITEM-020 is about 150 rows above that window.
+    ``scroll_to_find`` uses the default budget and direction up. The row
+    has to be on screen, and the search has to finish well under 15s.
+    Skips when no Chrome binary is on PATH.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    binary = _chrome_binary()
+    if binary is None:
+        pytest.skip("no Chrome/Chromium binary for the overflow-list scroll timing test")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    rows = "\n".join(
+        f'<li role="listitem">ITEM-{i:03d} scroll-row</li>' for i in range(1, 201)
+    )
+    page = tmp_path / "scroll371.html"
+    page.write_text(
+        "<!doctype html><meta charset=utf-8><title>scroll371</title>"
+        "<style>body{margin:8px;font:16px sans-serif}"
+        "li{height:18px;line-height:18px}"
+        "#box{height:520px;overflow-y:auto;border:1px solid #888}</style>"
+        f'<ul id=box role="list" aria-label="Rows">{rows}</ul>'
+        "<script>addEventListener('load',()=>{"
+        "const box=document.getElementById('box');"
+        "box.scrollTop=box.children[167].offsetTop;"
+        "});</script>"
+    )
+    profile = tmp_path / "chrome-scroll371-profile"
+    profile.mkdir()
+    proc = subprocess.Popen(
+        [
+            binary, "--force-renderer-accessibility", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic",
+            f"--user-data-dir={profile}", "--window-size=1000,800",
+            page.resolve().as_uri(),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 45
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"Chrome exited with status {proc.returncode} before the overflow list"
+                )
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "chrome")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+            else:
+                titles = sorted(title for title in _titles(shot) if title.startswith("ITEM-"))
+                if titles and titles[0] >= "ITEM-100" and not any(
+                    title.startswith("ITEM-020") for title in titles
+                ):
+                    ready = True
+                    break
+            time.sleep(0.3)
+        assert ready, "Chrome did not show the overflow list parked near the bottom"
+        runtime = _runtime_for(tmp_path, driver, "chrome", "google-chrome")
+        started = time.monotonic()
+        found = runtime.scroll_to_find(
+            "chrome", text="ITEM-020", direction="up", max_scrolls=45,
+        )
+        elapsed = time.monotonic() - started
+        assert "ITEM-020" in found, found
+        assert "not found" not in found, found
+        assert "found after 0" not in found, found
+        assert "time budget" not in found, found
+        assert elapsed < 12.0, f"ITEM-020 took {elapsed:.2f}s: {found.splitlines()[0]}"
+        shown = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
+        assert any(title.startswith("ITEM-020") for title in shown), sorted(
+            title for title in shown if title.startswith("ITEM-")
+        )
+    finally:
+        _stop_group(proc)
+
+
 def test_linux_chrome_scroll_to_find_large_table_row_and_clicks_its_button(tmp_path) -> None:
     """Find row 300 of a long document table and click that row's button.
 
