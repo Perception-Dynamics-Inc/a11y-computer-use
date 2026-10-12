@@ -528,6 +528,71 @@ def test_render_text_is_compact_and_within_budget() -> None:
     assert estimate_tokens(snap) <= 1000, "typical window must fit the ~1k token budget"
 
 
+def test_render_keeps_line_breaks_in_the_value_and_escapes_them_on_one_line() -> None:
+    """A textarea value keeps its newlines. Compact output escapes them.
+
+    Mousepad and FeatherPad store ``AAA\\nBBB\\nCCC``. The snapshot field
+    used to print that as ``AAA BBB CCC``. The element value stays the real
+    breaks. The one-line field writes ``\\n`` and ``\\r``. A value with no
+    break, including a backslash, is unchanged. A folded static line and a
+    diff field use the same escape so they stay one line.
+    """
+    window = ax(
+        "AXWindow", title="Mousepad", at=(0.0, 0.0), size=(800.0, 600.0),
+        children=[
+            ax(
+                "AXTextArea", title="Document body", value="AAA\nBBB\nCCC",
+                at=(10.0, 40.0), size=(760.0, 500.0), focused=True,
+            ),
+            ax(
+                "AXTextArea", title="crlf", value="AAA\r\nBBB",
+                at=(10.0, 40.0), size=(200.0, 40.0),
+            ),
+            ax(
+                "AXTextField", title="path", value="C:\\notes",
+                at=(10.0, 10.0), size=(200.0, 24.0),
+            ),
+            ax(
+                "AXTextField", title="slash-n", value="A\\B\nC",
+                at=(10.0, 10.0), size=(200.0, 24.0),
+            ),
+            ax(
+                "AXStaticText", value="Line1\nLine2",
+                at=(10.0, 560.0), size=(200.0, 20.0),
+            ),
+        ],
+    )
+    snap = snap_of(window)
+    body = by_title(snap, "Document body")
+    crlf = by_title(snap, "crlf")
+    path = by_title(snap, "path")
+    slash = by_title(snap, "slash-n")
+    assert body.value == "AAA\nBBB\nCCC"
+    assert crlf.value == "AAA\r\nBBB"
+    assert path.value == "C:\\notes"
+    assert slash.value == "A\\B\nC"
+    rendered = render_text(snap)
+    assert '="AAA\\nBBB\\nCCC"' in rendered
+    assert '="AAA BBB CCC"' not in rendered
+    assert '="AAA\\r\\nBBB"' in rendered
+    assert '="C:\\notes"' in rendered
+    assert '="A\\\\B\\nC"' in rendered
+    body_line = next(line for line in rendered.splitlines() if "Document body" in line)
+    assert body_line.count("\n") == 0
+    interactive = render_text(snap, mode="interactive")
+    assert '="AAA\\nBBB\\nCCC"' in interactive
+    assert 'text: "Line1\\nLine2"' in interactive
+    assert "Line1 Line2" not in interactive
+    previous = dataclasses.replace(body, value="AAA", snapshot_id="old")
+    diff = observe.SnapshotDiff(
+        "old", snap.snapshot_id, (), (),
+        ((previous, body, {"value": ("AAA", "AAA\nBBB\nCCC")}),),
+    )
+    change = next(line for line in observe.render_diff(diff).splitlines() if line.startswith("  ~"))
+    assert "AAA\\nBBB\\nCCC" in change
+    assert "AAA BBB" not in change
+
+
 def test_estimate_tokens_works_on_foreign_snapshots(synthetic_snapshot: Snapshot) -> None:
     # conftest's snapshot was not built by observe: no epoch metadata, no
     # markers — rendering and the estimate must still work.
@@ -1495,6 +1560,64 @@ def test_budget_truncates_deterministically_and_reports_omissions() -> None:
     with pytest.raises(ValueError):
         render_text(snap, budget=0)
     assert estimate_tokens(snap, mode="interactive") < estimate_tokens(snap)
+
+
+def test_several_windows_share_a_budget_and_mark_the_active_one() -> None:
+    """The active window is first and marked. A tight budget still lists the other window."""
+    editor = ax(
+        "AXWindow", title="Editor", at=(0.0, 0.0), size=(400.0, 300.0),
+        children=[button(f"Row {i}", (10.0, 40.0 + 16.0 * i)) for i in range(12)],
+    )
+    preferences = ax(
+        "AXDialog", title="Preferences", at=(500.0, 40.0), size=(240.0, 160.0),
+        children=[button("Font", (16.0, 40.0))],
+    )
+    accessor = DictAccessor()
+    editor_snap = build_snapshot(
+        editor, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    dialog_snap = build_snapshot(
+        preferences, accessor, scope=Scope.WINDOW, app="mousepad", pid=9, geometry=GEOMETRY,
+    )
+    merged = observe.merge_window_snapshots(
+        [editor_snap, dialog_snap], scope=Scope.WINDOW, app="mousepad", pid=9,
+    )
+    assert merged.app == "mousepad" and merged.pid == 9 and merged.scope is Scope.WINDOW
+    assert merged.elements[0].title == "Editor" and merged.elements[0].parent is None
+    assert any(el.title == "Preferences" and el.parent is None for el in merged.elements)
+    font = next(el for el in merged.elements if el.title == "Font")
+    assert observe.ax_handle_for(merged.snapshot_id, font.ref)["title"] == "Font"
+    full = render_text(merged)
+    assert "(active)" not in render_text(editor_snap)
+    assert full.index("Editor") < full.index("Preferences")
+    assert "Font" in full and "Row 11" in full
+    active_lines = [ln for ln in full.splitlines() if "(active)" in ln]
+    assert len(active_lines) == 1 and "Editor" in active_lines[0]
+    cut = render_text(merged, budget=80)
+    assert "truncated at" not in cut
+    assert "Font" in cut and "Preferences" in cut
+    assert cut.index("Editor") < cut.index("Preferences")
+    assert "… " in cut[:cut.index("Preferences")] and " more" in cut[:cut.index("Preferences")]
+    assert any("(active)" in ln and "Editor" in ln for ln in cut.splitlines())
+
+
+def test_discarded_window_epochs_do_not_evict_the_merged_handles() -> None:
+    snaps = []
+    for index in range(6):
+        snaps.append(snap_of(ax(
+            "AXWindow", title=f"W{index}", at=(0.0, 0.0), size=(200.0, 100.0),
+            children=[button(f"B{index}", (10.0, 10.0))],
+        )))
+    merged = observe.merge_window_snapshots(
+        snaps, scope=Scope.WINDOW, app="app", pid=1,
+    )
+    for snap in snaps:
+        observe.discard_epoch(snap.snapshot_id)
+    kept = next(el for el in merged.elements if el.title == "B5")
+    for _ in range(observe._MAX_EPOCHS - 1):
+        snap_of(ax("AXWindow", title="later", at=(0.0, 0.0), size=(100.0, 80.0)))
+    assert observe.ax_handle_for(merged.snapshot_id, kept.ref)["title"] == "B5"
+    assert observe.ax_handle_for(snaps[0].snapshot_id, snaps[0].elements[0].ref) is None
 
 
 def test_render_text_rejects_unknown_mode() -> None:

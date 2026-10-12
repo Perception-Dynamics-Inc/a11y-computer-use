@@ -1274,6 +1274,268 @@ def test_linux_scrolled_gtk_tree_rows_stay_in_the_snapshot(tmp_path) -> None:
             end.kill()
 
 
+_LARGE_TREE_APP = "culargetree"
+
+_GTK_LARGE_TREE = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("culargetree")
+    ROWS = 10000
+    store = Gtk.ListStore(str, str, int)
+    for index in range(ROWS):
+        store.append(["ROW-%05d" % index, "payload-%d" % index, index])
+    win = Gtk.Window(title="culargetree")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    # The header must not contain a ROW- id. A label that mentions one
+    # is a different bug.
+    header = Gtk.Label(label="Clean ListStore with %d rows (no row ids in this label)" % ROWS)
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Payload", "Index")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    probe = Gtk.Label(label="row=")
+    probe.get_accessible().set_name("RowProbe")
+    def on_select(selection):
+        model, iterator = selection.get_selected()
+        text = model.get_value(iterator, 0) if iterator is not None else ""
+        probe.set_text("row=%s" % text)
+    tree.get_selection().connect("changed", on_select)
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.add(tree)
+    box.pack_start(header, False, False, 4)
+    box.pack_start(scrolled, True, True, 0)
+    box.pack_start(probe, False, False, 0)
+    win.add(box)
+    win.set_default_size(700, 600)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_large_tree(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "culargetree.py"
+    script.write_text(_GTK_LARGE_TREE)
+    return subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_large_tree(driver, timeout_s: float = 20.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, _LARGE_TREE_APP)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            numbers = _tree_row_numbers(last)
+            if 0 in numbers and len(set(numbers)) > 6:
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_find_reaches_offscreen_cells_in_a_10k_gtk_tree(tmp_path) -> None:
+    """Live GTK3 TreeView, 10k rows. Not a synthetic tree.
+
+    The opening snapshot lists the painted page only. ``find`` still names
+    ROW-05000 and ROW-09999. A cell that stays off screen has no bounds and
+    is marked off-screen. A cell the bar scrolls into view has a real box
+    on the display, not a sentinel and not an invented origin.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _LARGE_TREE_APP, "python3")
+    proc = _launch_large_tree(tmp_path)
+    try:
+        snap = _wait_large_tree(driver)
+        assert snap is not None, "the 10k tree never listed its on-screen rows"
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 5000 not in numbers
+        assert 9999 not in numbers
+        for text in ("ROW-05000", "ROW-09999"):
+            found = runtime.find(_LARGE_TREE_APP, text=text)
+            assert "no elements match" not in found, found
+            assert text in found, found
+            shot = runtime._current
+            cells = [el for el in shot.elements if el.title == text]
+            assert cells, found
+            cell = cells[0]
+            assert cell.role in {"AXCell", "AXRow"}, (cell.role, found)
+            if cell.bounds is None:
+                assert "off-screen" in found, found
+                continue
+            assert "off-screen" not in found, found
+            assert cell.bounds.width > 1 and cell.bounds.height > 1
+            assert 0 <= cell.bounds.x < 4000
+            assert 0 <= cell.bounds.y < 4000
+            assert cell.bounds.x > -1_000_000
+            clicked = runtime.click(cell.ref)
+            assert "clicked" in clicked, clicked
+            assert "no click was sent" not in clicked, clicked
+            deadline = time.monotonic() + 3
+            probe = ""
+            while time.monotonic() < deadline:
+                shot = driver.snapshot(Scope.WINDOW, _LARGE_TREE_APP)
+                runtime._current = shot
+                probe = next(
+                    (
+                        f"{el.title} {el.value or ''}"
+                        for el in shot.elements
+                        if "row=" in f"{el.title} {el.value or ''}"
+                    ),
+                    "",
+                )
+                selected = any(el.title == text and el.selected for el in shot.elements)
+                if f"row={text}" in probe or selected:
+                    break
+                time.sleep(0.2)
+            assert f"row={text}" in probe or any(
+                el.title == text and el.selected for el in shot.elements
+            ), probe
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+_SCROLL_TREE_APP = "cuscrolltree"
+
+_GTK_10K_TREE_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuscrolltree")
+    ROWS = 10000
+    store = Gtk.ListStore(str, str, str)
+    for index in range(ROWS):
+        store.append(["ROW-%05d" % index, "val%d" % index, "n%d" % index])
+    win = Gtk.Window(title="cuscrolltree")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    header = Gtk.Label(
+        label="Clean ListStore with %d rows (no row ids in this label)" % ROWS
+    )
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Value", "Note")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    probe = Gtk.Label(label="row=")
+    probe.get_accessible().set_name("RowProbe")
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_size_request(600, 500)
+    scrolled.add(tree)
+    box.pack_start(header, False, False, 0)
+    box.pack_start(scrolled, True, True, 0)
+    box.pack_start(probe, False, False, 0)
+    win.add(box)
+    win.set_default_size(700, 600)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_10k_tree(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cuscrolltree.py"
+    script.write_text(_GTK_10K_TREE_APP)
+    return subprocess.Popen([sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _wait_named_tree(driver, app: str, predicate, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if predicate(last):
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_scroll_to_find_reaches_a_10k_gtk_tree(tmp_path) -> None:
+    """Live GTK3 TreeView, 10000 rows. Not a synthetic tree.
+
+    At the top the snapshot has row 0 and not row 5000. scroll_to_find
+    reaches ROW-05000 and ROW-09999 within 50 scrolls. The header label
+    does not contain a row id.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _SCROLL_TREE_APP, "python3")
+    proc = _launch_10k_tree(tmp_path)
+    try:
+        snap = _wait_named_tree(
+            driver,
+            _SCROLL_TREE_APP,
+            lambda shot: 0 in _tree_row_numbers(shot) and len(set(_tree_row_numbers(shot))) > 6,
+        )
+        assert snap is not None, "the 10k tree never listed its on-screen rows"
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 5000 not in numbers
+        assert 9999 not in numbers
+        listed = runtime.desktop_snapshot(_SCROLL_TREE_APP)
+        assert "ROW-00000" in listed
+        assert "ROW-05000" not in listed
+        assert "no row ids in this label" in listed
+
+        def landed(text: str) -> str:
+            found = runtime.scroll_to_find(
+                _SCROLL_TREE_APP, text=text, direction="down", max_scrolls=50,
+            )
+            assert found.startswith("found after "), found
+            assert "not found" not in found
+            assert text in found
+            count = int(found.split(" scroll", 1)[0].removeprefix("found after "))
+            assert count <= 6, found
+            shot = runtime._current
+            cell = next(
+                el for el in shot.elements
+                if el.title == text and el.bounds is not None and el.bounds.width > 1
+                and el.bounds.height > 1 and el.bounds.x >= 0 and el.bounds.y >= 0
+                and el.bounds.x < 4000 and el.bounds.y < 4000
+            )
+            assert cell.bounds.y > -2_000_000_000
+            return found
+
+        landed("ROW-05000")
+        landed("ROW-09999")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
 def _chrome_binary() -> str | None:
     import shutil
 
@@ -2565,7 +2827,27 @@ def _firefox_binary() -> str | None:
     return None
 
 
-def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
+# Same first-run block as the Firefox form fixture. Without the homepage
+# override, a fresh ESR profile can replace the requested file with a
+# what's-new tab, and the paragraph page never becomes the showing document.
+_FIREFOX_PARA_PREFS = textwrap.dedent(
+    """\
+    user_pref("accessibility.force_disabled", 0);
+    user_pref("browser.aboutwelcome.enabled", false);
+    user_pref("browser.startup.homepage_override.mstone", "ignore");
+    user_pref("datareporting.policy.dataSubmissionEnabled", false);
+    user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+    user_pref("browser.shell.checkDefaultBrowser", false);
+    user_pref("browser.tabs.warnOnClose", false);
+    user_pref("browser.startup.firstrunSkipsHomepage", true);
+    user_pref("browser.newtab.preload", true);
+    user_pref("browser.sessionstore.resume_from_crash", false);
+    user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
+    """
+)
+
+
+def _launch_para_browser(tmp_path, kind: str, log_file=None) -> tuple[subprocess.Popen, str]:
     page = tmp_path / "cuapara.html"
     page.write_text(_PARA_PAGE)
     url = page.resolve().as_uri()
@@ -2589,29 +2871,31 @@ def _launch_para_browser(tmp_path, kind: str) -> tuple[subprocess.Popen, str]:
     binary = _firefox_binary()
     if binary is None:
         pytest.skip("no Firefox binary for the paragraph AT-SPI test")
-    (profile / "user.js").write_text(
-        'user_pref("accessibility.force_disabled", -1);\n'
-        'user_pref("browser.shell.checkDefaultBrowser", false);\n'
-        'user_pref("datareporting.policy.dataSubmissionEnabled", false);\n'
-        'user_pref("browser.aboutwelcome.enabled", false);\n'
-        'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);\n'
-    )
+    (profile / "user.js").write_text(_FIREFOX_PARA_PREFS)
     env = os.environ.copy()
     env["MOZ_ENABLE_ACCESSIBILITY"] = "1"
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
     proc = subprocess.Popen(
-        [binary, "-no-remote", "-profile", str(profile), url],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [binary, "--profile", str(profile), "--no-remote", "--new-instance", url],
+        env=env,
+        stdout=log_file if log_file is not None else subprocess.DEVNULL,
+        stderr=subprocess.STDOUT if log_file is not None else subprocess.DEVNULL,
         start_new_session=True,
     )
     return proc, "firefox"
 
 
-def _wait_para_snapshot(driver, app: str):
+def _wait_para_snapshot(driver, app: str, proc: subprocess.Popen | None = None):
     from a11y_computer_use import observe
 
     deadline = time.monotonic() + 30
     last = ""
     while time.monotonic() < deadline:
+        # A dead browser will not publish the page. Stop this attempt so the
+        # caller can start a fresh profile instead of waiting out the clock.
+        if proc is not None and proc.poll() is not None:
+            break
         try:
             shot = driver.snapshot(Scope.WINDOW, app)
         except ComputerUseError as exc:
@@ -2623,7 +2907,16 @@ def _wait_para_snapshot(driver, app: str):
             if "Div button" in last and "the docs link" in last and "Verify you are human" in last:
                 return shot
         time.sleep(0.5)
-    raise AssertionError(f"{app} did not expose the paragraph page through AT-SPI\n{last}")
+    missing = [
+        name for name in ("Div button", "the docs link", "Verify you are human") if name not in last
+    ]
+    seen = "no snapshot" if not last else f"snapshot_lines={len(last.splitlines())}"
+    exited = ""
+    if proc is not None and proc.poll() is not None:
+        exited = f" exit={proc.poll()}"
+    raise AssertionError(
+        f"{app} did not expose the paragraph page through AT-SPI; missing {missing}; {seen}{exited}\n{last}"
+    )
 
 
 def _para_page_lists_controls(driver, runtime, app: str) -> None:
@@ -2947,20 +3240,46 @@ def test_linux_chrome_roleless_contenteditable(tmp_path) -> None:
 def test_linux_firefox_paragraph_and_label_checkbox(tmp_path) -> None:
     """Live Firefox AT-SPI: the same local page, including the empty-label checkbox click.
 
-    Skips when no Firefox binary is on PATH.
+    Skips when no Firefox binary is on PATH. The first launch on a busy runner
+    can exit before AT-SPI sees the app. One fresh profile is enough when that
+    happens. A second miss still fails, and the checkbox assertions are unchanged.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
     _require_bus(driver)
-    proc, app = _launch_para_browser(tmp_path, "firefox")
+    proc = None
+    log_f = None
     try:
-        _wait_para_snapshot(driver, app)
-        app = driver.activate_app(app)
-        runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
-        _para_page_lists_controls(driver, runtime, app)
+        for attempt in (1, 2):
+            if proc is not None:
+                _stop_group(proc)
+                proc = None
+            if log_f is not None:
+                log_f.close()
+                log_f = None
+            attempt_dir = tmp_path / f"firefox-{attempt}"
+            attempt_dir.mkdir()
+            log_path = attempt_dir / "firefox.log"
+            log_f = log_path.open("w", encoding="utf-8")
+            proc, app = _launch_para_browser(attempt_dir, "firefox", log_f)
+            try:
+                _wait_para_snapshot(driver, app, proc)
+            except AssertionError as exc:
+                log_f.flush()
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
+                if attempt == 2:
+                    raise AssertionError(f"{exc}\nfirefox log:\n{tail}") from None
+                continue
+            app = driver.activate_app(app)
+            runtime = _runtime_for(tmp_path, driver, *_browser_ids(driver, app, "firefox", "firefox-bin"))
+            _para_page_lists_controls(driver, runtime, app)
+            return
     finally:
-        _stop_group(proc)
+        if proc is not None:
+            _stop_group(proc)
+        if log_f is not None:
+            log_f.close()
 
 
 def test_linux_chrome_injection_fence_and_blocked_domain(tmp_path) -> None:
@@ -4099,6 +4418,125 @@ def test_short_gtk_drag_drops_onto_the_row_above(tmp_path) -> None:
         _stop(proc)
 
 
+def test_linux_snapshot_lists_a_non_raised_dialog_and_click_raises_it(tmp_path) -> None:
+    """A showing sibling dialog is in the snapshot while the main window is active.
+
+    Clicking a control in that dialog by ref raises the dialog and runs the control.
+    """
+    from a11y_computer_use import observe, safety
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    _require_ewmh()
+    subprocess.run(["pkill", "-f", "cuawindual.py"], check=False)
+    script = tmp_path / "cuawindual.py"
+    script.write_text(textwrap.dedent(
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        GLib.set_prgname("cuawindual")
+        win = Gtk.Window(title="cuawinmain")
+        win.set_default_size(420, 240)
+        win.move(80, 80)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        entry = Gtk.Entry()
+        main = Gtk.Button(label="Main only")
+        main.connect("clicked", lambda _b: entry.set_text("MAIN"))
+        box.pack_start(main, False, False, 0)
+        box.pack_start(entry, False, False, 0)
+        win.add(box)
+        dlg = Gtk.Dialog(title="cuawindlg", transient_for=win, modal=False)
+        dlg.set_modal(False)
+        dlg.set_default_size(320, 180)
+        dlg.move(520, 120)
+        area = dlg.get_content_area()
+        label = Gtk.Label(label="idle")
+        apply = Gtk.Button(label="Dialog apply")
+        apply.connect("clicked", lambda _b: label.set_text("APPLIED"))
+        area.pack_start(apply, False, False, 0)
+        area.pack_start(label, False, False, 0)
+        dlg.show_all()
+        win.show_all()
+        win.connect("destroy", Gtk.main_quit)
+
+        def _focus_main():
+            win.present()
+            return False
+
+        GLib.idle_add(_focus_main)
+        Gtk.main()
+        """
+    ))
+    proc = subprocess.Popen([sys.executable, str(script)])
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"cuawindual exited {proc.returncode} before the dialog was exposed")
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "cuawindual")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                shot = None
+            else:
+                last = observe.render_text(shot)
+                active = driver.active_window() or {}
+                if (
+                    "Main only" in last
+                    and "Dialog apply" in last
+                    and active.get("title") == "cuawinmain"
+                    and "(active)" in last
+                ):
+                    snap = shot
+                    break
+            time.sleep(0.3)
+        assert snap is not None, last[:1600]
+        text = observe.render_text(snap)
+        assert text.index("cuawinmain") < text.index("Dialog apply"), text[:1600]
+        assert any("(active)" in ln and "cuawinmain" in ln for ln in text.splitlines()), text[:1600]
+        button = next(
+            el for el in snap.elements if el.title == "Dialog apply" and el.clickable
+        )
+        store = safety.PermissionStore(tmp_path / "permissions.json")
+        store.set_tier("cuawindual", safety.Tier.FULL)
+        front = driver.frontmost_app()[0]
+        if front and front != "cuawindual":
+            store.set_tier(front, safety.Tier.FULL)
+        from a11y_computer_use import server
+
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+        )
+        runtime._current = snap
+        clicked = runtime.click(button.ref)
+        assert str(clicked).startswith("clicked"), clicked
+        deadline = time.monotonic() + 6
+        shown = ""
+        active_title = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.WINDOW, "cuawindual")
+            shown = observe.render_text(shot)
+            active_title = (driver.active_window() or {}).get("title") or ""
+            if "APPLIED" in shown and active_title == "cuawindlg":
+                break
+            time.sleep(0.25)
+        assert "APPLIED" in shown, shown[:1600]
+        assert active_title == "cuawindlg", active_title
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+
+
 def _key_target_source(name: str, initial: str) -> str:
     return textwrap.dedent(
         f"""
@@ -4923,12 +5361,12 @@ _GTK_TWO = textwrap.dedent(
 def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
     """Two GTK windows in one process. Beta is in front.
 
-    set_value on Field A writes the text. A window-scope snapshot does not
-    contain that field, which used to make the outcome unverifiable. The ref
-    came from find(scope='app'), and that read-back matches, so the outcome
-    is confirmed. This is not the covered-window case: nothing is on top of
-    Alpha, and a read-back that did not match would not be confirmed.
+    The window snapshot lists both windows, Beta first. set_value on Field A
+    writes that field and is confirmed. The ref came from find(scope='app').
+    This is not the covered-window case: nothing is on top of Alpha, and a
+    read-back that did not match would not be confirmed.
     """
+    from a11y_computer_use import observe
     from a11y_computer_use.drivers.linux import LinuxDriver
 
     driver = LinuxDriver()
@@ -4958,9 +5396,12 @@ def test_linux_set_value_on_a_background_window_is_confirmed(tmp_path) -> None:
         assert any(el.title == "Field B" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
-        assert not any(el.title == "Field A" for el in front.elements), [
+        assert any(el.title == "Field A" for el in front.elements), [
             (el.role, el.title) for el in front.elements
         ]
+        text = observe.render_text(front)
+        assert text.index("Beta Window") < text.index("Alpha Window"), text[:1200]
+        assert any("(active)" in line and "Beta Window" in line for line in text.splitlines()), text[:1200]
         runtime = _runtime_for(tmp_path, driver, _TWO_APP, "python3")
         runtime.find(_TWO_APP, text="Field A", scope="app")
         current = runtime._current
@@ -12304,6 +12745,136 @@ def test_linux_featherpad_snapshot_omits_the_hidden_replacement_window(tmp_path)
         _stop_group(proc)
 
 
+def test_linux_mousepad_snapshot_keeps_newlines_in_the_document(tmp_path) -> None:
+    """Live Mousepad. A multi-line document stays multi-line in the snapshot.
+
+    ``set_value`` writes ``AAA\\nBBB\\nCCC``. The textarea value keeps those
+    breaks. The compact field escapes them as ``\\\\n`` and does not print
+    ``AAA BBB CCC``. The hermetic suite has no display, so this skips there.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("mousepad")
+    assert binary, "mousepad is not installed"
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "mousepad-config")
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    proc = subprocess.Popen(
+        [binary, "--disable-server"], env=env, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "mousepad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None:
+                last = observe.render_text(shot)
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                if area is not None:
+                    break
+            time.sleep(0.3)
+        assert area is not None, f"mousepad did not expose its document ({proc.poll()}): {last}"
+        runtime = _runtime_for(tmp_path, driver, "mousepad")
+        runtime.desktop_snapshot("mousepad")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea")
+        runtime.click(area.ref)
+        written = runtime.set_value(area.ref, "AAA\nBBB\nCCC")
+        assert "AAA" in written, written
+        shot = driver.snapshot(Scope.WINDOW, "mousepad")
+        area = next(
+            (el for el in shot.elements if el.role == "AXTextArea" and el.value and "AAA" in el.value),
+            None,
+        )
+        rendered = observe.render_text(shot)
+        assert area is not None and area.value is not None, rendered
+        assert "AAA\nBBB\nCCC" in area.value, area.value
+        assert "AAA\\nBBB\\nCCC" in rendered
+        assert "AAA BBB CCC" not in rendered
+        body_line = next(line for line in rendered.splitlines() if "AAA" in line)
+        assert "BBB" in body_line and "CCC" in body_line
+    finally:
+        _stop_group(proc)
+
+
+def test_linux_featherpad_snapshot_keeps_newlines_in_the_document(tmp_path) -> None:
+    """Live FeatherPad when the Qt5 AT-SPI tree is published.
+
+    Ubuntu 24.04's ``featherpad`` package is Qt 5, and that Qt build ships
+    no accessible plugin, so the Linux CI job does not install it. This
+    skips when ``featherpad`` is not on PATH, and when the process starts
+    but never appears on the bus because that plugin is absent. A published
+    textarea keeps ``AAA\\nBBB\\nCCC`` in the value and escapes it in the
+    compact field.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("featherpad")
+    if not binary:
+        pytest.skip("featherpad is not installed")
+    env = os.environ.copy()
+    env["QT_ACCESSIBILITY"] = "1"
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    proc = subprocess.Popen([binary], env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        area = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "featherpad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None and shot.elements:
+                last = observe.render_text(shot)
+                area = next((el for el in shot.elements if el.role == "AXTextArea"), None)
+                if area is not None:
+                    break
+            time.sleep(0.3)
+        if area is None:
+            if not _qt5_has_accessible_plugin():
+                pytest.skip(
+                    "FeatherPad did not publish an AT-SPI tree; this Qt 5 build "
+                    "has no accessible plugin"
+                )
+            raise AssertionError(f"featherpad did not expose its document ({proc.poll()}): {last}")
+        runtime = _runtime_for(tmp_path, driver, "featherpad", "FeatherPad")
+        runtime.desktop_snapshot("featherpad")
+        current = runtime._current
+        assert current is not None
+        area = next(el for el in current.elements if el.role == "AXTextArea")
+        runtime.click(area.ref)
+        written = runtime.set_value(area.ref, "AAA\nBBB\nCCC")
+        assert "AAA" in written, written
+        shot = driver.snapshot(Scope.WINDOW, "featherpad")
+        area = next(
+            (el for el in shot.elements if el.role == "AXTextArea" and el.value and "AAA" in el.value),
+            None,
+        )
+        rendered = observe.render_text(shot)
+        assert area is not None and area.value is not None, rendered
+        assert "AAA\nBBB\nCCC" in area.value, area.value
+        assert "AAA\\nBBB\\nCCC" in rendered
+        assert "AAA BBB CCC" not in rendered
+    finally:
+        _stop_group(proc)
+
+
 def _which(name: str) -> str:
     found = subprocess.run(["bash", "-lc", f"command -v {name}"], capture_output=True, text=True)
     return found.stdout.strip()
@@ -12319,6 +12890,61 @@ def _qt5_has_accessible_plugin() -> bool:
             if os.path.isdir(plugin) and os.listdir(plugin):
                 return True
     return False
+
+
+def test_linux_featherpad_word_count_name_is_plain_text(tmp_path) -> None:
+    """Live FeatherPad. The word-count control is not raw HTML.
+
+    The Qt accessible name is
+    ``<p style='white-space:pre'>Calculate number of words</p>``. The
+    snapshot title is ``Calculate number of words``. This skips when
+    ``featherpad`` is not on PATH, and when the process never appears on
+    the bus because the Qt 5 accessible plugin is absent. Ubuntu 24.04 CI
+    does not install FeatherPad.
+    """
+    from a11y_computer_use import observe
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("featherpad")
+    if not binary:
+        pytest.skip("featherpad is not installed")
+    env = os.environ.copy()
+    env["QT_ACCESSIBILITY"] = "1"
+    env["QT_LINUX_ACCESSIBILITY_ALWAYS_ON"] = "1"
+    env["QT_QPA_PLATFORM"] = "xcb"
+    proc = subprocess.Popen([binary], env=env, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        shot = None
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                shot = driver.snapshot(Scope.WINDOW, "featherpad")
+            except ComputerUseError as exc:
+                last = f"{exc.code}: {exc.message}"
+                shot = None
+            if shot is not None and shot.elements:
+                last = observe.render_text(shot)
+                if any(el.role == "AXTextArea" for el in shot.elements):
+                    break
+            time.sleep(0.3)
+        if shot is None or not any(el.role == "AXTextArea" for el in shot.elements):
+            if not _qt5_has_accessible_plugin():
+                pytest.skip(
+                    "FeatherPad did not publish an AT-SPI tree; this Qt 5 build "
+                    "has no accessible plugin"
+                )
+            raise AssertionError(f"featherpad did not expose its document ({proc.poll()}): {last}")
+        rendered = observe.render_text(shot)
+        assert "<p style" not in rendered, rendered
+        assert "</p>" not in rendered, rendered
+        words = [el for el in shot.elements if "Calculate number of words" in (el.title or "")]
+        assert words, rendered
+        assert all(el.title == "Calculate number of words" for el in words), rendered
+    finally:
+        _stop_group(proc)
 
 
 def _java_atk_jar() -> str | None:

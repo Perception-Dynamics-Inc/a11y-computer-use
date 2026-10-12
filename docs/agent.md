@@ -18,7 +18,12 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
 
 1. Observe. The first observation of a window is `Runtime.desktop_snapshot`
    of the tracked app, or the frontmost app before one has been launched or
-   focused: the pruned tree. Later observations of that same window are a
+   focused: the pruned tree. On Linux that tree includes every showing
+   top-level window of the app. The active window is first, and its root
+   line is marked `(active)` when another window is showing. A token budget
+   is split across those windows; a window that does not fit its share ends
+   with `… N more`. A ref in a window that is not active raises that window
+   before the action. Later observations of that same window are a
    diff of added, removed, and changed elements, plus the focused element
    when it did not change. Refs from the latest full snapshot stay valid for
    elements that are still there, including refs the diff does not repeat.
@@ -369,6 +374,19 @@ not `done`. The stuck budget and the hard `--max-time` deadline still
 apply. A `budget` line and a `verify_finish` line in `trajectory.jsonl`
 record the class and that turn.
 
+Each planner turn's observation starts with one budget line: the step
+index, the steps still allowed, and the seconds left of the cap in force,
+rounded half up to a whole second. When a task class is set, the line names
+that class. Those numbers are the caps in force, which are the class caps
+unless `--max-steps` or `--max-time` overrides them. At or below 20 percent
+of either cap, the next line is `budget low: if the goal is met, call done
+now with its checks`. The system prompt has one line that explains the
+header. Neither line is inside the untrusted fence. A `turn_budget` row in
+`trajectory.jsonl` records the same numbers for that request, and each step
+row copies them under `budget`. When a class is set, those rows also record
+`class_max_steps` and `class_max_time_s`. The look-again check is a separate
+image turn and does not carry this header.
+
 `--max-time` is a hard deadline for a driver or tool call. Each snapshot,
 screenshot, crop, and tool call runs on a worker. When the budget is spent
 and that call is still blocked, the loop abandons it and stops. It does not
@@ -688,6 +706,10 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
   one verify-and-finish turn. A passing check is `done`. A failed check is
   `verify_failed` and is not `done`. That turn does not click a word from
   the goal and does not replace a key or a `type` with a different action
+  (`tests/test_agent_core.py`). Each planner turn starts with the budget
+  line. A fake clock and a scripted model check the step index, the steps
+  left, the rounded seconds, the 20 percent hint, a task class and its
+  caps, and that screen text containing `budget:` stays inside the fence
   (`tests/test_agent_core.py`). A live scripted run against the GTK fixture
   reports `done` only when the window title matches, and its clicks do not
   target a word named in the goal (`tests/test_agent_live.py`). That file

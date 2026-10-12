@@ -222,13 +222,21 @@ jobs:
             echo "::error::libreoffice-draw did not install sdraw"
             exit 1
           fi
-      # gnome-calculator and gnome-text-editor are the GTK 4 bounds live
-      # tests. A separate step, so the shared apt line stays as it is.
+      # gnome-calculator and gnome-text-editor cover the GTK 4 bounds
+      # live tests and the empty-field check. A separate step, so the
+      # shared apt list stays as it is.
       - name: install GTK 4 calculator and text editor
         run: |
           sudo apt-get install -y --no-install-recommends gnome-calculator gnome-text-editor
           command -v gnome-calculator
           command -v gnome-text-editor
+      # evince is the side-pane thumbnail live test. A separate step, so the
+      # shared apt line stays as it is. The test skips when the binary
+      # is absent.
+      - name: install Evince
+        run: |
+          sudo apt-get install -y --no-install-recommends evince
+          command -v evince
       # No setup-python here on purpose: apt's python3-gi is built for the
       # distro interpreter, and setup-python's cannot import it. So the venv is
       # created from the runner's /usr/bin/python3 with --system-site-packages;
@@ -359,7 +367,7 @@ jobs:
             export PYTHONUNBUFFERED=1
             setsid openbox > /tmp/openbox.log 2>&1 < /dev/null &
             .venv/bin/python /tmp/wait_wm.py || { echo "openbox log:"; cat /tmp/openbox.log; exit 1; }
-            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py -v -rs --tb=line -p no:cacheprovider
+            A11Y_OCR_LIVE=1 timeout -k 5 5400 stdbuf -oL -eL .venv/bin/pytest tests/test_linux_live.py tests/test_linux_desktop_live.py tests/test_linux_firefox_live.py tests/test_linux_untrusted_live.py tests/test_linux_ocr_live.py tests/test_agent_live.py tests/test_linux_gtk4_live.py tests/test_linux_gtk4_empty_value_live.py tests/test_evince_thumbnails.py -v -rs --tb=line -p no:cacheprovider
           '
 
   package:
@@ -413,8 +421,14 @@ jobs:
           # Run 38272489843 listed [] and the step failed. Wait for the
           # window manager, then for the xmessage window, and keep the
           # openbox log when neither appears.
+          # Run 38286187392 set _NET_SUPPORTING_WM_CHECK and then listed []
+          # for the whole poll. The property can land before openbox adopts
+          # a client, and an xmessage started in that gap never joins
+          # _NET_CLIENT_LIST. setsid keeps the WM off the shell's process
+          # group. The message is started only after the check holds, and
+          # restarted if that process has already exited.
           xvfb-run -a -s "-screen 0 1280x800x24" bash -c '
-            openbox >/tmp/openbox-pkg.log 2>&1 &
+            setsid openbox >/tmp/openbox-pkg.log 2>&1 < /dev/null &
             ready=0
             for _ in $(seq 1 40); do
               if xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
@@ -428,14 +442,28 @@ jobs:
               cat /tmp/openbox-pkg.log
               exit 1
             fi
-            xmessage -timeout 30 clean-install-window >/dev/null 2>&1 &
+            sleep 0.5
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+              echo "openbox log:"
+              cat /tmp/openbox-pkg.log
+              exit 1
+            fi
+            : > /tmp/xmessage-pkg.log
+            xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
+            restarts=0
             for _ in $(seq 1 40); do
               if /tmp/wheel-venv/bin/python /tmp/list-windows.py; then
                 exit 0
+              fi
+              if ! pgrep -x xmessage >/dev/null 2>&1 && [ "$restarts" -lt 2 ]; then
+                restarts=$((restarts + 1))
+                xmessage -timeout 30 clean-install-window >>/tmp/xmessage-pkg.log 2>&1 &
               fi
               sleep 0.25
             done
             echo "openbox log:"
             cat /tmp/openbox-pkg.log
+            echo "xmessage log:"
+            cat /tmp/xmessage-pkg.log
             exit 1
           '

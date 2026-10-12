@@ -22,6 +22,7 @@ Linux-only; imported lazily by `drivers/linux.py`.
 
 from __future__ import annotations
 
+import html
 import math
 import os
 import re
@@ -37,6 +38,7 @@ from a11y_computer_use.observe import (
     SHEET_MAX_CHILDREN,
     DisplayGeometry,
     RawNode,
+    _generic_region_name,
     normalize_document_title,
 )
 from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
@@ -901,6 +903,63 @@ def _frame_accessible_name(node) -> str:
     return str(_call_first(frame, ("get_name",), default="") or "").strip()
 
 
+# GIMP action buttons append modifier help to the tooltip:
+# ``tooltip + "\n<b>" + modifier + "</b> " + ext``. GTK strips the markup
+# and leaves two spaces between the modifier and the rest of the line
+# (``Shift  Create new layers with last used values``). A single space
+# (``Shift the layer``) is a sentence, not that help.
+_MODIFIER_HINT_LINE = re.compile(
+    r"(?i)^(?:shift|ctrl|control|alt|super|meta|primary)"
+    r"(?:\+(?:shift|ctrl|control|alt|super|meta|primary))*"
+    r"[ \t]{2,}\S"
+)
+
+
+def _modifier_hint_body(text: str) -> tuple[str, str] | None:
+    """``(primary line, hint lines)`` when every extra line is modifier help.
+
+    None when ``text`` is a single line, the first line is empty, or any
+    extra line is not the GIMP modifier pattern. Plug-in blurbs such as
+    ``Align Visible Layers...\\nThis plug-in only works...`` stay whole.
+    """
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in raw:
+        return None
+    lines = raw.split("\n")
+    label = lines[0].strip()
+    if not label:
+        return None
+    hints = [line.strip() for line in lines[1:] if line.strip()]
+    if not hints or any(_MODIFIER_HINT_LINE.match(line) is None for line in hints):
+        return None
+    return label, "\n".join(hints)
+
+
+def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
+    """Keep the visible label as the name and the modifier lines as the description.
+
+    GIMP leaves the accessible name empty and puts the whole tooltip,
+    including Shift/Ctrl lines, in the description. The snapshot uses the
+    description when the name is empty, so the button's name becomes those
+    lines. The first line is the label drawn on the button. The rest is
+    modifier help and stays on the description, which the snapshot does not
+    render. A name that already contains the same lines is split the same
+    way. Anything that is not that pattern is unchanged.
+    """
+    split = _modifier_hint_body(name)
+    if split is not None:
+        label, hints = split
+        if not str(description).strip():
+            return label, hints
+        return label, description
+    if str(name).strip():
+        return name, description
+    split = _modifier_hint_body(description)
+    if split is None:
+        return name, description
+    return split
+
+
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -1392,6 +1451,121 @@ _RANGE_ROLE_NAMES = frozenset({"slider", "spin button", "progress bar"})
 
 def _strip_objects(text: str) -> str:
     return text.replace(_OBJECT_REPLACEMENT, "").strip()
+
+
+# Qt rich-text names (FeatherPad's word-count control) are HTML. Only these
+# names are tags. ``<not-a-tag>`` and ``a < b`` are text and stay.
+_HTML_TAG_NAMES = (
+    "a|b|i|u|s|p|br|hr|img|div|span|em|strong|font|qt|html|body|head|title|"
+    "table|thead|tbody|tfoot|tr|td|th|ul|ol|li|pre|blockquote|center|big|small|"
+    "sub|sup|tt|nobr|code|meta|style|script|h1|h2|h3|h4|h5|h6|dl|dt|dd|caption"
+)
+# The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
+# not a tag: HTML does not allow a space between ``<`` and the name.
+_HTML_TAG_RE = re.compile(
+    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    re.IGNORECASE,
+)
+_HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
+_HTML_BLOCK_TAGS = frozenset({
+    "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "qt", "html",
+    "body", "pre", "blockquote", "ul", "ol", "table", "head", "title", "dl",
+    "dt", "dd", "caption",
+})
+
+
+def _html_markup(tags: list[re.Match[str]]) -> bool:
+    """True when ``tags`` are rich text, not a lone ``<a>`` or ``<not-a-tag>``.
+
+    A tag with attributes, a void tag, or an open/close pair is markup.
+    ``<a>`` with no attributes and no closer is left alone, and so is any
+    name that is not an HTML tag.
+    """
+    opened: set[str] = set()
+    closed: set[str] = set()
+    for match in tags:
+        name = match.group(2).lower()
+        rest = (match.group(3) or "").strip(" /")
+        if name in _HTML_VOID_TAGS or rest:
+            return True
+        if match.group(1):
+            closed.add(name)
+        else:
+            opened.add(name)
+    return bool(opened & closed)
+
+
+def _strip_known_markup(text: str) -> str:
+    """Remove rich-text tags. Text that is not markup is returned unchanged."""
+    tags = list(_HTML_TAG_RE.finditer(text))
+    if not _html_markup(tags):
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(2).lower()
+        if name in _HTML_VOID_TAGS or (match.group(1) and name in _HTML_BLOCK_TAGS):
+            return " "
+        return ""
+
+    cleaned = _HTML_TAG_RE.sub(replace, text)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+    return cleaned.strip()
+
+
+def _plain_accessible_name(text: str) -> str:
+    """Accessible name with rich-text markup removed and entities decoded.
+
+    ``<p style='white-space:pre'>Calculate number of words</p>`` becomes
+    ``Calculate number of words``. ``&amp;`` becomes ``&``. ``<not-a-tag>``,
+    ``a < b``, and a bare ``<a>`` are not markup and are kept. A name with
+    no ``<`` and no ``&`` is returned unchanged.
+    """
+    if "<" not in text and "&" not in text:
+        return text
+    current = text
+    for _ in range(3):
+        decoded = html.unescape(current)
+        if decoded != current:
+            decoded = decoded.replace("\xa0", " ")
+        stripped = _strip_known_markup(decoded)
+        if stripped == current:
+            return current
+        current = stripped
+    return current
+
+
+# An unnamed icon's Text is a caption, not a document. Evince thumbnail
+# page numbers are one or two characters. 80 holds a label and does not
+# raise the snapshot value caps.
+_IMAGE_LABEL_CHARS = 80
+
+
+def _image_text_label(acc) -> str:
+    """Text of an unnamed icon or image, used as its name.
+
+    Evince thumbnail icons have an empty name and a Text interface whose
+    string is the page label (``1``, ``2``, ``3``). A missing interface, a
+    blank string, or a generic word such as ``image`` stays empty, and the
+    pruner can still fold the icon. The read is bounded. ``get_text`` is
+    not asked for ``-1``.
+    """
+    try:
+        Atspi = _atspi()
+    except ImportError:
+        return ""
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return ""
+    limit = min(int(count), _IMAGE_LABEL_CHARS)
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, limit))
+    if not isinstance(got, str):
+        return ""
+    text = " ".join(
+        got.replace("\u00a0", " ").replace(_OBJECT_REPLACEMENT, " ").split()
+    )
+    if not text or _generic_region_name(text):
+        return ""
+    return text
 
 
 def _is_choice_role(role: str, role_name: str) -> bool:
@@ -2205,7 +2379,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     value on those roles stay. An empty entry, text field, or paragraph
     (character count 0) has no value either: Chromium's empty input
     publishes a subnormal double on Value, and that number is not the
-    field. A filler still keeps that double.
+    field. A filler still keeps that double. An empty GTK text field
+    implements Text and not Value. CurrentValue is then an uninitialized
+    double (about ``6.93e-310``). That read is skipped when the Value
+    interface is absent. When the text interface does not report a
+    character count, a subnormal on a text role is absent too, and zero
+    and a small normalized value stay when the interface is present.
     """
     if role == "AXSecureTextField":
         return None
@@ -2281,6 +2460,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     # A Qt label, check, row, or empty line edit has a Value interface whose
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
+        return None
+    # GTK 4 text (the calculator display, a new text-editor document) has
+    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # ``_value_interface_present`` is false only when the accessible reports
+    # the interface missing. A test double with no getter still reads Value.
+    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is None:
@@ -2550,7 +2735,9 @@ class ATSPIAccessor:
     A GTK table whose rows do not fit the child cap lists the cells that
     overlap the screen, grouped so the cap keeps that whole run. ``find``
     scrolls a named Table cell into the run when the name is not already
-    on screen. A short table and a Qt grid keep the walks they already had.
+    on screen. A cell the table still exposes that stays off screen is
+    remembered here and attached with no bounds. A short table and a Qt
+    grid keep the walks they already had.
     A Calc sheet lists the cells inside its on-screen box, banded so the
     child cap does not stop at the first six rows.
     """
@@ -2562,6 +2749,9 @@ class ATSPIAccessor:
         # Set by LinuxDriver.snapshot from a ``find`` text. None on a plain
         # snapshot, so listing the window does not scroll the tree.
         self._table_seek: str | None = None
+        # ``(cell, table)`` pairs ``find`` matched that are still off screen.
+        # Bounds are not invented for them; the snapshot attaches them as-is.
+        self._offscreen_seek: list[tuple[object, object]] = []
         # ``(cache key, start index, page size)`` set for one snapshot so
         # expand lists that node's next children instead of the visible band.
         self._expand_page: tuple | None = None
@@ -2651,6 +2841,12 @@ class ATSPIAccessor:
         # input and a date segment stay on the text-field mapping.
         if _aria_spinbutton(node, role_str, attrs):
             role = "AXSpinButton"
+        # `_entry_is_multiline` already mapped a tagged <textarea>. A Gecko
+        # entry that check left as a text field is still a textarea when it
+        # carries MULTI_LINE, multiline, or aria-multiline. A single-line
+        # input stays a text field. Chromium entries are not matched here.
+        if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
+            role = "AXTextArea"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -2672,12 +2868,24 @@ class ATSPIAccessor:
         # SHOWING. expanded follows the menu, including after it closes.
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
-        name = _call_first(node, ("get_name",), default="") or ""
+        name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
         description = _call_first(node, ("get_description",), default="") or ""
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        # An unnamed icon can still carry a caption on its Text interface.
+        # Evince thumbnail icons do: the text is the page number under the
+        # image. That string is the name, so the pruner does not fold the
+        # thumbnail into an opaque region. A named image is left alone.
+        if (
+            role == "AXImage"
+            and not str(name).strip()
+            and _generic_region_name(str(description))
+        ):
+            label = _image_text_label(node)
+            if label:
+                name = label
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
@@ -2721,6 +2929,7 @@ class ATSPIAccessor:
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
+        name, description = _split_modifier_hints(str(name), str(description))
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -2872,7 +3081,9 @@ class ATSPIAccessor:
         # near the end of the child list), and a few hundred rows also
         # matches the Calc shortcut that only samples the first rows.
         # The on-screen span is what snapshot and scroll_to_find list.
-        painted = _gtk_table_rows_for_snapshot(node, self._table_seek)
+        painted = _gtk_table_rows_for_snapshot(
+            node, self._table_seek, self._offscreen_seek,
+        )
         if painted:
             for acc, pos, size in painted:
                 self._visible_bounds[id(acc)] = (pos, size)
@@ -4346,6 +4557,126 @@ def find_root(app: str, scope) -> object | None:
         return picked if picked is not None else app_acc
 
 
+# Top-level windows a named-app snapshot lists. Menus, popups, and tooltips
+# are not windows: they belong to the frame that owns them.
+_TOPLEVEL_ROLES = frozenset({
+    "frame", "window", "dialog", "alert", "file chooser", "color chooser",
+})
+
+
+def _application_of(node):
+    """The AT-SPI application that owns ``node``, or None."""
+    if node is None:
+        return None
+    if _role_name(node) == "application":
+        return node
+    app = _call_first(node, ("get_application", "getApplication"))
+    if app is not None and _role_name(app) == "application":
+        return app
+    parent = _call_first(node, ("get_parent", "getParent"))
+    if parent is not None and _role_name(parent) == "application":
+        return parent
+    return None
+
+
+def _toplevel_of(node):
+    """The showing-window ancestor of ``node``, or None at the application."""
+    current = node
+    for _ in range(32):
+        if current is None:
+            return None
+        role = _role_name(current)
+        if role in _TOPLEVEL_ROLES:
+            return current
+        if role == "application":
+            return None
+        current = _call_first(current, ("get_parent", "getParent"))
+    return None
+
+
+def showing_toplevels(node) -> list:
+    """Showing top-level windows of ``node``'s application, active first.
+
+    One showing window is that window alone, so a single-window snapshot
+    stays one tree. A window that is not SHOWING (minimized) is left out, as
+    are menus and tooltips. A GTK combo's popup window is left out too: its
+    items already sit under the combo, and listing it would replace the
+    frame that owns the combo. When several windows are ACTIVE, the first in
+    child order leads and the rest keep that order.
+    """
+    if node is None:
+        return []
+    app = _application_of(node)
+    if app is None:
+        return [node]
+    count = _child_count(app)
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = 0
+    frames = []
+    for index in range(int(count)):
+        child = _child_at(app, index)
+        if child is None or _role_name(child) not in _TOPLEVEL_ROLES:
+            continue
+        if not _state_has(child, "SHOWING"):
+            continue
+        if _combo_owning_popup(child) is not None:
+            continue
+        frames.append(child)
+    if len(frames) <= 1:
+        return frames or [node]
+    active = [frame for frame in frames if _state_has(frame, "ACTIVE")]
+    head = active[:1]
+    if not head and _role_name(node) in _TOPLEVEL_ROLES and _state_has(node, "SHOWING"):
+        # find_root already chose this window. Lead with it when AT-SPI has
+        # not marked any frame ACTIVE.
+        chosen = _frame_cache_key(node)
+        head = [frame for frame in frames if _frame_cache_key(frame) == chosen][:1]
+    head_keys = {_frame_cache_key(frame) for frame in head}
+    return head + [frame for frame in frames if _frame_cache_key(frame) not in head_keys]
+
+
+def snapshot_window_list(node) -> list:
+    """Showing windows to snapshot, active first.
+
+    A find bar, an omnibox popup, and Chrome's empty cached frame are
+    showing siblings of the page. They are not windows. Merging one of
+    them is the untitled group with no rows that stops ``scroll_to_find``
+    before the wheel. A GTK dialog stays in the list. One real window is
+    a one-item list, so the snapshot stays a single tree.
+    """
+    if node is None:
+        return []
+    chrome = _chromium_app(node)
+    frames = []
+    for item in showing_toplevels(node):
+        if _is_browser_bar_frame(item):
+            continue
+        if chrome and _sparse_untitled_chrome_frame(item):
+            continue
+        frames.append(item)
+    return frames or [node]
+
+
+def toplevel_raise_target(node):
+    """``(active, title, pid, extents)`` for the window that owns ``node``.
+
+    None when ``node`` is not inside a top-level window. ``active`` is
+    STATE_ACTIVE on that window. ``extents`` is ``(x, y, width, height)`` in
+    screen pixels, or None when the window has no box. The caller raises the
+    matching X window before it acts, and leaves an already active window
+    alone.
+    """
+    top = _toplevel_of(node)
+    if top is None:
+        return None
+    title = str(_call_first(top, ("get_name", "getName"), default="") or "")
+    position, size = _extents(top)
+    extents = None
+    if position is not None and size is not None:
+        extents = (float(position[0]), float(position[1]), float(size[0]), float(size[1]))
+    return (_state_has(top, "ACTIVE"), title, pid_of(top), extents)
+
+
 def desktop_application_roots() -> DesktopApplications:
     """Every application under the AT-SPI desktop.
 
@@ -5790,7 +6121,11 @@ def opaque_click_target(acc) -> bool:
         return True
     if role in {"image", "icon"} or bool(xml & {"img", "image"}):
         name = str(_call_first(acc, ("get_name",), default="") or "").strip()
-        return not name
+        if name:
+            return False
+        # The accessible name is empty. A Text caption (a thumbnail's page
+        # number) is still a label, so the click is not an unnamed image.
+        return not _image_text_label(acc)
     return False
 
 
@@ -13603,15 +13938,72 @@ def _bring_cell_on_screen(cell, screen: tuple[int, int], row: int, rows: int) ->
     return _on_screen_item(cell, screen) is not None
 
 
-def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
-    """The Table cell named ``needle``, scrolled on screen. None when no cell matches."""
-    rows, cols = _plain_table_size(node)
-    if rows is None or cols is None:
+def _reveal_named_cell(cell, screen: tuple[int, int], row: int, rows: int):
+    """Scroll ``cell`` on screen when AT-SPI can. The same cell either way.
+
+    A cell that stays off screen is still the match. Its extents are left
+    alone, including the GTK off-screen sentinel.
+    """
+    if cell is None:
         return None
-    for row in range(min(rows, _GTK_SEEK_MAX_ROWS)):
-        for col in range(min(cols, _GTK_SEEK_MAX_COLS)):
+    if _on_screen_item(cell, screen) is None and rows > 0:
+        _bring_cell_on_screen(cell, screen, row, rows)
+    return cell
+
+
+def _seek_unshown_children(node, needle: str, screen: tuple[int, int]):
+    """A non-showing child whose name contains ``needle``.
+
+    Used when the Table interface exposes no cell. GTK still lists those
+    cells as children and parks them at the off-screen sentinel. On-screen
+    children are already in the painted span.
+    """
+    count = _child_count(node)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    rows, cols = _plain_table_size(node)
+    if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0:
+        col_span = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 1
+        cap = min(count, rows * min(col_span, _GTK_SEEK_MAX_COLS) + 64)
+    else:
+        cap = min(count, _GTK_TABLE_MAX_ROWS)
+    total = rows if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else cap
+    for index in range(cap):
+        child = _child_at(node, index)
+        if child is None or _on_screen_item(child, screen) is not None:
+            continue
+        found = _seek_hit(child, needle)
+        if found is None:
+            continue
+        row = _row_at_child_index(node, index)
+        if row is None:
+            row = min(index, max(total - 1, 0))
+        return _reveal_named_cell(found, screen, row, total)
+    return None
+
+
+def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
+    """The Table cell named ``needle``. None when no cell matches.
+
+    The scan uses ``Table.get_accessible_at``, which addresses a row the
+    on-screen walk never visits. The row cap is the table's own size, not
+    the short seek window used for a document table. When that interface
+    exposes no cell, non-showing children are searched instead. A match is
+    scrolled on screen when AT-SPI can do it. A cell that stays off screen
+    is still returned, with whatever extents the toolkit reported.
+    """
+    rows, cols = _plain_table_size(node)
+    if rows is None or cols is None or rows <= 0:
+        return _seek_unshown_children(node, needle, screen)
+    col_limit = min(cols, _GTK_SEEK_MAX_COLS)
+    saw_cell = False
+    for row in range(min(rows, _GTK_TABLE_MAX_ROWS)):
+        for col in range(col_limit):
             cell = _table_cell_at(node, row, col)
-            if cell is None or not _matches_seek(cell, needle):
+            if cell is None:
+                continue
+            saw_cell = True
+            if not _matches_seek(cell, needle):
                 continue
             if _on_screen_item(cell, screen) is None:
                 _bring_cell_on_screen(cell, screen, row, rows)
@@ -13619,7 +14011,9 @@ def _reveal_gtk_table_match(node, needle: str, screen: tuple[int, int]):
                 if refreshed is not None:
                     cell = refreshed
             return cell
-    return None
+    if saw_cell:
+        return None
+    return _seek_unshown_children(node, needle, screen)
 
 
 def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
@@ -13654,12 +14048,16 @@ def _visible_gtk_table_cells(node, screen: tuple[int, int]) -> list | None:
     return out or None
 
 
-def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
+def _gtk_table_rows_for_snapshot(
+    node, seek: str | None, offscreen: list | None = None,
+) -> list | None:
     """On-screen cells of a large GTK table, or None to keep the index walk.
 
     ``seek`` is the ``find`` text. When no painted cell contains it, the
     matching Table cell is scrolled into view and the span is read again.
-    A snapshot with no seek does not move the tree.
+    A cell that stays off screen is appended to ``offscreen`` as
+    ``(cell, table)``. Its bounds are not replaced. A snapshot with no
+    seek does not move the tree and does not record those cells.
     """
     if not _gtk_row_table(node):
         return None
@@ -13678,7 +14076,149 @@ def _gtk_table_rows_for_snapshot(node, seek: str | None) -> list | None:
                 item = _on_screen_item(match, screen)
                 if item is not None:
                     painted = [*painted, item]
+                elif offscreen is not None:
+                    offscreen.append((match, node))
     return painted
+
+
+def _first_large_gtk_table(root):
+    """The first large GTK row table under ``root``.
+
+    The walk stops at a table: a 10k TreeView exposes every cell as a child,
+    and those cells are not another table. None when the application is not
+    GTK or no table of that size is within the walk.
+    """
+    if root is None or "gtk" not in _toolkit_name(root):
+        return None
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 300:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        role = _role_name(node)
+        if role in {"table", "tree table"}:
+            if _gtk_row_table(node):
+                return node
+            continue
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        for index in range(min(int(count), 40)):
+            queue.append(_child_at(node, index))
+    return None
+
+
+def _large_gtk_table_from(acc):
+    """The large GTK table ``acc`` is, or the one under it, or an ancestor."""
+    if acc is None or "gtk" not in _toolkit_name(acc):
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _depth in range(8):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"table", "tree table"} and _gtk_row_table(node):
+            return node
+        node = _parent_of(node)
+    return _first_large_gtk_table(acc)
+
+
+def reveal_gtk_named_cell(root, needle: str):
+    """``(moved, on_screen)`` for a named cell in a large GTK table.
+
+    None when the application is not GTK or no cell in the table model
+    contains ``needle``. The scan uses ``Table.get_accessible_at`` up to the
+    GTK table cap, past the shorter document seek window. A cell already in
+    the painted span is left where it is: ``moved`` is false. An off-screen
+    cell is scrolled with AT-SPI ``scroll_to`` or the vertical bar's row
+    index. ``moved`` is true only when that scroll puts the cell on screen.
+    Extents are the cell's own; a cell that stays off screen is
+    ``(False, False)``.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None or "gtk" not in _toolkit_name(root):
+        return None
+    table = _first_large_gtk_table(root)
+    if table is None:
+        return None
+    rows, cols = _plain_table_size(table)
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        return None
+    cols = min(int(cols), _GTK_SEEK_MAX_COLS)
+    screen = _screen_size()
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is not None:
+        first, last = span
+        for row in range(first, last + 1):
+            for col in range(cols):
+                cell = _table_cell_at(table, row, col)
+                if cell is not None and _matches_seek(cell, text):
+                    return False, _on_screen_item(cell, screen) is not None
+    limit = min(int(rows), _GTK_TABLE_MAX_ROWS)
+    for row in range(limit):
+        for col in range(cols):
+            cell = _table_cell_at(table, row, col)
+            if cell is None or not _matches_seek(cell, text):
+                continue
+            if _on_screen_item(cell, screen) is not None:
+                return False, True
+            brought = _bring_cell_on_screen(cell, screen, row, rows)
+            if brought:
+                _invalidate_tree_cache(table)
+                return True, True
+            return False, False
+    return None
+
+
+def scroll_gtk_viewport_page(acc, direction: int) -> bool:
+    """Move a large GTK table's vertical bar by one painted viewport.
+
+    False unless the accessible belongs to GTK and a large row table can be
+    found. ``direction`` is positive to go down. The step is the painted
+    body-row count as a fraction of ``rows - 1``, applied to the bar's
+    range. A line scroll does not come through here. False when the span
+    or the bar cannot be read, or the value does not change.
+    """
+    if acc is None or isinstance(direction, bool) or not isinstance(direction, int) or direction == 0:
+        return False
+    table = _large_gtk_table_from(acc)
+    if table is None:
+        return False
+    rows, _cols = _plain_table_size(table)
+    if rows is None or rows <= 1:
+        return False
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is None:
+        return False
+    visible = max(1, span[1] - span[0] + 1)
+    sign = 1.0 if direction > 0 else -1.0
+    fraction = float(visible) / float(rows - 1)
+    for bar in _collect_scrollbars(table):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), 0.0)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), 0.0)
+        if maximum <= minimum:
+            continue
+        current = _read_value(bar)
+        if current is None:
+            continue
+        target = min(max(current + (maximum - minimum) * fraction * sign, minimum), maximum)
+        if abs(target - current) < 1e-6:
+            continue
+        _write_value(bar, target)
+        updated = _read_value(bar)
+        if updated is not None and abs(updated - current) > 1e-3:
+            _invalidate_tree_cache(table)
+            return True
+    return False
 
 
 _TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
@@ -13930,6 +14470,39 @@ def _chromium_app(acc) -> bool:
         return True
     name = (_call_first(app, ("get_name", "getName"), default="") or "").lower()
     return "chrom" in name
+
+
+def _reports_multiline(node, attrs: dict) -> bool:
+    """True when ``node`` publishes multi-line text.
+
+    ``STATE_MULTI_LINE`` is the AT-SPI fact. ``multiline`` and
+    ``aria-multiline`` are the same fact when a bridge publishes them as
+    attributes. A false or absent attribute is not multi-line. A true
+    attribute is, even when the other key is false.
+    """
+    if _state_has(node, "MULTI_LINE"):
+        return True
+    for key in ("multiline", "aria-multiline"):
+        flag = (attrs or {}).get(key)
+        if isinstance(flag, bool):
+            if flag:
+                return True
+            continue
+        if str(flag or "").strip().lower() in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _gecko_multiline_entry(node, attrs: dict) -> bool:
+    """True for a Firefox ``entry`` that is a ``<textarea>``.
+
+    Gecko exposes ``<input>`` and ``<textarea>`` as AT-SPI role ``entry``.
+    The textarea carries ``STATE_MULTI_LINE`` or a multiline attribute.
+    A single-line input does not. Chromium and GTK are not this check.
+    """
+    if not _reports_multiline(node, attrs):
+        return False
+    return _gecko_app(node)
 
 
 def _gecko_app(acc) -> bool:
@@ -14421,13 +14994,15 @@ def _overflow_ancestor_edges(container) -> tuple[float, float, float, float] | N
 def list_scrolls_with_document(container) -> bool:
     """True when a Chromium list is body content and the document scrolls.
 
-    A short table can be shorter than the screen and still longer than
-    the window. Its box is the content, not a scrollport. After the
-    document moves, the top sits above the page or the bottom still runs
-    past it, and the box stays no taller than the screen. A fixed-height
-    overflow list sits inside the document. A list taller than the screen
-    keeps the list wheel. No document edges means the caller keeps the
-    list's own bar.
+    A short table can be a little taller than an 800px screen and still
+    be body content. Its box is not a scrollport. After the document
+    moves, the top sits above the page or the bottom still runs past it.
+    The list bar does not move that table, and a wheel judged as a
+    scrollport then reports the page unchanged and the search turns
+    around before the last row. A list more than twice the screen is a
+    virtualized viewport and keeps the list wheel. A fixed-height
+    overflow list sits inside the document. No document edges means the
+    caller keeps the list's own bar.
     """
     if container is None or _role_name(container) not in _LIST_ROLES:
         return False
@@ -14438,17 +15013,17 @@ def list_scrolls_with_document(container) -> bool:
     pos, size = _extents(container)
     if pos is None or size is None or float(size[1]) < 4:
         return False
-    _sw, sh = _screen_size()
-    if sh > 0 and float(size[1]) > sh:
-        return False
     page = _page_edges(container)
     if page is None:
         return False
     top = float(pos[1])
     bottom = top + float(size[1])
-    if bottom > page[3] + 8:
-        return True
-    return top < page[1] - 8
+    if bottom <= page[3] + 8 and top >= page[1] - 8:
+        return False
+    _sw, sh = _screen_size()
+    if sh > 0 and float(size[1]) > sh * 2:
+        return False
+    return True
 
 
 def _page_node(container):

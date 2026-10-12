@@ -4074,8 +4074,9 @@ class Runtime:
         `observe.find_elements`. Gated + audited at READ, exactly like
         `desktop_snapshot`. On Linux, Chromium searches the whole document,
         including a table that starts below the viewport, and scrolls the
-        matching cell into that snapshot. A GTK table still seeks inside
-        its own walk. The ref is that on-screen cell."""
+        matching cell into that snapshot. A GTK table seeks through the
+        Table interface, including a row that is not on screen. A cell
+        that stays off screen is reported with no bounds."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -6002,6 +6003,14 @@ class Runtime:
         ``page_unchanged`` is used only when that container's scroll
         offset was read and did not move.
 
+        A large GTK table is searched once through its Table interface
+        before those steps. The matching cell is brought in with AT-SPI
+        scroll_to or by setting the vertical bar from the row index. That
+        counts as one scroll when the cell was off screen. When the name
+        is not a cell in that table, each following step moves the
+        vertical bar by one viewport of painted rows. Chromium, Firefox,
+        and a short table keep the five-line wheel.
+
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
         Once a document names the match and the center is just outside
@@ -6190,7 +6199,14 @@ class Runtime:
             stall_deadline = started + budget_s
             hard_deadline = started + (_SCROLL_FIND_HARD_S if budget_s > 0 else 0.0)
             page_mode = True
+            # A document table that began below the window has reached the
+            # end once its box sits inside the window. Page Down is for a
+            # table that fit from the start. Using it after the document
+            # scroll spends another pair of snapshots and misses the short
+            # page's time bound.
+            document_ran_past = False
             find_tried = False
+            table_jumped = False
             frame_latched = False
             frame_waits = 0
             same_rows = 0
@@ -6274,6 +6290,15 @@ class Runtime:
                 if now >= stall_deadline:
                     return budget_s
                 return None
+
+            def table_runs_past(shot: Snapshot, anchor: Element | None) -> bool:
+                """True when a table's box still extends below the window."""
+                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                return anchor.bounds.y + anchor.bounds.height > box[3] + 8
 
             def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
                 """A paginated or virtualized table that already fits the window.
@@ -6485,16 +6510,30 @@ class Runtime:
                     for el in shot.elements
                 )
 
+            def pinned_anchor(shot: Snapshot) -> Element | None:
+                """The pinned container in ``shot``.
+
+                A ref string is the slot in one snapshot. After the document
+                moves, that slot can be a cell. The unchanged-row check
+                follows the table that was pinned, using the fresh bounds.
+                The wheel still resolves once through the driver, so a
+                search records one resolution per scroll.
+                """
+                try:
+                    return observe.rematch_ref(pinned[0], ref, shot)
+                except (KeyError, ComputerUseError):
+                    try:
+                        return shot.element(ref)
+                    except KeyError:
+                        return None
+
             def ready_anchor() -> Element | None:
                 """The page anchor after Ctrl+F, when that frame is back."""
                 fresh = self._current
                 if fresh is None:
                     return None
                 if pinned is not None:
-                    try:
-                        found_anchor = fresh.element(ref)
-                    except KeyError:
-                        found_anchor = None
+                    found_anchor = pinned_anchor(fresh)
                 else:
                     found_anchor = _scroll_anchor(fresh)
                 if found_anchor is None or page_frame_missing(fresh, found_anchor):
@@ -6511,14 +6550,13 @@ class Runtime:
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
                 if pinned is not None:
-                    try:
-                        anchor_now = snap.element(ref)
-                    except KeyError:
-                        anchor_now = None
+                    anchor_now = pinned_anchor(snap)
                 else:
                     anchor_now = _scroll_anchor(snap)
                 if anchor_now is not None:
                     last_anchor = anchor_now
+                if table_runs_past(snap, last_anchor):
+                    document_ran_past = True
                 note_progress(snap, last_anchor)
                 cap = expired_cap()
                 if cap is not None and (issued > 0 or budget_s <= 0):
@@ -6659,6 +6697,14 @@ class Runtime:
                 cap = expired_cap()
                 if cap is not None:
                     return unfinished(issued, snap, last_anchor, budget_hit=True, budget_cap=cap)
+                if (
+                    document_ran_past
+                    and issued > 0
+                    and last_anchor is not None
+                    and last_anchor.role in ("AXTable", "AXGrid", "AXOutline")
+                    and not table_runs_past(snap, last_anchor)
+                ):
+                    return unfinished(issued, snap, last_anchor, budget_hit=False)
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
@@ -6674,6 +6720,21 @@ class Runtime:
                 elif seen_document and document_anchor(anchor):
                     wheel = 1 if step > 0 else -1
                 last_anchor = anchor
+                if (
+                    not table_jumped
+                    and text
+                    and callable(getattr(self.driver, "reveal_table_match", None))
+                ):
+                    # One index jump. A 10k GTK tree moves about a dozen
+                    # rows per five-line wheel, so the scroll budget ends
+                    # near the top. A cell already on screen is not counted.
+                    table_jumped = True
+                    jumped = self.driver.reveal_table_match(bundle, text)
+                    if isinstance(jumped, tuple) and len(jumped) == 2 and (jumped[0] or jumped[1]):
+                        if jumped[0]:
+                            issued += 1
+                            stalls = 0
+                        continue
                 if not find_tried and wants_in_page_find(snap, anchor):
                     find_tried = True
                     found = try_in_page_find(anchor)
@@ -6740,6 +6801,13 @@ class Runtime:
                         restore_page_frame()
                         continue
                     return unfinished(issued, snap, anchor, budget_hit=False)
+                # A large GTK table pages its own bar. The five-line wheel
+                # stays for Chromium and for a table this driver cannot page.
+                page_scroll = getattr(self.driver, "scroll_viewport_page", None)
+                if callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
+                    issued += 1
+                    stalls = 0
+                    continue
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
@@ -8485,8 +8553,11 @@ def build_server(
         latest snapshot: act on them promptly and re-observe after the UI
         changes (a stale_ref error means the tree moved). A ref from a process
         that has since quit is stale_ref with reason app_restarted and is not
-        applied to the new process. scope='window'
-        covers the frontmost window, 'app' all windows.
+        applied to the new process. scope='window' covers the frontmost
+        window. On Linux it also includes every other showing top-level
+        window of that app: the active window is first and its root line is
+        marked (active), and a ref in another window raises that window
+        before the action. scope='app' is the application tree.
 
         mode='full' (default) returns the complete pruned tree. mode='interactive'
         returns the same snapshot cut down to what you can act on (buttons,
@@ -8498,8 +8569,10 @@ def build_server(
         ONLY what changed since your last snapshot of this app (added / removed /
         changed elements), rendered in the view you last asked for; use it to
         re-observe after an action, and read '(no change)' as 'the action had no
-        visible effect'. budget=N caps the reply at about N tokens (the tail is
-        replaced by a marker counting the omitted elements). include_bounds=true
+        visible effect'. budget=N caps the reply at about N tokens. One window
+        replaces the tail with a marker counting the omitted element lines.
+        Several windows share that budget, and a window past its share ends
+        with '… N more'. include_bounds=true
         prints geometry on every line. Tier 'read' for the scoped app. Needs the
         Accessibility permission (see `a11y_computer_use doctor`)."""
         return await run(runtime.desktop_snapshot, app, scope, mode, budget, include_bounds)
@@ -8958,7 +9031,9 @@ def build_server(
         empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
-        window keeps the wheel. page_unchanged is raised only when that
+        window keeps the wheel. A large GTK table is searched once
+        through its row index before that wheel, and a miss there steps
+        the vertical bar by one viewport. page_unchanged is raised only when that
         container's scroll offset was read and did not move. The ref is from a snapshot taken
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll

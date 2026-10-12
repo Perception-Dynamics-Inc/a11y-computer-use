@@ -1699,6 +1699,77 @@ def test_firefox_paragraph_and_select_are_not_editable_entries(fake_atspi, monke
     assert paragraph.text == "idle"
 
 
+def test_gecko_textarea_entry_is_multi_line_text(monkeypatch) -> None:
+    """Gecko exposes ``<textarea>`` as AT-SPI ``entry`` plus MULTI_LINE.
+
+    A single-line ``<input>`` stays a text field. ``multiline`` and
+    ``aria-multiline`` are the same fact when the state is absent. A false
+    attribute is not a textarea. Chromium is not this mapping. The snapshot
+    word is ``textarea``. Not a live Firefox.
+    """
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((8.0, 40.0), (240.0, 80.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda acc, role, role_name=None: acc.text)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ("AXPress",))
+    monkeypatch.setattr(_atspi, "_stable_id", lambda acc, attrs=None: None)
+
+    def read(node: _Tagged):
+        return _atspi.ATSPIAccessor().read(node)
+
+    area = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE", "SINGLE_LINE"}, "textarea", "Gecko", "Firefox",
+    )
+    single = _Tagged(
+        "entry", "Name", "initial-name",
+        {"SINGLE_LINE", "EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    by_attr = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_attr.attrs["multiline"] = "true"
+    by_aria = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_aria.attrs["aria-multiline"] = "true"
+    by_bool = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    by_bool.attrs["multiline"] = True
+    off = _Tagged(
+        "entry", "Name", "initial-name", {"EDITABLE"}, "input", "Gecko", "Firefox",
+    )
+    off.attrs["multiline"] = "false"
+    off.attrs["aria-multiline"] = False
+    one_true = _Tagged(
+        "entry", "Notes", "line1 line2", {"EDITABLE"}, "textarea", "Gecko", "Firefox",
+    )
+    one_true.attrs["multiline"] = False
+    one_true.attrs["aria-multiline"] = "yes"
+    chrome = _Tagged(
+        "entry", "Notes", "line1 line2",
+        {"MULTI_LINE", "EDITABLE"}, "textarea", "Chromium", "Google Chrome",
+    )
+    assert _atspi._gecko_multiline_entry(chrome, chrome.get_attributes()) is False
+
+    assert read(area).role == "AXTextArea"
+    assert read(single).role == "AXTextField"
+    assert read(by_attr).role == "AXTextArea"
+    assert read(by_aria).role == "AXTextArea"
+    assert read(by_bool).role == "AXTextArea"
+    assert read(off).role == "AXTextField"
+    assert read(one_true).role == "AXTextArea"
+
+    snap = build_snapshot(
+        (read(area), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textarea "Notes"' in observe.render_text(snap)
+    single_snap = build_snapshot(
+        (read(single), []), _FakeAccessor(), scope=Scope.WINDOW, app="firefox", pid=1, geometry=_geometry(),
+    )
+    assert 'textfield "Name"' in observe.render_text(single_snap)
+
+
 def test_section_click_actions_map_like_the_figma_wrapper() -> None:
     """Live ``section#react-page`` exposes exactly click and showContextMenu.
 
@@ -6081,6 +6152,16 @@ def test_short_table_past_the_document_wheels_the_page(
     assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
     assert called["wheel"] == 2
     assert called["nudge"] == 0
+    # Live Chrome on an 800px screen publishes this 25-row table at about
+    # 857px. That is still the document. A list more than twice the screen
+    # stays a viewport.
+    hit.y, hit.height = 120, 857
+    assert _atspi.scroll_container_kind(listing) == "document"
+    assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
+    assert called["wheel"] == 3
+    assert called["nudge"] == 0
+    hit.height = 1601
+    assert _atspi.scroll_container_kind(listing) == "viewport"
 
 
 def test_content_height_line_scroll_does_not_write_the_scroll_bar(
@@ -10659,6 +10740,113 @@ def _gtk_row_titles(snap) -> list[str]:
     return [el.title for el in snap.elements if el.title.startswith("ROW-")]
 
 
+def _large_gtk_tree(rows: int = 10_000, cols: int = 3):
+    """Synthetic GTK ListStore tree. Cells are created when the table is asked.
+
+    Twenty body rows fit in the 484px box. The rest sit at the GTK off-screen
+    sentinel. ``scroll_to`` returns false. The vertical bar's fraction of
+    ``row / (rows - 1)`` is what moves the painted run. Not a live window.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=180, height=24)
+        for name in ("Name", "Value", "Note")[:cols]
+    ]
+    cache: dict[tuple[int, int], _Acc] = {}
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+
+    def position(cell: _Acc, row: int, col: int, head: int) -> None:
+        on_screen = head <= row < head + 20
+        y = 124 + (row - head) * 23 if on_screen else -2147483648
+        x = 110 + col * 200 if on_screen else -2147483648
+        _place_row(cell, x, y, 180, 23)
+
+    def cell_at(row: int, col: int) -> _Acc | None:
+        if row < 0 or row >= rows or col < 0 or col >= cols:
+            return None
+        key = (row, col)
+        cell = cache.get(key)
+        if cell is None:
+            if col == 0:
+                name = f"ROW-{row:05d}"
+            elif col == 1:
+                name = f"val{row}"
+            else:
+                name = f"note{row}"
+            cell = _Acc("table cell", name=name, width=180, height=23)
+            cell.parent = table
+            cell.get_index_in_parent = lambda row=row, col=col: cols + row * cols + col
+            if cell.component is not None:
+                cell.component.scroll_to = lambda *_args, **_kwargs: False
+            cache[key] = cell
+        position(cell, row, col, state["head"])
+        return cell
+
+    def place(head: int) -> None:
+        state["head"] = max(0, min(int(head), max(0, rows - 20)))
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for (row, col), cell in list(cache.items()):
+            position(cell, row, col, state["head"])
+
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+
+    def at_point(_x, y, _coord):
+        yy = int(y)
+        if yy < 124:
+            return headers[0]
+        slot = (yy - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= rows:
+            return None
+        return cell_at(row, 0)
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: rows
+    table.get_n_columns = lambda: cols
+    table.get_accessible_at = cell_at
+    table.get_column_header = lambda col: headers[col] if 0 <= col < len(headers) else None
+
+    def row_at_index(index: int) -> int:
+        if index < cols:
+            return -1
+        return (index - cols) // cols
+
+    table.get_row_at_index = row_at_index
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * (rows - 1)))
+        place(head)
+        return True
+
+    bar.on_value = on_value
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    bar.get_application = lambda: app
+    _adopt(scroll, table, bar)
+    _adopt(window, scroll)
+    return window, table, state, place, bar
+
+
+def _found_scrolls(text: str) -> int:
+    return int(text.split(" scroll", 1)[0].removeprefix("found after "))
+
+
 def test_scrolled_gtk_tree_lists_the_painted_rows(fake_atspi, monkeypatch) -> None:
     """Synthetic 300-row GTK tree, not a live window.
 
@@ -10769,6 +10957,340 @@ def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupporte
     assert "no elements match" not in found
     assert state["head"] == 293
     assert bar.value > 5000
+
+
+def _large_gtk_tree(*, rows: int = 10000, cols: int = 3, expose_table: bool = True):
+    """Synthetic GTK tree of ``rows``. Not a live window.
+
+    Cells are built when the Table interface or the child list asks for
+    them. Off-screen cells sit at the GTK sentinel. ``expose_table`` false
+    makes ``get_accessible_at`` return None so the child list is the only
+    way to name a deep row.
+    """
+    state = {"head": 0, "shown": set()}
+    sentinel = -2147483648
+    titles = ("Name", "Payload", "Index")
+    headers = [
+        _Acc("table column header", name=titles[col], width=180, height=24)
+        for col in range(cols)
+    ]
+    action = _NS(get_n_actions=lambda: 1, get_action_name=lambda _index: "activate")
+    table = _Acc("table", name="Rows", width=600, height=484)
+    _bind_gtk_app(table)
+    cells: dict[tuple[int, int], _Acc] = {}
+
+    def cell_name(row: int, col: int) -> str:
+        if col == 0:
+            return f"ROW-{row:05d}"
+        if col == 1:
+            return f"payload-{row}"
+        return str(row)
+
+    def cell(row: int, col: int) -> _Acc:
+        key = (row, col)
+        found = cells.get(key)
+        if found is not None:
+            return found
+        acc = _Acc("table cell", name=cell_name(row, col), width=180, height=23)
+        acc.get_action_iface = lambda action=action: action
+        acc.get_index_in_parent = lambda row=row, col=col: cols + row * cols + col
+        acc.parent = table
+        acc.component.scroll_to = lambda *_args, **_kwargs: False
+        _place_row(acc, sentinel, sentinel, 180, 23)
+        cells[key] = acc
+        return acc
+
+    def place(head: int) -> None:
+        previous = set(state["shown"])
+        state["head"] = head
+        now: set[tuple[int, int]] = set()
+        for col, header in enumerate(headers):
+            _place_row(header, 110 + col * 200, 100, 180, 24)
+        for row in range(head, min(rows, head + 20)):
+            for col in range(cols):
+                now.add((row, col))
+                _place_row(
+                    cell(row, col), 110 + col * 200, 124 + (row - head) * 23, 180, 23,
+                )
+        for key in previous - now:
+            acc = cells.get(key)
+            if acc is not None:
+                _place_row(acc, sentinel, sentinel, 180, 23)
+        state["shown"] = now
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 124:
+            return headers[0]
+        slot = (y - 124) // 23
+        if slot < 0 or slot >= 20:
+            return None
+        row = state["head"] + int(slot)
+        if row < 0 or row >= rows:
+            return None
+        return cell(row, 0)
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: rows
+    table.get_n_columns = lambda: cols
+
+    def accessible_at(row, col):
+        if not expose_table or row < 0 or row >= rows or col < 0 or col >= cols:
+            return None
+        return cell(row, col)
+
+    table.get_accessible_at = accessible_at
+    table.get_column_header = lambda col: headers[col] if 0 <= col < cols else None
+
+    def row_at_index(index: int) -> int:
+        if index < cols:
+            return -1
+        return (index - cols) // cols
+
+    table.get_row_at_index = row_at_index
+    ordered = list(headers)
+    if not expose_table:
+        for row in range(20):
+            for col in range(cols):
+                ordered.append(cell(row, col))
+        deep = min(rows - 1, 5000)
+        for col in range(cols):
+            ordered.append(cell(deep, col))
+        end = rows - 1
+        if end != deep:
+            for col in range(cols):
+                ordered.append(cell(end, col))
+    for index, header in enumerate(headers):
+        header.get_index_in_parent = lambda index=index: index
+    _adopt(table, *ordered)
+    place(0)
+    _place_row(table, 100, 100, 600, 484)
+    window = _Acc("frame", name="TreeProbe", width=640, height=560)
+    _place_row(window, 80, 40, 640, 560)
+    scroll = _Acc("scroll pane", width=600, height=484)
+    _place_row(scroll, 100, 100, 600, 484)
+    _bind_gtk_app(window)
+    _bind_gtk_app(scroll)
+    app = table.get_application()
+    window.get_application = lambda: app
+    scroll.get_application = lambda: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place
+
+
+def test_find_reports_an_offscreen_cell_past_the_old_seek_window(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10k-row GTK tree, not a live window.
+
+    ``scroll_to`` is unsupported and there is no bar, so the cell stays at
+    the sentinel. ``find`` still names it, with no bounds and an off-screen
+    note. The view does not move, and a missing name does not invent a cell.
+    """
+    import time
+
+    from a11y_computer_use import server
+
+    window, _table, state, _place = _large_gtk_tree()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    opening = _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert "ROW-00000" in opening
+    assert "ROW-05000" not in opening
+    assert "ROW-09999" not in opening
+    missed = runtime.find("treeprobe", text="ROW-99999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "no elements match" not in found
+    assert "ROW-05000" in found
+    assert "off-screen" in found
+    assert state["head"] == 0
+    shot = runtime._current
+    cell = next(el for el in shot.elements if el.title == "ROW-05000")
+    assert cell.role == "AXCell"
+    assert cell.bounds is None
+    end = runtime.find("treeprobe", text="ROW-09999")
+    assert "off-screen" in end
+    assert "ROW-09999" in end
+    assert state["head"] == 0
+    end_cell = next(el for el in runtime._current.elements if el.title == "ROW-09999")
+    assert end_cell.bounds is None
+
+
+def test_find_scrolls_a_10k_gtk_row_when_the_bar_can_reach_it(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10k-row tree. The bar fraction, not a fabricated box, reveals the cell.
+
+    Row 5000 is past the old 4096-row seek window. Not a live window.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _large_gtk_tree()
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * 9999))
+        place(max(0, min(head, 9999)))
+        return True
+
+    bar.on_value = on_value
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "ROW-05000" in found
+    assert "no elements match" not in found
+    assert "off-screen" not in found
+    assert state["head"] == 5000
+    cell = next(el for el in runtime._current.elements if el.title == "ROW-05000")
+    assert cell.bounds is not None
+    assert cell.bounds.x >= 0 and cell.bounds.y >= 0
+    assert cell.bounds.width > 1 and cell.bounds.height > 1
+
+
+def test_find_names_an_offscreen_child_when_the_table_interface_has_no_cell(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic tree. ``get_accessible_at`` is empty. The child list still has the row.
+
+    The deep cell is not showing. ``find`` reports it off screen and does
+    not give it a box. Not a live window.
+    """
+    import time
+
+    from a11y_computer_use import server
+
+    window, _table, state, _place = _large_gtk_tree(expose_table=False)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    runtime = _bare_runtime(driver)
+    found = runtime.find("treeprobe", text="ROW-05000")
+    assert "no elements match" not in found
+    assert "ROW-05000" in found
+    assert "off-screen" in found
+    assert state["head"] == 0
+    cell = next(el for el in runtime._current.elements if el.title == "ROW-05000")
+    assert cell.bounds is None
+    end = runtime.find("treeprobe", text="ROW-09999")
+    assert "ROW-09999" in end
+    assert "off-screen" in end
+
+
+def _found_scrolls(text: str) -> int:
+    return int(text.split(" scroll", 1)[0].removeprefix("found after "))
+
+
+def _attach_large_tree_bar(window, table, place, *, rows: int = 10000):
+    """The vertical bar #440 uses. The default tree has none, so find stays off screen."""
+    bar = _Acc(
+        "scroll bar", width=14, height=484, value=0, minimum=0, maximum=6000,
+        states=("VERTICAL",),
+    )
+    _place_row(bar, 700, 100, 14, 484)
+
+    def on_value(acc, new):
+        acc.value = float(new)
+        head = int(round((float(new) / 6000.0) * (rows - 1)))
+        place(max(0, min(head, rows - 1)))
+        return True
+
+    bar.on_value = on_value
+    app = table.get_application()
+    bar.get_application = lambda: app
+    scroll = window.children[0]
+    _adopt(scroll, table, bar)
+    place(0)
+    return bar
+
+
+def test_scroll_to_find_reaches_a_10k_gtk_row_inside_the_scroll_budget(
+    fake_atspi, monkeypatch
+) -> None:
+    """Synthetic 10000×3 GTK tree, not a live window.
+
+    Five wheel lines move about a dozen rows, so 50 of them stay near row
+    650. The table row index sets the vertical bar once. ROW-05000 and
+    ROW-09999 are on screen inside that budget, and a line wheel is not sent.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _large_gtk_tree()
+    _attach_large_tree_bar(window, table, place)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    wheels = {"n": 0}
+    keys = {"n": 0}
+    original = driver.scroll
+
+    def counting_scroll(*args, **kwargs):
+        wheels["n"] += 1
+        return original(*args, **kwargs)
+
+    driver.scroll = counting_scroll
+    driver.key_chord = lambda *_args, **_kwargs: keys.__setitem__("n", keys["n"] + 1)
+    driver.type_text = lambda *_args, **_kwargs: keys.__setitem__("n", keys["n"] + 1)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    opening = runtime.scroll_to_find("treeprobe", text="ROW-00000", max_scrolls=50)
+    assert opening.startswith("found after 0 scroll"), opening
+    assert state["head"] == 0
+    found = runtime.scroll_to_find("treeprobe", text="ROW-05000", max_scrolls=50)
+    assert found.startswith("found after "), found
+    assert "not found" not in found
+    assert "ROW-05000" in found
+    assert _found_scrolls(found) <= 6
+    assert state["head"] == 5000
+    shot = driver.snapshot(Scope.WINDOW, "treeprobe")
+    cell = next(
+        el for el in shot.elements
+        if el.title == "ROW-05000" and el.bounds is not None and el.bounds.y >= 0
+    )
+    assert cell.bounds.width > 1 and cell.bounds.height > 1
+    assert cell.bounds.x >= 0
+    far = runtime.scroll_to_find("treeprobe", text="ROW-09999", max_scrolls=50)
+    assert far.startswith("found after "), far
+    assert "not found" not in far
+    assert "ROW-09999" in far
+    assert _found_scrolls(far) <= 6
+    assert state["head"] >= 9980
+    assert "ROW-09999" in _gtk_row_titles(driver.snapshot(Scope.WINDOW, "treeprobe"))
+    assert wheels["n"] == 0
+    assert keys["n"] == 0
+
+
+def test_gtk_viewport_page_moves_a_large_tree_by_painted_rows(fake_atspi, monkeypatch) -> None:
+    """Synthetic tree. One viewport step is the painted run, not five lines.
+
+    The scroll anchor is the scroll pane. A Chromium table is left alone.
+    Not a live window.
+    """
+    window, table, state, place = _large_gtk_tree()
+    bar = _attach_large_tree_bar(window, table, place)
+    _wire_gtk_tree(monkeypatch, window)
+    scroll = window.children[0]
+    assert scroll.get_role_name() == "scroll pane"
+    assert _atspi.scroll_gtk_viewport_page(scroll, 1) is True
+    assert 15 <= state["head"] <= 25
+    assert bar.value > 0
+    chrome = _Acc("table", name="chrome")
+    app = _Acc("application", name="chrome")
+    app.get_toolkit_name = lambda: ""
+    chrome.get_application = lambda: app
+    assert _atspi.scroll_gtk_viewport_page(chrome, 1) is False
+    assert _atspi.reveal_gtk_named_cell(chrome, "ROW-05000") is None
 
 
 def test_short_gtk_tree_keeps_the_index_walk(fake_atspi, monkeypatch) -> None:
@@ -10908,3 +11430,142 @@ def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> 
     titles = [el.title for el in driver.snapshot(Scope.WINDOW, "qtprobe").elements]
     assert "R0" in titles
     assert "R11" in titles
+
+
+class _WindowNode:
+    """AT-SPI stand-in for showing_toplevels. No bus."""
+
+    def __init__(self, role, name="", states=(), children=()):
+        self.role = role
+        self.name = name
+        self.states = set(states)
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+    def get_application(self):
+        node = self
+        while node.parent is not None:
+            node = node.parent
+        return node
+
+    def get_state_set(self):
+        return _NS(names=set(self.states))
+
+
+def test_showing_toplevels_lists_showing_windows_active_first() -> None:
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    hidden = _WindowNode("frame", "Minimized")
+    menu = _WindowNode("menu", "File", states={"SHOWING"})
+    _WindowNode("application", "mousepad", children=[dialog, editor, hidden, menu])
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Editor", "Preferences"]
+    only = _WindowNode(
+        "application", "solo",
+        children=[_WindowNode("frame", "Only", states={"SHOWING", "ACTIVE"})],
+    )
+    assert [node.name for node in _atspi.showing_toplevels(only)] == ["Only"]
+
+
+def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
+    dialog = _WindowNode("dialog", "Form", states={"SHOWING"})
+    popup = _WindowNode("window", "", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "app", children=[popup, dialog])
+
+    def owns(node):
+        return node if node is popup else None
+
+    monkeypatch.setattr(_atspi, "_combo_owning_popup", owns)
+    assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
+
+
+def test_snapshot_window_list_skips_chrome_cache_frames() -> None:
+    """A find bar and an empty cached frame are not sibling windows.
+
+    Chrome keeps both beside the page, and both are SHOWING. Listing them
+    made the snapshot an untitled group with no rows, so scroll_to_find
+    stopped before the wheel. The named page is the only window. A GTK
+    dialog beside its editor stays.
+    """
+    filler = _WindowNode("panel", "")
+    panel = _WindowNode("panel", "", children=[filler])
+    empty = _WindowNode("frame", "", states={"SHOWING", "ACTIVE"}, children=[panel])
+    page = _WindowNode("frame", "rowtable - Google Chrome", states={"SHOWING"})
+    bar = _WindowNode("frame", "Find in page", states={"SHOWING"})
+    _WindowNode("application", "Google Chrome", children=[empty, bar, page])
+    assert [node.name for node in _atspi.snapshot_window_list(empty)] == [
+        "rowtable - Google Chrome",
+    ]
+    dialog = _WindowNode("dialog", "Preferences", states={"SHOWING"})
+    editor = _WindowNode("frame", "Editor", states={"SHOWING", "ACTIVE"})
+    _WindowNode("application", "mousepad", children=[dialog, editor])
+    assert [node.name for node in _atspi.snapshot_window_list(dialog)] == [
+        "Editor", "Preferences",
+    ]
+
+
+def test_raise_skips_a_window_that_is_already_the_ewmh_active_one(monkeypatch) -> None:
+    driver = LinuxDriver()
+    raised: list[int] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _atspi, "toplevel_raise_target",
+        lambda node: (False, "cuatypeform", 9, (10.0, 20.0, 800.0, 600.0)),
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.window_id_for_toplevel",
+        lambda **_kwargs: 42,
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 42, "app": "chrome", "pid": 9, "title": "cuatypeform"},
+    )
+    monkeypatch.setattr(driver, "raise_window", raised.append)
+    driver._raise_handle_window(object())
+    assert raised == []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 7, "app": "mousepad", "pid": 3, "title": "Editor"},
+    )
+    driver._raise_handle_window(object())
+    assert raised == [42]
+
+
+def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    rows = [
+        {"window_id": 1, "title": "Editor", "pid": 9, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 2, "title": "Preferences", "pid": 9, "on_screen": True,
+         "bounds": {"x": 420, "y": 40, "width": 280, "height": 200}},
+        {"window_id": 3, "title": "Editor", "pid": 4, "on_screen": True,
+         "bounds": {"x": 0, "y": 0, "width": 400, "height": 300}},
+        {"window_id": 4, "title": "Hidden", "pid": 9, "on_screen": False, "bounds": None},
+    ]
+    monkeypatch.setattr(_linux_system, "windows", lambda: rows)
+    assert _linux_system.window_id_for_toplevel(
+        title="Preferences", pid=9, extents=(430, 50, 100, 80),
+    ) == 2
+    assert _linux_system.window_id_for_toplevel(
+        title="", pid=9, extents=(10, 10, 100, 80),
+    ) == 1
+    assert _linux_system.window_id_for_toplevel(
+        title="Missing", pid=9, extents=None,
+    ) is None
