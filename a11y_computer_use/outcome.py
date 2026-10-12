@@ -763,6 +763,233 @@ def _windows_pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+# A 1px layout jitter must not look like a reorder. Row moves in a file
+# list are many times this. The order bucket matches the drag step.
+_DRAG_MOVE_PX = 4
+_DRAG_ORDER_BUCKET_PX = 8
+
+
+def _drag_label(element: object) -> str:
+    title = str(getattr(element, "title", "") or "").strip()
+    if title:
+        return title
+    value = getattr(element, "value", None)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _drag_center(element: object) -> tuple[int, int] | None:
+    bounds = getattr(element, "bounds", None)
+    if bounds is None:
+        return None
+    try:
+        return (
+            int(bounds.x) + int(bounds.width) // 2,
+            int(bounds.y) + int(bounds.height) // 2,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _drag_order_key(element: object) -> tuple:
+    center = _drag_center(element)
+    label = _drag_label(element)
+    if center is None:
+        return (0, 0, label)
+    return (
+        center[1] // _DRAG_ORDER_BUCKET_PX,
+        center[0] // _DRAG_ORDER_BUCKET_PX,
+        label,
+    )
+
+
+def _order_subject(elements: Sequence[object], element: object) -> object | None:
+    """The node whose same-parent siblings are the list being reordered.
+
+    A table cell's own siblings are the rows. A cell that is alone under its
+    parent uses the parent row and that row's siblings instead.
+    """
+    by_ref = {getattr(el, "ref", None): el for el in elements}
+    current: object | None = element
+    for _ in range(4):
+        if current is None:
+            return None
+        role = getattr(current, "role", "")
+        parent = getattr(current, "parent", None)
+        siblings = [
+            el for el in elements
+            if getattr(el, "role", "") == role
+            and getattr(el, "parent", None) == parent
+            and _drag_label(el)
+        ]
+        if len(siblings) >= 2:
+            return current
+        current = by_ref.get(parent)
+    return None
+
+
+def _title_order(elements: Sequence[object], subject: object) -> tuple[str, ...] | None:
+    role = getattr(subject, "role", "")
+    parent = getattr(subject, "parent", None)
+    siblings = [
+        el for el in elements
+        if getattr(el, "role", "") == role and getattr(el, "parent", None) == parent
+    ]
+    labels = [_drag_label(el) for el in sorted(siblings, key=_drag_order_key)]
+    labels = [label for label in labels if label]
+    if len(labels) < 2:
+        return None
+    return tuple(labels)
+
+
+def _order_changed(before: Sequence[object], after: Sequence[object], subject: object) -> bool:
+    previous = _title_order(before, subject)
+    if previous is None:
+        return False
+    wanted = sorted(previous)
+    role = getattr(subject, "role", "")
+    parents = {
+        getattr(el, "parent", None) for el in after if getattr(el, "role", "") == role
+    }
+    for parent in parents:
+        stand = next(
+            (el for el in after if getattr(el, "role", "") == role and getattr(el, "parent", None) == parent),
+            None,
+        )
+        if stand is None:
+            continue
+        current = _title_order(after, stand)
+        if current is not None and sorted(current) == wanted and current != previous:
+            return True
+    return False
+
+
+def _match_named(elements: Sequence[object], element: object) -> object | None:
+    """The same named control in a later tree. Selection is not identity."""
+    role = getattr(element, "role", "")
+    stable = getattr(element, "stable_id", None)
+    if stable:
+        for other in elements:
+            if getattr(other, "stable_id", None) == stable and getattr(other, "role", "") == role:
+                return other
+    label = _drag_label(element)
+    if not label:
+        return None
+    matches = [
+        other for other in elements
+        if getattr(other, "role", "") == role and _drag_label(other) == label
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _relative_bounds_moved(
+    before: Sequence[object], after: Sequence[object], start: object, end: object | None,
+) -> bool:
+    """True when the item moved relative to the target, not with a scroll."""
+    if end is None:
+        return False
+    after_start = _match_named(after, start)
+    after_end = _match_named(after, end)
+    if after_start is None or after_end is None:
+        return False
+    before_start_at = _drag_center(start)
+    before_end_at = _drag_center(end)
+    after_start_at = _drag_center(after_start)
+    after_end_at = _drag_center(after_end)
+    if None in (before_start_at, before_end_at, after_start_at, after_end_at):
+        return False
+    assert before_start_at is not None and before_end_at is not None
+    assert after_start_at is not None and after_end_at is not None
+    before_vec = (before_end_at[0] - before_start_at[0], before_end_at[1] - before_start_at[1])
+    after_vec = (after_end_at[0] - after_start_at[0], after_end_at[1] - after_start_at[1])
+    return (
+        abs(after_vec[0] - before_vec[0]) > _DRAG_MOVE_PX
+        or abs(after_vec[1] - before_vec[1]) > _DRAG_MOVE_PX
+    )
+
+
+def drag_item_moved(before: object | None, after: object | None, start: object | None,
+                    end: object | None = None) -> bool:
+    """True when ``start`` changed order among its siblings, or moved relative to ``end``.
+
+    A selection change is not a move. A uniform scroll is not a move: the
+    vector from the item to the target stays put. An item that disappears
+    is not, by itself, a move.
+    """
+    if before is None or after is None or start is None:
+        return False
+    before_els = _snap_elements(before)
+    after_els = _snap_elements(after)
+    subject = _order_subject(before_els, start)
+    if subject is not None and _order_changed(before_els, after_els, subject):
+        return True
+    return _relative_bounds_moved(before_els, after_els, start, end)
+
+
+def drag_drop_verdict(
+    before: object | None,
+    after: object | None,
+    start: object | None,
+    end: object | None = None,
+    *,
+    file_landed: bool | None = None,
+) -> tuple[str, str]:
+    """``(outcome, evidence)`` for a drag.
+
+    Confirmed when the item moved, or the source file is newly in the target
+    folder (``file_landed``). A tree that can be compared and did not change
+    is ``suspected_noop``. Nothing to compare is ``unverifiable``. Both of
+    those say the drop was not confirmed. Selection alone is not a drop.
+    """
+    if file_landed is True:
+        return "confirmed", "the file is now in the target folder"
+    if drag_item_moved(before, after, start, end):
+        return "confirmed", "the item moved"
+    comparable = (
+        file_landed is False
+        or (before is not None and after is not None and start is not None)
+    )
+    if comparable:
+        return "suspected_noop", "the drop was not confirmed"
+    return "unverifiable", "the drop was not confirmed"
+
+
+def element_at_point(snap: object | None, point: object | None) -> object | None:
+    """The smallest titled element whose box contains ``point``, or None."""
+    if snap is None or point is None:
+        return None
+    px = getattr(point, "x", None)
+    py = getattr(point, "y", None)
+    if not isinstance(px, (int, float)) or not isinstance(py, (int, float)):
+        return None
+    display_id = getattr(point, "display_id", None)
+    hits = []
+    for el in _snap_elements(snap):
+        bounds = getattr(el, "bounds", None)
+        if bounds is None:
+            continue
+        try:
+            width, height = int(bounds.width), int(bounds.height)
+            left, top = int(bounds.x), int(bounds.y)
+        except (TypeError, ValueError):
+            continue
+        if width <= 0 or height <= 0:
+            continue
+        if display_id is not None and getattr(bounds, "display_id", display_id) != display_id:
+            continue
+        if left <= px < left + width and top <= py < top + height:
+            hits.append(el)
+    if not hits:
+        return None
+    titled = [el for el in hits if _drag_label(el)]
+    pool = titled or hits
+    pool.sort(key=lambda el: int(el.bounds.width) * int(el.bounds.height))
+    return pool[0]
+
+
 def wait_until_dead(pid: int, wait_s: float) -> bool:
     """True if ``pid`` exits within ``wait_s``.
 

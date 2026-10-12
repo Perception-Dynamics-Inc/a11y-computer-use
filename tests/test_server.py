@@ -2657,6 +2657,8 @@ def test_drag_path_reaches_the_driver_as_waypoints_on_the_start_display(tmp_path
     rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
     out = rt.drag(start_x=10, start_y=10, end_x=90, end_y=90, path=[[30, 60], [60, 30]])
     assert "via 2 waypoints" in out
+    assert "drop not confirmed" in out
+    assert out.outcome == "unverifiable"
     start, end, path = calls[0]
     assert path == (Point(7, 30, 60), Point(7, 60, 30))
     assert start.display_id == 7 and end.display_id == 7
@@ -2678,6 +2680,112 @@ def test_drag_path_rejects_bad_waypoints(tmp_path) -> None:
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1]])
     with pytest.raises(ValueError, match="256"):
         rt.drag(start_x=1, start_y=1, end_x=2, end_y=2, path=[[1, 1]] * 257)
+
+
+def _drag_rows(snapshot_id: str, rows: list[tuple[str, int, int]], *, selected: str | None = None) -> Snapshot:
+    """A window and one cell per ``(title, x, y)``. Rows are 28px tall."""
+    cells = []
+    for index, (title, x, y) in enumerate(rows, start=2):
+        cells.append(Element(
+            f"e{index}", "AXCell", title, None, Bounds(0, x, y, 180, 28), snapshot_id,
+            parent="e1", path=("AXWindow", "AXCell"), selected=title == selected,
+        ))
+    window = Element(
+        "e1", "AXWindow", "files", None, Bounds(0, 0, 0, 400, 300), snapshot_id,
+        path=("AXWindow",),
+    )
+    return Snapshot(
+        snapshot_id, Scope.WINDOW, "com.test", 1, 0.0,
+        (Display(0, 1280, 800, 1.0, True),), (window, *cells),
+    )
+
+
+def _drag_runtime(tmp_path, before: Snapshot, after: Snapshot, *, on_drag=None):
+    class _D:
+        resolves_apps = True
+        name = "fake"
+        i = 0
+
+        def ensure_trusted(self):
+            return None
+
+        def frontmost_app(self):
+            return ("com.test", 1)
+
+        def main_display_id(self):
+            return 0
+
+        def snapshot(self, scope, app):
+            del scope, app
+            return after if _D.i else before
+
+        def resolve_ref(self, snap, ref, *, live=None):
+            del live
+            return snap.element(ref)
+
+        def drag(self, start, end, *, button=None, path=(), pre_check=None, dry_run=False):
+            del start, end, button, path, pre_check, dry_run
+            _D.i += 1
+            if on_drag is not None:
+                on_drag()
+
+    store = safety.PermissionStore(tmp_path / "p.json")
+    store.set_tier("com.test", safety.Tier.CLICK)
+    rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
+    rt._current = before
+    return rt
+
+
+def test_drag_confirms_when_the_row_order_changes(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    after = _drag_rows("s1", [("readme.txt", 20, 40), ("notes", 20, 68)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e3", end_ref="e2")
+    assert out == "dragged e3 (AXCell 'readme.txt') -> e2 (AXCell 'notes')"
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the item moved"
+
+
+def test_drag_confirms_a_sideways_move_that_keeps_the_row_order(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    after = _drag_rows("s1", [("notes", 20, 40), ("readme.txt", 200, 68)])
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e3", end_ref="e2")
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the item moved"
+    assert "drop not confirmed" not in out
+
+
+def test_drag_does_not_confirm_a_selection_or_a_scroll(tmp_path) -> None:
+    before = _drag_rows("s0", [("notes", 20, 40), ("readme.txt", 20, 68)])
+    selected = _drag_rows("s1", [("notes", 20, 40), ("readme.txt", 20, 68)], selected="readme.txt")
+    out = _drag_runtime(tmp_path, before, selected).drag(start_ref="e3", end_ref="e2")
+    assert "drop not confirmed" in out
+    assert out.outcome == "suspected_noop"
+    assert out.evidence == "the drop was not confirmed"
+
+    scrolled = _drag_rows("s2", [("notes", 20, 80), ("readme.txt", 20, 108)])
+    out = _drag_runtime(tmp_path, before, scrolled).drag(start_x=110, start_y=82, end_x=110, end_y=54)
+    assert out.outcome == "suspected_noop"
+    assert "drop not confirmed" in out
+
+
+def test_drag_confirms_when_the_file_appears_in_the_target_folder(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(server.Runtime, "_DRAG_DROP_SETTLE_S", 0)
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    before = _drag_rows("s0", [("readme.txt", 20, 68), (str(folder), 20, 40)])
+    after = _drag_rows("s1", [("readme.txt", 20, 68), (str(folder), 20, 40)])
+
+    def land() -> None:
+        (folder / "readme.txt").write_text("moved")
+
+    out = _drag_runtime(tmp_path, before, after, on_drag=land).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "confirmed"
+    assert out.evidence == "the file is now in the target folder"
+    assert (folder / "readme.txt").is_file()
+
+    out = _drag_runtime(tmp_path, before, after).drag(start_ref="e2", end_ref="e3")
+    assert out.outcome == "suspected_noop"
+    assert "drop not confirmed" in out
 
 
 # --- verified activation ------------------------------------------------------
