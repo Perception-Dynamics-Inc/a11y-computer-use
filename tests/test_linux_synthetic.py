@@ -3950,6 +3950,132 @@ def test_chrome_hidden_alive_ref_is_not_showing_and_a_gone_ref_stays_stale(monke
     assert _atspi.hidden_web_target(attached) is True
 
 
+def test_reused_parent_ids_do_not_hide_a_showing_electron_document(monkeypatch) -> None:
+    """Electron page content sits several panels under a showing frame.
+
+    ``get_parent`` returns a new wrapper. After the walk drops one, CPython
+    allocates a later panel at that same ``id()``. A seen-set of those ids
+    stops before the frame and reports the document hidden. The walk keys on
+    the AT-SPI bus name and object path, and keeps each wrapper alive when
+    that key is missing. A second chain reuses two wrapper objects for
+    different ancestors, so ``id()`` collides while both objects are alive.
+    Not a live Electron.
+    """
+    asked: list[tuple[str, str]] = []
+
+    def key(node):
+        token = getattr(node, "atspi_key", None)
+        if token is not None:
+            asked.append(token)
+        return token
+
+    monkeypatch.setattr(_atspi, "_atspi_wrapper_key", key)
+
+    class App:
+        def get_toolkit_name(self):
+            return "Chromium"
+
+        def get_name(self):
+            return "electron"
+
+        def get_application(self):
+            return self
+
+    app = App()
+    frame_at = 9
+
+    def states_of(names: set[str]):
+        copied = set(names)
+        return _NS(names=copied, contains=lambda member: str(member) in copied)
+
+    class Fresh:
+        __slots__ = ("role", "name", "states", "app", "depth", "atspi_key")
+
+        def __init__(self, role: str, depth: int):
+            self.role = role
+            self.name = "Notes" if role == "document web" else "Save note" if role == "push button" else ""
+            self.states = {"SHOWING", "VISIBLE"}
+            self.app = app
+            self.depth = depth
+            if role == "push button":
+                path = "/button"
+            elif role == "document web":
+                path = "/doc"
+            elif role == "frame":
+                path = "/frame"
+            else:
+                path = f"/panel/{depth}"
+            self.atspi_key = (":1.44", path)
+
+        def get_role_name(self):
+            return self.role
+
+        def get_name(self):
+            return self.name
+
+        def get_application(self):
+            return self.app
+
+        def get_state_set(self):
+            return states_of(self.states)
+
+        def get_parent(self):
+            if self.depth >= frame_at:
+                return None
+            nxt = self.depth + 1
+            if nxt == 1:
+                role = "document web"
+            elif nxt == frame_at:
+                role = "frame"
+            else:
+                role = "panel"
+            # Same-sized garbage. A freed wrapper's id is what the next
+            # ancestor is allocated at when the walk does not keep it.
+            dead = [Fresh("panel", -1) for _ in range(8)]
+            del dead
+            return Fresh(role, nxt)
+
+    for _ in range(30):
+        asked.clear()
+        assert _atspi.hidden_web_target(Fresh("push button", 0)) is False
+        assert (":1.44", "/frame") in asked
+
+    specs = [("document web", "/doc")]
+    specs.extend(("panel", f"/panel/{depth}") for depth in range(2, frame_at))
+    specs.append(("frame", "/frame"))
+
+    class Recycled(Fresh):
+        def get_parent(self):
+            if self.depth >= frame_at:
+                return None
+            return materialize(self.depth + 1)
+
+    shells = [Recycled("panel", 0), Recycled("panel", 0)]
+
+    def materialize(index: int) -> Recycled:
+        shell = shells[(index - 1) % 2]
+        role, path = specs[index - 1]
+        shell.role = role
+        shell.name = "Notes" if role == "document web" else ""
+        shell.states = {"SHOWING", "VISIBLE"}
+        shell.depth = index
+        shell.atspi_key = (":1.44", path)
+        return shell
+
+    class Button(Recycled):
+        def __init__(self):
+            super().__init__("push button", 0)
+            self.atspi_key = (":1.44", "/button")
+
+        def get_parent(self):
+            return materialize(1)
+
+    asked.clear()
+    assert _atspi.hidden_web_target(Button()) is False
+    assert (":1.44", "/doc") in asked
+    assert (":1.44", "/frame") in asked
+
+
 def test_set_text_on_wayland_does_not_claim_success_when_delete_is_a_noop(fake_atspi, monkeypatch) -> None:
     field = _KeyClearedWebField("bench-value-0")
     sent: list[str] = []
