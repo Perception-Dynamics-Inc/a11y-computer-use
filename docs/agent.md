@@ -52,10 +52,21 @@ in `a11y_computer_use/providers.py`. See `docs/agent-loop.md`.
    does not escalate a different key. The step result keeps the original
    error next to any escalation outcome. If no same-intent method remains,
    the loop stops escalating and reports that error.
-8. Stuck. If the same snapshot digest appears three times in the recent
-   window, the loop emits a `stuck` event and tells the model to change
-   strategy. After `max_replans` of those prompts (default 2) the run fails
-   with `reason` `stuck`.
+8. Stuck. A subgoal is the work since the last verified step. `stuck_steps`
+   (default 6) and `stuck_time_s` (default 120) bound one tactic of that
+   subgoal. When either budget runs out, the loop forces the next strategy
+   in a fixed order: the keyboard path, then the vision fallback, then a
+   re-plan. Each switch is one `strategy_switch` line in `trajectory.jsonl`.
+   A switch retries the same action or a same-intent method. It does not
+   change a key, turn typing into a click, turn a menu into focus, or
+   rewrite a click that already has `x` and `y`. When every switch has been
+   used and the budget runs out again, the run stops with `status` `stuck`,
+   a reason that names the subgoal and the switches, and evidence (steps
+   without progress, elapsed seconds, and the last action). That stop does
+   not wait for `max_time`. Separately, if the same snapshot digest appears
+   three times in the recent window, the loop emits a `stuck` event and
+   tells the model to change strategy. After `max_replans` of those prompts
+   (default 2) the run fails with `status` `failed` and `reason` `stuck`.
 9. Done. `done` must carry an answer and 1 to 3 conditions. The loop
    re-checks them on a fresh snapshot before it accepts success. A failed
    check is rejected and the model continues, until a limit stops the run.
@@ -228,7 +239,7 @@ than 40 pixels.
 ## CLI
 
 ```bash
-a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
+a11y-agent run "goal" --model scripted:turns.json --display :1 --max-steps 30 --max-time 120 --stuck-steps 6 --stuck-time 120 --model-timeout 120 --trace-dir /tmp/trace --json
 ```
 
 `--approve-policy deny` is the default: quit, close, send, delete, and
@@ -270,15 +281,16 @@ or with a policy other than `deny`. `--allow-exec` exposes `shell` and
 
 | Field | Meaning |
 |---|---|
-| `status` | `success`, `failed`, `needs_human`, or `cancelled` |
+| `status` | `success`, `failed`, `stuck`, `needs_human`, or `cancelled` |
 | `answer` | The `done` answer, or `""` |
 | `steps` | Count of actions in `step_log` |
 | `elapsed_s` | Wall clock for the run |
-| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `no_action`, `cancelled`, `error: ...`, or the human message |
+| `reason` | `done`, `max_steps`, `max_time`, `stuck`, `stuck: subgoal ...`, `no_action`, `cancelled`, `error: ...`, or the human message |
 | `conditions` | `{condition, ok, detail}` from the last evidence check |
 | `needs_human` | `{kind, message, ref, window}` or null. `kind` is `login`, `captcha`, `2fa`, `payment`, or `other` |
 | `trace_dir` | Directory of the trace |
 | `step_log` | One object per action |
+| `evidence` | For `status` `stuck`, `{subgoal, switches, steps_without_progress, elapsed_s, last_action}`. Otherwise null |
 
 Each `step_log` entry has `index`, `action`, `target` (`ref`, `role`, `name`
 from the snapshot the model acted on, before the action renumbered refs),
@@ -286,7 +298,7 @@ from the snapshot the model acted on, before the action renumbered refs),
 `error`, `verified`, `duration_s`, `skipped` (later calls in that turn that
 did not run), and `turn_stop` (`failure`, `refusal`, `needs_human`, or null).
 
-Exit codes: `0` success, `1` failed (including `stuck`, `max_steps`, `max_time`),
+Exit codes: `0` success, `1` failed or `stuck` (including `max_steps`, `max_time`),
 `2` needs_human, `3` error or cancel.
 
 SIGINT and SIGTERM during `a11y-agent run` cancel the run after the current
@@ -591,6 +603,9 @@ Hermetic, on every OS, with `ScriptedModel` only (`tests/test_agent_core.py`,
 - stuck method changes stay on the same intent (alternate ref, coordinate
   click of that element, Return only for a focused click) and failure with
   `reason` `stuck` after repeated screens
+- a subgoal stuck budget switches keyboard, then vision, then re-plan, records
+  each switch in the trace, keeps an explicit `x`/`y` click, and stops with
+  `status` `stuck` before `max_time`
 - a missing ref stays a click error and does not send Escape or Return
 - a no-op key does not turn the next chord into Return, a failed `type` does
   not become a click, and a failed `menu` does not become focus

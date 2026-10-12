@@ -106,6 +106,8 @@ def build_agent(args: argparse.Namespace):
         max_steps=args.max_steps,
         max_time_s=args.max_time_s,
         model_timeout_s=args.model_timeout_s,
+        stuck_steps=args.stuck_steps,
+        stuck_time_s=args.stuck_time_s,
         approve=approve,
         auto_deny=auto_deny,
         approve_policy=policy,
@@ -386,6 +388,20 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--display", default=None, help="X display, for example :1 (also sets $DISPLAY)")
     run.add_argument("--max-steps", type=int, default=50, dest="max_steps")
     run.add_argument("--max-time", type=float, default=900.0, dest="max_time_s", help="wall-clock budget in seconds")
+    run.add_argument(
+        "--stuck-steps",
+        type=int,
+        default=6,
+        dest="stuck_steps",
+        help="unverified steps per tactic before a subgoal strategy switch (default 6)",
+    )
+    run.add_argument(
+        "--stuck-time",
+        type=float,
+        default=120.0,
+        dest="stuck_time_s",
+        help="seconds without verified progress per tactic before a subgoal strategy switch (default 120)",
+    )
     run.add_argument(
         "--model-timeout",
         type=float,

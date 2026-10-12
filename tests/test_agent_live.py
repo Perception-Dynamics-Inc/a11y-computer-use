@@ -897,6 +897,55 @@ def test_agent_changes_strategy_after_a_stuck_ping(tmp_path, isolated_home) -> N
         dest.unlink(missing_ok=True)
 
 
+@requires_display
+def test_agent_stops_early_when_a_subgoal_stays_stuck(tmp_path, isolated_home) -> None:
+    """Ping changes nothing, so the subgoal budget stops before max_time."""
+    Agent, ScriptedModel, ModelTurn, ToolCall = _agent_api()
+    proc = launch_gtk()
+    trace = tmp_path / "trace"
+    trace.mkdir()
+    started = time.perf_counter()
+    try:
+        driver = _linux_driver()
+        assert wait_gtk_snapshot(driver) is not None
+        _focus_app()
+        _grant_linux_desktop()
+
+        def script(messages):
+            text = message_text(messages)
+            ping = pick(parse_snapshot(text), role="button", name="Ping")
+            ref = ping.ref if ping is not None else "e999"
+            return ModelTurn(calls=[ToolCall("click", {"ref": ref})])
+
+        result = _run_agent(
+            Agent,
+            _scripted(ScriptedModel, script),
+            f"In {APP_NAME}, click Ping until the screen changes.",
+            trace,
+            max_steps=30,
+            max_time_s=180,
+            stuck_steps=1,
+            stuck_time_s=60,
+        )
+        elapsed = time.perf_counter() - started
+        assert result.status == "stuck", result
+        assert result.reason and result.reason.startswith("stuck: subgoal")
+        assert result.evidence is not None
+        assert result.evidence["switches"] == ["keyboard", "vision", "replan"]
+        assert result.steps == 4
+        assert elapsed < 90
+        rows = [
+            json.loads(line)
+            for line in (trace / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        switches = [row["switch"] for row in rows if row.get("kind") == "strategy_switch"]
+        assert switches == ["keyboard", "vision", "replan"]
+        assert any(row.get("kind") == "stuck" for row in rows)
+    finally:
+        stop_process(proc)
+
+
 @pytest.fixture
 def pages(tmp_path, isolated_home, monkeypatch):
     assert isolated_home.is_dir()

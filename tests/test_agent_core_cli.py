@@ -448,6 +448,23 @@ def test_missing_model_exits_3():
     assert exc.value.code == 3
 
 
+def test_stuck_budget_flags_reach_the_agent(tmp_path):
+    script = tmp_path / "turns.json"
+    script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
+    parser = cli._build_parser()
+    default = parser.parse_args(["run", "goal", "--model", f"scripted:{script}"])
+    custom = parser.parse_args([
+        "run", "goal", "--model", f"scripted:{script}",
+        "--stuck-steps", "2",
+        "--stuck-time", "15",
+    ])
+    assert cli.build_agent(default).stuck_steps == 6
+    assert cli.build_agent(default).stuck_time_s == 120.0
+    agent = cli.build_agent(custom)
+    assert agent.stuck_steps == 2
+    assert agent.stuck_time_s == 15.0
+
+
 def test_model_timeout_flag_defaults_to_120_and_is_configurable(tmp_path):
     script = tmp_path / "turns.json"
     script.write_text(json.dumps({"turns": [{"text": "", "calls": []}]}), encoding="utf-8")
