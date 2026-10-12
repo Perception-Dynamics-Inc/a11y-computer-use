@@ -30,7 +30,13 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 
-from a11y_computer_use.observe import MAX_CHILDREN, DisplayGeometry, RawNode, normalize_document_title
+from a11y_computer_use.observe import (
+    MAX_CHILDREN,
+    SHEET_MAX_CHILDREN,
+    DisplayGeometry,
+    RawNode,
+    normalize_document_title,
+)
 from a11y_computer_use.schema import ComputerUseError, Display, ErrorCode
 
 # AT-SPI role name (english, from get_role_name()) -> canonical AX role.
@@ -1875,11 +1881,13 @@ class _OnScreenBand:
     The shared pruner keeps at most ``MAX_CHILDREN`` children of one node and
     drops the rest. A Chromium list can paint more rows than that (29 rows of
     18px in a 520px box). A band stays within the cap, so find still matches
-    the last painted row. A shorter run is not wrapped.
+    the last painted row. A shorter run is not wrapped. A Calc band uses the
+    table role so the sheet cap, not the dense cap, applies to its cells.
     """
 
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[tuple], *, role: str = "panel") -> None:
         self._rows = rows
+        self._role = role
         left = min(float(pos[0]) for _acc, pos, _size in rows)
         top = min(float(pos[1]) for _acc, pos, _size in rows)
         right = max(float(pos[0]) + float(size[0]) for _acc, pos, size in rows)
@@ -1887,7 +1895,7 @@ class _OnScreenBand:
         self._rect = _BandRect(left, top, max(1.0, right - left), max(1.0, bottom - top))
 
     def get_role_name(self) -> str:
-        return "panel"
+        return self._role
 
     def get_name(self) -> str:
         return ""
@@ -1949,8 +1957,9 @@ class ATSPIAccessor:
     A GTK table whose rows do not fit the child cap lists the cells that
     overlap the screen, grouped so the cap keeps that whole run. ``find``
     scrolls a named Table cell into the run when the name is not already
-    on screen. A short table, a Qt grid, and a Calc sheet keep the walks
-    they already had.
+    on screen. A short table and a Qt grid keep the walks they already had.
+    A Calc sheet lists the cells inside its on-screen box, banded so the
+    child cap does not stop at the first six rows.
     """
 
     def __init__(self) -> None:
@@ -2218,9 +2227,11 @@ class ATSPIAccessor:
         # Calc reports 1048576×16384 and get_child_at_index is row-major, so
         # the first fetch is all of row 1. A modest child count is the
         # visible cells (LibreOffice 25.2 exposes about 65) and is walked
-        # as usual. The observe cap for address-titled cells is 96.
+        # as usual. A million-row sheet lists the cells in its on-screen
+        # box. Those are banded: a flat list would keep the first 96 and
+        # drop the rows below that, which is most of a 1280×800 sheet.
         if count > _MAX_CHILDREN_FETCH and _spreadsheet_table(node):
-            return _sheet_window_cells(node)
+            return _publish_sheet_cells(_sheet_window_cells(node))
         count = min(count, _MAX_CHILDREN_FETCH)
         kids = []
         for i in range(count):
@@ -5591,6 +5602,13 @@ _CELL_EDITOR_PANEL = re.compile(r"^Cell\s+([A-Z]{1,3}[1-9][0-9]*)$")
 _SHEET_SCAN_ROWS = 32
 _SHEET_SCAN_COLS = 16
 _SHEET_KEEP = 96
+# On-screen Calc window the snapshot will list. 64×32 covers a tall display
+# at the default row height (a 1280×800 sheet shows about 29 rows). The
+# pruner keeps SHEET_MAX_CHILDREN cells per band and MAX_CHILDREN bands
+# before the dense cap, and 64×32 stays inside that. A million-row sheet
+# is not walked.
+_SHEET_VIEW_MAX_ROWS = 64
+_SHEET_VIEW_MAX_COLS = 32
 _LO_COMMS = frozenset({"soffice", "soffice.bin", "oosplash"})
 
 
@@ -6613,8 +6631,331 @@ def _spreadsheet_table(node) -> bool:
     return False
 
 
-def _sheet_window_cells(acc) -> list:
-    """Cells from ``Table.get_accessible_at``, on-screen ones first.
+def _sheet_index(address: str) -> tuple[int, int] | None:
+    """``(row, column)`` for ``A1`` or ``AA10``. None when it is not an address."""
+    if not _SHEET_ADDRESS.match(address):
+        return None
+    split = 0
+    while split < len(address) and address[split].isalpha():
+        split += 1
+    col = 0
+    for char in address[:split]:
+        col = col * 26 + (ord(char) - ord("A") + 1)
+    row = int(address[split:]) - 1
+    col -= 1
+    if row < 0 or col < 0:
+        return None
+    return row, col
+
+
+def _sheet_coord_from_node(node, table) -> tuple[int, int] | None:
+    """Address of ``node`` or a close ancestor, as ``(row, column)``."""
+    current = node
+    for _depth in range(6):
+        if current is None or current is table:
+            return None
+        found = _sheet_index(_node_name(current))
+        if found is not None:
+            return found
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return None
+        current = parent
+    return None
+
+
+def _sheet_view_box(acc, screen: tuple[int, int]):
+    """The table's screen rectangle clipped to the display, or None.
+
+    ``(x0, y0, x1, y1)`` with ``x1`` and ``y1`` exclusive. This is the
+    painted grid. Cells outside it are the rest of the million-row sheet.
+    """
+    pos, size = _extents(acc)
+    if not _overlaps_screen(pos, size, screen):
+        return None
+    x0 = max(0.0, float(pos[0]))
+    y0 = max(0.0, float(pos[1]))
+    x1 = min(float(screen[0]), float(pos[0]) + float(size[0]))
+    y1 = min(float(screen[1]), float(pos[1]) + float(size[1]))
+    if x1 - x0 <= 1 or y1 - y0 <= 1:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def _cell_box(acc, row: int, col: int):
+    """``(x0, y0, x1, y1)`` of the cell, or None when it has no positive box."""
+    cell = _table_cell_at(acc, row, col)
+    if cell is None:
+        return None
+    pos, size = _extents(cell)
+    if pos is None or size is None:
+        return None
+    width = float(size[0])
+    height = float(size[1])
+    if width <= 0 or height <= 0:
+        return None
+    x = float(pos[0])
+    y = float(pos[1])
+    if x <= _OFFSCREEN_SENTINEL or y <= _OFFSCREEN_SENTINEL:
+        return None
+    return (x, y, x + width, y + height)
+
+
+def _search_overlapping(count: int, span_at, low: float, high: float) -> tuple[int, int] | None:
+    """Inclusive indexes whose ``(start, end)`` meets ``[low, high)``.
+
+    ``span_at(index)`` returns that pair, or None when the cell has no box.
+    Positions increase with the index. The search is exponential and then
+    binary, a few dozen probes, so a million-row sheet is not walked.
+    """
+    if count <= 0 or not high > low:
+        return None
+    cache: dict[int, tuple[float, float] | None] = {}
+
+    def span(index: int):
+        if index < 0 or index >= count:
+            return None
+        if index not in cache:
+            cache[index] = span_at(index)
+        return cache[index]
+
+    def kind(index: int) -> str:
+        got = span(index)
+        if got is None:
+            return "none"
+        start, end = got
+        if end > low and start < high:
+            return "hit"
+        if end <= low:
+            return "above"
+        return "past"
+
+    if kind(0) == "none":
+        return None
+
+    prev = 0
+    index = 0
+    first = None
+    for _step in range(40):
+        state = kind(index)
+        if state == "above":
+            prev = index
+            nxt = 1 if index == 0 else index * 2
+            if nxt <= index:
+                return None
+            if nxt >= count:
+                if index >= count - 1:
+                    return None
+                index = count - 1
+                continue
+            index = nxt
+            continue
+        lo, hi = prev, index
+        found = None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            state = kind(mid)
+            if state == "hit":
+                found = mid
+                hi = mid - 1
+            elif state == "above":
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        first = found
+        break
+    if first is None:
+        return None
+
+    last = first
+    index = first
+    for _step in range(40):
+        nxt = index + 1 if index == first else index * 2
+        if nxt <= index:
+            break
+        if nxt >= count:
+            nxt = count - 1
+        if nxt <= index:
+            break
+        state = kind(nxt)
+        if state == "hit":
+            last = nxt
+            if nxt >= count - 1:
+                break
+            index = nxt
+            continue
+        lo, hi = index, nxt
+        found = index if kind(index) == "hit" else None
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if kind(mid) == "hit":
+                found = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if found is None:
+            return None
+        last = found
+        break
+    if last < first or kind(last) != "hit":
+        return None
+    return first, last
+
+
+def _clamp_sheet_span(span: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """Keep the visible origin and at most the on-screen maximum."""
+    row0, row1, col0, col1 = span
+    row0 = max(0, int(row0))
+    col0 = max(0, int(col0))
+    row1 = max(row0, int(row1))
+    col1 = max(col0, int(col1))
+    return (
+        row0,
+        min(row1, row0 + _SHEET_VIEW_MAX_ROWS - 1),
+        col0,
+        min(col1, col0 + _SHEET_VIEW_MAX_COLS - 1),
+    )
+
+
+def _span_advances(acc, row0: int, row1: int, col0: int, col1: int) -> bool:
+    """True when the corner cells move down and to the right.
+
+    A toolkit that parks every cell at the same point would otherwise look
+    like the whole sheet overlaps the window.
+    """
+    if row1 > row0:
+        top = _cell_box(acc, row0, col0)
+        bottom = _cell_box(acc, row1, col0)
+        if top is None or bottom is None or bottom[1] <= top[1]:
+            return False
+    if col1 > col0:
+        left = _cell_box(acc, row0, col0)
+        right = _cell_box(acc, row0, col1)
+        if left is None or right is None or right[0] <= left[0]:
+            return False
+    return True
+
+
+def _sheet_span_from_extents(acc, box, n_rows: int, n_cols: int):
+    """Inclusive ``(row0, row1, col0, col1)`` whose boxes meet ``box``.
+
+    None when the cells have no boxes, or the boxes do not advance. The
+    caller then hit-tests the same rectangle.
+    """
+    x0, y0, x1, y1 = box
+
+    def row_span(row: int):
+        got = _cell_box(acc, row, 0)
+        if got is None:
+            return None
+        return (got[1], got[3])
+
+    def col_span(col: int):
+        got = _cell_box(acc, row0, col)
+        if got is None:
+            return None
+        return (got[0], got[2])
+
+    rows = _search_overlapping(n_rows, row_span, y0, y1)
+    if rows is None:
+        return None
+    row0, row1 = rows
+    cols = _search_overlapping(n_cols, col_span, x0, x1)
+    if cols is None:
+        return None
+    col0, col1 = cols
+    if not _span_advances(acc, row0, row1, col0, col1):
+        return None
+    return row0, row1, col0, col1
+
+
+def _sheet_coord_at_point(acc, x: float, y: float) -> tuple[int, int] | None:
+    """``(row, column)`` of the cell under ``(x, y)``, or None."""
+    comp = _component(acc)
+    if comp is None:
+        return None
+    return _sheet_coord_from_node(_hit_at(comp, x, y), acc)
+
+
+def _sheet_walk_hit(acc, x: float, y: float, dx: float, dy: float, limit_x: float, limit_y: float):
+    """First address hit walking from ``(x, y)`` by ``(dx, dy)``.
+
+    Column headers and the row-header gutter answer no address. A short
+    walk steps past them and stays inside the table box.
+    """
+    for _step in range(48):
+        if dx > 0 and x >= limit_x:
+            return None
+        if dx < 0 and x <= limit_x:
+            return None
+        if dy > 0 and y >= limit_y:
+            return None
+        if dy < 0 and y <= limit_y:
+            return None
+        found = _sheet_coord_at_point(acc, x, y)
+        if found is not None:
+            return found
+        x += dx
+        y += dy
+    return None
+
+
+def _sheet_span_from_hits(acc, box):
+    """Inclusive span from ``get_accessible_at_point`` inside ``box``.
+
+    The four edges name the first and last visible row and column. None
+    when no edge hits an address, which is a toolkit with no hit-testing.
+    """
+    x0, y0, x1, y1 = box
+    mid_x = (x0 + x1) / 2.0
+    mid_y = (y0 + y1) / 2.0
+    top = _sheet_walk_hit(acc, mid_x, y0 + 1.0, 0.0, 4.0, x1, y1)
+    bottom = _sheet_walk_hit(acc, mid_x, y1 - 1.0, 0.0, -4.0, x0, y0)
+    left = _sheet_walk_hit(acc, x0 + 1.0, mid_y, 4.0, 0.0, x1, y1)
+    right = _sheet_walk_hit(acc, x1 - 1.0, mid_y, -4.0, 0.0, x0, y0)
+    coords = [item for item in (top, bottom, left, right) if item is not None]
+    if not coords:
+        return None
+    return (
+        min(row for row, _col in coords),
+        max(row for row, _col in coords),
+        min(col for _row, col in coords),
+        max(col for _row, col in coords),
+    )
+
+
+def _rect_meets(pos, size, box) -> bool:
+    x, y = float(pos[0]), float(pos[1])
+    width, height = float(size[0]), float(size[1])
+    x0, y0, x1, y1 = box
+    return x < x1 and y < y1 and x + width > x0 and y + height > y0
+
+
+def _sheet_cells_in_span(acc, span, screen, box, *, trust_missing: bool) -> list:
+    """Cells of ``span`` that meet the on-screen box.
+
+    ``trust_missing`` keeps a cell the toolkit gave no box, which is the
+    hit-tested span. A cell with a box outside the window is still dropped.
+    """
+    row0, row1, col0, col1 = _clamp_sheet_span(span)
+    found = []
+    for row in range(row0, row1 + 1):
+        for col in range(col0, col1 + 1):
+            cell = _table_cell_at(acc, row, col)
+            if cell is None:
+                continue
+            pos, size = _extents(cell)
+            if pos is None or size is None or float(size[0]) <= 0 or float(size[1]) <= 0:
+                if trust_missing:
+                    found.append(cell)
+                continue
+            if _overlaps_screen(pos, size, screen) and _rect_meets(pos, size, box):
+                found.append(cell)
+    return found
+
+
+def _sheet_fallback_cells(acc) -> list:
+    """The first addresses, when the sheet reports no on-screen box.
 
     Scans 32 rows by 16 columns and keeps up to 96 cells that have a
     positive size. That window includes B2 and E1–G1 on a new sheet. When
@@ -6643,6 +6984,61 @@ def _sheet_window_cells(acc) -> list:
     if on_screen:
         return on_screen
     return fallback[:_SHEET_KEEP]
+
+
+def _sheet_window_cells(acc) -> list:
+    """Cells inside the table's on-screen box, from the Table interface.
+
+    A Calc sheet reports about a million rows and ``INT_MAX`` children.
+    ``get_child_at_index`` is row-major, so the first children are row 1
+    and a cap of 96 stops at row 6. The visible rows and columns are the
+    ones whose boxes meet the table's screen rectangle. When those boxes
+    do not advance, ``get_accessible_at_point`` on the same rectangle
+    names the span. A sheet that reports neither a box nor a hit keeps
+    the first 96 addresses.
+    """
+    screen = _screen_size()
+    box = _sheet_view_box(acc, screen)
+    if box is not None:
+        rows, cols = _table_dimensions(acc)
+        n_rows = rows if isinstance(rows, int) and not isinstance(rows, bool) and rows > 0 else 0
+        n_cols = cols if isinstance(cols, int) and not isinstance(cols, bool) and cols > 0 else 0
+        if n_rows and n_cols:
+            span = _sheet_span_from_extents(acc, box, n_rows, n_cols)
+            if span is not None:
+                found = _sheet_cells_in_span(acc, span, screen, box, trust_missing=False)
+                if found:
+                    return found
+            span = _sheet_span_from_hits(acc, box)
+            if span is not None:
+                found = _sheet_cells_in_span(acc, span, screen, box, trust_missing=True)
+                if found:
+                    return found
+    return _sheet_fallback_cells(acc)
+
+
+def _publish_sheet_cells(cells: list) -> list:
+    """Cells the snapshot walk can keep, banded once they pass the sheet cap.
+
+    A flat list is cut at 96 and at 200 walked children, so a 29-row window
+    would still end at row 6. Each band is a table of at most
+    ``SHEET_MAX_CHILDREN`` address cells. A window of 64×32 is 22 bands,
+    which is under the dense cap, so the lower rows stay.
+    """
+    if len(cells) <= SHEET_MAX_CHILDREN:
+        return cells
+    items = []
+    for cell in cells:
+        pos, size = _extents(cell)
+        if pos is None or size is None or float(size[0]) <= 0 or float(size[1]) <= 0:
+            continue
+        items.append((cell, pos, size))
+    if len(items) <= SHEET_MAX_CHILDREN:
+        return [cell for cell, _pos, _size in items] or cells[:SHEET_MAX_CHILDREN]
+    return [
+        _OnScreenBand(items[start:start + SHEET_MAX_CHILDREN], role="table")
+        for start in range(0, len(items), SHEET_MAX_CHILDREN)
+    ]
 
 
 def _unescape_formula(text: str) -> str:

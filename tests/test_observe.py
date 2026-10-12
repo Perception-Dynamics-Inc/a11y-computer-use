@@ -869,6 +869,31 @@ def test_spreadsheet_addresses_keep_b2_and_cell_text() -> None:
     assert "… " not in render_text(snap)
 
 
+def test_flat_sheet_still_caps_at_96_addresses() -> None:
+    """A flat address grid keeps the first 96 cells. Synthetic tree.
+
+    The Linux walker bands a taller on-screen window so this cap does not
+    drop rows below row 6. A single flat list still stops at 96: that is
+    the token bound for a dump that is not already the visible window.
+    """
+    cells = []
+    for row in range(1, 9):
+        for col in range(16):
+            title = f"{chr(ord('A') + col)}{row}"
+            cells.append(ax(
+                "AXCell", title=title,
+                at=(40.0 + col * 20.0, 80.0 + row * 18.0), size=(18.0, 16.0),
+            ))
+    assert len(cells) == 128
+    table = ax("AXTable", title="Sheet", at=(20.0, 60.0), size=(400.0, 400.0), children=cells)
+    root = ax("AXWindow", title="Calc", at=(0.0, 0.0), size=(800.0, 600.0), children=[table])
+    snap = build_snapshot(root, DictAccessor(), scope=Scope.WINDOW, app="soffice", pid=1, geometry=GEOMETRY)
+    titles = {el.title for el in snap.elements}
+    assert "A1" in titles and "B2" in titles and "P6" in titles
+    assert "A7" not in titles
+    assert f"… {128 - observe.SHEET_MAX_CHILDREN} more" in render_text(snap)
+
+
 def test_calendar_day_numbers_stay_on_the_dense_cap() -> None:
     cells = [
         ax("AXCell", title=str(day), at=(10.0, 10.0 + day), size=(20.0, 16.0))
