@@ -6003,6 +6003,14 @@ class Runtime:
         ``page_unchanged`` is used only when that container's scroll
         offset was read and did not move.
 
+        A large GTK table is searched once through its Table interface
+        before those steps. The matching cell is brought in with AT-SPI
+        scroll_to or by setting the vertical bar from the row index. That
+        counts as one scroll when the cell was off screen. When the name
+        is not a cell in that table, each following step moves the
+        vertical bar by one viewport of painted rows. Chromium, Firefox,
+        and a short table keep the five-line wheel.
+
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
         Once a document names the match and the center is just outside
@@ -6198,6 +6206,7 @@ class Runtime:
             # page's time bound.
             document_ran_past = False
             find_tried = False
+            table_jumped = False
             frame_latched = False
             frame_waits = 0
             same_rows = 0
@@ -6700,6 +6709,21 @@ class Runtime:
                 elif seen_document and document_anchor(anchor):
                     wheel = 1 if step > 0 else -1
                 last_anchor = anchor
+                if (
+                    not table_jumped
+                    and text
+                    and callable(getattr(self.driver, "reveal_table_match", None))
+                ):
+                    # One index jump. A 10k GTK tree moves about a dozen
+                    # rows per five-line wheel, so the scroll budget ends
+                    # near the top. A cell already on screen is not counted.
+                    table_jumped = True
+                    jumped = self.driver.reveal_table_match(bundle, text)
+                    if isinstance(jumped, tuple) and len(jumped) == 2 and (jumped[0] or jumped[1]):
+                        if jumped[0]:
+                            issued += 1
+                            stalls = 0
+                        continue
                 if not find_tried and wants_in_page_find(snap, anchor):
                     find_tried = True
                     found = try_in_page_find(anchor)
@@ -6766,6 +6790,13 @@ class Runtime:
                         restore_page_frame()
                         continue
                     return unfinished(issued, snap, anchor, budget_hit=False)
+                # A large GTK table pages its own bar. The five-line wheel
+                # stays for Chromium and for a table this driver cannot page.
+                page_scroll = getattr(self.driver, "scroll_viewport_page", None)
+                if callable(page_scroll) and page_scroll(anchor, 1 if wheel > 0 else -1):
+                    issued += 1
+                    stalls = 0
+                    continue
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
@@ -8984,7 +9015,9 @@ def build_server(
         empty cached frame are not wheeled. A paginated
         or virtualized table that already fits in the window then uses
         Page Down before the wheel. A table that still runs past the
-        window keeps the wheel. page_unchanged is raised only when that
+        window keeps the wheel. A large GTK table is searched once
+        through its row index before that wheel, and a miss there steps
+        the vertical bar by one viewport. page_unchanged is raised only when that
         container's scroll offset was read and did not move. The ref is from a snapshot taken
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll

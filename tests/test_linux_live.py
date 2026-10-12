@@ -1414,6 +1414,127 @@ def test_linux_find_reaches_offscreen_cells_in_a_10k_gtk_tree(tmp_path) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
 
+_SCROLL_TREE_APP = "cuscrolltree"
+
+_GTK_10K_TREE_APP = textwrap.dedent(
+    """
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, GLib
+    GLib.set_prgname("cuscrolltree")
+    ROWS = 10000
+    store = Gtk.ListStore(str, str, str)
+    for index in range(ROWS):
+        store.append(["ROW-%05d" % index, "val%d" % index, "n%d" % index])
+    win = Gtk.Window(title="cuscrolltree")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    header = Gtk.Label(
+        label="Clean ListStore with %d rows (no row ids in this label)" % ROWS
+    )
+    tree = Gtk.TreeView(model=store)
+    tree.get_accessible().set_name("Rows")
+    for column_index, title in enumerate(("Name", "Value", "Note")):
+        column = Gtk.TreeViewColumn(title, Gtk.CellRendererText(), text=column_index)
+        column.set_min_width(120)
+        tree.append_column(column)
+    probe = Gtk.Label(label="row=")
+    probe.get_accessible().set_name("RowProbe")
+    scrolled = Gtk.ScrolledWindow()
+    scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scrolled.set_size_request(600, 500)
+    scrolled.add(tree)
+    box.pack_start(header, False, False, 0)
+    box.pack_start(scrolled, True, True, 0)
+    box.pack_start(probe, False, False, 0)
+    win.add(box)
+    win.set_default_size(700, 600)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win.present()
+    Gtk.main()
+    """
+)
+
+
+def _launch_10k_tree(tmp_path) -> subprocess.Popen:
+    script = tmp_path / "cuscrolltree.py"
+    script.write_text(_GTK_10K_TREE_APP)
+    return subprocess.Popen([sys.executable, str(script)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _wait_named_tree(driver, app: str, predicate, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = driver.snapshot(Scope.WINDOW, app)
+        except ComputerUseError as exc:
+            if exc.code is not ErrorCode.APP_NOT_FOUND:
+                raise
+            last = None
+        else:
+            if predicate(last):
+                return last
+        time.sleep(0.4)
+    return last
+
+
+def test_linux_scroll_to_find_reaches_a_10k_gtk_tree(tmp_path) -> None:
+    """Live GTK3 TreeView, 10000 rows. Not a synthetic tree.
+
+    At the top the snapshot has row 0 and not row 5000. scroll_to_find
+    reaches ROW-05000 and ROW-09999 within 50 scrolls. The header label
+    does not contain a row id.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    runtime = _runtime_for(tmp_path, driver, _SCROLL_TREE_APP, "python3")
+    proc = _launch_10k_tree(tmp_path)
+    try:
+        snap = _wait_named_tree(
+            driver,
+            _SCROLL_TREE_APP,
+            lambda shot: 0 in _tree_row_numbers(shot) and len(set(_tree_row_numbers(shot))) > 6,
+        )
+        assert snap is not None, "the 10k tree never listed its on-screen rows"
+        numbers = _tree_row_numbers(snap)
+        assert 0 in numbers
+        assert 5000 not in numbers
+        assert 9999 not in numbers
+        listed = runtime.desktop_snapshot(_SCROLL_TREE_APP)
+        assert "ROW-00000" in listed
+        assert "ROW-05000" not in listed
+        assert "no row ids in this label" in listed
+
+        def landed(text: str) -> str:
+            found = runtime.scroll_to_find(
+                _SCROLL_TREE_APP, text=text, direction="down", max_scrolls=50,
+            )
+            assert found.startswith("found after "), found
+            assert "not found" not in found
+            assert text in found
+            count = int(found.split(" scroll", 1)[0].removeprefix("found after "))
+            assert count <= 6, found
+            shot = runtime._current
+            cell = next(
+                el for el in shot.elements
+                if el.title == text and el.bounds is not None and el.bounds.width > 1
+                and el.bounds.height > 1 and el.bounds.x >= 0 and el.bounds.y >= 0
+                and el.bounds.x < 4000 and el.bounds.y < 4000
+            )
+            assert cell.bounds.y > -2_000_000_000
+            return found
+
+        landed("ROW-05000")
+        landed("ROW-09999")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 def _chrome_binary() -> str | None:
     import shutil

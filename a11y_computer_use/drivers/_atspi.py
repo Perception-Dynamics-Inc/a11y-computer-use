@@ -13694,6 +13694,146 @@ def _gtk_table_rows_for_snapshot(
     return painted
 
 
+def _first_large_gtk_table(root):
+    """The first large GTK row table under ``root``.
+
+    The walk stops at a table: a 10k TreeView exposes every cell as a child,
+    and those cells are not another table. None when the application is not
+    GTK or no table of that size is within the walk.
+    """
+    if root is None or "gtk" not in _toolkit_name(root):
+        return None
+    queue = [root]
+    seen: set[int] = set()
+    examined = 0
+    while queue and examined < 300:
+        node = queue.pop(0)
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        examined += 1
+        role = _role_name(node)
+        if role in {"table", "tree table"}:
+            if _gtk_row_table(node):
+                return node
+            continue
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            continue
+        for index in range(min(int(count), 40)):
+            queue.append(_child_at(node, index))
+    return None
+
+
+def _large_gtk_table_from(acc):
+    """The large GTK table ``acc`` is, or the one under it, or an ancestor."""
+    if acc is None or "gtk" not in _toolkit_name(acc):
+        return None
+    node = acc
+    seen: set[int] = set()
+    for _depth in range(8):
+        if node is None or id(node) in seen:
+            break
+        seen.add(id(node))
+        if _role_name(node) in {"table", "tree table"} and _gtk_row_table(node):
+            return node
+        node = _parent_of(node)
+    return _first_large_gtk_table(acc)
+
+
+def reveal_gtk_named_cell(root, needle: str):
+    """``(moved, on_screen)`` for a named cell in a large GTK table.
+
+    None when the application is not GTK or no cell in the table model
+    contains ``needle``. The scan uses ``Table.get_accessible_at`` up to the
+    GTK table cap, past the shorter document seek window. A cell already in
+    the painted span is left where it is: ``moved`` is false. An off-screen
+    cell is scrolled with AT-SPI ``scroll_to`` or the vertical bar's row
+    index. ``moved`` is true only when that scroll puts the cell on screen.
+    Extents are the cell's own; a cell that stays off screen is
+    ``(False, False)``.
+    """
+    text = needle.strip() if isinstance(needle, str) else ""
+    if not text or root is None or "gtk" not in _toolkit_name(root):
+        return None
+    table = _first_large_gtk_table(root)
+    if table is None:
+        return None
+    rows, cols = _plain_table_size(table)
+    if rows is None or cols is None or rows <= 0 or cols <= 0:
+        return None
+    cols = min(int(cols), _GTK_SEEK_MAX_COLS)
+    screen = _screen_size()
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is not None:
+        first, last = span
+        for row in range(first, last + 1):
+            for col in range(cols):
+                cell = _table_cell_at(table, row, col)
+                if cell is not None and _matches_seek(cell, text):
+                    return False, _on_screen_item(cell, screen) is not None
+    limit = min(int(rows), _GTK_TABLE_MAX_ROWS)
+    for row in range(limit):
+        for col in range(cols):
+            cell = _table_cell_at(table, row, col)
+            if cell is None or not _matches_seek(cell, text):
+                continue
+            if _on_screen_item(cell, screen) is not None:
+                return False, True
+            brought = _bring_cell_on_screen(cell, screen, row, rows)
+            if brought:
+                _invalidate_tree_cache(table)
+                return True, True
+            return False, False
+    return None
+
+
+def scroll_gtk_viewport_page(acc, direction: int) -> bool:
+    """Move a large GTK table's vertical bar by one painted viewport.
+
+    False unless the accessible belongs to GTK and a large row table can be
+    found. ``direction`` is positive to go down. The step is the painted
+    body-row count as a fraction of ``rows - 1``, applied to the bar's
+    range. A line scroll does not come through here. False when the span
+    or the bar cannot be read, or the value does not change.
+    """
+    if acc is None or isinstance(direction, bool) or not isinstance(direction, int) or direction == 0:
+        return False
+    table = _large_gtk_table_from(acc)
+    if table is None:
+        return False
+    rows, _cols = _plain_table_size(table)
+    if rows is None or rows <= 1:
+        return False
+    pos, size = _extents(table)
+    span = _gtk_visible_span(table, pos, size, rows)
+    if span is None:
+        return False
+    visible = max(1, span[1] - span[0] + 1)
+    sign = 1.0 if direction > 0 else -1.0
+    fraction = float(visible) / float(rows - 1)
+    for bar in _collect_scrollbars(table):
+        if _bar_axis(bar) != "vertical":
+            continue
+        minimum = _value_bound(bar, ("get_minimum_value", "getMinimumValue"), 0.0)
+        maximum = _value_bound(bar, ("get_maximum_value", "getMaximumValue"), 0.0)
+        if maximum <= minimum:
+            continue
+        current = _read_value(bar)
+        if current is None:
+            continue
+        target = min(max(current + (maximum - minimum) * fraction * sign, minimum), maximum)
+        if abs(target - current) < 1e-6:
+            continue
+        _write_value(bar, target)
+        updated = _read_value(bar)
+        if updated is not None and abs(updated - current) > 1e-3:
+            _invalidate_tree_cache(table)
+            return True
+    return False
+
+
 _TOP_LEVEL_WINDOW_ROLES = frozenset({"frame", "window", "dialog", "alert"})
 
 
