@@ -161,6 +161,25 @@ _CLICKABLE_ROLES = frozenset(
 _EDITABLE_ROLES = frozenset(
     {"AXSearchField", _SECURE_ROLE, "AXTextArea", "AXTextField"}
 )
+#: Controls kept when a Chromium page is already at ``MAX_DEPTH``. A named
+#: group is not one of these: it is walked through and not kept. Static text
+#: is not one either, so a buried label stays elided.
+_BURIED_CONTROL_ROLES = frozenset(
+    {
+        "AXButton",
+        "AXCheckBox",
+        "AXComboBox",
+        "AXLink",
+        "AXPopUpButton",
+        "AXRadioButton",
+        "AXSearchField",
+        _SECURE_ROLE,
+        "AXSlider",
+        "AXSpinButton",
+        "AXTextArea",
+        "AXTextField",
+    }
+)
 
 #: Rendering views of a snapshot. ``full`` is the whole pruned tree. ``interactive``
 #: is the same snapshot (same elements, same refs) rendered down to what an agent
@@ -1678,6 +1697,30 @@ def _prune_inner(
     )
 
 
+def _web_scan_identity(node: object) -> object:
+    """Identity of one node in the buried web scan.
+
+    ``get_child_at_index`` returns a new proxy. After a leaf is handled,
+    nothing else referenced it, so it was collected and CPython reused its
+    ``id()`` for a later control. A seen-set of those ids then skipped the
+    control (a settings button under a named group never reached
+    ``_prune_inner``). The AT-SPI bus name and object path stay on the C
+    object and do not call D-Bus. A synthetic node has no GObject pointer
+    and uses ``id()``. The scan also retains every proxy, so that fallback
+    cannot collide with a collected leaf.
+    """
+    if getattr(node, "__gpointer__", None) is not None:
+        try:
+            from a11y_computer_use.drivers._atspi import _atspi_wrapper_key
+
+            stable = _atspi_wrapper_key(node)
+        except Exception:
+            stable = None
+        if stable is not None:
+            return stable
+    return id(node)
+
+
 def _open_nested_frames(
     raw_children: Sequence[object],
     accessor: TreeAccessor,
@@ -1689,12 +1732,17 @@ def _open_nested_frames(
     *,
     parent_bounds: Bounds | None = None,
 ) -> tuple[list[_PNode], int]:
-    """Past `MAX_DEPTH` inside web content, open a nested iframe and nothing else.
+    """Past ``MAX_DEPTH`` inside web content, open a nested frame or a control.
 
-    Descend only through non-interactive wrappers, spending ``web.scan_reads``.
-    A found ``internal frame`` (or a ``document web`` already inside a page)
-    is pruned with a restarted kept-depth budget. Other children stay elided,
-    so the scan does not pull a whole deep page into the snapshot.
+    Descend through wrappers, including a named group, spending
+    ``web.scan_reads``. A found ``internal frame`` (or a ``document web``
+    already inside a page) is pruned with a restarted kept-depth budget. A
+    button, field, link, or other control is kept at the cap, so a phone
+    entry or a settings control under a named group is not dropped. The
+    group itself is not kept. Static text stays elided. ``MAX_DEPTH`` and
+    ``web.scan_reads`` are not raised. Proxies stay referenced for the
+    whole scan, and the seen-set uses `_web_scan_identity` rather than a
+    bare ``id()``.
     """
     kept: list[_PNode] = []
     elided = 0
@@ -1702,13 +1750,17 @@ def _open_nested_frames(
         (child, depth + 1, in_page, in_web) for child in raw_children[:_MAX_WALK_CHILDREN]
     ]
     elided += max(0, len(raw_children) - len(pending))
-    seen: set[int] = set()
+    # Keep every proxy alive. Dropping a leaf lets its id be reused for a
+    # control that has not been walked; the seen-set would then skip it.
+    pinned: list[object] = []
+    seen: set[object] = set()
     while pending and web.scan_reads > 0 and len(kept) < MAX_CHILDREN:
         child, child_depth, page, web_here = pending.pop(0)
+        pinned.append(child)
         if child_depth >= _MAX_RAW_DEPTH:
             elided += 1
             continue
-        marker = id(child)
+        marker = _web_scan_identity(child)
         if marker in seen:
             continue
         seen.add(marker)
@@ -1732,10 +1784,31 @@ def _open_nested_frames(
             if pruned is not None:
                 kept.append(pruned)
             continue
+        if child_raw.role in _BURIED_CONTROL_ROLES:
+            # kept_depth stays at the cap, so this control's own children
+            # are still scanned under the same ``web.scan_reads`` budget.
+            pruned = _prune_inner(
+                child,
+                child_raw,
+                accessor,
+                geometry,
+                child_depth,
+                MAX_DEPTH,
+                in_page=page,
+                in_web=web_here,
+                web=web,
+                parent_bounds=parent_bounds,
+            )
+            if pruned is not None:
+                kept.append(pruned)
+            else:
+                elided += 1
+            continue
         if (
             _noninteractive_wrapper(child_raw)
             or _plain_zero_wrapper(child_raw)
             or kind in ("docframe", "page", "iframe")
+            or child_raw.role in _WRAPPER_ROLES
         ):
             kids = tuple(accessor.children(child))
             room = kids[:_MAX_WALK_CHILDREN]
@@ -1743,6 +1816,7 @@ def _open_nested_frames(
             next_page = page or kind in ("page", "iframe")
             next_web = web_here or kind in ("page", "docframe", "iframe")
             for kid in room:
+                pinned.append(kid)
                 pending.append((kid, child_depth + 1, next_page, next_web))
             continue
         elided += 1

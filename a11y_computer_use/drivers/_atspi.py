@@ -1547,6 +1547,21 @@ def _sane_range(low: float, high: float) -> bool:
 # 6.93e-310), which is subnormal. Zero and ordinary small values stay.
 _UNINITIALIZED_VALUE_ROLES = frozenset({"AXDialog", "AXCheckBox"})
 _UNINITIALIZED_VALUE_ROLE_NAMES = frozenset({"dialog", "alert", "check box"})
+#: An empty text control whose character count is 0. ``document text`` is
+#: absent: a Writer document's text lives in its paragraphs, and that read
+#: has to run. A filler is absent too, so its Value stays.
+_EMPTY_TEXT_VALUE_NAMES = frozenset({
+    "entry", "text", "password text", "terminal", "paragraph",
+})
+#: Roles whose Value interface is not the text a person reads. A subnormal
+#: double on these is dropped. A filler is not here.
+_SUBNORMAL_TEXT_ROLES = frozenset({
+    "AXTextField", "AXTextArea", "AXSearchField", "AXStaticText",
+})
+_SUBNORMAL_TEXT_ROLE_NAMES = frozenset({
+    "entry", "text", "static", "label", "password text", "paragraph",
+    "terminal", "document text",
+})
 
 
 def _uninitialized_double(value: object) -> bool:
@@ -1829,7 +1844,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     maximum are a real range. GTK's fallback for a non-range control is
     unchanged, except a dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
-    value on those roles stay.
+    value on those roles stay. An empty entry, text field, or paragraph
+    (character count 0) has no value either: Chromium's empty input
+    publishes a subnormal double on Value, and that number is not the
+    field. A filler still keeps that double.
     """
     if role == "AXSecureTextField":
         return None
@@ -1874,6 +1892,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         if role_name == "spin button" and _chrome_date_segment(acc):
             return _date_segment_text(acc)
         return None
+    elif count == 0 and role_name in _EMPTY_TEXT_VALUE_NAMES:
+        # Text is present and empty. Chromium's Value on that entry is a
+        # subnormal double (about 4e-323), which is not the field.
+        return None
     handled, choice = _choice_value(acc, role, role_name)
     if handled:
         return choice
@@ -1906,7 +1928,10 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     if cur is None:
         return None
     if (
-        role in _UNINITIALIZED_VALUE_ROLES or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+        role in _UNINITIALIZED_VALUE_ROLES
+        or role_name in _UNINITIALIZED_VALUE_ROLE_NAMES
+        or role in _SUBNORMAL_TEXT_ROLES
+        or role_name in _SUBNORMAL_TEXT_ROLE_NAMES
     ) and _uninitialized_double(cur):
         return None
     return cur
@@ -11689,6 +11714,11 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     True only when the snapshot read equals ``text``. A toolkit whose text
     cannot be read at all is trusted when ``set_text_contents`` returned
     true, so a replace is not refused just because ``Text.get_text`` failed.
+    When that call returned false and the snapshot read is NULL (Chromium's
+    empty entry), the field is typed on X11 and this returns true only when
+    a later snapshot read equals ``text``. A number input is not typed: focusing
+    it can make the empty field read back as 0. Focus that never arrives
+    raises ``focus_lost`` and does not report a write.
     A field with no EditableText is cleared and typed on X11; that also
     returns True only when the snapshot read equals ``text``. On Qt the
     character count has to equal that string too: ``GetText`` stops at an
@@ -11742,7 +11772,22 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
-        return wrote
+        if wrote:
+            return True
+        # Chromium's empty entry: set_text_contents returns false and
+        # get_text(0, -1) is NULL. Type only when the field still reads
+        # blank, and only accept the write when that read comes back as
+        # ``text``. A number input is left alone.
+        if (
+            not _number_input(acc)
+            and _text_is_gone(acc)
+            and _x11_keys_available()
+        ):
+            grab_focus(acc)
+            _type_into_target(acc, text)
+            if _confirm_text(acc, text):
+                return True
+        return False
     if not _clear_text(acc, eti, current):
         return False
     if not _call_first(eti, ("set_text_contents",), text, default=False):
