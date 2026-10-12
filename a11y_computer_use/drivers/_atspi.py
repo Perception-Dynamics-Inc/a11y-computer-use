@@ -11504,6 +11504,200 @@ def changed_peer_fields(acc, before: dict) -> list[str]:
     return changed
 
 
+# ``88%`` or ``50 %``. A bare ``50`` is not a percent literal. A narrow
+# no-break space is the same gap as a normal space.
+_PERCENT_LITERAL = re.compile(
+    r"^(?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*%$"
+)
+# Inkscape draws an integer percent. The log2 of that percent can be a
+# fraction of a percent away from the rounded text.
+_PERCENT_DISPLAY_TOLERANCE = 0.51
+
+
+def _percent_literal(value: str) -> float | None:
+    """The number in ``50%`` or ``50 %``. None when the text has no percent sign."""
+    text = str(value).replace("\u00a0", " ").replace("\u202f", " ").strip()
+    match = _PERCENT_LITERAL.match(text)
+    if match is None:
+        return None
+    try:
+        number = float(match.group("number"))
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _finite_current_value(acc) -> float | None:
+    """The Value interface's current value, or None when it is not a finite number."""
+    got = _safe(lambda: _atspi().Value.get_current_value(acc))
+    if isinstance(got, bool) or not isinstance(got, (int, float)):
+        return None
+    number = float(got)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _pow2_percent(log_value: float) -> float | None:
+    """``100 * 2**log_value``, or None when that power is not finite."""
+    try:
+        percent = math.pow(2.0, float(log_value)) * 100.0
+    except OverflowError:
+        return None
+    if not math.isfinite(percent):
+        return None
+    return percent
+
+
+def _percent_value_unit(acc) -> tuple[str, float] | None:
+    """How a percent label relates to the current Value, plus that value.
+
+    ``log2`` means the text is the percent and the Value is ``log2`` of
+    that percent as a fraction (Inkscape's zoom spin: ``88%`` is about
+    ``-0.184``). ``percent`` means the Value is already that percent.
+    ``unmatched`` means the text is a percent and neither relationship
+    holds, so a percent literal must not be converted by guesswork.
+    None means the text is not a percent, or the current value could not
+    be read.
+    """
+    shown = _number_text(acc)
+    if not shown:
+        return None
+    percent = _percent_literal(shown)
+    if percent is None:
+        return None
+    current = _finite_current_value(acc)
+    if current is None:
+        return None
+    displayed = _pow2_percent(current)
+    if displayed is not None and abs(displayed - percent) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "log2", current
+    if abs(percent - current) <= _PERCENT_DISPLAY_TOLERANCE:
+        return "percent", current
+    return "unmatched", current
+
+
+def _clamp_near_bounds(number: float, low: float, high: float, *, open_upper: bool) -> float:
+    """Pull a conversion that landed an ulp outside the published bounds back in."""
+    if number < low and low - number <= 1e-6:
+        return low
+    if not open_upper and number > high and number - high <= 1e-6:
+        return high
+    return number
+
+
+def _log_percent_range_message(value: str, low: float, high: float, *, open_upper: bool) -> str:
+    """The percent a log2 control can show, and the Value scale underneath it."""
+    low_pct = _pow2_percent(low)
+    low_text = "?" if low_pct is None else f"{_format_bound(low_pct)}%"
+    if open_upper:
+        return (
+            f"value {value!r} is below {low_text} "
+            f"(value scale minimum {_format_bound(low)})"
+        )
+    high_pct = _pow2_percent(high)
+    high_text = "?" if high_pct is None else f"{_format_bound(high_pct)}%"
+    return (
+        f"value {value!r} is outside {low_text}..{high_text} "
+        f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+    )
+
+
+def _unmatched_percent_message(
+    acc, value: str, low: float, high: float, *, open_upper: bool,
+) -> str:
+    """A percent was asked of a control whose text and Value do not agree."""
+    shown = _number_text(acc) or ""
+    current = _finite_current_value(acc)
+    current_text = "unreadable" if current is None else _format_bound(current)
+    if open_upper:
+        span = f"minimum {_format_bound(low)}"
+    else:
+        span = f"{_format_bound(low)}..{_format_bound(high)}"
+    return (
+        f"value {value!r} is a percent; the control shows {shown.strip()!r} "
+        f"which does not match its value {current_text}; valid range is {span}"
+    )
+
+
+def _format_held_percent(percent: float) -> str:
+    """The percent a log2 control holds after the toolkit rounds the write."""
+    if abs(percent - round(percent)) <= 0.05:
+        return f"{int(round(percent))}%"
+    return f"{_format_bound(percent)}%"
+
+
+def _write_log_percent(acc, value: str, written: float, before: float) -> bool | str:
+    """Write a log2 zoom and read it back. No step snap and no keystrokes.
+
+    An exact landing returns True, so the caller reports the requested
+    percent. A toolkit that moved the value by at most one step returns
+    the percent that landing represents. A value that did not move is a
+    mismatch, including when the old value was already within one step.
+    """
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _safe(lambda: Atspi.Value.get_current_value(acc))
+        if (
+            isinstance(got, (int, float))
+            and not isinstance(got, bool)
+            and _numbers_match(float(got), written)
+        ):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    if isinstance(got, (int, float)) and not isinstance(got, bool):
+        step = _minimum_increment(acc)
+        moved = not _numbers_match(float(got), before)
+        if step is not None and moved and abs(float(got) - written) <= step:
+            held = _pow2_percent(float(got))
+            if held is not None:
+                return _format_held_percent(held)
+    raise _text_mismatch(
+        "text_mismatch",
+        f"the value read back {got!r} does not match {value!r}",
+        expected=value,
+        actual=got,
+    )
+
+
+def _apply_log_percent(acc, value: str, low: float, high: float, before: float, *, open_upper: bool):
+    """Convert a percent onto a log2 Value. None lets the bare number through.
+
+    A percent literal (``50%``, ``50 %``) is ``log2(percent / 100)``. A bare
+    number inside the Value range is not a percent: the caller writes it
+    unchanged, including the spin step. A bare number outside that range is
+    a percent when the conversion fits, and the same percent bounds when it
+    does not. The conversion is not snapped to the step. Snapping ``50%``
+    onto Inkscape's tenth would land near ``48.5%``.
+    """
+    literal = _percent_literal(value)
+    if literal is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if not _outside_range(number, low, high, open_upper=open_upper):
+            return None
+        percent = number
+    else:
+        percent = literal
+    if not math.isfinite(percent) or percent <= 0:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    try:
+        written = math.log(percent / 100.0) / math.log(2.0)
+    except ValueError:
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper)) from None
+    written = _clamp_near_bounds(written, low, high, open_upper=open_upper)
+    if _outside_range(written, low, high, open_upper=open_upper):
+        raise ValueError(_log_percent_range_message(value, low, high, open_upper=open_upper))
+    return _write_log_percent(acc, value, written, before)
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -11521,6 +11715,15 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    A control whose text is a percent and whose Value is ``log2`` of that
+    percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
+    falls outside the Value range as that percent, converted with
+    ``log2(percent / 100)`` and not snapped to the step. A bare number inside
+    the Value range is still that scale. A percent the control cannot
+    represent names the percent range and the Value scale. When the text is
+    a percent but it matches neither the Value nor ``log2`` of the Value, a
+    percent literal is refused and the Value range is named. No keystrokes
+    are sent for any of these.
     """
     if value == "" and _number_input(acc):
         if _clear_number_input(acc):
@@ -11545,6 +11748,27 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        unit = _percent_value_unit(acc)
+        if unit is not None:
+            kind, before = unit
+            if kind == "log2":
+                # None means the text is an in-range bare number. That write
+                # stays on the Value scale, step snap included.
+                handled = _apply_log_percent(
+                    acc, value, low, high, before, open_upper=open_upper,
+                )
+                if handled is not None:
+                    return handled
+            elif kind == "percent":
+                literal = _percent_literal(value)
+                if literal is not None:
+                    value = _format_bound(literal)
+            elif kind == "unmatched" and _percent_literal(value) is not None:
+                raise ValueError(
+                    _unmatched_percent_message(
+                        acc, value, low, high, open_upper=open_upper,
+                    )
+                )
     try:
         number = _parse_number(value)
     except ValueError:
