@@ -1593,29 +1593,46 @@ def test_cli_json_exit_codes(tmp_path, isolated_home) -> None:
         good.unlink(missing_ok=True)
 
 
+def _set_showing_desktop(showing: bool) -> None:
+    """Ask the window manager to show or leave the desktop.
+
+    The short model-timeout run needs every window iconified. Leaving that
+    hint set keeps later Chrome document wheels from landing on the page.
+    """
+    import shutil
+
+    if shutil.which("wmctrl"):
+        subprocess.run(
+            ["wmctrl", "-k", "on" if showing else "off"],
+            check=False, timeout=3, capture_output=True,
+        )
+    try:
+        from a11y_computer_use.drivers._linux_system import _client_message, _open_display
+
+        with _open_display() as opened:
+            _client_message(
+                opened, opened.screen().root, "_NET_SHOWING_DESKTOP",
+                [1 if showing else 0, 0, 0, 0, 0],
+            )
+    except Exception:
+        pass
+
+
 def _clear_focus(*, show_desktop: bool = False) -> str:
     """Drop the active window so the next observation is the empty desktop.
 
     ``show_desktop`` asks the window manager to iconify every window. Writing
     ``_NET_ACTIVE_WINDOW`` as 0 does not do that, and openbox puts the focused
     app back. A full snapshot of that app can spend a 1s run budget before
-    the model starts.
+    the model starts. The caller turns the desktop hint off when the run ends.
     """
     import shutil
 
     if show_desktop or shutil.which("wmctrl"):
-        if shutil.which("wmctrl"):
-            subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
         if show_desktop:
-            try:
-                from a11y_computer_use.drivers._linux_system import _client_message, _open_display
-
-                with _open_display() as opened:
-                    _client_message(
-                        opened, opened.screen().root, "_NET_SHOWING_DESKTOP", [1, 0, 0, 0, 0],
-                    )
-            except Exception:
-                pass
+            _set_showing_desktop(True)
+        elif shutil.which("wmctrl"):
+            subprocess.run(["wmctrl", "-k", "on"], check=False, timeout=3, capture_output=True)
     try:
         from Xlib import Xatom, display
 
@@ -1819,39 +1836,42 @@ def test_agent_model_call_keeps_its_timeout_when_the_budget_is_short(tmp_path, i
     from a11y_computer_use.agent.models.command import CommandModel
 
     front = _clear_focus(show_desktop=True)
-    assert front in {"", "unknown"}, front
-    _grant_linux_desktop()
-    started_flag = tmp_path / "model-started"
-    finished_flag = tmp_path / "model-finished"
-    script = tmp_path / "slow_model.py"
-    script.write_text(
-        "import json, sys, time\n"
-        f"open({str(started_flag)!r}, 'w').write('started')\n"
-        "json.load(sys.stdin)\n"
-        "time.sleep(1.5)\n"
-        f"open({str(finished_flag)!r}, 'w').write('finished')\n"
-        "json.dump({'calls': [], 'text': 'slow'}, sys.stdout)\n",
-        encoding="utf-8",
-    )
-    Agent, _ScriptedModel, _ModelTurn, _ToolCall = _agent_api()
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    result = _run_agent(
-        Agent,
-        CommandModel([sys.executable, str(script)]),
-        "Look at the desktop and stop.",
-        trace,
-        approve=None,
-        auto_deny=True,
-        max_steps=4,
-        max_time_s=1.0,
-        model_timeout_s=30,
-    )
-    assert result.status == "failed", result
-    assert result.reason == "max_time", result.reason
-    assert exit_code(result) == 1
-    if started_flag.exists():
-        assert finished_flag.exists(), "the model call was killed before its own timeout"
+    try:
+        assert front in {"", "unknown"}, front
+        _grant_linux_desktop()
+        started_flag = tmp_path / "model-started"
+        finished_flag = tmp_path / "model-finished"
+        script = tmp_path / "slow_model.py"
+        script.write_text(
+            "import json, sys, time\n"
+            f"open({str(started_flag)!r}, 'w').write('started')\n"
+            "json.load(sys.stdin)\n"
+            "time.sleep(1.5)\n"
+            f"open({str(finished_flag)!r}, 'w').write('finished')\n"
+            "json.dump({'calls': [], 'text': 'slow'}, sys.stdout)\n",
+            encoding="utf-8",
+        )
+        Agent, _ScriptedModel, _ModelTurn, _ToolCall = _agent_api()
+        trace = tmp_path / "trace"
+        trace.mkdir()
+        result = _run_agent(
+            Agent,
+            CommandModel([sys.executable, str(script)]),
+            "Look at the desktop and stop.",
+            trace,
+            approve=None,
+            auto_deny=True,
+            max_steps=4,
+            max_time_s=1.0,
+            model_timeout_s=30,
+        )
+        assert result.status == "failed", result
+        assert result.reason == "max_time", result.reason
+        assert exit_code(result) == 1
+        if started_flag.exists():
+            assert finished_flag.exists(), "the model call was killed before its own timeout"
+    finally:
+        _set_showing_desktop(False)
 
 
 @requires_display
