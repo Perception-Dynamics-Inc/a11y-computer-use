@@ -11,7 +11,11 @@ permits commercial use. This package does not vendor the weights, does not
 download them at import, and does not call a hosted API. Install the
 optional ``[holo]`` extra (``torch``, ``torchvision``, and ``transformers``).
 ``AutoProcessor`` builds ``Qwen3VLVideoProcessor``, and that class imports
-torchvision even though ``ground`` only sends an image. The adapter stays on
+torchvision even though ``ground`` only sends an image. A CPU torch and the
+default PyPI torchvision wheel are not the same build: importing torchvision
+raises ``RuntimeError: operator torchvision::nms does not exist``. Install
+torch and torchvision from the same index (the CPU index for a ``+cpu``
+torch). That failure is ``GroundingUnavailable``. The adapter stays on
 CPU: it loads bfloat16 when that dtype runs, otherwise float16, otherwise
 float32, and it caps torch at
 4 threads. The reply is ``{"x", "y"}`` on a 0..1000 grid, scaled onto the
@@ -273,6 +277,10 @@ class HoloLocalGrounding:
     weights. ``ground`` does both, and raises `GroundingUnavailable` when
     the local stack or the weights are missing. A failed import names the
     missing distribution (``torch``, ``torchvision``, or ``transformers``).
+    A ``RuntimeError`` or ``OSError`` from those imports, including
+    ``operator torchvision::nms does not exist`` when a CPU torch is paired
+    with the default PyPI torchvision wheel, is the same error and names
+    the CPU install command.
     No other model id is accepted. ``threads`` is capped at 4. ``dtype``
     ``auto`` (the default) uses bfloat16 when that dtype runs, otherwise
     float16, otherwise float32.
@@ -346,6 +354,9 @@ class HoloLocalGrounding:
         except GroundingUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - a local generate failure is not fatal upstream
+            mismatch = _stack_mismatch_error(exc, where="load")
+            if mismatch is not None:
+                raise mismatch from exc
             raise GroundingUnavailable(
                 f"local grounding failed: {type(exc).__name__}: {exc}"
             ) from exc
@@ -373,6 +384,9 @@ class HoloLocalGrounding:
         except GroundingUnavailable:
             raise
         except Exception as exc:  # noqa: BLE001 - a missing weight download stays local
+            mismatch = _stack_mismatch_error(exc, where="load")
+            if mismatch is not None:
+                raise mismatch from exc
             raise _load_unavailable(self.model_id, exc) from exc
         return model, processor
 
@@ -414,6 +428,12 @@ def _open_rgb(png: bytes):
 #: Imported before any weight download. The processor imports torchvision
 #: while it builds the video processor, including for an image-only call.
 _HOLO_IMPORTS = ("torch", "torchvision", "transformers")
+
+#: A ``+cpu`` torch and the default PyPI torchvision wheel are different
+#: builds. ``pip`` cannot put this index inside the ``[holo]`` extra.
+_CPU_TORCH_INSTALL = (
+    "pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision"
+)
 
 #: Longer names first so "torchvision" is not reported as "torch".
 _HOLO_PACKAGES = ("torchvision", "transformers", "torch")
@@ -462,6 +482,62 @@ def _format_package_list(packages: list[str]) -> str:
     return ", ".join(packages[:-1]) + f", and {packages[-1]}"
 
 
+def _exception_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(str(current))
+        cause = current.__cause__
+        if cause is not None:
+            current = cause
+            continue
+        if current.__suppress_context__:
+            break
+        current = current.__context__
+    return " ".join(parts)
+
+
+def _is_stack_mismatch(exc: BaseException) -> bool:
+    """True when torch and torchvision are installed but are not one build.
+
+    The default PyPI torchvision wheel raises ``RuntimeError: operator
+    torchvision::nms does not exist`` inside a ``+cpu`` torch. A missing
+    module is an ``ImportError`` and is not this case. An ``OSError`` that
+    names torchvision or libtorch is a mismatched binary.
+    """
+    text = _exception_text(exc).lower()
+    if isinstance(exc, ImportError) and "torchvision::" not in text:
+        return False
+    if "torchvision::nms" in text or "operator torchvision::" in text:
+        return True
+    return isinstance(exc, OSError) and ("torchvision" in text or "libtorch" in text)
+
+
+def _mismatch_package(exc: BaseException) -> str:
+    named = _package_named_by(exc) or _package_in_text(_exception_text(exc))
+    return named or "torchvision"
+
+
+def _stack_mismatch_error(
+    exc: BaseException, *, where: str,
+) -> GroundingUnavailable | None:
+    """The CPU/PyPI torchvision mismatch, or None when ``exc`` is another failure."""
+    if not _is_stack_mismatch(exc):
+        return None
+    package = _mismatch_package(exc)
+    detail = f"{type(exc).__name__}: {exc}"
+    return GroundingUnavailable(
+        f"local grounding could not {where} {package}: {detail}. "
+        "torch and torchvision must be the same build. "
+        "The default PyPI torchvision wheel does not load into a CPU torch "
+        "(operator torchvision::nms does not exist). "
+        "Install torchvision from the same index as torch, for example the CPU index: "
+        f"{_CPU_TORCH_INSTALL}"
+    )
+
+
 def _load_unavailable(model_id: str, exc: BaseException) -> GroundingUnavailable:
     """A weight or processor load failure. An import error names its package."""
     missing = _package_named_by(exc)
@@ -474,6 +550,16 @@ def _load_unavailable(model_id: str, exc: BaseException) -> GroundingUnavailable
     return GroundingUnavailable(f"could not load {model_id} on CPU: {detail}")
 
 
+def _import_failure(name: str, exc: BaseException) -> GroundingUnavailable:
+    """A torch-stack import that is not a missing distribution."""
+    return _stack_mismatch_error(exc, where="import") or GroundingUnavailable(
+        f"local grounding could not import {name}: {type(exc).__name__}: {exc}. "
+        "torch and torchvision must be the same build. "
+        "Install torchvision from the same index as torch, for example the CPU index: "
+        f"{_CPU_TORCH_INSTALL}"
+    )
+
+
 def _torch_stack():
     missing: list[str] = []
     failure: ImportError | None = None
@@ -481,11 +567,16 @@ def _torch_stack():
         try:
             _try_import(name)
         except ImportError as exc:
+            mismatch = _stack_mismatch_error(exc, where="import")
+            if mismatch is not None:
+                raise mismatch from exc
             if failure is None:
                 failure = exc
             package = _package_named_by(exc) or name
             if package not in missing:
                 missing.append(package)
+        except Exception as exc:
+            raise _import_failure(name, exc) from exc
     if missing:
         listed = _format_package_list(missing)
         verb = "is" if len(missing) == 1 else "are"
@@ -493,8 +584,11 @@ def _torch_stack():
             f"local grounding needs {listed}, which {verb} not installed "
             "(pip install 'a11y-computer-use[holo]')"
         ) from failure
-    import torch
-    from transformers import AutoModelForImageTextToText, AutoProcessor
+    try:
+        import torch
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+    except Exception as exc:
+        raise _import_failure("transformers", exc) from exc
 
     return torch, AutoModelForImageTextToText, AutoProcessor
 
