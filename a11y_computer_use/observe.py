@@ -1620,11 +1620,13 @@ def _role_name(el: Element) -> str:
 def render_model_diff(basis: Snapshot, aligned: Snapshot) -> str:
     """Added, removed, and changed elements, with the refs on ``aligned``.
 
-    A changed line is the element's current rendering plus the old→new
-    values. The focused element is included when it did not itself change,
-    so a diff still says where the keyboard is. Bounds jitter below
-    `_BOUNDS_MOVE_PX` is omitted. Nothing else the snapshot kept is omitted
-    from an element that changed: the line is the same shape as `render_text`.
+    A changed line is the element's current rendering plus the old->new
+    values. The markers are ASCII so a UTF-8 trace still decodes with the
+    Windows locale encoding. The focused element is included when it did
+    not itself change, so a diff still says where the keyboard is. Bounds
+    jitter below `_BOUNDS_MOVE_PX` is omitted. Nothing else the snapshot
+    kept is omitted from an element that changed: the line is the same
+    shape as `render_text`.
     """
     old = {el.ref: el for el in basis.elements}
     new = {el.ref: el for el in aligned.elements}
@@ -1641,7 +1643,7 @@ def render_model_diff(basis: Snapshot, aligned: Snapshot) -> str:
     changed_refs = {el.ref for _prev, el, _delta in changed}
     added_refs = {el.ref for el in added}
     head = (
-        f"[{aligned.snapshot_id} ← {basis.snapshot_id}] "
+        f"[{aligned.snapshot_id} <- {basis.snapshot_id}] "
         f"+{len(added)} -{len(removed)} ~{len(changed)}"
     )
     lines = [head]
@@ -1657,7 +1659,7 @@ def render_model_diff(basis: Snapshot, aligned: Snapshot) -> str:
         lines.append(f"  - {el.ref} {_role_name(el)}{title} (gone)")
     for _prev, el, delta in changed:
         shown = ", ".join(
-            f"{attr}: {_clip(str(before), _RENDER_VALUE_CHARS)}→{_clip(str(after), _RENDER_VALUE_CHARS)}"
+            f"{attr}: {_clip(str(before), _RENDER_VALUE_CHARS)}->{_clip(str(after), _RENDER_VALUE_CHARS)}"
             for attr, (before, after) in delta.items()
         )
         lines.append(f"  ~ {_render_line(el)} [{shown}]")

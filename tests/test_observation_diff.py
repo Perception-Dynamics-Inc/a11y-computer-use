@@ -123,8 +123,8 @@ def test_same_turn_click_keeps_the_ref_after_an_insert_renumbers_the_tree(tmp_pa
     assert runtime._current.element("e2").title == "Insert"
     assert runtime._current.element("e4").title == "Extra"
     observations = _user_observations(agent)
-    assert "←" not in observations[0]
-    assert "←" in observations[1]
+    assert "<-" not in observations[0]
+    assert "<-" in observations[1]
     assert "Extra" in observations[1]
     assert "latest full snapshot" in agent._messages[0].content
 
@@ -148,7 +148,7 @@ def test_value_change_is_in_the_next_observation_and_not_hidden_by_the_post_acti
     )
     assert result.status == "success", result
     second = _user_observations(agent)[1]
-    assert "←" in second
+    assert "<-" in second
     assert "hello" in second
     assert second.count("</untrusted nonce=") == 1
 
@@ -174,13 +174,13 @@ def test_window_title_change_sends_a_full_snapshot_and_a_dirty_marker_does_not()
         return _user_observations(agent)
 
     changed = retitle("Other app")
-    assert "←" not in changed[0]
-    assert "←" not in changed[1]
+    assert "<-" not in changed[0]
+    assert "<-" not in changed[1]
     assert "Other app" in changed[1]
     assert 'button "Save"' in changed[1]
 
     dirty = retitle("*Demo")
-    assert "←" in dirty[1]
+    assert "<-" in dirty[1]
     assert "*Demo" in dirty[1]
     assert 'button "Save"' not in dirty[1]
 
@@ -198,7 +198,7 @@ def test_snapshot_full_redraws_with_stable_refs_and_the_next_observation_can_be_
     assert runtime.calls == []
     drawn = next(message.content for message in agent._messages if message.role == "tool")
     assert isinstance(drawn, str)
-    assert "←" not in drawn
+    assert "<-" not in drawn
     assert 'button "Save"' in drawn
     assert "e2" in drawn
     assert "(no change)" in _user_observations(agent)[1]
@@ -230,7 +230,7 @@ def test_snapshot_diff_repeats_the_change_and_a_bad_mode_is_rejected():
         for message in agent._messages
         if message.role == "tool" and message.name == "snapshot"
     )
-    assert "←" in drawn
+    assert "<-" in drawn
     assert "hello" in drawn
     assert drawn.count("</untrusted nonce=") == 1
     follow = _user_observations(agent)[1]
@@ -378,7 +378,7 @@ def test_unchanged_side_lines_stay_in_the_earlier_snapshot_and_a_change_is_appen
     assert menu in view.text
     again = _snap(elements, sid="again")
     same, basis = _show(basis, again, render_text(again) + "\n" + menu)
-    assert "←" in same.text
+    assert "<-" in same.text
     assert "open menu:" not in same.text
     closed, _basis = _show(basis, _snap(elements, sid="closed"), render_text(again))
     assert "(snapshot note gone)" in closed.text
@@ -398,7 +398,7 @@ def test_requested_full_snapshot_keeps_refs_after_an_insert():
     ], sid="grown")
     full, _basis = _show(basis, grown, force_full=True)
     assert full.full
-    assert "←" not in full.text
+    assert "<-" not in full.text
     assert _ref(full.snap, "AXButton", "Save") == "e2"
     assert _ref(full.snap, "AXButton", "Extra") != "e2"
 
@@ -417,7 +417,7 @@ def test_file_identity_keeps_the_window_when_the_title_changes():
     view, basis = _show(None, titled("/tmp/a.txt - Mousepad", "a"))
     nxt, _basis = _show(basis, titled("*/tmp/a.txt - Mousepad", "b"))
     assert nxt.full is False
-    assert "←" in nxt.text
+    assert "<-" in nxt.text
     assert _ref(nxt.snap, "AXButton", "Save") == "e2"
 
 
@@ -710,12 +710,12 @@ def test_fixture_observations_use_fewer_tokens_than_a_full_tree_every_turn(capsy
 
     gtk_save = rows[0]
     assert gtk_save["full_flags"] == [True, False, False, False, True]
-    assert "←" not in gtk_save["texts"][0]
-    assert "←" in gtk_save["texts"][1]
+    assert "<-" not in gtk_save["texts"][0]
+    assert "<-" in gtk_save["texts"][1]
     assert "M1 live note" in gtk_save["texts"][1]
     assert "/tmp/cu-m3.txt" in gtk_save["texts"][2]
     assert "plain" in gtk_save["texts"][3]
-    assert "←" not in gtk_save["texts"][4]
+    assert "<-" not in gtk_save["texts"][4]
     assert "saved plain" in gtk_save["texts"][4]
     assert len(set(gtk_save["refs"])) == 1
 
@@ -730,7 +730,7 @@ def test_fixture_observations_use_fewer_tokens_than_a_full_tree_every_turn(capsy
     assert "Ada" in form_row["texts"][1]
     assert "blue" in form_row["texts"][2]
     assert "checked" in form_row["texts"][3]
-    assert "←" not in form_row["texts"][4]
+    assert "<-" not in form_row["texts"][4]
     assert FORM_RESULT in form_row["texts"][4]
     assert len(set(form_row["refs"])) == 1
 

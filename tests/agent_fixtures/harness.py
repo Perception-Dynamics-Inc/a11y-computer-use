@@ -33,7 +33,7 @@ FORM_RESULT = "RESULT name=Ada color=blue subscribe=yes"
 # Rendered snapshot lines from observe.render_text, and the same line after a
 # model diff prefix (+ added, ~ changed, focus). A leading "- ref" is a removal.
 #   e7 textarea "Notes" ="M1 live note second line " (edit,focus)
-#   ~ e7 textarea "Notes" ="M1 live note second line " (edit) [value: ""→…]
+#   ~ e7 textarea "Notes" ="M1 live note second line " (edit) [value: ""->…]
 _LINE = re.compile(
     r"""^[ \t]*(?:(?:\+|~|focus)\s+)?(e\d+)\s+(\S+)\s+"([^"]*)"(?:\s+="([^"]*)")?(?:\s+\(([^)]*)\))?"""
 )

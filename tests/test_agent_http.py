@@ -538,10 +538,15 @@ def test_ui_text_is_fenced_on_events_and_trace(tmp_path: Path) -> None:
             event["data"]["text"] for event in events if event["type"] == "observation"
         ]
         assert observations
+        # The first observation is the full tree, so the injection phrase is
+        # fenced and flagged. A later observation of the same window is a
+        # diff and does not repeat an unchanged title.
+        assert "<untrusted nonce=" in observations[0]
+        assert "suspicious=1" in observations[0]
+        assert title in observations[0]
         for text in observations:
-            assert "<untrusted nonce=" in text
-            assert "suspicious=1" in text
-            assert title in text
+            assert text.count("<untrusted ") == 1
+            assert "<untrusted" not in _plain(text)
         result = _wait(port, started["id"])
         assert result["status"] == "success"
         assert "<untrusted nonce=" in result["conditions"][0]["detail"]

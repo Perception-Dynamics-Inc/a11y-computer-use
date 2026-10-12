@@ -104,7 +104,7 @@ refused, or needs a human, later calls in that turn do not run.
 
 Use element refs from the latest observation. The first observation of a
 window is the full tree. After that you see a diff: + added, - removed,
-~ changed (the current line, then old→new in brackets). focus is the focused
+~ changed (the current line, then old->new in brackets). focus is the focused
 element when it did not change. Refs from the latest full snapshot stay valid,
 including ones the diff does not repeat. A different window sends the full
 tree again. snapshot mode="full" does that on request; mode="diff" repeats

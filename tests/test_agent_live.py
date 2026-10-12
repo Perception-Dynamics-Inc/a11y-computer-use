@@ -112,10 +112,10 @@ def test_snapshot_text_parser_matches_rendered_lines() -> None:
     assert status is not None and status.value == "idle"
     diff = "\n".join([
         sample,
-        "[snap-2 ← snap-1] +1 -1 ~1",
+        "[snap-2 <- snap-1] +1 -1 ~1",
         '  + e18 button "Extra" (click) parent=e1',
         '  - e16 button "Ping" (gone)',
-        '  ~ e17 statictext "Status" ="saved plain" [value: idle→saved plain]',
+        '  ~ e17 statictext "Status" ="saved plain" [value: idle->saved plain]',
         '  focus e10 textfield "Save path" ="/tmp/n.txt" (click,edit)',
     ])
     revised = parse_snapshot(diff)
