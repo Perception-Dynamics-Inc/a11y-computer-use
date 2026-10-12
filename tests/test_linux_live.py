@@ -5158,6 +5158,8 @@ def test_linux_impress_frame_type_confirms_multiline(tmp_path) -> None:
     assert binary, "libreoffice-impress is not installed"
     template = "/usr/lib/libreoffice/share/template/common/presnt/Lights.otp"
     assert os.path.isfile(template), "libreoffice-impress did not install a presentation template"
+    # The template lives in libreoffice-common. The slide frames need the impress component.
+    assert os.path.isfile("/usr/lib/libreoffice/program/simpress"), "libreoffice-impress is not installed"
     _kill_libreoffice()
     time.sleep(0.4)
     profile = tmp_path / "lo-impress"
