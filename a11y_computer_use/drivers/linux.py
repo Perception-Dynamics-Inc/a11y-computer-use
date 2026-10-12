@@ -1805,7 +1805,10 @@ class LinuxDriver:
 
         A ref in a sibling dialog is acted on only after that dialog is
         frontmost. No matching X window does not fail the action: the AT-SPI
-        action still runs. An already ACTIVE window is left alone.
+        action still runs. An already ACTIVE window is left alone. A window
+        that is already the EWMH active window is left alone too: Chrome's
+        page frame often lacks STATE_ACTIVE while the omnibox popup of that
+        same window has it, and raising the window focuses the address bar.
         """
         if handle is None or _on_wayland():
             return
@@ -1825,6 +1828,12 @@ class LinuxDriver:
         except Exception:
             return
         if window_id is None:
+            return
+        try:
+            current = _linux_system.active_window()
+        except Exception:
+            current = None
+        if current is not None and int(current.get("window_id") or 0) == int(window_id):
             return
         try:
             self.raise_window(int(window_id))

@@ -11138,6 +11138,33 @@ def test_showing_toplevels_skips_a_gtk_combo_popup(monkeypatch) -> None:
     assert [node.name for node in _atspi.showing_toplevels(dialog)] == ["Form"]
 
 
+def test_raise_skips_a_window_that_is_already_the_ewmh_active_one(monkeypatch) -> None:
+    driver = LinuxDriver()
+    raised: list[int] = []
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(
+        _atspi, "toplevel_raise_target",
+        lambda node: (False, "cuatypeform", 9, (10.0, 20.0, 800.0, 600.0)),
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.window_id_for_toplevel",
+        lambda **_kwargs: 42,
+    )
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 42, "app": "chrome", "pid": 9, "title": "cuatypeform"},
+    )
+    monkeypatch.setattr(driver, "raise_window", raised.append)
+    driver._raise_handle_window(object())
+    assert raised == []
+    monkeypatch.setattr(
+        "a11y_computer_use.drivers._linux_system.active_window",
+        lambda: {"window_id": 7, "app": "mousepad", "pid": 3, "title": "Editor"},
+    )
+    driver._raise_handle_window(object())
+    assert raised == [42]
+
+
 def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     from a11y_computer_use.drivers import _linux_system
 
