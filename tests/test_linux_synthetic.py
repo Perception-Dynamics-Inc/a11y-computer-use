@@ -4938,6 +4938,16 @@ def test_overflow_bar_at_rest_does_not_scroll_up(
     assert _row_titles(driver.snapshot(Scope.WINDOW, "chrome"))[0] == "ITEM-001"
 
 
+def test_page_unchanged_requires_an_unmoved_scroll_offset() -> None:
+    """The offset comparison. Not a live scroll."""
+    from a11y_computer_use.drivers.linux import _offset_did_not_move
+
+    assert _offset_did_not_move(4.0, 4.2) is True
+    assert _offset_did_not_move(4.0, 30.0) is False
+    assert _offset_did_not_move(None, 4.0) is None
+    assert _offset_did_not_move(4.0, None) is None
+
+
 def test_short_table_past_the_document_wheels_the_page(
     fake_atspi, xtest_recorder, monkeypatch
 ) -> None:
@@ -4972,6 +4982,9 @@ def test_short_table_past_the_document_wheels_the_page(
     assert driver.scroll(listing_el, dy=5, unit=ScrollUnit.LINES) is None
     assert called["wheel"] == 1
     assert called["nudge"] == 0
+    assert _atspi.scroll_container_kind(listing) == "document"
+    _overflow_window, overflow, _overflow_hit, _overflow_stuck = _chrome_list()
+    assert _atspi.scroll_container_kind(overflow) == "viewport"
     # After the document moves, the list's top is above the page and the
     # box no longer sits on the screen. It is still body content.
     hit.y = -22

@@ -7191,9 +7191,9 @@ def test_linux_chrome_document_scroll_to_find_item_180_is_quick(tmp_path) -> Non
     Live Chrome, not a synthetic list. Two hundred 28px rows in a list on
     the document, opened at the top. ``scroll_to_find`` has to report the
     row while it is on screen, and the whole search has to finish well
-    under the 10s a per-step clock-wait used to take. Eight seconds is
-    loose for a viewport step and tight for that clock. Skips when no
-    Chrome binary is on PATH.
+    under the 10s a per-step clock-wait used to take. About six seconds,
+    with the bound at seven so a busy runner still fails a regression to
+    the old clock. Skips when no Chrome binary is on PATH.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -7256,7 +7256,7 @@ def test_linux_chrome_document_scroll_to_find_item_180_is_quick(tmp_path) -> Non
         assert "ITEM-180" in found, found
         assert "not found" not in found, found
         assert "found after 0" not in found, found
-        assert elapsed < 8.0, f"ITEM-180 took {elapsed:.2f}s: {found.splitlines()[0]}"
+        assert elapsed < 7.0, f"ITEM-180 took {elapsed:.2f}s: {found.splitlines()[0]}"
         shown = _titles(driver.snapshot(Scope.WINDOW, "chrome"))
         assert any(title.startswith("ITEM-180") for title in shown), sorted(
             title for title in shown if title.startswith("ITEM-")

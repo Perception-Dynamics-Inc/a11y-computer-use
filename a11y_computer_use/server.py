@@ -5438,7 +5438,7 @@ class Runtime:
     @_serialized
     def scroll_to_find(self, app: str, text: str | None = None, role: str | None = None,
                        direction: str = "down", max_scrolls: int = 6, scope: str = "window",
-                       ref: str | None = None) -> str:
+                       ref: str | None = None, budget_s: float | None = None) -> str:
         """Scroll a view until an element matching text/role enters it, then
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
@@ -5477,6 +5477,13 @@ class Runtime:
         checks again. The ref and the bounds are from that confirming
         snapshot, not from the pre-scroll one.
 
+        The search stops when ``budget_s`` seconds have elapsed (15 by
+        default, or ``A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S``). The note
+        names the scroll container, its scroll position, and the last rows
+        on screen. A paginated or virtualized table is stepped with Ctrl+F
+        and Page Down before the wheel. ``page_unchanged`` is used only
+        when that container's scroll offset was read and did not move.
+
         While the name is not in the tree, the step stays five lines. On
         a document that is one burst of wheel notches, about a viewport.
         Once a document names the match and the center is still outside
@@ -5493,6 +5500,15 @@ class Runtime:
             raise ValueError("scope must be 'window' or 'app'")
         if isinstance(max_scrolls, bool) or not isinstance(max_scrolls, int) or not 0 <= max_scrolls <= MAX_SCROLLS:
             raise ValueError(f"max_scrolls must be an integer between 0 and {MAX_SCROLLS}")
+        if budget_s is None:
+            raw_budget = os.environ.get("A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S", "15")
+            try:
+                budget_s = float(raw_budget)
+            except ValueError:
+                budget_s = 15.0
+        if isinstance(budget_s, bool) or not isinstance(budget_s, (int, float)) or not 0 <= float(budget_s) <= 120:
+            raise ValueError("budget_s must be a number of seconds from 0 to 120")
+        budget_s = float(budget_s)
         self.driver.ensure_trusted()
         _running, bundle = self._resolve_app(app)
         pinned = self._anchor_audited(ref, "scroll") if ref is not None else None
@@ -5628,6 +5644,103 @@ class Runtime:
             # this: its correction stays five lines.
             seen_document = False
             limit = max_scrolls
+            deadline = time.monotonic() + budget_s
+            page_mode = True
+            find_tried = False
+            same_rows = 0
+            previous_rows: tuple[str, ...] | None = None
+            last_anchor: Element | None = None
+
+            def row_names(shot: Snapshot) -> tuple[str, ...]:
+                names: list[str] = []
+                for el in shot.elements:
+                    if el.role not in ("AXCell", "AXRow", "AXListItem"):
+                        continue
+                    title = (el.title or "").strip()
+                    if not title or not on_screen(el, shot):
+                        continue
+                    if not names or names[-1] != title:
+                        names.append(title)
+                return tuple(names)
+
+            def prefers_page_step(shot: Snapshot, anchor: Element | None) -> bool:
+                """A paginated or virtualized table, which steps by a page.
+
+                A Next link is pagination. A table that fits in the window
+                and has its own bar is virtualized. A body-scroll list is
+                neither, and keeps the wheel.
+                """
+                if anchor is None or anchor.role not in ("AXTable", "AXGrid", "AXOutline"):
+                    return False
+                if not callable(getattr(self.driver, "key_chord", None)):
+                    return False
+                for el in shot.elements:
+                    title = (el.title or "").strip().casefold()
+                    if el.role in ("AXLink", "AXButton") and title in {"next", "next page", "older"}:
+                        return True
+                if not any(el.role == "AXScrollBar" for el in shot.elements):
+                    return False
+                box = viewport_box(shot)
+                if box is None:
+                    return False
+                _left, top, _right, bottom = box
+                if anchor.bounds.height >= (bottom - top) - 8:
+                    return False
+                visible = sum(1 for el in shot.elements if el.role in ("AXRow", "AXCell"))
+                return visible <= 80
+
+            def read_offset(anchor: Element | None) -> str:
+                fn = getattr(self.driver, "scroll_offset", None)
+                if anchor is None or not callable(fn):
+                    return "unknown"
+                try:
+                    value = fn(anchor)
+                except Exception:
+                    return "unknown"
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return "unknown"
+                return f"{float(value):g}"
+
+            def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool) -> str:
+                names = row_names(shot)
+                tail = ", ".join(names[-8:]) if names else "none"
+                if anchor is None:
+                    container = "unknown"
+                else:
+                    title = f" {(anchor.title or '').strip()!r}" if (anchor.title or "").strip() else ""
+                    container = f"{anchor.role}{title} ref={anchor.ref}"
+                why = f" (time budget {budget_s:g}s)" if budget_hit else ""
+                return (
+                    f"not found after {count} scroll(s){why}: "
+                    f"no element matches text={text!r} role={role!r}\n"
+                    f"container: {container}\n"
+                    f"scroll_position: {read_offset(anchor)}\n"
+                    f"last_rows: {tail}"
+                )
+
+            def try_in_page_find(anchor: Element) -> str | None:
+                """Ctrl+F once. The match is returned only when a later snapshot shows it."""
+                if not text or "\n" in text or len(text) > 80:
+                    return None
+                if not callable(getattr(self.driver, "type_text", None)):
+                    return None
+                kind, verified = "missing", None
+                try:
+                    self.driver.key_chord("ctrl+f")
+                    self.driver.type_text(text)
+                    self.driver.key_chord("Return")
+                    time.sleep(0.2)
+                    kind, verified = confirming_snapshot(issued)
+                except Exception:
+                    kind, verified = "missing", None
+                try:
+                    self.driver.key_chord("Escape")
+                except Exception:
+                    pass
+                if kind == "found":
+                    return verified
+                return None
+
             while True:
                 snap = self.driver.snapshot(Scope(scope), bundle)
                 self._current = snap
@@ -5637,6 +5750,23 @@ class Runtime:
                         "the pinned scroll ref belongs to a different app; re-observe the requested app",
                         detail={"ref": ref, "ref_app": pinned[0].app, "target_app": snap.app},
                     )
+                anchor_now = (
+                    self.driver.resolve_ref(pinned[0], ref, live=snap)
+                    if pinned is not None else _scroll_anchor(snap)
+                )
+                if anchor_now is not None:
+                    last_anchor = anchor_now
+                if issued > 0 and time.monotonic() >= deadline:
+                    return unfinished(issued, snap, last_anchor, budget_hit=True)
+                if last_anchor is not None and last_anchor.role in ("AXTable", "AXGrid"):
+                    seen = row_names(snap)
+                    if issued > 0 and previous_rows is not None and seen == previous_rows:
+                        same_rows += 1
+                        if same_rows >= 2:
+                            return unfinished(issued, snap, last_anchor, budget_hit=False)
+                    else:
+                        same_rows = 0
+                    previous_rows = seen
                 matches = observe.find_elements(snap, text=text, role=role)
                 if matches:
                     shown = visible_matches(snap)
@@ -5749,6 +5879,8 @@ class Runtime:
                         issued += 1
                         stalls = 0
                         continue
+                if time.monotonic() >= deadline:
+                    return unfinished(issued, snap, last_anchor, budget_hit=True)
                 if issued >= limit:
                     break
                 anchor = (self.driver.resolve_ref(pinned[0], ref, live=snap)
@@ -5761,6 +5893,42 @@ class Runtime:
                 wheel = step
                 if seen_document and document_anchor(anchor):
                     wheel = 1 if step > 0 else -1
+                last_anchor = anchor
+                if page_mode and prefers_page_step(snap, anchor):
+                    if not find_tried:
+                        find_tried = True
+                        found = try_in_page_find(anchor)
+                        if found:
+                            return found
+                    before_names = row_names(snap)
+                    before_pos = read_offset(anchor)
+                    chord = "pagedown" if wheel > 0 else "pageup"
+                    try:
+                        self.driver.key_chord(chord)
+                    except Exception:
+                        page_mode = False
+                    else:
+                        time.sleep(0.15)
+                        issued += 1
+                        fresh = self.driver.snapshot(Scope(scope), bundle)
+                        self._current = fresh
+                        after_pos = read_offset(anchor)
+                        moved = row_names(fresh) != before_names or (
+                            before_pos != "unknown" and after_pos != before_pos
+                        )
+                        if moved:
+                            stalls = 0
+                            previous_rows = row_names(fresh)
+                            same_rows = 0
+                            continue
+                        stalls += 1
+                        if stalls < 2:
+                            continue
+                        # The page key did not move this container. The wheel
+                        # is the fallback, not another unchanged report.
+                        page_mode = False
+                        stalls = 0
+                        continue
                 # Scrolling is a pointer action too: the container can move,
                 # disappear, become secure or be covered between iterations.
                 try:
@@ -5802,7 +5970,7 @@ class Runtime:
                     continue
                 issued += 1
                 stalls = 0
-            return f"not found after {issued} scroll(s): no element matches text={text!r} role={role!r}"
+            return unfinished(issued, self._current, last_anchor, budget_hit=False)
 
         # Each injected scroll has its own receipt, including those that
         # complete before a later iteration fails; the outer row is observation.
@@ -7890,7 +8058,7 @@ def build_server(
     async def scroll_to_find(
         app: str, text: str | None = None, role: str | None = None,
         direction: str = "down", max_scrolls: int = 6, scope: str = "window",
-        ref: str | None = None,
+        ref: str | None = None, budget_s: float | None = None,
     ) -> str:
         """Scroll a scrollable view until an element matching text and/or role
         comes into view, then return its ref — for a target that isn't in the
@@ -7898,7 +8066,12 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. The ref is from a snapshot taken
+        matching ref(s) or a not-found note. The search stops at budget_s
+        seconds (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S) and
+        reports the container, its scroll position, and the last rows seen.
+        A paginated or virtualized table is searched with Ctrl+F and Page
+        Down before the wheel. page_unchanged is raised only when that
+        container's scroll offset was read and did not move. The ref is from a snapshot taken
         after the scroll settles, and only when that match's center is inside
         the window. A name that disappears on the re-read was the pre-scroll
         tree; the search scrolls back toward the row and checks again instead
@@ -7923,7 +8096,9 @@ def build_server(
         refreshed under the ref, and the row at that position is now another
         one), call find(text=...) or scroll_to_find again and act on the ref it
         returns; never click the old slot."""
-        return await run(runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref)
+        return await run(
+            runtime.scroll_to_find, app, text, role, direction, max_scrolls, scope, ref, budget_s,
+        )
 
     @server.tool(name="app")
     async def app(action: str, name: str | None = None, activate: bool | None = None) -> CallToolResult:

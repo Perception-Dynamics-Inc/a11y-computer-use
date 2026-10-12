@@ -881,7 +881,19 @@ def _name_source(run, handle):
     return source, before
 
 
-def _document_did_not_move(dx: int, dy: int) -> ComputerUseError:
+def _offset_did_not_move(before: float | None, after: float | None) -> bool | None:
+    """Whether a container's scroll offset stayed put.
+
+    True only when both reads exist and match. False when they differ.
+    None when either read is missing, which is not proof the page was
+    unchanged.
+    """
+    if before is None or after is None:
+        return None
+    return abs(float(after) - float(before)) < 0.5
+
+
+def _document_did_not_move(dx: int, dy: int, offset: float | None = None) -> ComputerUseError:
     """The document wheel ran and the on-screen rows stayed put.
 
     ``surface=document`` tells ``scroll_to_find`` this is the end of the
@@ -896,6 +908,7 @@ def _document_did_not_move(dx: int, dy: int) -> ComputerUseError:
             "unit": "lines",
             "dx": int(dx),
             "dy": int(dy),
+            "scroll_position": offset,
         },
     )
 
@@ -947,6 +960,10 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
     if len(before) < 2:
         plain()
         return
+    try:
+        before_offset = run(lambda node=source: _atspi.scroll_offset(node))
+    except Exception:
+        before_offset = None
 
     def measure() -> tuple[tuple[str, ...], int]:
         after = _refresh_shown_names(run, source)
@@ -998,11 +1015,18 @@ def _wheel_chromium_document(run, handle, x: int, y: int, dx: int, dy: int) -> N
             break
         time.sleep(0.05)
     # No measurable move, or the head already left the sample. The burst
-    # is the step. A sample that never changed is the end of the document:
-    # the wheel landed and the rows stayed. A short move still inside the
-    # old sample is the collapsed burst: top it up.
+    # is the step. A sample that never changed is the end of the document
+    # only when the container's scroll offset also stayed put. A missing
+    # offset is not that proof. A short move still inside the old sample
+    # is the collapsed burst: top it up.
     if not changed:
-        raise _document_did_not_move(dx, dy)
+        try:
+            after_offset = run(lambda node=source: _atspi.scroll_offset(node))
+        except Exception:
+            after_offset = None
+        if _offset_did_not_move(before_offset, after_offset) is True:
+            raise _document_did_not_move(dx, dy, before_offset)
+        return
     if not (0 < abs(moved) < burst) or _names_parted(before, after):
         return
     for _extra in range(wanted * 2):
@@ -2050,6 +2074,26 @@ class LinuxDriver:
         self._note_pointer(x1, y1)
         return None
 
+    def scroll_offset(self, target: Element) -> float | None:
+        """Vertical offset of the scroll container that holds ``target``.
+
+        None when that container has no readable bar.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        try:
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        except Exception:
+            return None
+        if handle is None:
+            return None
+        try:
+            value = self._run(lambda: _atspi.scroll_offset(handle))
+        except Exception:
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
+
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
                dry_run: bool = False) -> object:
@@ -2200,7 +2244,7 @@ class LinuxDriver:
             ancestor_box is None
             and raw_box is not None
             and int(dy)
-            and self._run(lambda: _atspi.list_scrolls_with_document(container))
+            and self._run(lambda: _atspi.scroll_container_kind(container)) == "document"
         ):
             display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
             self.hover(Point(display_id, x, y))
@@ -2222,6 +2266,10 @@ class LinuxDriver:
             _linux_input.scroll(x, y, dx=dx, dy=dy)
             return None
         display_id = target.display_id if isinstance(target, Point) else target.bounds.display_id
+        try:
+            offset_before = self._run(lambda: _atspi.scroll_offset(container))
+        except Exception:
+            offset_before = None
         still: dict[str, object] = {}
 
         def judge(mutate) -> bool:
@@ -2350,6 +2398,16 @@ class LinuxDriver:
                     "rows": list(shown[:8]),
                 },
             )
+        try:
+            offset_after = self._run(lambda: _atspi.scroll_offset(container))
+        except Exception:
+            offset_after = None
+        # A bar that moved is a scroll, even when the painted rows have not
+        # caught up. page_unchanged is only a bar that was read twice and
+        # stayed put. A list with no readable bar still uses the painted
+        # rows: that list is the scrollport, and there is no other offset.
+        if _offset_did_not_move(offset_before, offset_after) is False:
+            return None
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
             "the rows on screen did not change after the wheel scroll",
@@ -2361,6 +2419,7 @@ class LinuxDriver:
                 "mean_abs": mean,
                 "samples": samples,
                 "box": list(box),
+                "scroll_position": offset_after if offset_after is not None else offset_before,
                 "rows": list(shown[:8]),
             },
         )
