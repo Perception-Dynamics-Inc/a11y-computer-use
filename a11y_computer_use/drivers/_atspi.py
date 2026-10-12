@@ -2205,7 +2205,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     value on those roles stay. An empty entry, text field, or paragraph
     (character count 0) has no value either: Chromium's empty input
     publishes a subnormal double on Value, and that number is not the
-    field. A filler still keeps that double.
+    field. A filler still keeps that double. An empty GTK text field
+    implements Text and not Value. CurrentValue is then an uninitialized
+    double (about ``6.93e-310``). That read is skipped when the Value
+    interface is absent. When the text interface does not report a
+    character count, a subnormal on a text role is absent too, and zero
+    and a small normalized value stay when the interface is present.
     """
     if role == "AXSecureTextField":
         return None
@@ -2281,6 +2286,12 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     # A Qt label, check, row, or empty line edit has a Value interface whose
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
+        return None
+    # GTK 4 text (the calculator display, a new text-editor document) has
+    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # ``_value_interface_present`` is false only when the accessible reports
+    # the interface missing. A test double with no getter still reads Value.
+    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is None:
