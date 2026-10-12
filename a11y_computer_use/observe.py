@@ -975,7 +975,7 @@ def _interactive_entries(snap: Snapshot, include_bounds: bool) -> list[tuple[str
             if text and text != el.title and (not items or items[-1] != text):
                 total += 1
                 if len(items) < _COLLAPSED_TEXT_ITEMS:
-                    items.append(text.replace("\n", " "))
+                    items.append(_compact_value(text))
             stack.extend(reversed(children.get(node.ref, ())))
         return items, total, elided
 
@@ -1343,7 +1343,7 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
                 kept_changes.append((old, new, ch))
             elif "value" in ch or "title" in ch:
                 a, b = ch.get("value") or ch["title"]
-                text_changes.append(f"{new.ref} {_clip(str(a), 24)}→{_clip(str(b), 24)}")
+                text_changes.append(f"{new.ref} {_compact_clip(a)}→{_compact_clip(b)}")
         changed = tuple(kept_changes)
         hidden_added = len(diff.added) - len(added)
         hidden_removed = len(diff.removed) - len(removed)
@@ -1356,7 +1356,7 @@ def render_diff(diff: SnapshotDiff, *, mode: str = "full", budget: int | None = 
         entries.append((f"  - {el.ref} {role}{title} (gone)", True))
     for _old, new, changes in changed:
         parts = ", ".join(
-            f"{attr}: {_clip(str(a), 24)}→{_clip(str(b), 24)}" for attr, (a, b) in changes.items()
+            f"{attr}: {_compact_clip(a)}→{_compact_clip(b)}" for attr, (a, b) in changes.items()
         )
         role = new.role[2:].lower() if new.role.startswith("AX") else new.role.lower()
         entries.append((f"  ~ {new.ref} {role} [{parts}]", True))
@@ -2620,6 +2620,28 @@ _IMPLICIT_CLICK_ROLES = frozenset(
 )
 
 
+def _compact_value(text: str) -> str:
+    """Escape line breaks so one snapshot field stays on one line.
+
+    ``Element.value`` keeps the real breaks. Compact output writes ``\\n``
+    and ``\\r`` so a multi-line document is not a space-separated line.
+    A value with no break is returned unchanged, including a backslash.
+    """
+    if "\n" not in text and "\r" not in text:
+        return text
+    return (
+        text.replace("\\", "\\\\")
+        .replace("\r\n", "\\r\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
+def _compact_clip(value: object, limit: int = 24) -> str:
+    """Clip a diff field after escaping its line breaks."""
+    return _clip(_compact_value(str(value)), limit)
+
+
 def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = False) -> str:
     """One element line. ``bounds``: None prints geometry on roots only (the
     full view's rule), True on every line, False never. ``compact`` (the
@@ -2630,11 +2652,12 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     if el.title:
         parts.append(f'"{el.title}"')
     if el.value is not None:
-        flat = el.value.replace(chr(10), " ")
         # A terminal value is already the on-screen text, or its tail.
         # Clipping that head would hide the output the snapshot is showing.
-        shown = flat if el.subrole == "terminal" else _clip(flat, _RENDER_VALUE_CHARS)
-        parts.append(f'="{shown}"')
+        # Line breaks stay in ``el.value``. The field escapes them so this
+        # line does not become several elements.
+        shown = el.value if el.subrole == "terminal" else _clip(el.value, _RENDER_VALUE_CHARS)
+        parts.append(f'="{_compact_value(shown)}"')
     elif el.placeholder and not el.title:  # blank field: show its prompt for identity
         parts.append(f'~"{_clip(el.placeholder, _RENDER_VALUE_CHARS)}"')
     show_click = el.clickable and not (compact and el.role in _IMPLICIT_CLICK_ROLES)

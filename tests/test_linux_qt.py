@@ -275,6 +275,18 @@ def atspi(monkeypatch):
     monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
 
 
+def test_text_value_keeps_line_breaks_for_qt_and_gtk(atspi) -> None:
+    """``Text.get_text`` newlines stay in the value. Neither toolkit flattens them.
+
+    The snapshot field used to turn those breaks into spaces later. This
+    read is the string ``Element.value`` stores.
+    """
+    qt = _Node("text", text="AAA\nBBB\nCCC", toolkit="Qt", states=("SHOWING", "EDITABLE"))
+    gtk = _Node("text", text="AAA\r\nBBB", toolkit="gtk", states=("SHOWING", "EDITABLE", "MULTI_LINE"))
+    assert _atspi._value_text(qt, "AXTextArea", "text") == "AAA\nBBB\nCCC"
+    assert _atspi._value_text(gtk, "AXTextArea", "text") == "AAA\r\nBBB"
+
+
 def test_qt_character_length_inserts_exactly_and_a_byte_length_is_rejected(atspi) -> None:
     field = _QtField("Start", caret=5)
     assert _atspi.insert_text(field, "ünï") == 3
