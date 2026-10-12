@@ -2,6 +2,11 @@
 
 GTK publishes a menu-bar entry as role ``menu``. Its rows are either direct
 children or the children of one popup (untitled, or the entry's only child).
+Chromium and Electron publish the bar entry as a push button with no children.
+Pressing it opens a menu in another window. Item names include the accelerator
+(``New Note Ctrl+N``). An exact title wins; otherwise the name with that
+suffix removed matches.
+
 The shared macOS walker looks for an ``AXMenu`` child of each item, which does
 not match that tree, so the walk lives here. Title matching, ellipsis, and
 prefixes still go through `menus.match_title`.
@@ -46,6 +51,15 @@ _MOD_TAGS = {
     "mod4": "super",
 }
 _TAG = re.compile(r"<([^>]+)>")
+# Chromium appends the accelerator to the accessible name ("New Note Ctrl+N",
+# "Save As Ctrl+Shift+S", "Fullscreen F11"). The suffix is not the title.
+_ACCEL_SUFFIX = re.compile(
+    r"\s+(?:(?:(?:ctrl|control|alt|option|shift|super|meta|cmd|command|primary)\+)+[^\s]+|f\d{1,2})$",
+    re.IGNORECASE,
+)
+# Page content is not a menu popup. A Chromium menu opens in its own window,
+# which a breadth-first walk reaches before the document's children.
+_POPUP_STOP_ROLES = frozenset({"document web", "document frame", "internal frame"})
 
 
 def _settle(seconds: float) -> None:
@@ -159,10 +173,39 @@ def entries_of(node: object, depth: int = 0) -> list[object]:
     return [child for child in raw if _name(child).strip()]
 
 
+def _strip_accelerator_suffix(title: str) -> str:
+    """Title without a trailing accelerator Chromium glues onto the name.
+
+    ``New Note Ctrl+N`` becomes ``New Note``. A name that is only the chord
+    stays as it is, so an exact match on the full string still wins.
+    """
+    text = " ".join((title or "").split())
+    match = _ACCEL_SUFFIX.search(text)
+    if match is None:
+        return text
+    stripped = text[: match.start()].strip()
+    return stripped or text
+
+
 def _has_submenu(node: object) -> bool:
+    """True when activating ``node`` opens another menu.
+
+    GTK bar entries are role ``menu``, or they already have rows. A Chromium
+    menu-bar entry is a push button whose parent is the menu bar and whose
+    popup does not exist until the button is pressed. ``HAS_POPUP`` or
+    ``EXPANDABLE`` is that same fact on a menu item.
+    """
     if _role(node) in _MENU_ROLES:
         return True
-    return bool(entries_of(node))
+    if entries_of(node):
+        return True
+    if _has_state(node, "HAS_POPUP", "EXPANDABLE"):
+        return True
+    if _role(node) in {"push button", "toggle button"}:
+        parent = _call(node, ("get_parent", "getParent"))
+        if _role(parent) == "menu bar":
+            return True
+    return False
 
 
 def _render_chord(chosen: str) -> str | None:
@@ -488,7 +531,40 @@ def _require_bar(app: object) -> object:
 
 
 def _match(entries: list[object], wanted: str, depth: int) -> tuple[object, str]:
+    """The entry named ``wanted``.
+
+    An exact normalized title wins, including a name that still has its
+    accelerator. Otherwise one title whose accelerator suffix was removed
+    equals ``wanted``. Unique prefixes and ellipsis still go through
+    `menus.match_title`.
+    """
     titles = [_name(node) for node in entries]
+    want = menus.normalize_title(wanted)
+    normalized = [menus.normalize_title(title) for title in titles]
+    exact = [index for index, title in enumerate(normalized) if title == want]
+    if len(exact) == 1:
+        return entries[exact[0]], titles[exact[0]]
+    if len(exact) > 1:
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"menu path component {depth + 1} ({wanted!r}): {wanted!r} matches {len(exact)} items with the same title",
+            detail={"component": wanted, "available": titles},
+        )
+    stripped = [menus.normalize_title(_strip_accelerator_suffix(title)) for title in titles]
+    accel = [
+        index
+        for index, title in enumerate(stripped)
+        if title == want and title != normalized[index]
+    ]
+    if len(accel) == 1:
+        return entries[accel[0]], titles[accel[0]]
+    if len(accel) > 1:
+        options = ", ".join(repr(titles[index]) for index in accel)
+        raise ComputerUseError(
+            ErrorCode.APP_NOT_FOUND,
+            f"menu path component {depth + 1} ({wanted!r}): {wanted!r} matches {len(accel)} items: {options}",
+            detail={"component": wanted, "available": titles},
+        )
     try:
         index = menus.match_title(wanted, titles)
     except LookupError as exc:
@@ -498,6 +574,84 @@ def _match(entries: list[object], wanted: str, depth: int) -> tuple[object, str]
             detail={"component": wanted, "available": titles},
         ) from None
     return entries[index], titles[index]
+
+
+def _contains(root: object, target: object) -> bool:
+    """True when ``target`` is ``root`` or one of its descendants."""
+    if root is None or target is None:
+        return False
+    want = _node_key(target)
+    pinned: list[object] = [root]
+    queue = [root]
+    seen: set[object] = set()
+    walked = 0
+    while queue and walked < 200:
+        node = queue.pop(0)
+        identity = _node_key(node)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        walked += 1
+        if identity == want:
+            return True
+        for child in _raw_children(node)[:40]:
+            pinned.append(child)
+            queue.append(child)
+    return False
+
+
+def _popup_menus(app: object) -> list[object]:
+    """Menus under ``app`` that already have rows. The page is not walked."""
+    found: list[object] = []
+    pinned: list[object] = [app]
+    queue = [app]
+    seen: set[object] = set()
+    walked = 0
+    while queue and walked < 400 and len(found) < 8:
+        node = queue.pop(0)
+        identity = _node_key(node)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        walked += 1
+        role = _role(node)
+        if role in _MENU_ROLES and entries_of(node):
+            found.append(node)
+        if role in _POPUP_STOP_ROLES:
+            continue
+        for child in _raw_children(node)[:80]:
+            pinned.append(child)
+            queue.append(child)
+    return found
+
+
+def _menu_showing(menu: object) -> bool:
+    if _has_state(menu, "SHOWING"):
+        return True
+    parent = _call(menu, ("get_parent", "getParent"))
+    for _ in range(4):
+        if parent is None:
+            return False
+        if _role(parent) in {"window", "frame", "dialog"} and _has_state(parent, "SHOWING"):
+            return True
+        parent = _call(parent, ("get_parent", "getParent"))
+    return False
+
+
+def _opened_menu(app: object, node: object) -> object:
+    """The container whose rows are ``node``'s submenu.
+
+    GTK rows are children of ``node``. A Chromium menu-bar button has none
+    until it is pressed, and the popup is another window. A menu that still
+    contains ``node`` is the parent popup, not the one this press opened.
+    """
+    if entries_of(node):
+        return node
+    found = [menu for menu in _popup_menus(app) if not _contains(menu, node)]
+    if not found:
+        return node
+    showing = [menu for menu in found if _menu_showing(menu)]
+    return (showing or found)[-1]
 
 
 def _walk(app: object, path: str) -> list[object]:
@@ -514,7 +668,7 @@ def _walk(app: object, path: str) -> list[object]:
                 f"{_name(node)!r} has no submenu",
                 detail={"component": wanted},
             )
-        container = node
+        container = node if depth == len(components) - 1 else _opened_menu(app, node)
     return nodes
 
 
@@ -593,7 +747,7 @@ def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, 
                 f"{_name(target)!r} is an item, not a menu",
                 detail={"path": path, "hint": "list its parent, or press it"},
             )
-        rows = entries_of(target)
+        rows = entries_of(_opened_menu(app, target))
         if rows:
             return [_describe(node).to_dict() for node in rows]
     top = _open_branch(app, path, settle)
@@ -605,7 +759,7 @@ def menu_items(app: object, path: str | None, *, settle=None) -> list[dict[str, 
                 f"{_name(target)!r} is an item, not a menu",
                 detail={"path": path, "hint": "list its parent, or press it"},
             )
-        return [_describe(node).to_dict() for node in entries_of(target)]
+        return [_describe(node).to_dict() for node in entries_of(_opened_menu(app, target))]
     finally:
         _press(top)
 
@@ -642,7 +796,7 @@ def _open_branch(app: object, path: str, settle) -> object:
             if top is None:
                 top = node
             settle(menus.MENU_OPEN_SETTLE_S)
-            container = node
+            container = _opened_menu(app, node)
     except Exception:
         if top is not None:
             _press(top)
@@ -732,7 +886,7 @@ def menu_press(app: object, path: str, *, settle=None, dismiss=None, dispatch=No
             return title
         opened.append(node)
         settle(menus.MENU_OPEN_SETTLE_S)
-        container = node
+        container = _opened_menu(app, node)
     raise AssertionError("unreachable")  # pragma: no cover
 
 
