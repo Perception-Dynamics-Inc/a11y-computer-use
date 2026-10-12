@@ -291,6 +291,13 @@ class RawNode:
     #: childless panel still becomes an opaque region. The pruner copies it
     #: onto that region's title. Empty on macOS, Windows, and the browser.
     surface_name: str = ""
+    #: Tooltip sentence split off a multiline accessible name. Empty when
+    #: the name was a single line. The snapshot prints it as ``hint=``, not
+    #: inside the name.
+    hint: str = ""
+    #: Key chord split off the end of that tooltip, such as ``T`` or
+    #: ``Ctrl+S``. Empty when the name had no parenthetical chord.
+    shortcut: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -1314,7 +1321,7 @@ def find_elements(
             value = full_values.get(el.ref, el.value or "")
             # NBSP is a space. The container value already has each U+FFFC
             # replaced by the embedded child's text, so the sentence matches.
-            haystack = f"{el.title} {value}".replace("\u00a0", " ").lower()
+            haystack = f"{el.title} {value} {el.hint} {el.shortcut}".replace("\u00a0", " ").lower()
             if needle.replace("\u00a0", " ") not in haystack:
                 continue
         if role_needle is not None and role_needle not in el.role.lower().removeprefix("ax"):
@@ -2667,6 +2674,8 @@ def _flatten(
             instance_id=instance_id,
             document_id=document_id,
             subrole="terminal" if terminal else None,
+            hint=node.raw.hint,
+            shortcut=node.raw.shortcut,
         )
     )
     if node.elided:
@@ -2810,6 +2819,10 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
     parts = [el.ref, role]
     if el.title:
         parts.append(f'"{el.title}"')
+    if el.hint:
+        parts.append("hint=" + _field_quote(el.hint))
+    if el.shortcut:
+        parts.append("shortcut=" + _field_quote(el.shortcut))
     if el.value is not None:
         # A terminal value is already the on-screen text, or its tail.
         # Clipping that head would hide the output the snapshot is showing.
@@ -2852,6 +2865,12 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _field_quote(text: str) -> str:
+    """One quoted field. Newlines and embedded quotes stay on one line."""
+    shown = " ".join(str(text).replace('"', "'").split())
+    return '"' + _clip(shown, 160) + '"'
 
 
 def _terminal_value(text: str) -> str:
