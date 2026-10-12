@@ -348,13 +348,29 @@ def port_for_pid(pid: object) -> int | None:
     """DevTools port of process ``pid``, or of an ancestor, or None.
 
     None means this process was not started with the flag and neither was
-    an ancestor. A missing flag is not a default port.
+    an ancestor. A missing flag is not a default port. When several
+    processes in the chain name a port, this is the process's own port.
+    """
+    ports = ports_for_pid(pid)
+    return ports[0] if ports else None
+
+
+def ports_for_pid(pid: object) -> tuple[int, ...]:
+    """Distinct DevTools ports on ``pid`` and its ancestors, process first.
+
+    A renderer often copies a port that is not the one the browser bound.
+    The browser's port is later in the chain. Callers try them in order.
     """
     if isinstance(pid, bool) or not isinstance(pid, int):
         raise TypeError("pid must be a positive int")
     if pid <= 0:
         raise ValueError("pid must be a positive int")
-    return port_from_process_chain(_cmdline_chain(pid))
+    found: list[int] = []
+    for raw in _cmdline_chain(pid):
+        port = debug_port_from_cmdline(raw)
+        if port is not None and port not in found:
+            found.append(port)
+    return tuple(found)
 
 
 def _cmdline_chain(pid: int) -> tuple[bytes, ...]:
@@ -558,7 +574,7 @@ def fetch_form_controls(port: object, window_title: object) -> tuple[FormControl
     return tuple(found)
 
 
-def write_element(element: Element, value: object) -> bool | None:
+def write_element(element: Element, value: object, window_title: str = "") -> bool | None:
     """Write one form control through the DOM.
 
     None means this element is not a CDP form write (no port, no unique
@@ -573,10 +589,10 @@ def write_element(element: Element, value: object) -> bool | None:
         raise TypeError("value must be a string")
     if element.role not in _FORM_ROLES or element.secure is True or element.enabled is not True:
         return None
-    return _commit(element, _write_spec(element, value))
+    return _commit(element, _write_spec(element, value), window_title)
 
 
-def press_checkable(element: Element) -> bool | None:
+def press_checkable(element: Element, window_title: str = "") -> bool | None:
     """Toggle a checkbox, or select a radio, through the DOM.
 
     None means CDP is not used for this element. True means the DOM
@@ -595,7 +611,7 @@ def press_checkable(element: Element) -> bool | None:
         "kind": kind,
         "action": "toggle",
     }
-    reply = _commit_raw(element, spec)
+    reply = _commit_raw(element, spec, window_title)
     if reply is None:
         return None
     if reply.get("wrote") is True and type(reply.get("checked")) is bool:
@@ -634,8 +650,8 @@ def _kind_for_element(element: Element) -> str:
     return "text"
 
 
-def _commit(element: Element, spec: dict) -> bool | None:
-    reply = _commit_raw(element, spec)
+def _commit(element: Element, spec: dict, window_title: str = "") -> bool | None:
+    reply = _commit_raw(element, spec, window_title)
     if reply is None:
         return None
     _raise_rejected(element, reply, spec)
@@ -647,24 +663,33 @@ def _commit(element: Element, spec: dict) -> bool | None:
     return True
 
 
-def _commit_raw(element: Element, spec: dict) -> dict | None:
+def _commit_raw(element: Element, spec: dict, window_title: str = "") -> dict | None:
+    if not isinstance(window_title, str):
+        raise TypeError("window_title must be a string")
     pid = pid_from_instance(element.instance_id)
     if pid is None:
         return None
     try:
-        port = port_for_pid(pid)
+        ports = ports_for_pid(pid)
     except OSError:
         return None
-    if port is None:
+    if not ports:
         return None
     expression = f"{_WRITE_JS}({json.dumps(spec)})"
-    try:
-        reply = _evaluate(port, "", expression)
-    except (OSError, TimeoutError, ComputerUseError):
-        raise
-    if not isinstance(reply, dict) or reply.get("found") is not True:
-        return None
-    return reply
+    last_error: BaseException | None = None
+    answered = False
+    for port in ports:
+        try:
+            reply = _evaluate(port, window_title, expression)
+        except (OSError, TimeoutError, ComputerUseError) as exc:
+            last_error = exc
+            continue
+        answered = True
+        if isinstance(reply, dict) and reply.get("found") is True:
+            return reply
+    if not answered and last_error is not None:
+        raise last_error
+    return None
 
 
 def _raise_rejected(element: Element, reply: dict, spec: dict) -> None:
@@ -693,11 +718,11 @@ def _evaluate(port: int, window_title: str, expression: str) -> object:
 
     pages = page_targets(f"http://127.0.0.1:{port}")
     socket = choose_socket(pages, window_title)
-    if socket is None and not window_title:
-        # A write has no window title of its own. One page is that page.
-        # Several pages are probed with a locate that does not change the
-        # DOM, and the write runs only on the single page that has the
-        # control. Two pages with the same control are not a guess.
+    if socket is None:
+        # The window title missed, or the write has no title. One page is
+        # that page. Several pages are probed with a locate that does not
+        # change the DOM, and the write runs only on the single page that
+        # has the control. Two pages with the same control are not a guess.
         socket = _only_form_page(pages, _locate_expression(expression))
     if socket is None:
         return None

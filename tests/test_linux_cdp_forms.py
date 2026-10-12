@@ -208,7 +208,7 @@ def test_snapshot_merges_dom_text_and_leaves_bounds(monkeypatch) -> None:
 
 def test_dom_write_readback_failure_is_not_success(monkeypatch) -> None:
     element = _element()
-    monkeypatch.setattr(_cdp_forms, "port_for_pid", lambda pid: 9333)
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (9333,))
     monkeypatch.setattr(
         _cdp_forms, "_evaluate",
         lambda port, title, expression: {"found": True, "wrote": False, "value": "nope", "options": []},
@@ -237,14 +237,14 @@ def test_dom_write_readback_failure_is_not_success(monkeypatch) -> None:
         _cdp_forms.write_element(seats, "abc")
     with pytest.raises(TypeError):
         _cdp_forms.write_element(element, True)  # type: ignore[arg-type]
-    monkeypatch.setattr(_cdp_forms, "port_for_pid", lambda pid: None)
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: ())
     assert _cdp_forms.write_element(element, "Ada") is None
 
 
 def test_driver_uses_dom_write_without_calling_atspi(monkeypatch) -> None:
     driver = LinuxDriver()
     element = _element()
-    monkeypatch.setattr(_cdp_forms, "write_element", lambda el, value: True)
+    monkeypatch.setattr(_cdp_forms, "write_element", lambda el, value, window_title="": True)
 
     def boom(*_args, **_kwargs):
         raise AssertionError("AT-SPI set_value ran")
@@ -252,7 +252,88 @@ def test_driver_uses_dom_write_without_calling_atspi(monkeypatch) -> None:
     monkeypatch.setattr(_atspi, "is_sheet_cell", boom)
     assert driver._apply_set_value(element, "Ada", object()) is True
     box = _element(role="AXCheckBox", title="Agree", checked=True)
-    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el: True)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="": True)
     assert driver.press_element(box) is True
-    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el: None)
+    monkeypatch.setattr(_cdp_forms, "press_checkable", lambda el, window_title="": None)
     assert driver.press_element(box) is False
+
+
+def test_ports_for_pid_keeps_each_distinct_port_process_first(monkeypatch) -> None:
+    child = b"chrome\x00--type=renderer\x00--remote-debugging-port=9222\x00"
+    browser = b"chrome\x00--remote-debugging-port=9222\x00--remote-debugging-port=9333\x00"
+    monkeypatch.setattr(_cdp_forms, "_cmdline_chain", lambda pid: (child, browser))
+    assert _cdp_forms.ports_for_pid(9) == (9222, 9333)
+    assert _cdp_forms.port_for_pid(9) == 9222
+
+
+def test_write_uses_the_window_title_when_several_pages_are_open(monkeypatch) -> None:
+    pages = [
+        {"title": "Other", "type": "page", "webSocketDebuggerUrl": "ws://other"},
+        {"title": "cuahybrid119", "type": "page", "webSocketDebuggerUrl": "ws://form"},
+    ]
+    seen: list[str] = []
+    monkeypatch.setattr(_cdp_forms, "port_for_pid", lambda pid: 9333)
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (9333,))
+
+    def targets(endpoint):
+        return pages
+
+    def eval_socket(socket, expression):
+        seen.append(socket)
+        return {"found": True, "wrote": True, "value": "Grace", "kind": "text"}
+
+    monkeypatch.setattr("a11y_computer_use.drivers._cdp.page_targets", targets)
+    monkeypatch.setattr(_cdp_forms, "_eval_socket", eval_socket)
+    assert _cdp_forms.write_element(
+        _element(), "Grace", window_title="cuahybrid119 - Google Chrome",
+    ) is True
+    assert seen == ["ws://form"]
+
+
+def test_write_tries_the_next_port_when_the_first_page_misses(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def evaluate(port, title, expression):
+        calls.append(port)
+        if port == 9222:
+            return None
+        return {"found": True, "wrote": True, "value": "Grace", "kind": "text"}
+
+    monkeypatch.setattr(_cdp_forms, "ports_for_pid", lambda pid: (9222, 9333))
+    monkeypatch.setattr(_cdp_forms, "_evaluate", evaluate)
+    assert _cdp_forms.write_element(
+        _element(), "Grace", window_title="cuahybrid119",
+    ) is True
+    assert calls == [9222, 9333]
+
+
+def test_top_window_title_is_the_outer_frame(monkeypatch) -> None:
+    class Node:
+        def __init__(self, role: str, name: str, parent: "Node | None") -> None:
+            self.role = role
+            self.name = name
+            self.parent = parent
+
+    outer = Node("frame", "cuahybrid119 - Google Chrome", None)
+    inner = Node("document web", "cuahybrid119", outer)
+    field = Node("entry", "Name", inner)
+    monkeypatch.setattr(_atspi, "_role_name", lambda node: node.role)
+    monkeypatch.setattr(_atspi, "_node_name", lambda node: node.name)
+    monkeypatch.setattr(_atspi, "_parent_of", lambda node: node.parent)
+    assert _atspi.top_window_title(field) == "cuahybrid119 - Google Chrome"
+    assert _atspi.top_window_title(None) == ""
+
+
+def test_driver_passes_the_frame_title_into_the_dom_write(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    def write(element, value, window_title=""):
+        seen["title"] = window_title
+        return True
+
+    monkeypatch.setattr(_cdp_forms, "write_element", write)
+    monkeypatch.setattr(_atspi, "top_window_title", lambda acc: "cuahybrid119 - Google Chrome")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert driver._apply_set_value(_element(), "Grace", object()) is True
+    assert seen["title"] == "cuahybrid119 - Google Chrome"
