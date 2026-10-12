@@ -205,14 +205,20 @@ Before a coordinate click is sent, the loop looks again. It crops a 640 by
 400 screen-pixel rectangle centred on the proposed point, clipped to the
 image, and shows that crop at 2× (an unclipped crop is a 1280 by 800 PNG
 whose screen bounds stay 640 by 400). A magenta crosshair marks the point.
-The verifier accepts it or returns a better point in the crop. A reply that
+The verifier accepts it or returns another point in the crop. A reply that
 is not a point counts as accept. The click that is sent is still the
 model's `x` and `y`. Look-again does not move that point, does not snap it
 to a ref, and does not snap it to an OCR word. When the verifier's point is
 more than 40 screen pixels from the proposed point, the loop records
 `disagree` and looks again once at the full screenshot, at 1×. That second
-point is recorded and is not the click. A distance of 40 does not open the
-full-screen look. When `grounding` is set, that local model is the
+look may only confirm the first point. A verifier point within 8 screen
+pixels confirms it (`accept`): `refined` on that line is the model's point,
+and `distance` is how far the verifier was. The click is not moved onto the
+verifier's pixel. A second look farther than 8 screen pixels is
+`unconfirmed`. That result is not a new point, and the click stays the
+model's `x` and `y`. Adopting the farther point on a dense grid scored
+16/24. A distance of 40 on the crop does not open the full-screen look.
+When `grounding` is set, that local model is the
 verifier (`HoloLocalGrounding` or a test `ScriptedGrounding`). Otherwise the
 verifier is one short image turn on the main model, with no tools. The check
 does not call a hosted or paid grounding service. `Agent(..., look_again=False)`, or
@@ -227,10 +233,12 @@ is used, and a span that still contains whitespace is split by character
 count. A missing OCR engine does not fail the click. RapidOCR's ONNX
 intra-op and inter-op thread counts are 4, and `OMP_NUM_THREADS`,
 `MKL_NUM_THREADS`, and `OPENBLAS_NUM_THREADS` are capped at 4. The marked
-crop, the decision (`accept`, `refine`, `unavailable`, `skipped`, or
-`disagree`), the distance, and the snap are lines in `trajectory.jsonl`
-(`kind` `look_again`) and on the step. A disagreement records the crop,
-then a second line for the full-screen look; the step keeps the last one.
+crop, the decision (`accept`, `refine`, `unavailable`, `skipped`,
+`disagree`, or `unconfirmed`), the distance, and the snap are lines in
+`trajectory.jsonl` (`kind` `look_again`) and on the step. A disagreement
+records the crop, then a second line for the full-screen look. The step
+keeps `accept` when that look is within 8 screen pixels and `unconfirmed`
+when it is farther. The click is the model's point either way.
 The coordinate click already passed the approval gate, the payment stop,
 and typed outcomes as the model's point. One crop check per coordinate
 click, plus the full-screen look only when that check disagrees by more
