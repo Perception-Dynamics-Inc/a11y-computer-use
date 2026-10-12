@@ -1591,9 +1591,9 @@ def _launch_label_tree(tmp_path) -> subprocess.Popen:
 def test_linux_find_skips_a_label_that_mentions_a_10k_tree_row(tmp_path) -> None:
     """Live GTK3 TreeView, 10000 rows, plus a label that names three row ids.
 
-    find ROW-00000 returns the on-screen cell. find ROW-05000 does not
-    return the label. scroll_to_find does not stop on that label at
-    scroll 0; a later hit is the cell.
+    find ROW-00000 returns the on-screen cell. scroll_to_find does not
+    stop on the label at scroll 0 while row 5000 is still off screen; a
+    later hit is the cell. find ROW-05000 returns that cell, not the label.
     """
     from a11y_computer_use.drivers.linux import LinuxDriver
 
@@ -1628,9 +1628,6 @@ def test_linux_find_skips_a_label_that_mentions_a_10k_tree_row(tmp_path) -> None
         assert "ROW-00000" in top
         assert "this label is not the row" not in top
         assert "cell" in top
-        missed = runtime.find(_LABEL_TREE_APP, text="ROW-05000")
-        assert "no elements match" in missed
-        assert "this label is not the row" not in missed
         hunted = runtime.scroll_to_find(
             _LABEL_TREE_APP, text="ROW-05000", direction="down", max_scrolls=2,
         )
@@ -1641,6 +1638,11 @@ def test_linux_find_skips_a_label_that_mentions_a_10k_tree_row(tmp_path) -> None
             assert "cell" in hunted
         else:
             assert "not found" in hunted
+        deep = runtime.find(_LABEL_TREE_APP, text="ROW-05000")
+        assert "no elements match" not in deep
+        assert "this label is not the row" not in deep
+        assert "ROW-05000" in deep
+        assert "cell" in deep
     finally:
         proc.terminate()
         try:
