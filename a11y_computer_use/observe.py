@@ -285,6 +285,12 @@ class RawNode:
     #: while the tab bar is hidden. The snapshot keeps the name and does not
     #: invent a box. Default false, so every other node is unchanged.
     unallocated: bool = False
+    #: Linux only. A title read from somewhere else in the tree (the image
+    #: label, or the frame title) for a surface that has no name of its own.
+    #: It is not the node's name: the dead-region check ignores it, so a
+    #: childless panel still becomes an opaque region. The pruner copies it
+    #: onto that region's title. Empty on macOS, Windows, and the browser.
+    surface_name: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -2542,6 +2548,11 @@ def _as_opaque_region(
         return raw
     title = "" if _generic_region_name(raw.title) else raw.title
     description = "" if _generic_region_name(raw.description) else raw.description
+    # ``surface_name`` is not the node's own name, so it did not keep this
+    # region from being demoted. Once it is an opaque region, that string is
+    # the honest title. A generic placeholder is not used.
+    if not title and not _generic_region_name(raw.surface_name):
+        title = raw.surface_name
     return dataclasses.replace(raw, role=OPAQUE_ROLE, title=title, description=description)
 
 

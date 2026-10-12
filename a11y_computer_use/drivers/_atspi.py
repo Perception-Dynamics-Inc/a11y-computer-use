@@ -966,6 +966,111 @@ def _split_modifier_hints(name: str, description: str) -> tuple[str, str]:
     return split
 
 
+# A GIMP image window's canvas is a focusable childless panel. Its name is
+# not on that panel. The image title is a label elsewhere in the frame, and
+# the frame name is the window title. This search is local to that one
+# panel; it does not raise the snapshot's depth or child caps.
+_SURFACE_SKIP_ROLES = frozenset({"layered pane", "menu", "menu bar", "table", "tree table"})
+_SURFACE_WALK_NODES = 480
+_SURFACE_WALK_DEPTH = 16
+_SURFACE_WALK_CHILDREN = 48
+_TITLE_PREFIX_NEXT = frozenset(" .-(–—")
+
+
+def _page_tab_ancestor(acc):
+    """Nearest page tab above ``acc``, or None when a window comes first."""
+    node = acc
+    for _ in range(32):
+        if node is None:
+            return None
+        role = _role_name(node)
+        if role == "page tab":
+            return node
+        if role in {"application", "frame", "window", "dialog"}:
+            return None
+        node = _parent_of(node)
+    return None
+
+
+def _title_prefix_label(name: str, title: str) -> bool:
+    """True when ``name`` is the image title copied into the window title.
+
+    GIMP's frame name starts with the image title and then a view suffix
+    (``[Untitled]-1.0 (RGB...``). The next character is ``.``, a space, a
+    dash, or ``(``. A label that merely shares a shorter stem is not used.
+    """
+    if not name or _generic_region_name(name):
+        return False
+    if not title.startswith(name) or len(title) <= len(name):
+        return False
+    return title[len(name)] in _TITLE_PREFIX_NEXT
+
+
+def _prefix_image_labels(frame, title: str) -> list[str]:
+    """Label names under ``frame`` that are the image-title prefix.
+
+    Menus, icon grids, and tables are not walked. The budget stops the
+    search; a miss falls back to the frame title rather than a guess.
+    """
+    found: list[str] = []
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth: int) -> None:
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH or len(found) > 1:
+            return
+        budget -= 1
+        role = _role_name(node)
+        if role == "label":
+            name = _node_name(node)
+            if _title_prefix_label(name, title):
+                found.append(name)
+        if role in _SURFACE_SKIP_ROLES:
+            return
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return
+        for index in range(min(int(count), _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None:
+                walk(child, depth + 1)
+
+    walk(frame, 0)
+    return found
+
+
+def _panel_surface_name(node, size, focusable: bool) -> str:
+    """Image or window title for a focusable childless unnamed panel.
+
+    Empty unless the panel sits under a page tab, which is the GIMP image
+    canvas. The name is a label that prefixes the frame title when exactly
+    one such label is in the frame, otherwise the frame title itself. No
+    string is invented: an empty frame title leaves the panel unnamed.
+    """
+    if not focusable or size is None:
+        return ""
+    try:
+        if float(size[0]) < 32 or float(size[1]) < 32:
+            return ""
+    except (TypeError, ValueError, IndexError):
+        return ""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count != 0:
+        return ""
+    if _page_tab_ancestor(node) is None:
+        return ""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    title = str(_call_first(frame, ("get_name",), default="") or "").strip()
+    if not title or _generic_region_name(title):
+        return ""
+    labels = _prefix_image_labels(frame, title)
+    if len(labels) == 1:
+        return labels[0]
+    return title
+
+
 def _hidden_page_tab(node) -> bool:
     """True when ``node`` is a page tab GTK gave no allocation of its own."""
     if node is None or _role_name(node) != "page tab":
@@ -2985,6 +3090,9 @@ class ATSPIAccessor:
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
+        surface_name = ""
+        if role_str == "panel" and not str(name).strip() and not str(description).strip():
+            surface_name = _panel_surface_name(node, size, focusable)
         return RawNode(
             role=role,
             subrole="terminal" if role_str == "terminal" else None,
@@ -3013,6 +3121,7 @@ class ATSPIAccessor:
             # cell, or canvas does not pay for the parent walk.
             browser_chrome=self._browser_frame(node, role_str) if role == "AXGroup" else False,
             screen_text=screen_text,
+            surface_name=surface_name,
         )
 
     def _browser_frame(self, node: object, role_str: str) -> bool:
