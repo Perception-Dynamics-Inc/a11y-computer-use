@@ -2717,8 +2717,9 @@ class ATSPIAccessor:
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
         if role == "application":
-            # The combo menu is already a child of the combo. The extra
-            # top-level window would list those same items a second time.
+            # The combo menu is already a child of the combo. A top-level
+            # window or a second menu for that same popup would list the
+            # items again.
             kids = [child for child in kids if _combo_owning_popup(child) is None]
         if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
             return []
@@ -3744,26 +3745,184 @@ def _window_is_only_browser_chrome(root) -> bool:
     return chrome
 
 
+def _showing_menu_labels(menu):
+    """Ordered item names of an unnamed open menu, or None.
+
+    A named menu is an application menu. Open means the menu or one of its
+    items is SHOWING. A closed model is not this menu.
+    """
+    if menu is None:
+        return None
+    try:
+        if _role_name(menu) not in {"menu", "popup menu"}:
+            return None
+        if _node_name(menu):
+            return None
+        menu_showing = _state_has(menu, "SHOWING")
+    except Exception:
+        return None
+    count = _child_count(menu)
+    if count < 0:
+        count = 0
+    labels = []
+    item_showing = False
+    for index in range(min(int(count), 64)):
+        child = _child_at(menu, index)
+        if child is None:
+            continue
+        if _role_name(child) not in {"menu item", "check menu item", "radio menu item"}:
+            continue
+        if _state_has(child, "SHOWING"):
+            item_showing = True
+        labels.append(_node_name(child))
+    if not labels or not any(labels) or not (menu_showing or item_showing):
+        return None
+    return tuple(labels)
+
+
+def _popup_item_labels(node):
+    """Item names of an unnamed showing popup, or None.
+
+    A window counts when it holds one such menu. A second menu is a menu
+    bar tear-off, not a combo popup. A named window or menu is not one.
+    """
+    if node is None or _node_name(node):
+        return None
+    role = _role_name(node)
+    if role in {"menu", "popup menu"}:
+        return _showing_menu_labels(node)
+    if role != "window":
+        return None
+    count = _child_count(node)
+    if count < 0:
+        count = 0
+    labels = None
+    for index in range(min(int(count), 4)):
+        child = _child_at(node, index)
+        child_labels = _showing_menu_labels(child)
+        if child_labels is None:
+            continue
+        if labels is not None:
+            return None
+        labels = child_labels
+    return labels
+
+
+def _application_ancestor(node):
+    """The application that contains ``node``, or None."""
+    current = node
+    for _ in range(20):
+        if current is None:
+            return None
+        if _role_name(current) == "application":
+            return current
+        parent = _parent_of(current)
+        if parent is None or parent is current:
+            return _call_first(current, ("get_application", "getApplication"))
+        current = parent
+    return None
+
+
+def _open_gtk_combo_menus(application):
+    """``(combo, item names)`` for each GTK combo whose menu is open.
+
+    Tables, documents, and menus are not descended into. A combo's menu is
+    read from the combo itself.
+    """
+    found = []
+    stack = [application]
+    seen: set[int] = set()
+    # Keep each wrapper alive. ``id()`` is reused after a PyGObject proxy is freed.
+    held: list[object] = []
+    steps = 0
+    skip = {
+        "table", "tree table", "tree", "list", "list box",
+        "document web", "document frame", "menu bar", "menu", "popup menu",
+    }
+    while stack and steps < 250:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        held.append(node)
+        steps += 1
+        role = _role_name(node)
+        if role == "combo box" and _gtk_combo(node):
+            count = _child_count(node)
+            if count < 0:
+                count = 0
+            for index in range(min(int(count), 8)):
+                labels = _showing_menu_labels(_child_at(node, index))
+                if labels is not None:
+                    found.append((node, labels))
+                    break
+            continue
+        if role in skip:
+            continue
+        count = _child_count(node)
+        if count < 0:
+            count = 0
+        for index in range(min(int(count), 30)):
+            child = _child_at(node, index)
+            if child is not None:
+                stack.append(child)
+    return found
+
+
+def _combo_with_same_open_menu(window):
+    """The GTK combo whose open menu lists the same items as ``window``, or None.
+
+    Used when the popup's parent is the application or the popup window, so
+    the parent walk never reaches the combo. The item names have to match
+    the combo's open menu exactly. A context menu with different items
+    stays. Chromium, Firefox, and Qt are not matched.
+    """
+    try:
+        if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
+            return None
+        labels = _popup_item_labels(window)
+        if labels is None:
+            return None
+        app = _application_ancestor(window)
+        if app is None or app is window:
+            return None
+        for combo, item_labels in _open_gtk_combo_menus(app):
+            if item_labels == labels:
+                return combo
+    except Exception:
+        return None
+    return None
+
+
 def _combo_owning_popup(window):
     """The GTK combo whose menu this top-level popup is showing, or None.
 
     GtkComboBox puts the open menu in its own window and marks that window
     ACTIVE. The menu's parent is still the combo, so the options are already
-    under the combo. A named frame, a dialog, a menu-bar menu, and a
-    Chromium or Qt popup are not this window.
+    under the combo. GTK also exposes that same popup as its own menu under
+    the application. When that menu's parent is not the combo, the SHOWING
+    item names still identify it. A named frame, a dialog, a menu-bar menu,
+    a context menu with different items, and a Chromium or Qt popup are not
+    this window.
     """
     if window is None:
         return None
     try:
         role = _role_name(window)
-        if role not in {"window", "popup menu"}:
+        if role not in {"window", "popup menu", "menu"}:
             return None
         if role == "window" and _node_name(window):
+            return None
+        if role == "menu" and _node_name(window):
             return None
         if _chromium_app(window) or _gecko_app(window) or _qt_app(window):
             return None
     except Exception:
         return None
+    if role == "menu":
+        # A context menu can be parented to the combo it was opened on.
+        # Item names, not that parent, decide whether this is the combo popup.
+        return _combo_with_same_open_menu(window)
     starts = []
     if role == "popup menu":
         starts.append(window)
@@ -3792,7 +3951,9 @@ def _combo_owning_popup(window):
             }:
                 break
             node = parent
-    return None
+    # The popup menu is a different object, parented to the application or
+    # to this window, so the walk above never reaches the combo.
+    return _combo_with_same_open_menu(window)
 
 
 def _frame_containing(node, frames):

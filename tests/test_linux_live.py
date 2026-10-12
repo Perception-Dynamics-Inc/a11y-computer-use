@@ -2026,6 +2026,10 @@ def test_linux_gtk_combo_popup_lists_options_under_the_combo(tmp_path) -> None:
             if ancestor.ref == combo.ref:
                 names.append(el.title)
         assert names == ["None", "Classic", "Cobalt", "Kate"], shown
+        app_shot = driver.snapshot(Scope.APP, "cucombo363")
+        app_shown = observe.render_text(app_shot)
+        app_names = [el.title for el in app_shot.elements if el.role == "AXMenuItem"]
+        assert app_names == ["None", "Classic", "Cobalt", "Kate"], app_shown
         chosen = next(el for el in opened.elements if el.role == "AXMenuItem" and el.title == "None")
         assert chosen.selected is True, shown
         assert 'menuitem "Cobalt"' in shown, shown
