@@ -298,6 +298,10 @@ class RawNode:
     #: Key chord split off the end of that tooltip, such as ``T`` or
     #: ``Ctrl+S``. Empty when the name had no parenthetical chord.
     shortcut: str = ""
+    #: Linux only. ``activates on double-click`` when a single click on this
+    #: GTK outline row only selects it. Empty everywhere else. The click is
+    #: not turned into that double-click.
+    note: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -2676,6 +2680,7 @@ def _flatten(
             subrole="terminal" if terminal else None,
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
+            note=node.raw.note or None,
         )
     )
     if node.elided:
@@ -2854,6 +2859,8 @@ def _render_line(el: Element, *, bounds: bool | None = None, compact: bool = Fal
         flags.append("active")
     if flags:
         parts.append(f"({','.join(flags)})")
+    if el.note:
+        parts.append(f"({el.note})")
     # An opaque region is addressed by its box. Always print the bounds, in
     # both views, so a coordinate click does not have to guess the size.
     # A hidden control has no box. Printing one would invent a click target.
@@ -3015,6 +3022,7 @@ def attach_offscreen_matches(
                 stable_id=raw.stable_id or None,
                 instance_id=(parent.instance_id if parent is not None else raw.instance_id),
                 document_id=(parent.document_id if parent is not None else raw.document_id),
+                note=raw.note or None,
             )
         )
         handles[ref] = cell

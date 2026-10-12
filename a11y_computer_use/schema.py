@@ -292,6 +292,10 @@ class Element:
     #: Key chord that was glued onto that tooltip, such as ``T`` or
     #: ``Ctrl+S``. Empty when there was no parenthetical chord.
     shortcut: str = ""
+    #: A fact about how this row opens, when a single click only selects it.
+    #: ``activates on double-click`` is a GTK tree or tree-table row. None
+    #: for every other element. A click is not rewritten into that double-click.
+    note: str | None = None
 
     @property
     def actionable(self) -> bool:

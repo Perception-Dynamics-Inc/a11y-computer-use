@@ -11430,6 +11430,263 @@ def test_shared_java_column_headers_keep_each_columns_name(fake_atspi, monkeypat
     found = _bare_runtime(driver).find("swingprobe", text="Item")
     assert "no elements match" not in found
     assert "Item" in found
+def _bind_java_app(node: _Acc) -> _Acc:
+    """Toolkit ``JAVA`` so the table takes the large-table walk and not Qt."""
+    app = getattr(node, "_java_app", None)
+    if app is None:
+        app = _Acc("application", name="swingprobe")
+        app.get_toolkit_name = lambda: "JAVA"
+        node._java_app = app
+    node.get_application = lambda app=app: app
+    return app
+
+
+def _java_table_page():
+    """Synthetic 200×3 Swing table. Not a live window.
+
+    The table box runs to the bottom of a 1280×800 screen. The scroll pane
+    ends at y=616 and the window at y=635. Rows below the pane keep screen
+    coordinates and omit SHOWING. The item text lives on a child label.
+    """
+    state = {"head": 0}
+    headers = [
+        _Acc("table column header", name=name, width=170, height=24, states={"SHOWING", "VISIBLE"})
+        for name in ("ID", "Item", "Qty")
+    ]
+    cells: list[list[tuple[_Acc, _Acc]]] = []
+    for row in range(200):
+        pair = []
+        for col, text in enumerate((str(row), f"ROW-{row:03d}", str(row))):
+            label = _Acc("label", name=text, width=170, height=22)
+            cell = _Acc("table cell", name="", width=170, height=22)
+            cell.get_index_in_parent = lambda index=3 + row * 3 + col: index
+            _adopt(cell, label)
+            pair.append((cell, label))
+        cells.append(pair)
+    table = _Acc("table", name="Rows", width=540, height=720)
+    app = _bind_java_app(table)
+    ordered: list[_Acc] = list(headers)
+    for row in cells:
+        for cell, label in row:
+            ordered.append(cell)
+            _bind_java_app(cell)
+            _bind_java_app(label)
+            cell._java_app = table._java_app
+            label._java_app = table._java_app
+            cell.get_application = lambda app=app: app
+            label.get_application = lambda app=app: app
+    for header in headers:
+        _bind_java_app(header)
+        header._java_app = table._java_app
+        header.get_application = lambda app=app: app
+    _adopt(table, *ordered)
+
+    def place(head: int) -> None:
+        state["head"] = head
+        for col, header in enumerate(headers):
+            _place_row(header, 46 + col * 180, 80, 170, 24)
+        for row in range(200):
+            y = 104 + (row - head) * 22
+            showing = 80 <= y < 616 and y + 22 > 80
+            states = {"ENABLED", "VISIBLE", "SENSITIVE"}
+            if showing:
+                states.add("SHOWING")
+            for col, (cell, label) in enumerate(cells[row]):
+                _place_row(cell, 46 + col * 180, y, 170, 22)
+                _place_row(label, 46 + col * 180, y, 170, 22)
+                cell.states = set(states)
+                label.states = set(states)
+
+    def scroll_to(_scroll_type, row: int) -> bool:
+        place(row)
+        return True
+
+    for row in range(200):
+        for cell, _label in cells[row]:
+            cell.component.scroll_to = lambda _scroll_type, row=row: scroll_to(_scroll_type, row)
+    place(0)
+    _place_row(table, 46, 80, 540, 720)
+
+    def at_point(_x, y, _coord):
+        y = int(y)
+        if y < 104:
+            return headers[0]
+        row = state["head"] + (y - 104) // 22
+        if row < 0 or row >= 200:
+            return None
+        return cells[row][0][0]
+
+    table.component.get_accessible_at_point = at_point
+    table.get_n_rows = lambda: 200
+    table.get_n_columns = lambda: 3
+    table.get_accessible_at = lambda row, col: cells[row][col][0]
+    table.get_column_header = lambda col: headers[col]
+    table.get_row_at_index = lambda index: -1 if index < 3 else (index - 3) // 3
+    window = _Acc("frame", name="SwingTable", width=640, height=595)
+    _place_row(window, 20, 40, 640, 595)
+    scroll = _Acc("scroll pane", width=560, height=536)
+    _place_row(scroll, 40, 80, 560, 536)
+    for node in (window, scroll):
+        node._java_app = table._java_app
+        node.get_application = lambda app=app: app
+    _adopt(scroll, table)
+    _adopt(window, scroll)
+    return window, table, state, place, cells
+
+
+def _swing_row_titles(snap) -> list[str]:
+    return [el.title for el in snap.elements if el.title.startswith("ROW-")]
+
+
+def test_swing_table_lists_only_rows_inside_the_viewport(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table, not a live window.
+
+    Rows below the scroll pane still overlap the screen. They are not
+    listed, and their coordinates are not published.
+    """
+    window, _table, _state, _place, _cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    snap = driver.snapshot(Scope.WINDOW, "swingprobe")
+    titles = _swing_row_titles(snap)
+    assert "ROW-000" in titles
+    assert "ROW-023" in titles
+    assert "ROW-024" not in titles
+    assert "ROW-030" not in titles
+    assert "ROW-150" not in titles
+    names = [el.title for el in snap.elements]
+    assert names.count("ID") == 1
+    assert "Item" in names
+    for el in snap.elements:
+        if not el.title.startswith("ROW-") or el.bounds is None:
+            continue
+        assert el.bounds.y < 616, (el.title, el.bounds)
+        assert el.bounds.y + el.bounds.height <= 800
+
+
+def test_find_scrolls_a_swing_row_that_is_below_the_viewport(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table. The item name is on the cell's child.
+
+    ``find`` reaches ROW-030, which overlaps the screen below the pane,
+    and ROW-150, which is off the screen. Both come back inside the
+    viewport. A missing name does not move the view.
+    """
+    from a11y_computer_use import server
+
+    window, _table, state, _place, _cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    missed = runtime.find("swingprobe", text="ROW-999")
+    assert "no elements match" in missed
+    assert state["head"] == 0
+    found = runtime.find("swingprobe", text="ROW-030")
+    assert "no elements match" not in found
+    assert "ROW-030" in found
+    assert state["head"] == 30
+    shown = next(el for el in runtime._current.elements if el.title == "ROW-030")
+    assert shown.bounds is not None and shown.bounds.y < 616
+    far = runtime.find("swingprobe", text="ROW-150")
+    assert "no elements match" not in far
+    assert "ROW-150" in far
+    assert state["head"] == 150
+    landed = next(el for el in runtime._current.elements if el.title == "ROW-150")
+    assert landed.bounds is not None and landed.bounds.y < 616
+
+
+def test_find_does_not_publish_a_swing_row_it_cannot_scroll(fake_atspi, monkeypatch) -> None:
+    """Synthetic Swing table. A failed scroll does not invent a box."""
+    from a11y_computer_use import server
+
+    window, _table, state, _place, cells = _java_table_page()
+    for row in cells:
+        for cell, _label in row:
+            cell.component.scroll_to = lambda *_args, **_kwargs: False
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    found = runtime.find("swingprobe", text="ROW-150")
+    assert "no elements match" in found
+    assert state["head"] == 0
+    assert not any(el.title == "ROW-150" for el in runtime._current.elements)
+
+
+def _record_clicks(monkeypatch) -> list:
+    clicks: list[tuple] = []
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr(
+        _linux_input, "click",
+        lambda x, y, *, button="left", count=1: clicks.append((int(x), int(y), count)),
+    )
+    monkeypatch.setattr(LinuxDriver, "_pointer", lambda self, x, y: (int(x), int(y)))
+    monkeypatch.setattr(LinuxDriver, "_note_pointer", lambda self, x, y: None)
+    return clicks
+
+
+def test_click_scrolls_an_unpainted_swing_cell_and_uses_the_new_center(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic Swing cell. The published box is below the window.
+
+    The click scrolls that same cell and lands on its new center. A cell
+    that is already painted keeps the published point. A point target is
+    those pixels.
+    """
+    window, _table, state, _place, cells = _java_table_page()
+    driver = _wire_gtk_tree(monkeypatch, window)
+    clicks = _record_clicks(monkeypatch)
+    painted = cells[0][1][1]
+    published = Element(
+        "e0", "AXStaticText", "ROW-000", "ROW-000",
+        Bounds(0, 10, 20, 30, 40), "snap-painted", clickable=True,
+    )
+    observe._register_epoch(published.snapshot_id, {}, {"e0": painted})
+    driver.click(published)
+    assert clicks[-1] == (25, 40, 1)
+    assert state["head"] == 0
+
+    driver.click(Point(0, 400, 700))
+    assert clicks[-1] == (400, 700, 1)
+    assert state["head"] == 0
+
+    label = cells[30][1][1]
+    element = Element(
+        "e30", "AXStaticText", "ROW-030", "ROW-030",
+        Bounds(0, 226, 764, 170, 22), "snap-swing", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e30": label})
+    driver.click(element)
+    assert state["head"] == 30
+    x, y, _count = clicks[-1]
+    assert y < 616
+    assert abs(x - (226 + 85)) <= 1
+    assert abs(y - (104 + 11)) <= 1
+
+
+def test_click_refuses_an_unpainted_swing_cell_that_cannot_be_scrolled(
+    fake_atspi, monkeypatch,
+) -> None:
+    """Synthetic Swing cell. No pointer event is sent, and no center is invented."""
+    _window, _table, state, _place, cells = _java_table_page()
+    for row in cells:
+        for cell, _label in row:
+            cell.component.scroll_to = lambda *_args, **_kwargs: False
+    driver = _wire_gtk_tree(monkeypatch, _window)
+    clicks = _record_clicks(monkeypatch)
+    label = cells[30][1][1]
+    element = Element(
+        "e30", "AXStaticText", "ROW-030", "ROW-030",
+        Bounds(0, 226, 764, 170, 22), "snap-hidden", clickable=True,
+    )
+    observe._register_epoch(element.snapshot_id, {}, {"e30": label})
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(element)
+    assert exc.value.code is ErrorCode.NOT_VISIBLE
+    assert exc.value.detail["reason"] == "not_visible"
+    assert exc.value.detail["outcome"] == "refused"
+    assert "clicked" not in exc.value.message
+    assert "not sent" in exc.value.message
+    assert clicks == []
+    assert state["head"] == 0
 
 
 def test_qt_table_does_not_use_the_gtk_visible_span(fake_atspi, monkeypatch) -> None:
@@ -11599,3 +11856,136 @@ def test_window_id_for_toplevel_prefers_the_title(monkeypatch) -> None:
     assert _linux_system.window_id_for_toplevel(
         title="Missing", pid=9, extents=None,
     ) is None
+
+
+def _outline_cell(name: str, actions: list[str]) -> _Acc:
+    cell = _Acc(
+        "table cell", name=name, width=180, height=21,
+        states=("SHOWING", "VISIBLE", "SELECTABLE", "ENABLED", "SENSITIVE"),
+    )
+    _place_row(cell, 48, 100, 180, 21)
+    cell.actions = list(actions)
+    if actions:
+        cell.get_action_iface = lambda cell=cell: cell
+        cell.get_n_actions = lambda cell=cell: len(cell.actions)
+        cell.get_action_name = lambda index, cell=cell: cell.actions[index]
+    return cell
+
+
+def _outline_window(*cells: _Acc, role: str = "tree table") -> _Acc:
+    """A GTK outline. Not a live Geany window."""
+    tree = _Acc(role, name="Symbols", width=220, height=320)
+    _bind_gtk_app(tree)
+    _place_row(tree, 40, 80, 220, 320)
+
+    def select_child(index: int) -> bool:
+        child = tree.children[index]
+        child.states.add("SELECTED")
+        return True
+
+    tree.select_child = select_child
+    tree.get_selection_iface = lambda: tree
+    _adopt(tree, *cells)
+    window = _Acc("frame", name="outline", width=640, height=480)
+    _place_row(window, 20, 20, 640, 480)
+    app = tree.get_application()
+    window.get_application = lambda: app
+    for cell in cells:
+        cell.get_application = lambda app=app: app
+    _adopt(window, tree)
+    return window
+
+
+def test_gtk_outline_row_says_it_activates_on_double_click(fake_atspi) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    A cell whose actions are expand, edit, then activate only selects on a
+    single click. The snapshot says the row activates on double-click. A
+    cell whose own action is click, and a cell in a plain table, do not.
+    The table check does not walk that table's children.
+    """
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    bare = _outline_cell("plain_row", [])
+    clicking = _outline_cell("opens_on_click", ["click"])
+    _outline_window(symbol, bare, clicking)
+    assert _atspi.outline_double_click_note(symbol) == "activates on double-click"
+    assert _atspi.outline_double_click_note(bare) == "activates on double-click"
+    assert _atspi.outline_double_click_note(clicking) == ""
+    table = _Acc("table", name="grid")
+    _bind_gtk_app(table)
+    table.get_selection_iface = lambda: table
+    scanned: list[int] = []
+
+    def child_at(index, table=table):
+        scanned.append(index)
+        return table.children[index]
+
+    table.get_child_at_index = child_at
+    grid = _outline_cell("A1", [])
+    _adopt(table, grid)
+    grid.get_application = table.get_application
+    assert _atspi.outline_double_click_note(grid) == ""
+    assert scanned == []
+
+
+def test_click_on_an_outline_row_stays_a_single_click(
+    fake_atspi, monkeypatch, xtest_recorder, tmp_path
+) -> None:
+    """Synthetic GTK tree table. Not a live Geany window.
+
+    count=1 selects the row and says it activates on double-click. It does
+    not send a double-click and it does not run the activate action.
+    count=2 is the double-click the caller asked for.
+    """
+    from a11y_computer_use import observe, safety, server
+
+    events, _display = xtest_recorder
+    symbol = _outline_cell("target_fn_row150 [301]", ["expand or contract", "edit", "activate"])
+    window = _outline_window(symbol)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    monkeypatch.setattr(safety, "seconds_since_user_input", lambda: None)
+    named: list[str] = []
+    real_named = _atspi.do_named_action
+
+    def record(acc, name: str) -> bool:
+        named.append(name)
+        return real_named(acc, name)
+
+    monkeypatch.setattr(_atspi, "do_named_action", record)
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(shot.app or "outline", safety.Tier.FULL)
+    runtime = server.Runtime(
+        store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver,
+    )
+    runtime._current = shot
+    # count=2 is a real pointer click. The recheck hit-tests the desktop
+    # under this synthetic box, which is the runner's own terminal.
+    runtime._recheck_target = lambda *_args, **_kwargs: None
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    assert cell.note == "activates on double-click"
+    rendered = observe.render_matches(shot, (cell,))
+    assert "(activates on double-click)" in rendered
+    events.clear()
+    single = runtime.click(cell.ref)
+    assert "clicked" in single
+    assert "(activates on double-click)" in single
+    assert single.outcome == "partial"
+    assert single.evidence == "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) <= 1, events
+    assert named == []
+    events.clear()
+    named.clear()
+    shot = driver.snapshot(Scope.WINDOW, "outline")
+    runtime._current = shot
+    cell = next(el for el in shot.elements if "target_fn_row150" in el.title)
+    double = runtime.click(cell.ref, count=2)
+    assert "clicked" in double
+    assert "(activates on double-click)" not in double
+    assert double.outcome != "partial"
+    assert double.evidence != "the row was selected and activates on double-click"
+    presses = [event for event in events if event[0] == _X_BPRESS]
+    assert len(presses) == 2, events
+    assert named == []
