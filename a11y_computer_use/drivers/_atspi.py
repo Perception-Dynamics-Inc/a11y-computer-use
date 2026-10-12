@@ -661,6 +661,59 @@ def _frame_ancestor(acc):
     return None
 
 
+def _negative_extent(size) -> bool:
+    """True for GTK's no-allocation sentinel, (-1, -1) width and height."""
+    if size is None:
+        return False
+    try:
+        return float(size[0]) < 0 or float(size[1]) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _frame_accessible_name(node) -> str:
+    """Accessible name of the frame that contains ``node``, or empty."""
+    frame = _frame_ancestor(node)
+    if frame is None:
+        return ""
+    return str(_call_first(frame, ("get_name",), default="") or "").strip()
+
+
+def _hidden_page_tab(node) -> bool:
+    """True when ``node`` is a page tab GTK gave no allocation of its own."""
+    if node is None or _role_name(node) != "page tab":
+        return False
+    _pos, size = _extents(node, keep_zero=True)
+    return _negative_extent(size)
+
+
+def _direct_children(node) -> list:
+    """Immediate children, without the snapshot's page-tab hoist."""
+    count = _child_count(node)
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        return []
+    found = []
+    for index in range(min(int(count), _MAX_CHILDREN_FETCH)):
+        child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), index)
+        if child is not None:
+            found.append(child)
+    return found
+
+
+def _hoist_hidden_page_tabs(kids: list) -> list:
+    """Lift a hidden page tab's page up to the tab list.
+
+    The page stays in the snapshot, and it is not a child of the tab button.
+    A page tab that has a real box keeps its own children.
+    """
+    out = []
+    for kid in kids:
+        out.append(kid)
+        if _hidden_page_tab(kid):
+            out.extend(_direct_children(kid))
+    return out
+
+
 def _usable_window_rect(rect) -> bool:
     """False for a missing box, a zero box, or GTK's off-screen sentinel."""
     if rect is None:
@@ -2204,6 +2257,19 @@ class ATSPIAccessor:
             name = _combo_display_name(node, str(name))
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
+        unallocated = False
+        if role_str == "page tab" and _negative_extent(size):
+            # A notebook with one page hides the tab bar. GTK reports no
+            # allocation and, for a terminal, an empty name. The frame name
+            # is the page label. Inventing a box would put a click on the
+            # menu or the page, so this control stays hidden: named, with
+            # no bounds and no press action.
+            label = str(name).strip()
+            if not label:
+                label = _frame_accessible_name(node)
+            name = label
+            position, size = None, None
+            unallocated = True
         if checked is None and role == "AXButton":
             flag = str(attrs.get("aria-pressed") or attrs.get("pressed") or "").strip().lower()
             if flag in {"true", "false"}:
@@ -2232,7 +2298,8 @@ class ATSPIAccessor:
             focusable=focusable,
             position=position,
             size=size,
-            actions=_action_names(node),
+            actions=() if unallocated else _action_names(node),
+            unallocated=unallocated,
             value=value,
             checked=checked,
             selected=selected,
@@ -2396,16 +2463,22 @@ class ATSPIAccessor:
             child = _call_first(node, ("get_child_at_index", "getChildAtIndex"), i)
             if child is not None:
                 kids.append(child)
+        role = _role_name(node)
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
             # document here so snapshot and find never offer it.
             kids = [child for child in kids if not _hidden_gecko_browser(child)]
-        if _role_name(node) == "application":
+        if role == "application":
             # The combo menu is already a child of the combo. The extra
             # top-level window would list those same items a second time.
             kids = [child for child in kids if _combo_owning_popup(child) is None]
-        return _with_table_body(node, kids)
+        if role == "page tab" and _negative_extent(_extents(node, keep_zero=True)[1]):
+            return []
+        kids = _with_table_body(node, kids)
+        if role == "page tab list":
+            return _hoist_hidden_page_tabs(kids)
+        return kids
 
     def _lo_placement(self, frame):
         """``(client origin, screen coordinates already include the frame)``.

@@ -11828,3 +11828,219 @@ def test_linux_vte_snapshot_shows_the_screen_tail_and_find_matches_it(tmp_path) 
         assert "MARKER386" in observe.render_matches(snap, matches)
     finally:
         _stop_group(proc)
+
+
+def _xfce_terminal_or_fail(driver) -> str:
+    """The xfce4-terminal binary when a display is up.
+
+    Hermetic CI has no display, so this skips there. Under a display the
+    binary and the AT-SPI bus are required: a missing one fails the test.
+    """
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        pytest.skip("no DISPLAY/WAYLAND_DISPLAY: xfce4-terminal cannot open a window")
+    found = subprocess.run(
+        ["bash", "-lc", "command -v xfce4-terminal"], capture_output=True, text=True,
+    )
+    binary = found.stdout.strip()
+    assert binary, "xfce4-terminal is not installed"
+    try:
+        driver.ensure_trusted()
+    except ComputerUseError as exc:
+        pytest.fail(f"AT-SPI bus not reachable under a display: {exc.message}")
+    except ImportError as exc:
+        pytest.fail(f"PyGObject/Atspi missing under a display: {exc}")
+    return binary
+
+
+def _kill_xfce4_terminal() -> None:
+    """Stop xfce4-terminal by comm, including a window left from an earlier case."""
+    for _ in range(15):
+        alive = False
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as fh:
+                    comm = fh.read().strip()
+            except OSError:
+                continue
+            if comm != "xfce4-terminal":
+                continue
+            alive = True
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+            except OSError:
+                pass
+        if not alive:
+            return
+        time.sleep(0.2)
+
+
+def _launch_xfce_terminal(binary: str, args: list[str], tmp_path) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xfce-terminal-config")
+    return subprocess.Popen(
+        [binary, *args],
+        env=env,
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _covers_point(bounds, x: float, y: float) -> bool:
+    return (
+        bounds.x <= x < bounds.x + bounds.width
+        and bounds.y <= y < bounds.y + bounds.height
+    )
+
+
+def _assert_xfce_tabs(snap, titles: tuple[str, ...], *, hidden: bool) -> None:
+    from a11y_computer_use import observe
+
+    rendered = observe.render_text(snap, include_bounds=True)
+    area = next((el for el in snap.elements if el.role == "AXTextArea"), None)
+    assert area is not None and area.bounds is not None, rendered[:1500]
+    center_x = area.bounds.x + area.bounds.width / 2
+    center_y = area.bounds.y + area.bounds.height / 2
+    buttons = [el for el in snap.elements if el.role == "AXButton"]
+    covering = [
+        el for el in buttons
+        if el.bounds is not None and _covers_point(el.bounds, center_x, center_y)
+    ]
+    assert not covering, rendered[:1500]
+    by_ref = {el.ref: el for el in snap.elements}
+    ancestors = []
+    parent = area.parent
+    while parent is not None:
+        ancestors.append(by_ref[parent])
+        parent = by_ref[parent].parent
+    for title in titles:
+        matches = [el for el in buttons if el.title == title]
+        assert len(matches) == 1, (title, rendered[:1500])
+        tab = matches[0]
+        line = next(
+            item for item in rendered.splitlines()
+            if "button" in item and f'"{title}"' in item
+        )
+        if hidden:
+            assert tab.bounds is None, tab.bounds
+            assert tab.clickable is False
+            assert tab.actionable is False
+            assert "hidden" in line
+            assert "@" not in line
+            assert all(item.ref != tab.ref for item in ancestors), rendered[:1500]
+        else:
+            assert tab.bounds is not None
+            assert tab.clickable is True
+            assert "hidden" not in line
+            assert tab.bounds.height <= 40, tab.bounds
+            assert tab.bounds.width <= 200, tab.bounds
+            assert tab.bounds.width * tab.bounds.height < area.bounds.width * area.bounds.height / 4
+    for ancestor in ancestors:
+        if ancestor.role != "AXButton" or ancestor.bounds is None:
+            continue
+        assert ancestor.bounds.height <= 40, ancestor.bounds
+        assert not _covers_point(ancestor.bounds, center_x, center_y)
+
+
+def _wait_xfce_tabs(driver, titles: tuple[str, ...], *, hidden: bool, timeout_s: float = 20.0):
+    from a11y_computer_use import observe
+
+    deadline = time.monotonic() + timeout_s
+    last = ""
+    while time.monotonic() < deadline:
+        try:
+            shot = driver.snapshot(Scope.WINDOW, "xfce4-terminal")
+        except ComputerUseError as exc:
+            last = exc.message
+        else:
+            last = observe.render_text(shot)[:1500]
+            try:
+                _assert_xfce_tabs(shot, titles, hidden=hidden)
+            except AssertionError:
+                pass
+            else:
+                return shot
+        time.sleep(0.4)
+    raise AssertionError(last)
+
+
+def _pointer_xy() -> tuple[int, int]:
+    from Xlib import display as xdisplay
+
+    opened = xdisplay.Display()
+    try:
+        point = opened.screen().root.query_pointer()
+        return int(point.root_x), int(point.root_y)
+    finally:
+        opened.close()
+
+
+def test_xfce4_terminal_one_tab_is_named_from_the_title(tmp_path) -> None:
+    """One xfce4-terminal page is a hidden named tab, not a content-sized button.
+
+    The tab bar is not allocated. The tab keeps the terminal title, has no
+    bounds, and a ref click does not move the pointer.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    binary = _xfce_terminal_or_fail(driver)
+    title = "Cu Tab One"
+    _kill_xfce4_terminal()
+    proc = _launch_xfce_terminal(
+        binary,
+        ["--disable-server", "--dynamic-title-mode=none", "--title", title],
+        tmp_path,
+    )
+    try:
+        snap = _wait_xfce_tabs(driver, (title,), hidden=True)
+        tab = next(el for el in snap.elements if el.role == "AXButton" and el.title == title)
+        runtime = _runtime_for(tmp_path, driver, "xfce4-terminal")
+        runtime._current = snap
+        before = _pointer_xy()
+        result = runtime.click(tab.ref)
+        after = _pointer_xy()
+        assert after == before, (before, after, result)
+        assert result.outcome == "suspected_noop", (result, result.outcome, result.evidence)
+        assert result.evidence == "not_actionable"
+        assert "no click was sent" in result
+    finally:
+        _stop_group(proc)
+        _kill_xfce4_terminal()
+
+
+def test_xfce4_terminal_two_tabs_keep_their_titles(tmp_path) -> None:
+    """Two xfce4-terminal pages are small buttons named with each terminal title.
+
+    A second page gives the tab bar a real allocation. Each tab keeps that
+    title, and neither button is the terminal.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    binary = _xfce_terminal_or_fail(driver)
+    alpha = "Cu Tab Alpha"
+    beta = "Cu Tab Beta"
+    _kill_xfce4_terminal()
+    proc = _launch_xfce_terminal(
+        binary,
+        [
+            "--disable-server",
+            "--dynamic-title-mode=none", "--title", alpha,
+            "--tab", "--dynamic-title-mode=none", "--title", beta,
+        ],
+        tmp_path,
+    )
+    try:
+        _wait_xfce_tabs(driver, (alpha, beta), hidden=False)
+    finally:
+        _stop_group(proc)
+        _kill_xfce4_terminal()

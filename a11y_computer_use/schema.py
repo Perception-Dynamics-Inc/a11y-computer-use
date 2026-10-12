@@ -220,7 +220,8 @@ class Element:
         value: Current value for value-bearing elements (text fields,
             checkboxes, sliders); None for elements without a value. Secure
             fields always carry ``value=None`` (never the secret).
-        bounds: On-screen rect in display-qualified physical pixels.
+        bounds: On-screen rect in display-qualified physical pixels. None when
+            the control has no allocation, such as a hidden notebook tab.
         snapshot_id: Id of the owning `Snapshot`; the staleness anchor.
         parent: Ref of the parent element; None for the snapshot root.
         path: Role path from the root to this node inclusive, e.g.
@@ -263,7 +264,7 @@ class Element:
     role: str
     title: str
     value: str | None
-    bounds: Bounds
+    bounds: Bounds | None
     snapshot_id: str
     parent: str | None = None
     path: tuple[str, ...] = ()

@@ -960,6 +960,162 @@ def test_hollow_page_tab_keeps_the_document_below_it() -> None:
     assert not [el for el in snap.elements if el.title in ("hidden", "Inside")]
 
 
+class _PageNode:
+    """A notebook accessible with an explicit box. No gi."""
+
+    def __init__(self, role, name="", box=None, children=()):
+        self.role = role
+        self.name = name
+        self.box = box
+        self.children = list(children)
+        self.parent = None
+        for child in self.children:
+            child.parent = self
+
+    def get_role_name(self):
+        return self.role
+
+    def get_name(self):
+        return self.name
+
+    def get_description(self):
+        return ""
+
+    def get_child_count(self):
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        return self.children[index]
+
+    def get_parent(self):
+        return self.parent
+
+
+def test_hidden_page_tab_is_named_from_the_frame_and_is_not_the_page(monkeypatch) -> None:
+    """A notebook page with no allocation is a named hidden tab, not the page.
+
+    GTK reports (-1, -1, -1, -1) and an empty name for the lone page tab.
+    The frame name is the page label. The page is hoisted to the tab list.
+    The tab has no box and is not clickable. A page tab that already has a
+    box and a name keeps that box.
+    """
+    def extents(acc, *, keep_zero=False):
+        box = getattr(acc, "box", None)
+        if box is not None:
+            return box
+        return (0.0, 0.0), (10.0, 10.0)
+
+    monkeypatch.setattr(_atspi, "_extents", extents)
+    monkeypatch.setattr(
+        _atspi, "_state_flags",
+        lambda _acc: (True, False, None, True, None, False, False),
+    )
+    monkeypatch.setattr(_atspi, "_value_text", lambda *_args, **_kwargs: None)
+
+    frame = _PageNode("frame", "Probe Title", box=((100.0, 100.0), (800.0, 500.0)))
+    hidden = _PageNode("page tab", "", box=((-1.0, -1.0), (-1.0, -1.0)))
+    page = _PageNode("panel", "", box=((110.0, 160.0), (780.0, 420.0)))
+    terminal = _PageNode("terminal", "Terminal", box=((110.0, 160.0), (760.0, 420.0)))
+    page.children = [terminal]
+    terminal.parent = page
+    tabs = _PageNode("page tab list", "", box=((110.0, 160.0), (780.0, 420.0)), children=[hidden])
+    hidden.children = [page]
+    page.parent = hidden
+    frame.children = [tabs]
+    tabs.parent = frame
+
+    accessor = _atspi.ATSPIAccessor()
+    raw = accessor.read(hidden)
+    assert raw.role == "AXButton"
+    assert raw.title == "Probe Title"
+    assert raw.selected is True
+    assert raw.unallocated is True
+    assert raw.position is None and raw.size is None
+    assert raw.actions == ()
+    assert accessor.children(hidden) == []
+    assert accessor.children(tabs) == [hidden, page]
+
+    labelled = _PageNode("page tab", "Kept Label", box=((-1.0, -1.0), (-1.0, -1.0)))
+    labelled.parent = tabs
+    labelled_raw = accessor.read(labelled)
+    assert labelled_raw.title == "Kept Label"
+    assert labelled_raw.unallocated is True
+    assert labelled_raw.position is None and labelled_raw.size is None
+
+    visible = _PageNode("page tab", "Alpha Title", box=((565.0, 402.0), (74.0, 19.0)))
+    visible_page = _PageNode("panel", "", box=((551.0, 429.0), (818.0, 420.0)))
+    visible.children = [visible_page]
+    visible_page.parent = visible
+    visible_tabs = _PageNode("page tab list", "", children=[visible])
+    visible.parent = visible_tabs
+    assert accessor.read(visible).title == "Alpha Title"
+    assert accessor.read(visible).size == (74.0, 19.0)
+    assert accessor.children(visible) == [visible_page]
+    assert accessor.children(visible_tabs) == [visible]
+
+    snap = build_snapshot(
+        frame, accessor, scope=Scope.WINDOW, app="xfce4-terminal", pid=1, geometry=_geometry(),
+    )
+    buttons = [el for el in snap.elements if el.role == "AXButton" and el.title == "Probe Title"]
+    assert len(buttons) == 1
+    tab = buttons[0]
+    assert tab.bounds is None
+    assert tab.clickable is False
+    assert tab.actionable is False
+    rendered = observe.render_text(snap, include_bounds=True)
+    line = next(
+        item for item in rendered.splitlines()
+        if "button" in item and "Probe Title" in item
+    )
+    assert "hidden" in line
+    assert "@" not in line
+    text = [el for el in snap.elements if el.role == "AXTextArea" and el.title == "Terminal"]
+    assert len(text) == 1
+    area = text[0]
+    assert area.bounds is not None
+    by_ref = {el.ref: el for el in snap.elements}
+    parent = area.parent
+    while parent is not None:
+        assert by_ref[parent].ref != tab.ref
+        parent = by_ref[parent].parent
+
+
+def test_hidden_page_tab_ref_click_is_not_a_pointer_click() -> None:
+    """A ref click on a hidden tab is a typed no-op. The pointer is not called."""
+    from a11y_computer_use import server
+
+    tab = Element(
+        "e2", "AXButton", "Probe Title", None, None, "s",
+        clickable=False, selected=True,
+    )
+    clicks: list[object] = []
+
+    class _Driver:
+        name = "linux"
+
+        def click(self, target, **kwargs):
+            clicks.append(target)
+
+        def press_element(self, element):
+            clicks.append(("press", element.ref))
+            return False
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = _Driver()
+    rt._current = Snapshot("s", Scope.WINDOW, "xfce4-terminal", 1, 0.0, (), (tab,))
+    rt._reject_coordinate = lambda *args, **kwargs: None
+    rt._target = lambda *args, **kwargs: (tab, "xfce4-terminal")
+    rt._capture = lambda app=None: {}
+    rt._run_gated = lambda action, app, execute, **kwargs: execute()
+    rt._refuse_disabled = lambda *args, **kwargs: None
+    rt._refuse_secure = lambda *args, **kwargs: None
+    result = rt.click(ref="e2")
+    assert clicks == []
+    assert result.outcome == "suspected_noop"
+    assert result.evidence == "not_actionable"
+    assert "no click was sent" in result
+
+
 def test_accessor_read_marks_internal_frame_and_keeps_zero_size(monkeypatch) -> None:
     """The snapshot read keeps a zero box and marks an internal frame.
     Hit-testing still asks for the default extents, which drop that box."""
