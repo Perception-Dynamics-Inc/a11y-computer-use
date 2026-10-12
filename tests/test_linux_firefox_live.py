@@ -1230,3 +1230,114 @@ def test_linux_firefox_paragraph_and_select_are_not_editable(tmp_path) -> None:
     finally:
         _stop(proc)
         proc._log.close()
+
+
+_TEXTAREA_PAGE = textwrap.dedent(
+    """\
+    <!doctype html>
+    <html>
+    <head><meta charset="utf-8"><title>fftextarea432</title></head>
+    <body>
+    <label>Name <input id="name" aria-label="Name" value="initial-name"></label>
+    <label>Notes <textarea id="notes" aria-label="Notes" rows="4">line1
+line2</textarea></label>
+    </body>
+    </html>
+    """
+)
+
+
+def _gecko_entry_facts(driver, name: str) -> dict | None:
+    """AT-SPI facts for the Firefox entry named ``name``. None when it is absent.
+
+    Live tree. The role, MULTI_LINE, and tag are what the snapshot mapping reads.
+    """
+    from a11y_computer_use.drivers import _atspi
+
+    def collect() -> dict | None:
+        root = _atspi.find_root("firefox", Scope.WINDOW)
+        found: dict | None = None
+
+        def walk(node, depth: int) -> None:
+            nonlocal found
+            if node is None or depth > 22 or found is not None:
+                return
+            role = _atspi._role_name(node)
+            if role == "entry" and _atspi._node_name(node) == name:
+                attrs = _atspi._get_attributes(node)
+                found = {
+                    "role": role,
+                    "multi": _atspi._state_has(node, "MULTI_LINE"),
+                    "single": _atspi._state_has(node, "SINGLE_LINE"),
+                    "tag": str(attrs.get("tag") or "").lower(),
+                }
+                return
+            count = _atspi._child_count(node)
+            if not isinstance(count, int) or isinstance(count, bool):
+                return
+            for index in range(min(count, 48)):
+                walk(_atspi._child_at(node, index), depth + 1)
+
+        walk(root, 0)
+        return found
+
+    return driver._run(collect)
+
+
+def test_linux_firefox_textarea_is_not_a_textfield(tmp_path) -> None:
+    """Live Firefox ESR. A ``<textarea>`` snapshots as textarea.
+
+    Gecko exposes it as AT-SPI ``entry`` with MULTI_LINE. A single-line
+    ``<input>`` on the same page stays a text field. A missing Firefox
+    binary fails. This test does not skip for a missing browser.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    page = tmp_path / "fftextarea432.html"
+    page.write_text(_TEXTAREA_PAGE)
+    proc = _launch_firefox(tmp_path, page.as_uri())
+    try:
+        runtime = _runtime(tmp_path, driver)
+        deadline = time.monotonic() + 45
+        snap = None
+        last = ""
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+                raise AssertionError(f"Firefox exited {proc.returncode}\n{log}")
+            try:
+                runtime.find("firefox", text="Name")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            else:
+                snap = runtime._current
+                last = observe.render_text(snap)
+                titles = {el.title for el in snap.elements}
+                if {"Name", "Notes"} <= titles:
+                    break
+            time.sleep(0.4)
+        else:
+            log = (tmp_path / "firefox.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+            raise AssertionError(f"Firefox did not expose the textarea page\n{last}\n{log}")
+
+        rendered = observe.render_text(snap)
+        name = next(el for el in snap.elements if el.title == "Name")
+        notes = next(el for el in snap.elements if el.title == "Notes")
+        assert name.role == "AXTextField", rendered
+        assert notes.role == "AXTextArea", rendered
+        name_line = next(line for line in rendered.splitlines() if '"Name"' in line)
+        notes_line = next(line for line in rendered.splitlines() if '"Notes"' in line)
+        assert "textfield" in name_line, name_line
+        assert "textarea" in notes_line, notes_line
+        assert "textfield" not in notes_line, notes_line
+        facts = _gecko_entry_facts(driver, "Notes")
+        assert facts is not None, rendered
+        assert facts["role"] == "entry", facts
+        assert facts["multi"] is True, facts
+    finally:
+        _stop(proc)
+        proc._log.close()
