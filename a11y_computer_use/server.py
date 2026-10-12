@@ -3784,6 +3784,60 @@ class Runtime:
                     detail={"ref": hit.ref, "role": hit.role},
                 )
 
+    def _recheck_scroll_target(self, app: str, target: Target) -> None:
+        """Hit-test a scroll before the wheel.
+
+        A disabled element is not hit-tested, so ``element_disabled`` still
+        wins. On Linux, a scroll area whose center lies on another window is
+        rechecked at another point inside its own box when that point
+        belongs to the snapshot's process. No such point rechecks the
+        center, and a foreign window there still raises ``focus_changed``.
+        """
+        if isinstance(target, Element) and not target.enabled:
+            return
+        point = self._linux_scroll_point(target)
+        if point is not None:
+            self._recheck_target(app, point)
+            return
+        self._recheck_target(app, target)
+
+    def _linux_scroll_point(self, target: Target) -> Point | None:
+        """An in-box point other than the center that belongs to the snapshot pid.
+
+        None on a non-Linux driver, a raw point, a missing pid, when the
+        center already matches, and when no candidate matches.
+        """
+        if getattr(self.driver, "name", None) != "linux" or not isinstance(target, Element):
+            return None
+        snap = self._current
+        pid = getattr(snap, "pid", None) if snap is not None else None
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+            return None
+        from a11y_computer_use.drivers import _linux_system
+        from a11y_computer_use.drivers._linux_scroll_anchor import recheck_point
+
+        screen = None
+        displays = getattr(self.driver, "displays", None)
+        if callable(displays):
+            try:
+                found = tuple(displays() or ())
+            except Exception:
+                found = ()
+            main = next((item for item in found if getattr(item, "is_main", False)), None)
+            chosen = main or (found[0] if found else None)
+            if chosen is not None:
+                try:
+                    screen = (int(chosen.width), int(chosen.height))
+                except (TypeError, ValueError):
+                    screen = None
+        found_point = recheck_point(
+            target.bounds, int(pid), _linux_system.pid_at_point, screen=screen,
+        )
+        if found_point is None:
+            return None
+        x, y = found_point
+        return Point(target.bounds.display_id, x, y)
+
     def _recheck_enabled_target(self, app: str, *targets: Target) -> None:
         """Hit-test before input, except when a target is already disabled.
 
@@ -5333,7 +5387,7 @@ class Runtime:
             action,
             app,
             execute,
-            recheck=lambda gated, target=target: self._recheck_enabled_target(gated, target),
+            recheck=lambda gated, target=target: self._recheck_scroll_target(gated, target),
         )
         if into_view:
             text = f"scrolled {self._label(ref, target)} into view"
