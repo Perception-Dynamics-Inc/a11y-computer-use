@@ -409,18 +409,25 @@ jobs:
           sudo apt-get install -y --no-install-recommends xvfb openbox x11-utils
           {
             echo 'import importlib.metadata as md'
+            echo 'import time'
             echo 'reqs = md.requires("a11y-computer-use") or []'
             echo 'assert any("python-xlib" in r and "linux" in r for r in reqs), reqs'
             echo 'from a11y_computer_use.drivers._linux_system import windows'
-            echo 'rows = windows()'
-            echo 'blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
+            echo 'deadline = time.monotonic() + 8'
+            echo 'rows = []'
+            echo 'blob = ""'
+            echo 'while True:'
+            echo '    rows = windows()'
+            echo '    blob = " ".join((str(r.get("app") or "") + " " + str(r.get("title") or "")).lower() for r in rows)'
+            echo '    if "xmessage" in blob or "clean-install-window" in blob or time.monotonic() >= deadline:'
+            echo '        break'
+            echo '    time.sleep(0.25)'
             echo 'print(rows)'
             echo 'raise SystemExit(0 if ("xmessage" in blob or "clean-install-window" in blob) else 1)'
           } > /tmp/list-windows.py
-          # One second is not enough for openbox to publish _NET_CLIENT_LIST.
-          # Run 38272489843 listed [] and the step failed. Wait for the
-          # window manager, then for the xmessage window, and keep the
-          # openbox log when neither appears.
+          # xprop exits 0 when the atom is missing, so the ready check has to
+          # see a window id. xmessage mapped before that never enters
+          # _NET_CLIENT_LIST.
           # Run 38286187392 set _NET_SUPPORTING_WM_CHECK and then listed []
           # for the whole poll. The property can land before openbox adopts
           # a client, and an xmessage started in that gap never joins
@@ -431,7 +438,7 @@ jobs:
             setsid openbox >/tmp/openbox-pkg.log 2>&1 < /dev/null &
             ready=0
             for _ in $(seq 1 40); do
-              if xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+              if xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
                 ready=1
                 break
               fi
@@ -443,7 +450,7 @@ jobs:
               exit 1
             fi
             sleep 0.5
-            if ! xprop -root _NET_SUPPORTING_WM_CHECK >/dev/null 2>&1; then
+            if ! xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q "window id"; then
               echo "openbox log:"
               cat /tmp/openbox-pkg.log
               exit 1
