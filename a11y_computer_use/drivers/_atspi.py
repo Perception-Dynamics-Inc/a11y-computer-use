@@ -2347,6 +2347,24 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     return (nx, ny), (float(window[2]), float(window[3]))
 
 
+def gtk4_in_window_dialog(acc) -> bool:
+    """GTK 4 dialog descendants whose WINDOW origin is not a screen box.
+
+    AdwAlertDialog is nested inside a frame, rather than an X window of its
+    own. Its positive WINDOW coordinates can still omit dialog offsets (#520).
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    dialog = False
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"alert", "dialog"}:
+            dialog = True
+        elif role in {"frame", "window"}:
+            return dialog
+    return False
+
+
 def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
