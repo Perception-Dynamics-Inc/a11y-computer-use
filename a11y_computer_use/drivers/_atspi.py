@@ -2840,7 +2840,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+        got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
@@ -7473,18 +7473,36 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
+def _read_full_text(acc, *, count=None):
+    """Retry GTK 4's empty sentinel result with a positive end offset.
+
+    Chromium's bounded read can echo a write instead of the actual contents,
+    so a nonempty sentinel result remains authoritative. NULL still means
+    unreadable; only an empty string with a positive count gets a retry.
+    """
+    Atspi = _atspi()
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if got == "":
+        if count is None:
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    return got
+
+
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. A bounded ``get_text(0, character_count)`` is not used. On a
-    Chromium web field that count can be the length of the string just passed
+    returns one. GTK 4's empty sentinel read is retried with a positive
+    character count. A nonempty sentinel read is kept: on a Chromium web
+    field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
     is dropped first so the read is not the pre-write value.
     """
     _call_first(acc, ("clear_cache", "clearCache"))
-    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    got = _read_full_text(acc)
     if got is None:
         return None
     return str(got)
