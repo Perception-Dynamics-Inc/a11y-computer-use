@@ -2343,7 +2343,21 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
-        x, y = _point_of(target)
+        revealed = None
+        if isinstance(target, Element) and handle is not None:
+            # An off-view table cell is scrolled, then clicked at its new
+            # center. A point target keeps the pixels it was given. A cell
+            # that stays outside the viewport is not clicked.
+            try:
+                revealed = self._run(lambda: _atspi.reveal_unpainted_table_click(handle))
+            except ComputerUseError:
+                raise
+            except Exception:
+                revealed = None
+        if revealed is not None:
+            x, y = int(revealed[0]), int(revealed[1])
+        else:
+            x, y = _point_of(target)
         if isinstance(target, Element) and self._gtk4_point_untrusted(target, handle):
             plain = button is MouseButton.LEFT and count == 1 and not modifiers and handle is not None
             if plain and self._run(lambda: _atspi.do_press(handle)):
