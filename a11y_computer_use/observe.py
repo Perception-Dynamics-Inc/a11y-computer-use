@@ -1341,6 +1341,52 @@ def find_elements(
     return tuple(out)
 
 
+_EXACT_NAME_ROLES = frozenset({
+    "cell", "row", "column", "listitem",
+    "button", "link", "menu", "menuitem", "menubutton",
+    "checkbox", "radiobutton", "combobox", "popupbutton",
+    "textfield", "textarea", "searchfield", "tab",
+})
+
+
+def _folded_title(title: str) -> str:
+    return title.replace("\u00a0", " ").strip().casefold()
+
+
+def prefer_exact_targets(matches: Sequence[Element], text: str | None) -> tuple[Element, ...]:
+    """Prefer an exact name on a cell or control over a label that mentions it.
+
+    ``find_elements`` stays a substring search. ``find`` and ``scroll_to_find``
+    apply this ranking. When a cell, row, or other control is titled exactly
+    with ``text``, only those matches are returned. A label whose title merely
+    contains ``text`` is dropped. A label whose title is ``text`` stays. A
+    paragraph or other static text whose value contains ``text`` stays, and so
+    does a button or field matched by substring when no exact control exists.
+    """
+    if not matches or not isinstance(text, str) or not text.strip():
+        return tuple(matches)
+    needle = _folded_title(text)
+
+    def exact_control(el: Element) -> bool:
+        if _folded_title(el.title or "") != needle:
+            return False
+        if el.clickable:
+            return True
+        role = el.role.lower().removeprefix("ax")
+        return role in _EXACT_NAME_ROLES
+
+    exact = tuple(el for el in matches if exact_control(el))
+    if exact:
+        return exact
+
+    def mentions_label(el: Element) -> bool:
+        if el.subrole != "label" or el.role not in {"AXStaticText", "AXHeading"}:
+            return False
+        return _folded_title(el.title or "") != needle
+
+    return tuple(el for el in matches if not mentions_label(el))
+
+
 def render_matches(
     snap: Snapshot, matches: Sequence[Element], *, text: str | None = None,
 ) -> str:
@@ -2680,7 +2726,11 @@ def _flatten(
             stable_id=node.raw.stable_id or None,
             instance_id=instance_id,
             document_id=document_id,
-            subrole="terminal" if terminal else None,
+            subrole=(
+                "terminal" if terminal
+                else "label" if node.raw.subrole == "label"
+                else None
+            ),
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,
