@@ -806,7 +806,8 @@ def _scroll_anchor(snap):
     taller than the window is the document's content box: the wheel goes to
     the document group that contains it when that group is smaller than the
     window, and otherwise to the list. It does not go to Chrome's tab strip.
-    A menu smaller than the window is used only when the page has no list.
+    A standalone menu smaller than the window is used only when the page has
+    no list. Menubar and toolbar branches are not scrolling content.
     With no list, a titled group wins over a larger empty panel: that panel
     is Chrome's frame, and a wheel there does not move the document.
     None for an empty snapshot.
@@ -822,29 +823,43 @@ def _scroll_anchor(snap):
     def below_window(el) -> bool:
         return _element_area(el) < 0.9 * reference
 
-    areas = [el for el in snap.elements if el.role == "AXScrollArea"]
+    by_ref = {el.ref: el for el in snap.elements}
+
+    def content(el) -> bool:
+        seen = set()
+        while el is not None and el.ref not in seen:
+            seen.add(el.ref)
+            if el.role in ("AXMenuBar", "AXToolbar"):
+                return False
+            el = by_ref.get(el.parent)
+        return True
+
+    candidates = [el for el in snap.elements if content(el)]
+    if not candidates:
+        return None
+
+    areas = [el for el in candidates if el.role == "AXScrollArea"]
     if areas:
         return largest(areas)
 
-    lists = [el for el in snap.elements if el.role in _PAGE_LIST_ROLES]
+    lists = [el for el in candidates if el.role in _PAGE_LIST_ROLES]
     inner = [el for el in lists if below_window(el)]
     if inner:
         return largest(inner)
 
     if not lists:
-        menus = [el for el in snap.elements if el.role == "AXMenu" and below_window(el)]
+        menus = [el for el in candidates if el.role == "AXMenu" and below_window(el)]
         if menus:
             return largest(menus)
-        groups = [el for el in snap.elements if el.role == "AXGroup" and below_window(el)]
+        groups = [el for el in candidates if el.role == "AXGroup" and below_window(el)]
         if groups:
             titled = [el for el in groups if (el.title or "").strip()]
             return largest(titled or groups)
-        tabs = [el for el in snap.elements if el.role == "AXTabGroup" and below_window(el)]
+        tabs = [el for el in candidates if el.role == "AXTabGroup" and below_window(el)]
         if tabs:
             return largest(tabs)
-        return largest(snap.elements)
+        return largest(candidates)
 
-    by_ref = {el.ref: el for el in snap.elements}
     page = _page_group_ancestor(largest(lists), by_ref, below_window)
     if page is not None:
         return page
