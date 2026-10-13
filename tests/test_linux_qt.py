@@ -1019,3 +1019,15 @@ def test_rich_text_snapshot_names_and_description_fallback(atspi, use_descriptio
     assert control.title == expected
     assert f'button "{expected}"' in observe.render_text(snap)
     assert control in observe.find_elements(snap, text=expected)
+
+
+@pytest.mark.parametrize("states", [("SHOWING", "EDITABLE"), ("SHOWING", "EDITABLE", "SINGLE_LINE")])
+def test_qt_line_edit_does_not_request_document_viewport(atspi, monkeypatch, states):
+    """Qt line edits must retain their value without a bounded-range bus call."""
+    edit = _Node("text", name="Qt name", text="Ada", toolkit="Qt", states=states)
+
+    def unexpected_viewport(node):
+        pytest.fail("single-line Qt control requested document viewport text")
+
+    monkeypatch.setattr(_atspi, "_qt_viewport_text", unexpected_viewport)
+    assert ATSPIAccessor().read(edit).value == "Ada"

@@ -226,20 +226,6 @@ pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
 
-## Qt document searches
-
-Qt multiline editors (including FeatherPad) expose the entire document through
-AT-SPI Text. Snapshot values and text searches use `Text.get_bounded_ranges`
-inside the measured editor bounds, falling back to native point offsets and
-verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
-these ranges, so an off-screen match becomes searchable when it enters the
-viewport. When neither interface establishes visibility, the document value is
-omitted and its hint recommends in-document Find or line navigation. `find` and
-`scroll_to_find` cannot confirm document text through the whole buffer in that
-case. This path is covered by synthetic tests; FeatherPad has not been live-
-verified for this change.
-
-
 Okular's Thumbnails sidebar can expose its painted thumbnail strip as an
 empty AT-SPI filler, without page icons or page-label text. In the reported
 Sidebar structure (a Thumbnails label above a filler beside a scrollbar),
@@ -270,6 +256,22 @@ result therefore stays empty in snapshots, find, and action readback, even when
 the character count is positive. This also hides values for plain GTK 4 entries
 with the same empty sentinel behavior. Positive-offset reads are used only for
 private boolean write verification; their contents are never published.
+
+## Qt document searches
+
+Qt multiline editors (including FeatherPad) expose the entire document through
+AT-SPI Text. Native multiline states or attributes select this path; ordinary
+Qt line edits retain their text without requesting document viewport ranges.
+Snapshot values and text searches use `Text.get_bounded_ranges`
+inside the measured editor bounds, falling back to native point offsets and
+verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+these ranges, so an off-screen match becomes searchable when it enters the
+viewport. When neither interface establishes visibility, the document value is
+omitted and its hint recommends in-document Find or line navigation. `find` and
+`scroll_to_find` cannot confirm document text through the whole buffer in that
+case. This path is covered by synthetic tests; FeatherPad has not been live-
+verified for this change.
+
 ### Execution permission and launchers
 
 With `allow_exec=False` (the default), terminal launches and input require an

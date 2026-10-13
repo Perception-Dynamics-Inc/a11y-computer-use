@@ -3565,7 +3565,10 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
-        qt_document = role == "AXTextArea" and role_str != "terminal" and _qt_app(node)
+        qt_document = (
+            role == "AXTextArea" and role_str != "terminal"
+            and _qt_app(node) and _reports_multiline(node, attrs)
+        )
         if qt_document:
             value = _qt_viewport_text(node)
         if role_str == "push button" and name != button_name and button_name.strip() and value is None:
