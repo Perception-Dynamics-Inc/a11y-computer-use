@@ -9728,6 +9728,15 @@ def test_outcome_confirms_a_calc_formula_the_cell_displays_as_a_number(
     assert typed == "confirmed", typed_evidence
     assert "Résumé ✓" in typed_evidence
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    typed, typed_evidence = runtime._judge_mutation(
+        "soffice.bin", before, None, "42", previous="",
+    )
+    assert typed == "confirmed", typed_evidence
+    assert "42" in typed_evidence
+    assert runtime.driver._sheet_type_readback is None
+    # A read from another app cannot confirm this mutation.
+    runtime.driver._sheet_type_readback = ("other", "=Z9")
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
     untouched, untouched_evidence = runtime._judge_mutation(
         "soffice.bin", before, before_el, "=Z9", previous="",
@@ -10078,6 +10087,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
     assert driver.type_text("42") == 2
+    assert driver._sheet_type_readback == ("soffice.bin", "42")
 
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
@@ -10089,6 +10099,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] in {None, ""}
+    assert driver._sheet_type_readback is None
 
 
 def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
@@ -12886,6 +12897,58 @@ def test_missing_tree_does_not_restart_the_process_startup_grace(fake_atspi, mon
         assert exc.value.code is ErrorCode.UNSUPPORTED
         assert exc.value.detail["reason"] == "no_accessibility_bridge"
         assert clock["t"] - before == pytest.approx(expected_wait)
+
+
+@pytest.mark.parametrize("owner_name,role,contents,omitted", [
+    ("Kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("kate", "text", "TOP\nBOTTOM_MARKER_520", True),
+    ("Kate", "text", "BOTTOM_MARKER_520", True),
+    ("Other editor", "text", "TOP\nBOTTOM_MARKER_520", False),
+    ("Kate", "entry", "BOTTOM_MARKER_520", False),
+])
+def test_kate_document_buffer_is_not_a_visible_search_hit(
+    fake_atspi, monkeypatch, owner_name, role, contents, omitted,
+) -> None:
+    """A widget box does not prove visibility of KTextEditor's buffer text."""
+    owner = _Acc("application", name=owner_name)
+    editor = _Acc(role, states={"EDITABLE"} | ({"MULTI_LINE"} if role == "text" else set()),
+                  width=600, height=400)
+    editor.text = contents
+    editor.get_application = lambda: owner
+    monkeypatch.setattr(
+        _atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True),
+    )
+    raw = _atspi.ATSPIAccessor().read(editor)
+    assert raw.role == ("AXTextField" if role == "entry" else "AXTextArea")
+    assert raw.value == (None if omitted else contents)
+    tree = (raw, [])
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW, app=owner_name,
+                          pid=42, geometry=_geometry())
+    assert bool(observe.find_elements(snap, text="BOTTOM_MARKER_520")) is not omitted
+    assert observe.find_elements(snap, role="textarea" if role == "text" else "textfield")
+    if omitted:
+        assert "in-document navigation" in raw.description
+
+        from a11y_computer_use import server
+
+        class Driver:
+            def ensure_trusted(self):
+                pass
+
+            def snapshot(self, scope, app):
+                return snap
+
+            def scroll(self, *args, **kwargs):
+                pytest.fail("zero-scroll search must not move the editor")
+
+        monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+        runtime = _bare_runtime(Driver())
+        assert "no elements match" in runtime.find(owner_name, text="BOTTOM_MARKER_520")
+        result = runtime.scroll_to_find(owner_name, text="BOTTOM_MARKER_520", max_scrolls=0)
+        assert result.startswith("not found after 0 scroll(s)")
+    # Snapshot refusal must not change the buffer or caret.
+    assert editor.text == contents
+    assert not hasattr(editor, "caret")
 @pytest.mark.parametrize("name", [
     "xfce4-appfinder", "xfce4-run", "krunner", "rofi", "dmenu_run",
     "python3", "python3.12", "/usr/bin/python3", "pypy3", "perl", "ruby",
@@ -13262,10 +13325,15 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
         state["events_processed"] = True
 
     def check(app, origin, text):
-        assert state["in_operation"]
+        assert not state["in_operation"]
         assert state["events_processed"]
         assert origin == "A1"
         return None
+
+    def commit(app):
+        assert state["in_operation"]
+        assert app == "soffice.bin"
+        return True
 
     driver._run = run
     monkeypatch.setattr(linux, "_on_wayland", lambda: False)
@@ -13276,8 +13344,123 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
     monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
     monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
     monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
-    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: True)
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", commit)
     monkeypatch.setattr(_atspi, "sheet_grid_check", check)
     monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
     monkeypatch.setattr(linux.time, "sleep", pause)
     assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+
+
+def test_sheet_child_cache_restores_default_after_read_failure(fake_atspi, monkeypatch):
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+    masks = []
+    app.set_cache_mask = masks.append
+
+    def fail():
+        assert masks == [0]
+        raise RuntimeError("read failed")
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        _atspi._without_child_cache(app, fail)
+    assert masks == [0, 128]
+
+
+def test_direct_atspi_read_runs_on_event_thread(monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+
+    on_thread = [False]
+    calls = []
+
+    def run(fn):
+        on_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_thread[0] = False
+
+    def native_read():
+        assert on_thread[0]
+        calls.append("table read")
+        return "Item"
+
+    monkeypatch.setattr(_atspi_events, "run", run)
+    assert _atspi._safe(native_read) == "Item"
+    assert calls == ["table read"]
+    assert not on_thread[0]
+
+
+def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._typed_readback = lambda _app: ""
+    on_event_thread = [False]
+
+    def run(fn):
+        on_event_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_event_thread[0] = False
+
+    driver._run = run
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda _app: False)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: True)
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda _app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda _app: "A1")
+    sent = []
+    monkeypatch.setattr(_linux_input, "type_string", sent.append)
+
+    def verify(app, origin, text):
+        # Verification waits for publication between native reads. Keeping
+        # this entire operation on the event thread starves those replies.
+        assert not on_event_thread[0]
+        assert (app, origin, text) == ("soffice.bin", "A1", "Item\tQ1")
+        return None
+
+    monkeypatch.setattr(_atspi, "sheet_grid_check", verify)
+    assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+    assert sent == ["Item\tQ1"]
+
+
+@pytest.mark.parametrize("windows,expected", [
+    ([{"pid": 123, "app": "python3", "wm_class": "cuaoutcome"}], 14.0),
+    ([{"pid": 123, "app": "python3", "title": "cuaoutcome"}], 0.0),
+    ([{"pid": 123, "wm_class": "cuaoutcome"},
+      {"pid": 456, "wm_class": "cuaoutcome"}], 0.0),
+])
+def test_registration_grace_for_interpreted_gtk_owner(monkeypatch, windows, expected):
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "windows", lambda: windows)
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0)
+    assert _atspi.registration_startup_remaining("cuaoutcome") == expected
+
+
+def test_registration_grace_preserves_original_gtk_name(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    window = _Acc("frame", name="cuaoutcome", width=640, height=480)
+    monkeypatch.setattr(_atspi, "find_root", lambda *args: window if clock["t"] >= 1.0 else None)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda app: "python3")
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda app: set())
+    monkeypatch.setattr(_linux_system, "windows", lambda: [
+        {"pid": 123, "app": "python3", "wm_class": "cuaoutcome"},
+    ])
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0 + clock["t"])
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep",
+                        lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "cuaoutcome")
+    assert snap.app == "cuaoutcome"
+    assert snap.elements[0].role == "AXWindow"
+    assert clock["t"] == pytest.approx(1.0)
