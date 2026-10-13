@@ -3562,8 +3562,11 @@ def test_app_launch_gate_keys_by_the_installed_bundle_id(tmp_path, monkeypatch, 
     # Keep the bundle grant test independent of the host executable/catalog.
     # A lowercase executable intentionally canonicalizes the launch spelling.
     monkeypatch.setattr(shutil, "which", lambda ident: "/usr/bin/krita" if program and ident == program else None)
-    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: [])
-    monkeypatch.setattr(server, "_installed_bundle_id", lambda ident: "org.krita" if ident == "Krita" else None)
+    monkeypatch.setattr(app_identity, "load_desktop_entries", lambda: (
+        [{"id": "org.krita.desktop", "name": "Krita", "exec": "krita"}] if program else []
+    ))
+    monkeypatch.setattr(server, "_installed_bundle_id",
+                        lambda ident: "org.krita" if ident == "Krita" and not program else None)
     store = safety.PermissionStore(tmp_path / "p.json")
     store.set_tier("org.krita", safety.Tier.CLICK)
     rt = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=_D())
@@ -4376,3 +4379,102 @@ async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, m
     rows = json.loads(result.content[0].text)
     assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
                      "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
+
+
+@pytest.mark.parametrize("hit_at", [0, 1, 2])
+@pytest.mark.parametrize("status_child, role", [(False, None), (True, None), (True, "text")])
+def test_scroll_to_find_refuses_statusbar_only_opaque_hit(monkeypatch, hit_at, status_child, role) -> None:
+    """Status metadata is not a character ref, including on confirming reads."""
+    elements = [
+        Element(ref="window", role="AXWindow", title="Character Map", value=None,
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="box", role="AXScrollArea", title="Scripts", value=None,
+                bounds=Bounds(0, 0, 0, 150, 500), snapshot_id="s", parent="window"),
+        Element(ref="script", role="AXStaticText", title="Latin", value=None,
+                bounds=Bounds(0, 10, 10, 100, 20), snapshot_id="s", parent="box"),
+        Element(ref="table", role="opaque_region", title="Character Table", value=None,
+                bounds=Bounds(0, 160, 0, 640, 500), snapshot_id="s", parent="window"),
+        Element(ref="status", role="AXStatusBar", title="", value=None,
+                bounds=Bounds(0, 0, 550, 800, 30), snapshot_id="s", parent="window"),
+    ]
+    if status_child:
+        elements.append(Element(
+            ref="label", role="AXStaticText", title="", value=None,
+            bounds=Bounds(0, 0, 550, 800, 30), snapshot_id="s", parent="status",
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="gucharmap", pid=1,
+                    created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                    elements=tuple(elements))
+    calls = []
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            index = len(calls)
+            calls.append("snapshot")
+            if index >= hit_at:
+                return dataclasses.replace(snap, elements=tuple(
+                    dataclasses.replace(el, title="U+2764 HEAVY BLACK HEART")
+                    if el.ref == ("label" if status_child else "status") else el
+                    for el in snap.elements
+                ))
+            # A real candidate in the naming read must also be checked again.
+            if hit_at == 2 and index == 1:
+                return dataclasses.replace(snap, elements=tuple(
+                    dataclasses.replace(el, title="HEAVY BLACK HEART")
+                    if el.ref == "script" else el for el in snap.elements
+                ))
+            return snap
+
+        def scroll(self, target, **kw):
+            pass
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "gucharmap"))
+    with pytest.raises(ComputerUseError) as caught:
+        rt.scroll_to_find("gucharmap", text="HEAVY BLACK HEART", role=role)
+    assert caught.value.code is ErrorCode.UNSUPPORTED
+    assert caught.value.detail["reason"] == "statusbar_only_match"
+    assert "opaque" in caught.value.message
+
+
+@pytest.mark.parametrize("explicit_status", [False, True])
+def test_scroll_to_find_keeps_content_hits_and_explicit_status_search(monkeypatch, explicit_status) -> None:
+    """An opaque sibling does not invalidate a real cell or requested statusbar."""
+    elements = [
+        Element(ref="table", role="opaque_region", title="Character Table", value=None,
+                bounds=Bounds(0, 0, 0, 400, 400), snapshot_id="s"),
+        Element(ref="status", role="AXStatusBar", title="HEART", value=None,
+                bounds=Bounds(0, 0, 450, 400, 20), snapshot_id="s"),
+    ]
+    if not explicit_status:
+        elements.append(Element(
+            ref="cell", role="AXCell", title="HEART", value=None, parent="table",
+            bounds=Bounds(0, 10, 10, 20, 20), snapshot_id="s", clickable=True,
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="gucharmap", pid=1,
+                    created_at=0.0, displays=(Display(0, 800, 600, 1.0, True),),
+                    elements=tuple(elements))
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "gucharmap"))
+    out = rt.scroll_to_find("gucharmap", text="HEART",
+                            role="statusbar" if explicit_status else None)
+    assert out.startswith("found after 0 scroll(s)")
+    assert ("status" if explicit_status else "cell") in out

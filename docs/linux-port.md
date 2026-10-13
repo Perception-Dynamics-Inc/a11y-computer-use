@@ -205,7 +205,8 @@ unnamed track view remains an `opaque_region`, labelled `Audacity track / wavefo
 Mute, Solo, track names, Gain, and Pan painted inside it are not separate controls
 in that tree. Use Audacity's `Tracks > Mute/Unmute` menus for mute operations.
 The unnamed panel in the Time toolbar is labelled `Audacity Time clock` and stays
-opaque: its displayed reading is not an accessible value. When Audacity publishes
+opaque, including the wxGTK layout with the toolbar description on a sibling
+grip: its displayed reading is not an accessible value. When Audacity publishes
 real children or names, the driver preserves them.
 
 ## Meld file comparisons
@@ -237,3 +238,12 @@ This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
 ### Opaque document search
 `scroll_to_find` refuses in-app Find before sending keys or query text when the chosen container contains an `opaque_region`, such as AbiWord’s document drawing area. It returns `unsupported` with reason `opaque_find_unverifiable`: the accessibility tree cannot verify a match, and native Find could leave document text selected for replacement by a later `type`. This refusal does not open Find or change the document selection.
+
+GTK grid buttons with empty or duplicated accessible names use the nearest
+sibling label to their left with overlapping vertical extents. Explicit
+`labelled-by` relations take precedence. Missing geometry or equally near
+labels leave the raw name unchanged. The original nonempty button name (for
+example `Sans Bold`) is retained as its value when no value is exposed. This
+lets snapshots and `find` identify font and colour controls by their row label;
+button handles, actions, and measured bounds are unchanged. Covered by hermetic
+galculator-shaped regression tests; no local live verification.
