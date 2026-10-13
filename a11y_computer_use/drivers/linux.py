@@ -1221,6 +1221,7 @@ class LinuxDriver:
         # Set when a file-chooser type was confirmed from the location entry
         # rather than the page. The outcome judge reads it once.
         self._chooser_readback: str | None = None
+        self._sheet_type_readback: tuple[str, str] | None = None
         # Final field text when type replaced an active selection. The
         # outcome check confirms that string instead of an append.
         self._type_expected: str | None = None
@@ -2676,6 +2677,49 @@ class LinuxDriver:
 
         return bool(self._run(lambda: _atspi.latch_chromium_find(app)))
 
+    def supports_in_page_find(self, app: str) -> bool:
+        """True when Ctrl+F opens a find bar in ``app``.
+
+        Chromium and Firefox do. Java Swing, GTK, and Qt do not. False when
+        the tree cannot be read, so ``scroll_to_find`` does not type the query
+        into whichever cell already has the caret.
+        """
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.schema import Scope
+
+        def probe() -> bool:
+            root = _atspi.find_root(app, Scope.WINDOW)
+            return _atspi.app_supports_in_page_find(root)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
+
+    def find_bar_focused(self, app: str) -> bool:
+        """True when keyboard focus is in the browser find field.
+
+        One focused-node read, not a page snapshot. An open find bar fills
+        libatspi's child cache, and a snapshot of it is the empty frame
+        ``scroll_to_find`` must not wheel. False when focus is a table cell,
+        a page input, or unknown.
+        """
+        from a11y_computer_use.drivers import _atspi
+
+        def probe() -> bool:
+            try:
+                acc, truncated = _atspi._focused_node(app, max_nodes=48)
+            except Exception:
+                return False
+            if truncated or acc is None:
+                return False
+            return _atspi.focused_find_field(acc)
+
+        try:
+            return bool(self._run(probe))
+        except Exception:
+            return False
+
     def scroll(self, target: Target, *, dx: int = 0, dy: int = 0,
                unit: ScrollUnit = ScrollUnit.LINES, pre_check: Callable | None = None,
                dry_run: bool = False) -> object:
@@ -3263,6 +3307,7 @@ class LinuxDriver:
         if dry_run or not text:
             return None
         self._chooser_readback = None
+        self._sheet_type_readback = None
         self._type_expected = None
         self._sheet_type_origin = None
         self._drawing_type_before = None
@@ -3459,7 +3504,14 @@ class LinuxDriver:
             # the editor's removal before the next native tree operation.
             if self._run(lambda: _atspi._commit_open_sheet_editor(app_id)):
                 time.sleep(_atspi._SHEET_GRID_COMMIT_PAUSE_S)
-            mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
+            # Each native read marshals through _safe/_call_first. The
+            # verification waits must leave the event loop free to process
+            # Calc's commit and cache updates between those reads.
+            from a11y_computer_use.drivers import _dbus_guard
+
+            mismatch = _dbus_guard.call_with_reconnect(
+                lambda: _atspi.sheet_grid_check(app_id, origin, text)
+            )
             if mismatch is None:
                 return len(text)
             self._sheet_type_origin = None
@@ -3510,6 +3562,12 @@ class LinuxDriver:
         after = self._typed_readback(app_id)
         if selection and _atspi._typed_visible(before, after, text, selection=selection):
             self._type_expected = _atspi._matched_replacement(before, after, text, selection)
+        if (
+            app_id and _atspi.libreoffice_app(app_id)
+            and _atspi._typed_visible(before, after, text)
+            and self._run(lambda: _atspi.spreadsheet_open(app_id))
+        ):
+            self._sheet_type_readback = (app_id, after)
         # A Chrome contenteditable can publish the keys after that first
         # read. Poll until the text settles. The address bar does too: the
         # first read can be a truncated URL. Calc is the same lag: the cell
@@ -3532,6 +3590,10 @@ class LinuxDriver:
                 sheet=sheet,
             )
             if _atspi._typed_visible(before, after, text):
+                if sheet:
+                    # Preserve the actual settled read: a subsequent snapshot
+                    # can lose the transient editor in libatspi's child cache.
+                    self._sheet_type_readback = (app_id, after)
                 return len(text)
             if sheet:
                 raise _atspi._text_mismatch(
