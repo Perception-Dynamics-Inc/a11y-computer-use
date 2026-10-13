@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -80,10 +81,15 @@ def _point_of(target: Target) -> tuple[int, int]:
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
-    if target.bounds is None:
+    bounds = target.bounds
+    center = bounds.center if bounds is not None else None
+    if center is None or any(
+        not math.isfinite(v) or v < -32768 or v > 32767
+        for v in (center.x, center.y)
+    ):
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
-            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            f"{target.ref} ({target.role}) has no usable bounds; no pointer click was sent",
             detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
         )
     return int(target.bounds.center.x), int(target.bounds.center.y)
@@ -3429,6 +3435,10 @@ class LinuxDriver:
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
+            # Return to the caller after committing so event_main can process
+            # the editor's removal before the next native tree operation.
+            if self._run(lambda: _atspi._commit_open_sheet_editor(app_id)):
+                time.sleep(_atspi._SHEET_GRID_COMMIT_PAUSE_S)
             mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
             if mismatch is None:
                 return len(text)
