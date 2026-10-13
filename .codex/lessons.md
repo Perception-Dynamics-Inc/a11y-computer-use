@@ -29,9 +29,11 @@
 
 - 2026-10-14 (#578): GTK 4 masked Gtk.Entry can expose neither password role nor protected state nor visibility metadata. Positive-offset Text reads after an empty sentinel must stay private to boolean write verification; publishing them leaks secrets even when is_secure is false.
 - 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
+- 2026-10-14 (#472 repair): Inkscape exposes empty dock content as an opaque filler beside its SVG drawing area. Preserve existing surface labels when adding canvas facts; an empty dock may use the real window/document label, but must not inherit the SVG canvas's inaccessible-content note. Verify with a real Inkscape snapshot as well as synthetic drawing areas.
 
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
 
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
 
 - 2026-10-14 (PR #472 repair): Inkscape can expose both its SVG canvas and a childless painted filler inside the Fill tab as opaque regions. Preserve their native bounds and derive document context from the native frame title; keep the inaccessible SVG content note specific to the drawing canvas. An empty app-specific fallback must not overwrite another application's surface name.
+- 2026-10-14 (PR #472 merge repair): Concurrent isolated D-Bus test sessions need distinct writable XDG_CACHE_HOME directories. AT-SPI bus launchers share the cache socket path; ending one session can remove another session's socket and abort MCP subprocess tests. Recheck bus failures in a fresh session with its own cache before treating them as code regressions.

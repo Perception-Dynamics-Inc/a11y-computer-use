@@ -1221,19 +1221,15 @@ def _drawing_canvas_facts(node, size) -> tuple[str, str, str]:
     note = ""
     if not text and count == 0:
         note = _CANVAS_CONTENT_NOTE
-    return _inkscape_surface_name(node), note, text
-
-
-def _inkscape_surface_name(node) -> str:
-    """Native document title for an Inkscape painted surface."""
     frame = _frame_ancestor(node)
     if frame is None:
-        return ""
+        return "", note, text
     title = str(_call_first(frame, ("get_name",), default="") or "").strip()
     if not title or _generic_region_name(title):
-        return ""
+        return "", note, text
     labels = _prefix_image_labels(frame, title)
-    return labels[0] if len(labels) == 1 else title
+    name = labels[0] if len(labels) == 1 else title
+    return name, note, text
 
 
 def _audacity_track_area(container) -> bool:
@@ -3647,18 +3643,6 @@ class ATSPIAccessor:
             label = _selected_icon_name(node)
             if label:
                 name = label
-        # Inkscape's Fill tab also contains a childless painted GTK filler.
-        # Its document context is readable even though the pixels are not.
-        if (
-            role_str == "filler"
-            and not str(name).strip() and not str(description).strip()
-            and size is not None
-            and size[0] >= _CANVAS_MIN_SIDE and size[1] >= _CANVAS_MIN_SIDE
-            and _child_count(node) == 0
-            and _page_tab_ancestor(node) is not None
-            and _inkscape_window(node)
-        ):
-            surface_name = _inkscape_surface_name(node)
         if (
             role_str in {"drawing area", "canvas"}
             and _generic_region_name(str(name))
@@ -3668,6 +3652,16 @@ class ATSPIAccessor:
             surface_name = canvas_name or surface_name
             if canvas_text and not isinstance(value, str):
                 value = canvas_text
+        elif (
+            role_str == "filler" and not surface_name
+            and _generic_region_name(str(name))
+            and _generic_region_name(str(description))
+            and _child_count(node) == 0 and value is None
+        ):
+            # Inkscape's empty dock content is also an opaque surface.
+            # Use its real document/window label, without claiming that
+            # this sibling is the SVG canvas or inventing a content box.
+            surface_name, _note, _text = _drawing_canvas_facts(node, size)
         return RawNode(
             role=role,
             subrole=(
