@@ -6096,6 +6096,33 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     return acc
 
 
+def gtk_toggle_cell(acc) -> bool:
+    """GTK renderer toggle cells need pointer input, not row selection."""
+    return (
+        _toolkit_name(acc).lower() == "gtk"
+        and not _gtk4_app(acc)
+        and _role_name(acc) == "table cell"
+        and "toggle" in _raw_action_names(acc)
+    )
+
+
+def checked_state(acc) -> bool:
+    """Read the cell itself, even when unchecked GTK cells omit CHECKABLE."""
+    return _state_has(acc, "CHECKED")
+
+
+def checked_state_flipped(acc, before: bool) -> bool:
+    """Require a stable checked change, independent of row selection."""
+    for attempt in range(8):
+        if checked_state(acc) != before:
+            time.sleep(0.04)
+            if checked_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def qt_toggle_only_control(acc) -> bool:
     """Qt buttons and list items whose only activating action is Toggle.
 

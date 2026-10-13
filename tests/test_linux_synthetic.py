@@ -3203,6 +3203,66 @@ def test_qt_toggle_pointer_failure_does_not_run_toggle(fake_atspi, monkeypatch):
     assert events == [("raise", control)]
 
 
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("changes", [False, True])
+def test_gtk_toggle_cell_click_verifies_checked_not_selection(
+    fake_atspi, monkeypatch, checked, selected, changes,
+):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell",
+        actions=("toggle", "expand or contract", "edit", "activate"),
+    )
+    if checked:
+        cell.states.add("CHECKED")
+    if selected:
+        cell.states.add("SELECTED")
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        cell.states.add("SELECTED")
+        if changes:
+            cell.states.symmetric_difference_update({"CHECKED"})
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if changes:
+        assert driver.press_element(element) is True
+        assert ("CHECKED" in cell.states) != checked
+    else:
+        with pytest.raises(ComputerUseError, match="checked state") as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "checked_unchanged"
+    assert action_log == []
+    assert [event for event in events if event[0] == "click"] == [
+        ("click", 90, 70, "left", 1),
+    ]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, -200, 60, 100, 20),
+])
+def test_gtk_toggle_cell_without_bounds_refuses_without_toggle(fake_atspi, monkeypatch, bounds):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",), bounds=bounds,
+    )
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
+
+
+def test_gtk_toggle_cell_wayland_refuses_without_toggle(fake_atspi, monkeypatch):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",),
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
+
+
 def _scrolled_text():
     """text inside viewport inside a scroll pane that owns both bars."""
     text = _Acc("text")
