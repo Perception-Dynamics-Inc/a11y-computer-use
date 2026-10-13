@@ -263,6 +263,8 @@ class RawNode:
     #: and EditableText. Default false, so macOS, Windows, and the browser
     #: stay editable only when the role is a text field.
     editable: bool = False
+    #: Explicit platform refusal of text replacement, overriding role inference.
+    read_only: bool = False
     #: Process identity of the app that owns this node. Linux sets
     #: ``pid:<pid>|start:<ticks>`` and appends ``|bus:<name>`` when the
     #: application exposes an AT-SPI bus name. None on backends that do not
@@ -2602,7 +2604,7 @@ def _flags(raw: RawNode) -> tuple[bool, bool, bool]:
     """
     secure = raw.role == _SECURE_ROLE or raw.subrole == _SECURE_ROLE
     clickable = bool(_PRESS_ACTIONS.intersection(raw.actions)) or raw.role in _CLICKABLE_ROLES
-    editable = secure or raw.editable or raw.role in _EDITABLE_ROLES
+    editable = not raw.read_only and (secure or raw.editable or raw.role in _EDITABLE_ROLES)
     return clickable, editable, secure
 
 

@@ -3437,6 +3437,10 @@ class ATSPIAccessor:
                 node, role_str=role_str, attrs=attrs, state_editable=state_editable,
                 drawing=self._drawing_paragraph(node, role_str, state_editable),
             ),
+            read_only=(
+                role_str in {"text", "editable text"}
+                and (not state_editable or _state_has(node, "READ_ONLY"))
+            ),
             instance_id=self._bound_instance_id(node),
             document_id=window_document_id(node, role_str, str(name)),
             # Only a group can be suppressed as browser chrome. A button,
@@ -7140,9 +7144,11 @@ def editable_entry(
     ``STATE_EDITABLE`` and EditableText. The snapshot sets that only for a
     LibreOffice tree. A browser paragraph stays false.
 
-    An entry, password, or text role is an entry when it has EditableText or
+    Text views require ``STATE_EDITABLE``: GTK exposes EditableText even
+    when a GtkTextView is read-only. Other entry roles accept EditableText or
     ``STATE_EDITABLE``. A contenteditable with no textbox role is a section
     whose tag is ``div`` or ``span`` and whose state is ``EDITABLE``.
+    Synthetic handles without a state set retain the interface fallback.
     Chromium often has no EditableText (#221). Firefox's own roleless
     contenteditable has EditableText. A browser paragraph is not that section.
     """
@@ -7160,6 +7166,9 @@ def editable_entry(
             state_editable = _state_has(acc, "EDITABLE")
         if state_editable:
             return True
+        if (role in {"text", "editable text"}
+                and _call_first(acc, ("get_state_set",)) is not None):
+            return False
         return _editable_iface(acc) is not None
     if role != "section":
         return False
@@ -7197,6 +7206,9 @@ def _blocks_text_replace(acc) -> bool:
         return True
     if role == "section":
         return not (editable_entry(acc) or _chromium_contenteditable(acc))
+    if (role in {"text", "editable text"}
+            and _call_first(acc, ("get_state_set",)) is not None):
+        return not editable_entry(acc)
     return _state_has(acc, "READ_ONLY")
 
 
