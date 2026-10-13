@@ -12563,3 +12563,79 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+@pytest.mark.parametrize("app", ["vlc", "krita"])
+@pytest.mark.parametrize("listed_by", ["apps", "windows"])
+def test_running_app_without_atspi_tree_fails_fast(
+    fake_atspi, monkeypatch, app, listed_by
+) -> None:
+    """Synthetic no root, whether the app connected to the bus or not.
+
+    Runtime snapshot/find and driver menu listing must distinguish this
+    from a stopped app on every call, without a 15 s registration wait.
+    """
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args: None)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_linux_system, "running_apps", lambda: (
+        [{"bundle_id": app, "name": app, "pid": 123}]
+        if listed_by == "apps" else []
+    ))
+    monkeypatch.setattr(_linux_system, "windows", lambda: (
+        [{"app": app, "title": app, "wm_class": app}]
+        if listed_by == "windows" else []
+    ))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+
+    def sleep(seconds):
+        clock["t"] += seconds
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    driver = LinuxDriver()
+    driver.ensure_trusted = lambda: None
+    runtime = _bare_runtime(driver)
+    for _repeat in range(2):
+        for call, expected_wait in (
+            (lambda: runtime.desktop_snapshot(app), 0.25),
+            (lambda: runtime.find(app, text="Play"), 0.25),
+            (lambda: driver.menu_items(app, None), 0.0),
+        ):
+            before = clock["t"]
+            with pytest.raises(ComputerUseError) as exc:
+                call()
+            assert exc.value.code is ErrorCode.UNSUPPORTED
+            assert exc.value.detail["app"] == app
+            assert exc.value.detail["reason"] == "no_accessibility_bridge"
+            assert "running" in exc.value.message
+            assert "screenshot" in exc.value.detail["hint"]
+            assert clock["t"] - before == pytest.approx(expected_wait)
+
+
+def test_non_office_registration_can_complete_on_short_retry(fake_atspi, monkeypatch) -> None:
+    """A new app can register during the short retry and return its tree."""
+    from a11y_computer_use.drivers import _linux_system
+
+    window = _Acc("frame", name="Krita", width=640, height=480)
+    ready = {"value": False}
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args: window if ready["value"] else None)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    clock = {"t": 0.0}
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+
+    def sleep(seconds):
+        clock["t"] += seconds
+        ready["value"] = True
+
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep", sleep)
+    snap = LinuxDriver().snapshot(Scope.WINDOW, "krita")
+    assert snap.app == "krita"
+    assert snap.elements[0].role == "AXWindow"
+    assert clock["t"] == pytest.approx(0.25)
