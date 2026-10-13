@@ -519,7 +519,7 @@ def resolve_launch(
             launch_name = concrete
     else:
         program = _linux_launch_program(name, catalog, lookup, display)
-        if program:
+        if program and not installed_bundle:
             launch_name = program
         elif (
             hit
