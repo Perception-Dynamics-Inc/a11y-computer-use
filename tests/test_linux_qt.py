@@ -774,6 +774,8 @@ def test_gtk4_popover_item_uses_relation_label_without_reading_value(atspi, monk
     item.name = ""
     label.name = "Properties"
     assert _read(item).title == "Properties"
+    label.name = '<b title="a > b">Properties</b>'
+    assert _read(item).title == "Properties"
     item.relations = []
     assert _read(item).title == ""
 

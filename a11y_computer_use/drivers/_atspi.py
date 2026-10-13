@@ -1256,6 +1256,23 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
                         and marker.startswith("audacity ") and marker.endswith(" toolbar")):
                     if description.casefold() != marker:
                         return "AXButton", "", ""
+    # wxGTK publishes the Time toolbar as a panel containing a labelled
+    # grip, the clock, and a resize grip, rather than a named tool bar.
+    container = _parent_of(node)
+    if not name and not description and _role_name(container) == "panel" and _child_count(container) == 3:
+        grip = _child_at(container, 0)
+        clock = _child_at(container, 1)
+        resize_grip = _child_at(container, 2)
+        if (
+            clock == node
+            and grip is not None
+            and resize_grip is not None
+            and _role_name(grip) == "panel"
+            and _role_name(resize_grip) == "panel"
+            and str(_call_first(grip, ("get_description",), default="") or "").strip().casefold()
+            == "audacity time toolbar"
+        ):
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
@@ -2611,6 +2628,53 @@ def _combo_display_name(acc, name: str) -> str:
     return title or name
 
 
+def _gtk_button_row_name(acc, name: str) -> str:
+    """Name ambiguous GTK grid buttons from measured same-row sibling labels.
+
+    Explicit relations win; unique names and missing or ambiguous geometry
+    retain the raw name. GTK child order need not match screen row order.
+    """
+    if "gtk" not in _toolkit_name(acc):
+        return name
+    label = _labelled_by_name(acc)
+    if label:
+        return _strip_label_colon(label) or name
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
+        return name
+    siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
+    if name.strip() and sum(
+        _role_name(child) == "push button" and _node_name(child) == name
+        for child in siblings if child is not None
+    ) < 2:
+        return name
+    position, size = _extents(acc)
+    if position is None or size is None:
+        return name
+    x, y = position
+    width, height = size
+    if not all(math.isfinite(v) for v in (*position, *size)) or min(width, height) <= 0:
+        return name
+    candidates = []
+    for child in siblings:
+        if child is None or _role_name(child) not in {"label", "static", "static text"}:
+            continue
+        text = _node_name(child)
+        pos, span = _extents(child)
+        if not text.strip() or pos is None or span is None:
+            continue
+        if not all(math.isfinite(v) for v in (*pos, *span)) or min(span) <= 0:
+            continue
+        left, top = pos
+        w, h = span
+        if left + w <= x and top < y + height and top + h > y:
+            candidates.append((x - left - w, text))
+    candidates.sort()
+    if not candidates or (len(candidates) > 1 and candidates[0][0] == candidates[1][0]):
+        return name
+    return _strip_label_colon(candidates[0][1]) or name
+
+
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
     """True for a Chromium custom ``role=spinbutton``, not a native number input.
 
@@ -3322,6 +3386,20 @@ class ATSPIAccessor:
         description = _plain_accessible_name(
             str(_call_first(node, ("get_description",), default="") or "")
         )
+        # GTK 4 can expose uninitialized allocations on empty anonymous
+        # panels (#503). Do not turn that filler into a clickable opaque
+        # region. A side longer than the full X coordinate span (65535)
+        # is suspect only here. Keep real containers' extents for clipping
+        # and row sampling.
+        if (
+            role_str == "panel"
+            and not str(name).strip()
+            and size is not None
+            and any(not math.isfinite(v) or v > 65535 for v in size)
+            and _gtk_major(node) == 4
+            and _child_count(node) == 0
+        ):
+            position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if role == "AXMenuItem" and not str(name).strip():
@@ -3332,6 +3410,9 @@ class ATSPIAccessor:
                 if label:
                     name = _plain_accessible_name(label)
                     break
+        button_name = str(name)
+        if role_str == "push button":
+            name = _gtk_button_row_name(node, button_name)
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
         # An unnamed icon can still carry a caption on its Text interface.
@@ -3402,6 +3483,8 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        if role_str == "push button" and name != button_name and button_name.strip() and value is None:
+            value = button_name
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
