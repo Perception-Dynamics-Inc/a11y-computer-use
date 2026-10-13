@@ -1784,11 +1784,12 @@ def test_agent_file_save_done_rejects_a_matching_window_title(tmp_path, isolated
 
 @requires_display
 def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_home) -> None:
-    """A grant for the real binary covers Files and Terminal."""
+    """Binary grants cover Files and Terminal; Terminal also needs exec."""
     import shutil
 
     from a11y_computer_use import safety, server
     from a11y_computer_use.safety import Tier
+    from a11y_computer_use.schema import ComputerUseError, ErrorCode
 
     files = next((
         name for name in ("thunar", "nautilus", "nemo", "dolphin", "pcmanfm")
@@ -1811,6 +1812,15 @@ def test_agent_files_and_terminal_grants_cover_those_names(tmp_path, isolated_ho
             assert "ask the user" not in text, text
         if terminal is not None:
             store.set_tier(terminal, Tier.FULL)
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.app("launch", "Terminal")
+            assert caught.value.code is ErrorCode.EXEC_DISABLED
+            rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+                    for line in path.read_text().splitlines()]
+            row = rows[-1]
+            assert row["result"] == "exec_disabled"
+            assert row["metrics"]["security_violation"] == "exec_disabled"
+            runtime.allow_exec = True
             text = runtime.app("launch", "Terminal")
             assert "needs_permission" not in text, text
             assert "ask the user" not in text, text

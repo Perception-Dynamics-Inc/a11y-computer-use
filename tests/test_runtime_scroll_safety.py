@@ -66,6 +66,58 @@ def audit_rows(tmp_path: Path) -> list[dict]:
             for line in path.read_text().splitlines()]
 
 
+@pytest.mark.parametrize("title", ["Navigation", "Documents"])
+@pytest.mark.parametrize("content_role", ["AXScrollArea", "AXGroup"])
+@pytest.mark.parametrize("direction,dy", [("up", -5), ("down", 5)])
+def test_automatic_scroll_ignores_menubar_and_toolbar_branches(
+    runtime, title: str, content_role: str, direction: str, dy: int,
+) -> None:
+    def element(ref, role, title, bounds, parent=None):
+        return Element(ref, role, title, None, Bounds(0, *bounds), "s", parent=parent)
+
+    document = element("e6", content_role, "", (0, 80, 649, 434), "e0")
+    elements = (
+        element("e0", "AXWindow", "Editor", (0, 0, 800, 600)),
+        element("e1", "AXMenuBar", "", (0, 0, 800, 25), "e0"),
+        element("e2", "AXMenu", title, (200, 0, 100, 25), "e1"),
+        element("e3", "AXToolbar", "", (0, 25, 800, 50), "e0"),
+        element("e4", "AXGroup", "Documents", (0, 25, 750, 50), "e3"),
+        element("e5", "AXMenu", "Navigation", (0, 25, 120, 50), "e4"),
+        document,
+        element("e7", "AXScrollBar", "", (630, 80, 19, 434), "e6"),
+    )
+    runtime.driver.snapshots = [dataclasses.replace(snapshot(), elements=elements)]
+    steps = []
+
+    def scroll(target, *, dy):
+        runtime.driver.scrolls.append(target)
+        steps.append(dy)
+
+    runtime.driver.scroll = scroll
+
+    out = runtime.scroll_to_find(
+        "test-app", text="NOSUCHTOKEN2", direction=direction, max_scrolls=2,
+    )
+
+    assert "not found after 2 scroll(s)" in out
+    assert f"container: {content_role}" in out
+    assert runtime.driver.scrolls == [document, document]
+    assert steps == [dy, dy]
+
+
+def test_automatic_scroll_preserves_a_standalone_popup_menu() -> None:
+    menu = dataclasses.replace(snapshot().elements[0], role="AXMenu", title="Options")
+    assert server._scroll_anchor(dataclasses.replace(snapshot(), elements=(menu,))) == menu
+
+
+def test_automatic_scroll_has_no_anchor_for_only_window_chrome() -> None:
+    toolbar = dataclasses.replace(snapshot().elements[0], role="AXToolbar")
+    child = dataclasses.replace(toolbar, ref="e2", role="AXGroup", parent="e1")
+    assert server._scroll_anchor(
+        dataclasses.replace(snapshot(), elements=(toolbar, child)),
+    ) is None
+
+
 def test_pinned_scroll_ref_cannot_borrow_another_apps_grant(runtime, tmp_path) -> None:
     runtime._current = snapshot(app="ungranted-app")
     with pytest.raises(ComputerUseError) as refused:
