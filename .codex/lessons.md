@@ -12,3 +12,4 @@
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
+- 2026-10-13 (#547): GTK viewport queries using AT-SPI Text.get_bounded_ranges can segfault during native TextRange array release; Python exception guards cannot contain that failure. Use single range/character rectangle queries, preserve fail-closed search visibility, and exercise the real GTK menu snapshot as well as hermetic geometry tests.

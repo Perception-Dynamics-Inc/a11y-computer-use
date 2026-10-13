@@ -2693,16 +2693,38 @@ def _gtk_editor_on_screen(acc, full: str) -> str:
     if box is None or box[2] <= 0 or box[3] <= 0:
         return ""
     Atspi = _atspi()
-    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
-        acc, *(int(v) for v in box), Atspi.CoordType.SCREEN,
-        Atspi.TextClipType.BOTH, Atspi.TextClipType.BOTH,
-    ))
+    # GI's native TextRange array ownership can segfault on release, even
+    # for an ordinary GtkTextView. Use single rectangle queries instead.
+    coord = Atspi.CoordType.SCREEN
     parts = []
-    for span in ranges or ():
-        start = getattr(span, "start_offset", None)
-        end = getattr(span, "end_offset", None)
-        if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(full):
-            parts.append(full[start:end])
+    offset = 0
+    for line in full.splitlines(keepends=True):
+        end = offset + len(line)
+        rect = _safe(lambda: Atspi.Text.get_range_extents(acc, offset, end, coord))
+        if _rect_hits_box(rect, box):
+            left, top, width, height = box
+            if (
+                rect.x >= left and rect.y >= top
+                and rect.x + rect.width <= left + width
+                and rect.y + rect.height <= top + height
+            ):
+                parts.append(line)
+            else:
+                # Clipped lines need character geometry, including horizontal
+                # clipping. Unknown geometry supplies no searchable text.
+                run = []
+                for index in range(offset, end):
+                    glyph = _safe(lambda index=index: Atspi.Text.get_character_extents(
+                        acc, index, coord,
+                    ))
+                    if _rect_hits_box(glyph, box):
+                        run.append(full[index])
+                    elif run:
+                        parts.append("".join(run))
+                        run = []
+                if run:
+                    parts.append("".join(run))
+        offset = end
     return "\n".join(parts)
 
 

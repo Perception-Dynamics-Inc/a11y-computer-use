@@ -16,12 +16,23 @@ def editor(monkeypatch):
 
     class Text(_Text):
         @staticmethod
-        def get_bounded_ranges(acc, x, y, width, height, coord, clip_x, clip_y):
-            assert (x, y, width, height) == (40, 40, 500, 640)
-            assert (coord, clip_x, clip_y) == (0, 3, 3)
+        def get_bounded_ranges(*args):
+            pytest.fail('native bounded-range arrays must not be queried')
+
+        @staticmethod
+        def get_range_extents(acc, start, end, coord):
             if acc.visible is None:
                 raise RuntimeError('unsupported')
-            return [NS(start_offset=start, end_offset=end) for start, end in acc.visible]
+            if any(0 <= lo <= start < end <= hi <= len(acc.text) for lo, hi in acc.visible):
+                return NS(x=40, y=40, width=100, height=20)
+            if any(0 <= lo < end and start < hi <= len(acc.text) for lo, hi in acc.visible):
+                return NS(x=40, y=20, width=100, height=40)
+            return NS(x=40, y=-100, width=100, height=20)
+
+        @staticmethod
+        def get_character_extents(acc, index, coord):
+            visible = any(0 <= lo <= index < hi <= len(acc.text) for lo, hi in acc.visible or ())
+            return NS(x=40, y=40 if visible else -100, width=10, height=20)
 
     api = NS(Text=Text, CoordType=NS(SCREEN=0), TextClipType=NS(BOTH=3))
     monkeypatch.setattr(_atspi, '_atspi', lambda: api)
@@ -87,3 +98,19 @@ def test_scroll_to_find_waits_for_gtk_match_to_be_visible(editor, monkeypatch):
     assert scrolls
     assert 'found after 0 scroll(s)' not in result
     assert '1 match' in result
+
+
+def test_find_gtk_editor_checks_horizontal_clipping(editor, monkeypatch):
+    api = _atspi._atspi()
+    monkeypatch.setattr(api.Text, 'get_range_extents', staticmethod(
+        lambda *args: NS(x=-100, y=40, width=300, height=20),
+    ))
+    marker = editor.text.index('LEFT-MARKER-150')
+    monkeypatch.setattr(api.Text, 'get_character_extents', staticmethod(
+        lambda acc, index, coord: NS(
+            x=-100 if index >= marker else 40, y=40, width=10, height=20,
+        ),
+    ))
+    snap = snapshot(editor)
+    assert observe.find_elements(snap, text='SHARED-001')
+    assert not observe.find_elements(snap, text='LEFT-MARKER-150')
