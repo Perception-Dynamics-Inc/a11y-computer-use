@@ -3435,6 +3435,10 @@ class LinuxDriver:
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
+            # Return to the caller after committing so event_main can process
+            # the editor's removal before the next native tree operation.
+            if self._run(lambda: _atspi._commit_open_sheet_editor(app_id)):
+                time.sleep(_atspi._SHEET_GRID_COMMIT_PAUSE_S)
             mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
             if mismatch is None:
                 return len(text)

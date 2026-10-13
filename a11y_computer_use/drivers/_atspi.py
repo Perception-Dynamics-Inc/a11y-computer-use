@@ -773,9 +773,22 @@ def _call_first(obj, names, *args, default=None):
 
     Inside ``read_cache``, a successful stable getter is remembered for
     this object and these arguments. A mutator drops that memory first.
+
+    While ``event_main`` is running, the call moves onto that thread.
+    libatspi is not safe from the caller and the loop at once.
     """
     if obj is None:
         return default
+
+    def invoke():
+        return _call_first_inline(obj, names, *args, default=default)
+
+    from a11y_computer_use.drivers import _atspi_events
+
+    return _atspi_events.run(invoke)
+
+
+def _call_first_inline(obj, names, *args, default=None):
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
@@ -1256,6 +1269,23 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
                         and marker.startswith("audacity ") and marker.endswith(" toolbar")):
                     if description.casefold() != marker:
                         return "AXButton", "", ""
+    # wxGTK publishes the Time toolbar as a panel containing a labelled
+    # grip, the clock, and a resize grip, rather than a named tool bar.
+    container = _parent_of(node)
+    if not name and not description and _role_name(container) == "panel" and _child_count(container) == 3:
+        grip = _child_at(container, 0)
+        clock = _child_at(container, 1)
+        resize_grip = _child_at(container, 2)
+        if (
+            clock == node
+            and grip is not None
+            and resize_grip is not None
+            and _role_name(grip) == "panel"
+            and _role_name(resize_grip) == "panel"
+            and str(_call_first(grip, ("get_description",), default="") or "").strip().casefold()
+            == "audacity time toolbar"
+        ):
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
@@ -3504,7 +3534,11 @@ class ATSPIAccessor:
                 name = label
         return RawNode(
             role=role,
-            subrole="terminal" if role_str == "terminal" else None,
+            subrole=(
+                "terminal" if role_str == "terminal"
+                else "label" if role_str == "label"
+                else None
+            ),
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -10279,7 +10313,8 @@ def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
-    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    group, and 25.2 as a panel. Menus, toolbars, status bars, and the
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10288,7 +10323,7 @@ def _find_cell_editor(node, budget: list[int]):
     if _CELL_EDITOR_PANEL.match(_node_name(node)):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = _child_count(node)
@@ -10302,34 +10337,114 @@ def _find_cell_editor(node, budget: list[int]):
     return None
 
 
+def _cache_masks():
+    """``(none, undefined)`` for ``set_cache_mask``.
+
+    ``none`` is ``0`` when the typelib has no ``Cache`` enum, which is the
+    same value as ``Atspi.Cache.NONE``. ``undefined`` is missing on a test
+    double; the caller then leaves the mask alone after the read.
+    """
+    none = 0
+    undefined = None
+    try:
+        cache = getattr(_atspi(), "Cache", None)
+    except Exception:
+        return none, undefined
+    if cache is None:
+        return none, undefined
+    member = getattr(cache, "NONE", None)
+    if member is not None:
+        none = member
+    return none, getattr(cache, "UNDEFINED", None)
+
+
+def _without_child_cache(node, fn):
+    """Run ``fn`` without trusting this application's child cache.
+
+    ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
+    children array in place. The next D-Bus call reenters the event loop.
+    A cache event then sets the children flag again, and
+    ``get_child_at_index`` returns that stale array. LibreOffice opens the
+    cell editor as a new sibling of the sheet. The pre-edit children do not
+    contain it, so the grid never sends Return. While that editor is open
+    every other cell's text interface stays empty, and A1 reads back as a
+    mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
+    the flag comes back. The desktop default is restored afterwards.
+    The operation-scoped getter cache is invalidated around the walk too,
+    since it can retain child counts and handles read before the edit. The
+    mask change and walk share the event thread, including direct native calls.
+    A node without ``set_cache_mask`` is a test double and is walked as it is.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    def read_uncached():
+        app = _call_first(node, ("get_application", "getApplication"))
+        target = app if app is not None else node
+        setter = getattr(target, "set_cache_mask", None)
+        if setter is None:
+            return fn()
+        none, undefined = _cache_masks()
+        try:
+            _drop_read_cache()
+            setter(none)
+        except Exception:
+            return fn()
+        try:
+            return fn()
+        finally:
+            _drop_read_cache()
+            if undefined is not None:
+                try:
+                    setter(undefined)
+                except Exception:
+                    pass
+
+    return _atspi_events.run(read_uncached)
+
+
+def _fresh_sheet_root(app, scope):
+    """Refresh desktop children before locating Calc's application/window."""
+    try:
+        desktop = _call_first(_atspi(), ("get_desktop",), 0)
+    except ImportError:
+        desktop = None
+    return _without_child_cache(desktop, lambda: find_root(app, scope))
+
+
 def sheet_editor_text(app: str) -> str | None:
     """Paragraph text of the open cell editor, or None.
 
     Only LibreOffice. The panel is a sibling of the sheet, named ``Cell F1``,
     and its paragraph is the in-progress string. Absent when no edit is open.
+    The walk does not trust the child cache: the editor is created when the
+    edit starts, and a stale children array still lists the sheet alone.
     """
     if not libreoffice_app(app):
         return None
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is None:
+                continue
+            text = _full_text(child)
+            if text:
+                return text
         return None
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is None:
-            continue
-        text = _full_text(child)
-        if text:
-            return text
-    return None
+
+    return _without_child_cache(root, read)
 
 
 def _cell_editor_is_secure(app: str) -> bool | None:
@@ -10345,22 +10460,26 @@ def _cell_editor_is_secure(app: str) -> bool | None:
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
-        return None
-    if is_secure(panel):
-        return True
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is not None and is_secure(child):
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        if is_secure(panel):
             return True
-    return False
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is not None and is_secure(child):
+                return True
+        return False
+
+    return _without_child_cache(root, read)
 
 
 def _selected_sheet_cell(app: str):
@@ -10405,13 +10524,13 @@ def selected_sheet_text(app: str) -> str | None:
 
 
 def _find_spreadsheet(node, budget: list[int]):
-    """The Calc grid, without indexing its cells."""
+    """The Calc grid, without indexing cells or unrelated toolbar contents."""
     if budget[0] <= 0 or node is None:
         return None
     if _spreadsheet_table(node):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = min(_child_count(node), 40)
@@ -10563,12 +10682,12 @@ def _sheet_table(app: str):
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.WINDOW)
+        root = _fresh_sheet_root(app, Scope.WINDOW)
     except Exception:
         return None
     if root is None:
         return None
-    return _find_spreadsheet(root, [80])
+    return _without_child_cache(root, lambda: _find_spreadsheet(root, [80]))
 
 
 def _cell_for_address(app: str, address: str):
@@ -10740,17 +10859,16 @@ def sheet_grid_check(app: str, origin: str, text: str):
     committed = False
     deadline = time.monotonic() + _SHEET_GRID_WAIT_S
     while True:
+        # Reading another cell while Calc's editor is open can time out and
+        # make libatspi mark the application hung. Commit before any cell
+        # reads so the native connection remains usable for verification.
+        if not committed and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
-        # A blank or missing cell is not final while the editor from the
-        # type is open. One Return publishes the others and moves the caret
-        # the way Enter does. A disagreement is judged after that commit.
-        if not committed and _commit_open_sheet_editor(app):
-            committed = True
-            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
-            continue
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)
@@ -17549,13 +17667,20 @@ def _drop_cached_properties(acc) -> None:
 
     if not _atspi_events.listening():
         return
-    _reply_local.dropping_properties = True
-    try:
-        method()
-    except Exception:
-        return
-    finally:
-        _reply_local.dropping_properties = False
+
+    def drop() -> None:
+        # The guard is thread-local. It has to be set on the thread that
+        # actually calls libatspi, which is the event thread when the loop
+        # is up.
+        _reply_local.dropping_properties = True
+        try:
+            method()
+        except Exception:
+            return
+        finally:
+            _reply_local.dropping_properties = False
+
+    _atspi_events.run(drop)
 
 
 def _invalidate_tree_cache(acc) -> None:
