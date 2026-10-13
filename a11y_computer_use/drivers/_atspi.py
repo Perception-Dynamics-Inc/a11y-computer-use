@@ -13535,6 +13535,20 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return False
     if force:
         return _replace_editable_text(acc, text)
+    # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
+    # echo the requested spacing while OK discards it. We cannot observe
+    # that model through AT-SPI, so refuse before changing the buffer rather
+    # than claim a committed value or send an unverified activation key.
+    if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
+        app = _call_first(acc, ("get_application", "getApplication"))
+        name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "abiword":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "AbiWord entry values cannot be confirmed as committed; "
+                "use focused typing and verify the value after closing and reopening the dialog",
+                detail={"reason": "commit_unverified"},
+            )
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
