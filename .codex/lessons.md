@@ -22,3 +22,4 @@
 - 2026-10-14 (#446 repair): A post-commit pause inside the AT-SPI event-thread callback cannot process the editor-removal event. Commit in one driver operation, pause on the caller, then verify in the next operation; keep the existing pause bound.
 
 - 2026-10-14 (#578): GTK 4 masked Gtk.Entry can expose neither password role nor protected state nor visibility metadata. Positive-offset Text reads after an empty sentinel must stay private to boolean write verification; publishing them leaks secrets even when is_secure is false.
+- 2026-10-14 (#559 repair): Check shell-capable launchers before app resolution so command strings return audited exec_disabled rather than app_not_found. Inspect executable symlinks and desktop Exec programs even when gtk-launch delegates the launch; interpreter launch classification must not block ordinary GUI input merely because its process comm is python3.
