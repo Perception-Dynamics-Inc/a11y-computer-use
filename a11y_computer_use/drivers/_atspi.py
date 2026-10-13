@@ -1142,7 +1142,8 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
-    Toolbar tools put their label in the tooltip. The track view and Time
+    Toolbar tools put their label in the tooltip; wxGTK may identify their
+    container only through a sibling grip's description. The track view and Time
     clock paint their contents without publishing controls or a value. Keep
     those surfaces opaque; never invent track names or clock readings.
     """
@@ -1170,6 +1171,18 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
         return "", "", ""
     name = _node_name(node).strip()
     description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is None and not name and description:
+        container = _parent_of(node)
+        if _role_name(container) == "panel":
+            for index in range(_child_count(container)):
+                sibling = _child_at(container, index)
+                marker = str(_call_first(
+                    sibling, ("get_description",), default="",
+                ) or "").strip().casefold()
+                if (_role_name(sibling) == "panel" and _child_count(sibling) == 0
+                        and marker.startswith("audacity ") and marker.endswith(" toolbar")):
+                    if description.casefold() != marker:
+                        return "AXButton", "", ""
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""

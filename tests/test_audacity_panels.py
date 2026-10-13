@@ -91,6 +91,34 @@ def test_toolbar_tool_is_a_findable_clickable_button(description):
     assert matches[0].clickable
 
 
+@pytest.mark.parametrize("toolbar,description", [
+    ("Transport", "Play (Space) / Play Once (Shift+Space)"),
+    ("Transport", "Pause (P)"), ("Transport", "Stop"),
+    ("Transport", "Record (R) / Record New Track (Shift+R)"),
+    ("Edit", "Zoom In"), ("Tools", "Selection Tool"),
+])
+def test_toolbar_sibling_grip_identifies_buttons(toolbar, description):
+    grip = _Node("panel", description=f"Audacity {toolbar} Toolbar", size=(10.0, 63.0))
+    tool = _Node("panel", description=description)
+    frame = _frame(_Node("panel", children=[grip, tool]))
+    matches = observe.find_elements(_snapshot(frame), role="button")
+    assert [el.title for el in matches] == [description]
+    assert matches[0].clickable
+    assert _atspi.ATSPIAccessor().read(grip).role == "AXGroup"
+
+
+@pytest.mark.parametrize("case", ["other_app", "dialog", "separate_container", "named", "children"])
+def test_toolbar_grip_does_not_reclassify_unrelated_panels(case):
+    grip = _Node("panel", description="Audacity Transport Toolbar")
+    tool = _Node("panel", "Named" if case == "named" else "", description="Play (Space)",
+                 children=[_Node("label", "Child")] if case == "children" else [])
+    containers = ([_Node("panel", children=[grip]), _Node("panel", children=[tool])]
+                  if case == "separate_container" else [_Node("panel", children=[grip, tool])])
+    _frame(*containers, app="other" if case == "other_app" else "audacity",
+           role="dialog" if case == "dialog" else "frame")
+    assert _atspi.ATSPIAccessor().read(tool).role == "AXGroup"
+
+
 def test_track_and_clock_remain_opaque_with_surface_notes():
     track = _Node("panel", size=(1096.0, 436.0), focusable=True)
     clock = _Node("panel", size=(230.0, 41.0))
