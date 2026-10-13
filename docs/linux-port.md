@@ -235,3 +235,10 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+## Gnumeric name-box navigation
+Ref-based activation of Gnumeric's `AXImage` named `go-jump` is refused with an
+`unsupported` error because this name-box control has been reported to crash
+Gnumeric (#492). The guard covers accessibility activation and element pointer
+clicks. It does not substitute keyboard input or claim cell-address navigation
+succeeded. Coordinate-only clicks do not identify an accessible control and are
+not covered by this guard.
