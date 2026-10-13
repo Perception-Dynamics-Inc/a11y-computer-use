@@ -2759,6 +2759,59 @@ def _evince_page(node) -> bool:
     name = _call_first(app, ("get_name",), default="") if app is not None else ""
     return str(name).strip().lower() == "evince"
 
+def _qt_viewport_text(acc) -> str | None:
+    """Only native text ranges inside a Qt editor's measured viewport.
+
+    Qt Text.get_text exposes the whole document, including off-screen lines.
+    An unavailable bounded-range interface is not evidence of visibility.
+    """
+    box = _raw_rect(acc, "SCREEN")
+    if box is None or box[2] <= 0 or box[3] <= 0:
+        return None
+    Atspi = _atspi()
+    coord = getattr(getattr(Atspi, "CoordType", None), "SCREEN", 0)
+    clip = getattr(getattr(Atspi, "TextClipType", None), "BOTH", None)
+    if clip is None:
+        return None
+    ranges = _safe(lambda: Atspi.Text.get_bounded_ranges(
+        acc, *map(int, box), coord, clip, clip,
+    ))
+    if not ranges:
+        # Qt commonly leaves GetBoundedRanges unimplemented. Use native
+        # point offsets and character rectangles instead, never the buffer
+        # alone. These reads are repeated after every scroll.
+        left, top, width, height = map(int, box)
+        offsets = [
+            _safe(lambda x=x, y=y: Atspi.Text.get_offset_at_point(acc, x, y, coord))
+            for x in (left, left + width - 1)
+            for y in (top, top + height - 1)
+        ]
+        if any(not isinstance(offset, int) or offset < 0 for offset in offsets):
+            return None
+        start, end = min(offsets), max(offsets) + 1
+        text = _safe(lambda: Atspi.Text.get_text(acc, start, end))
+        if not isinstance(text, str):
+            return None
+        visible = []
+        for index, char in enumerate(text):
+            rect = _safe(lambda index=index: Atspi.Text.get_character_extents(
+                acc, start + index, coord,
+            ))
+            hits = _rect_hits_box(rect, box)
+            if hits is None:
+                return None
+            # Keep a separator at clipped characters so two disconnected
+            # visible fragments cannot manufacture a substring match.
+            visible.append(char if hits else "\n")
+        return "".join(visible)
+    try:
+        contents = [span.content for span in ranges]
+        if not all(isinstance(content, str) for content in contents):
+            return None
+        return "\n".join(contents)
+    except (AttributeError, TypeError):
+        return None
+
 
 def _page_text(acc) -> str | None:
     """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
@@ -3388,11 +3441,18 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        qt_document = role == "AXTextArea" and role_str != "terminal" and _qt_app(node)
+        if qt_document:
+            value = _qt_viewport_text(node)
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
+        if qt_document and value is None:
+            hint = (hint + "; " if hint else "") + (
+                "Visible document text unavailable; use in-document Find or line navigation"
+            )
         surface_name = ""
         panel_note = ""
         if (

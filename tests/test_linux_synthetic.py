@@ -12516,3 +12516,116 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+@pytest.mark.parametrize("available,use_offsets", [(True, False), (True, True), (False, False)])
+def test_qt_document_find_uses_only_viewport_ranges(monkeypatch, available, use_offsets):
+    """FeatherPad's whole buffer must not become an off-screen find hit."""
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, True, True))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((20.0, 30.0), (800.0, 400.0)))
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda acc, coord: (20.0, 30.0, 800.0, 400.0))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: "TOKEN_001\nTOKEN_070")
+    monkeypatch.setattr(_atspi, "_qt_app", lambda acc: True)
+    monkeypatch.setattr(_atspi, "_action_names", lambda acc: ())
+    monkeypatch.setattr(_atspi, "_get_attributes", lambda acc: {})
+    monkeypatch.setattr(_atspi, "_stable_id", lambda *args: None)
+    calls = []
+    painted = ["TOKEN_001"]
+
+    def ranges(*args):
+        calls.append(args[1:])
+        if not available:
+            raise NotImplementedError("Qt bounded ranges unavailable")
+        return [] if use_offsets else [_NS(content=painted[0])]
+
+    buffer = "TOKEN_001\nTOKEN_070"
+    def character_rect(acc, offset, coord):
+        token = "TOKEN_001" if offset < 10 else "TOKEN_070"
+        return _NS(x=20, y=40 if token == painted[0] else 900, width=8, height=16)
+
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        Text=_NS(
+            get_bounded_ranges=ranges,
+            get_offset_at_point=lambda acc, x, y, coord: (
+                (0 if y == 30 else len(buffer) - 1) if available else -1
+            ),
+            get_text=lambda acc, start, end: buffer[start:end],
+            get_character_extents=character_rect,
+        ), CoordType=_NS(SCREEN=0),
+        TextClipType=_NS(BOTH=3),
+    ))
+
+    class Editor:
+        def get_role_name(self):
+            return "text"
+
+        def get_name(self):
+            return "Document"
+
+        def get_description(self):
+            return ""
+
+        def get_state_set(self):
+            return _States({"MULTI_LINE", "EDITABLE"})
+
+    raw = _atspi.ATSPIAccessor().read(Editor())
+    snap = build_snapshot((raw, []), _FakeAccessor(), scope=Scope.WINDOW,
+                          app="featherpad", pid=1, geometry=_geometry())
+    assert calls == [(20, 30, 800, 400, 0, 3, 3)]
+    assert not observe.find_elements(snap, text="TOKEN_070")
+    assert bool(observe.find_elements(snap, text="TOKEN_001")) is available
+    assert raw.editable
+    if not available:
+        assert raw.value is None
+        assert "in-document Find" in raw.hint
+
+    if available:
+        from a11y_computer_use import server
+
+        driver = LinuxDriver()
+        driver.ensure_trusted = lambda: None
+        def snapshot(*args):
+            visible = _atspi.ATSPIAccessor().read(Editor())
+            return build_snapshot((visible, []), _FakeAccessor(), scope=Scope.WINDOW,
+                                  app="featherpad", pid=1, geometry=_geometry())
+        driver.snapshot = snapshot
+        scrolls = []
+        def scroll(anchor, *, dy):
+            scrolls.append(dy)
+            painted[0] = "TOKEN_070"
+        driver.scroll = scroll
+        runtime = server.Runtime.__new__(server.Runtime)
+        runtime.driver = driver
+        runtime._resolve_app = lambda app: (None, app)
+        runtime._run_gated = lambda action, app, execute, **kwargs: execute()
+        runtime._require_permission = lambda *args, **kwargs: None
+        runtime._recheck_target = lambda *args, **kwargs: None
+        result = runtime.scroll_to_find("featherpad", text="TOKEN_070", max_scrolls=3)
+        assert scrolls == [5]
+        assert "found after 1 scroll(s)" in result
+        assert "TOKEN_070" in result
+
+
+@pytest.mark.parametrize("missing_geometry", [False, True])
+def test_qt_document_point_offsets_verify_character_visibility(monkeypatch, missing_geometry):
+    """Qt's unimplemented bounded ranges still allow honest viewport reads."""
+    monkeypatch.setattr(_atspi, "_raw_rect", lambda *args: (20, 30, 800, 400))
+    text = "TOKEN_001\nTOKEN_070"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: _NS(
+        CoordType=_NS(SCREEN=0), TextClipType=_NS(BOTH=3),
+        Text=_NS(
+            get_bounded_ranges=lambda *args: [],
+            get_offset_at_point=lambda acc, x, y, coord: 0 if y == 30 else len(text) - 1,
+            get_text=lambda acc, start, end: text[start:end],
+            get_character_extents=lambda acc, offset, coord: (
+                None if missing_geometry else
+                _NS(x=20, y=40 if offset < 10 else 900, width=8, height=16)
+            ),
+        ),
+    ))
+    value = _atspi._qt_viewport_text(object())
+    if missing_geometry:
+        assert value is None
+    else:
+        assert "TOKEN_001" in value
+        assert "TOKEN_070" not in value
