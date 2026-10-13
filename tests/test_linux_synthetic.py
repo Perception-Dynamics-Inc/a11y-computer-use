@@ -12516,3 +12516,68 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+@pytest.mark.parametrize("value", ["150%", "150 %", "150", "200%", "100%"])
+def test_xournal_zoom_percent_uses_offset_log_on_driver_path(fake_atspi, monkeypatch, value):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    app = _Acc("application", name="xournalpp")
+    slider.get_application = lambda: app
+    writes = []
+
+    def write(acc, raw):
+        writes.append(raw)
+        acc.value = raw
+        acc.name = f"{int(100 * (math.exp(raw) + 0.20753))}%"
+        return True
+
+    monkeypatch.setattr(fake_atspi.Value, "set_current_value", write)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: slider)
+    monkeypatch.setattr(_atspi, "_click_center", lambda *_args: pytest.fail("unexpected click"))
+    monkeypatch.setattr(_atspi, "_type_string", lambda *_args: pytest.fail("unexpected typing"))
+    driver = LinuxDriver()
+    driver._run = lambda fn: fn()
+    element = Element("e1", "AXSlider", "185%", "0.5", None, "zoom", enabled=True)
+    assert driver.set_value(element, value) is True
+    percent = float(value.replace("%", "").strip())
+    assert writes == [pytest.approx(math.log(percent / 100 - 0.20753))]
+    assert abs(float(slider.name[:-1]) - percent) < 1
+
+
+@pytest.mark.parametrize("raw_moves", [True, False])
+def test_xournal_zoom_requires_percent_effect(fake_atspi, monkeypatch, raw_moves):
+    slider = _Acc("slider", name="105%", value=-0.16572184707184515,
+                  minimum=-2.38087, maximum=1.91581)
+    slider.get_application = lambda: _Acc("application", name="Xournal++")
+
+    def write(acc, raw):
+        if raw_moves:
+            acc.value = raw
+        return True
+
+    monkeypatch.setattr(fake_atspi.Value, "set_current_value", write)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda *_args: None)
+    with pytest.raises(ComputerUseError) as exc:
+        _atspi.set_numeric_value(slider, "150%")
+    assert exc.value.detail["reason"] == "text_mismatch"
+    assert slider.name == "105%"
+
+
+@pytest.mark.parametrize("value", ["0%", "20%", "800%", "-10%"])
+def test_xournal_zoom_bounds_reject_before_write(fake_atspi, monkeypatch, value):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    slider.get_application = lambda: _Acc("application", name="xournalpp")
+    monkeypatch.setattr(fake_atspi.Value, "set_current_value",
+                        lambda *_args: pytest.fail("out-of-range write"))
+    with pytest.raises(ValueError, match="value scale"):
+        _atspi.set_numeric_value(slider, value)
+
+
+def test_xournal_zoom_preserves_raw_value_input(fake_atspi):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    slider.get_application = lambda: _Acc("application", name="xournalpp")
+    assert _atspi.set_numeric_value(slider, "0.25") is True
+    assert slider.value == 0.25

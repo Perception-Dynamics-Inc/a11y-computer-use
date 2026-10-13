@@ -12038,6 +12038,73 @@ def _apply_log_percent(acc, value: str, low: float, high: float, before: float, 
     return _write_log_percent(acc, value, written, before)
 
 
+# ToolZoomSlider::scaleFunc/scaleFuncInv in Xournal++ 1.2.6:
+# https://github.com/xournalpp/xournalpp/blob/v1.2.6/src/core/gui/toolbarMenubar/ToolZoomSlider.cpp
+_XOURNAL_ZOOM_OFFSET = 0.20753
+
+
+def _apply_xournal_percent(acc, value: str, low: float, high: float) -> bool | None:
+    """Convert Xournal++ zoom and verify both Value and percent label.
+
+    Xournal++ truncates the displayed percent and gates document updates on
+    slider interaction. A raw-only change must not be reported as success.
+    None preserves other controls and in-range raw writes.
+    """
+    if _role_name(acc) != "slider":
+        return None
+    app = _application_of(acc)
+    if app is None or _node_name(app).casefold() not in {"xournalpp", "xournal++"}:
+        return None
+    shown = _percent_literal(_node_name(acc))
+    before = _finite_current_value(acc)
+    if shown is None or before is None:
+        return None
+    try:
+        displayed = 100 * (math.exp(before) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if not shown <= displayed < shown + 1:
+        return None
+    percent = _percent_literal(value)
+    if percent is None:
+        try:
+            number = _parse_number(value)
+        except ValueError:
+            return None
+        if low <= number <= high:
+            return None
+        percent = number
+    try:
+        minimum = 100 * (math.exp(low) + _XOURNAL_ZOOM_OFFSET)
+        maximum = 100 * (math.exp(high) + _XOURNAL_ZOOM_OFFSET)
+    except OverflowError:
+        return None
+    if (percent <= 100 * _XOURNAL_ZOOM_OFFSET
+            or not minimum - 1e-6 <= percent <= maximum + 1e-6):
+        raise ValueError(
+            f"value {value!r} is outside {_format_bound(minimum)}%..{_format_bound(maximum)}% "
+            f"(value scale {_format_bound(low)}..{_format_bound(high)})"
+        )
+    written = _clamp_near_bounds(
+        math.log(percent / 100 - _XOURNAL_ZOOM_OFFSET), low, high, open_upper=False,
+    )
+    Atspi = _atspi()
+    _safe(lambda: Atspi.Value.set_current_value(acc, written), False)
+    got = label = None
+    for attempt in range(_TEXT_CONFIRM_POLLS):
+        got = _finite_current_value(acc)
+        label = _percent_literal(_node_name(acc))
+        if (got is not None and _numbers_match(got, written)
+                and label is not None and abs(label - percent) < 1):
+            return True
+        if attempt + 1 < _TEXT_CONFIRM_POLLS:
+            time.sleep(_TEXT_CONFIRM_PAUSE_S)
+    raise _text_mismatch(
+        "text_mismatch", "Xournal++ zoom did not confirm the requested percent",
+        expected=value, actual={"value": got, "percent": label},
+    )
+
+
 def set_numeric_value(acc, value: str) -> bool | str:
     """Set the Value interface's current value.
 
@@ -12055,6 +12122,8 @@ def set_numeric_value(acc, value: str) -> bool | str:
     it differs from what was asked, so the caller reports the value held.
     An empty Chrome number input is filled by typing. A read-back of 0.0 from
     the Value interface is not success while the text is still empty.
+    Xournal++ zoom uses its offset natural-log scale for percent input;
+    both the raw Value and displayed percent must confirm the write.
     A control whose text is a percent and whose Value is ``log2`` of that
     percent (Inkscape's status zoom) accepts ``50%`` and a bare number that
     falls outside the Value range as that percent, converted with
@@ -12088,6 +12157,10 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        if not open_upper:
+            handled = _apply_xournal_percent(acc, value, low, high)
+            if handled is not None:
+                return handled
         # Some sliders (Xournal++ zoom) expose the percent only as their
         # name. That label does not establish a conversion for the raw scale.
         # Explain the mismatch before parsing, but preserve in-range raw input.
