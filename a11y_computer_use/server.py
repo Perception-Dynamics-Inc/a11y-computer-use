@@ -10,6 +10,9 @@ structured errors (`schema.ComputerUseError`) are rendered as clear
 tool-error strings that carry the doctor hint, never raised across the wire
 as stack traces.
 
+The opt-in Linux ``files`` tool uses a host-configured filesystem root
+allowlist instead of app grants; attempts and verified effects are audited.
+
 Gating policy: ref-based actions are gated against the app of the snapshot
 that issued the ref; target-less actions (typing, keys, clipboard, raw
 coordinates, list verbs) and screen captures are gated against the frontmost
@@ -2072,6 +2075,9 @@ class Runtime:
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        from a11y_computer_use.files import FileOperations
+
+        self.file_operations = FileOperations(os.environ.get("A11Y_COMPUTER_USE_FILE_ROOTS", ""), self.audit)
         #: Terminal GUI input requires the same opt-in as agent execution.
         self.allow_exec = allow_exec
         #: The OS backend. Every platform op (observe/act/capture) routes through
@@ -4752,6 +4758,19 @@ class Runtime:
             menu_note.append(self._dismiss_open_menu(app))
             if isinstance(act, Element):
                 self._refuse_vanished_target(act)
+                sibling_cover = getattr(self.driver, "same_app_window_cover", None)
+                cover = sibling_cover(act, app) if sibling_cover is not None else None
+                if cover:
+                    raise ComputerUseError(
+                        ErrorCode.UNSUPPORTED,
+                        f"{act.ref} is covered by {cover}",
+                        detail={
+                            "ref": act.ref, "role": act.role,
+                            "reason": "covered", "outcome": "refused",
+                            "next": ["foreground", "ref"],
+                            "evidence": f"the window is covered by {cover}",
+                        },
+                    )
             # Content nested in a <canvas> is not painted. A Linux button with
             # a box would otherwise take the pointer path and hit the canvas.
             # Activate the node. A right-click, double-click, or modifier
@@ -6079,8 +6098,18 @@ class Runtime:
         self._run_gated(action, app, execute, input_target=live)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
+        text = f"set {ref} = {shown!r}"
+        if getattr(self.driver, "name", None) == "linux" and live.role in {
+            "AXTextField", "AXTextArea",
+        }:
+            text += (
+                "; text read-back does not verify activation or navigation. "
+                "set_value does not guarantee keyboard focus. For GTK path entries "
+                "(Thunar/FileZilla), focus the field, select all, type the path, "
+                "then Return; verify the folder title/file list in a fresh snapshot."
+            )
         return self._conclude(
-            f"set {ref} = {shown!r}",
+            text,
             tool="select" if choice else "set_value",
             app=app, before=before, element=live, requested=value,
             had_ref=True, previous=previous,
@@ -6098,6 +6127,9 @@ class Runtime:
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
         body-scroll page, not the window's tab strip.
+        An opaque container without readable contents returns
+        ``container_not_readable`` before input; the target's presence
+        cannot be determined from that accessibility tree.
 
         A downward step of several lines can pass the target and land at the
         end of the list. A wheel that does not move pixels there
@@ -6417,6 +6449,40 @@ class Runtime:
                 if budget_s > 0 and (rows_moved or offset_moved):
                     stall_deadline = time.monotonic() + budget_s
 
+            def container_not_readable(shot: Snapshot, anchor: Element | None) -> bool:
+                """An opaque surface without readable content in this container.
+
+                Empty virtualized lists can acquire children after scrolling;
+                require an actual opaque surface rather than just missing rows.
+                Names outside this container do not make its contents readable.
+                """
+                if anchor is None:
+                    return False
+                under = {anchor.ref}
+                children: dict[str, list[str]] = {}
+                for el in shot.elements:
+                    if el.parent:
+                        children.setdefault(el.parent, []).append(el.ref)
+                stack = [anchor.ref]
+                while stack:
+                    for child in children.get(stack.pop(), ()):
+                        if child not in under:
+                            under.add(child)
+                            stack.append(child)
+                opaque = False
+                for el in shot.elements:
+                    if el.ref not in under:
+                        continue
+                    if el.role == observe.OPAQUE_ROLE:
+                        opaque = True
+                    elif el.role == "AXGroup" and el.value is not None and str(el.value).strip():
+                        return False
+                    elif el.ref != anchor.ref and el.role not in (
+                        "AXScrollBar", "AXScrollArea", "AXGroup", "AXSplitter",
+                    ) and ((el.title or "").strip() or (el.value is not None and str(el.value).strip())):
+                        return False
+                return opaque
+
             def expired_cap() -> float | None:
                 """The cap that has run out, or None while the search may continue.
 
@@ -6507,7 +6573,7 @@ class Runtime:
                 return f"{float(value):g}"
 
             def unfinished(count: int, shot: Snapshot, anchor: Element | None, *, budget_hit: bool,
-                           budget_cap: float | None = None) -> str:
+                           budget_cap: float | None = None, unreadable: bool = False) -> str:
                 names = row_names(shot, anchor)
                 tail = ", ".join(names[-8:]) if names else "none"
                 if anchor is None:
@@ -6517,9 +6583,18 @@ class Runtime:
                     container = f"{anchor.role}{title} ref={anchor.ref}"
                 shown_budget = budget_s if budget_cap is None else budget_cap
                 why = f" (time budget {shown_budget:g}s)" if budget_hit else ""
-                return (
+                heading = (
                     f"not found after {count} scroll(s){why}: "
-                    f"no element matches text={text!r} role={role!r}\n"
+                    f"no element matches text={text!r} role={role!r}"
+                )
+                if unreadable:
+                    heading = (
+                        f"container_not_readable after {count} scroll(s): "
+                        "the container exposes an opaque surface but no readable contents; "
+                        "accessibility search cannot determine whether the target is present"
+                    )
+                return (
+                    f"{heading}\n"
                     f"container: {container}\n"
                     f"scroll_position: {read_offset(anchor)}\n"
                     f"last_rows: {tail}"
@@ -6714,6 +6789,8 @@ class Runtime:
                         same_rows = 0
                     previous_rows = seen
                 matches = observe.find_elements(snap, text=text, role=role)
+                if not matches and container_not_readable(snap, anchor_now):
+                    return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
@@ -8132,6 +8209,15 @@ class Runtime:
         return self._frontmost()
 
     @_serialized
+    def files(self, action: str, path: str, destination: str | None = None) -> str:
+        """Explicit filesystem operations authorized by the host's root allowlist.
+
+        No app grant or UI focus is involved. Every attempt is audit logged;
+        mutations return success only after filesystem verification.
+        """
+        return json.dumps(self.file_operations.run(action, path, destination))
+
+    @_serialized
     def notes(self, action: str, text: str | None = None) -> str:
         """The agent's scratchpad. ``add`` records a fact, ``list`` returns the
         numbered notes, ``clear`` empties them. Notes are injected into every
@@ -8209,7 +8295,7 @@ class Runtime:
     #: Tools ``run-once`` may call: the action verbs. Refs (and so ``wait_for``)
     #: need a live snapshot epoch, which a one-shot process never has.
     RUN_ONCE_TOOLS = frozenset(
-        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog"}
+        {"click", "hover", "type", "key", "scroll", "drag", "app", "window", "clipboard", "menu", "file_dialog", "files"}
     )
 
     @_serialized
@@ -8254,6 +8340,7 @@ class Runtime:
             "clipboard": self.clipboard,
             "menu": partial(self.menu, confirm=confirm),
             "file_dialog": self.file_dialog,
+            "files": self.files,
             "notes": self.notes,
             "wait_until": self.wait_until,
             "webmcp": partial(self.webmcp, confirm=confirm),
@@ -9151,9 +9238,17 @@ def build_server(
         range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
-        back matches. A mismatch is an error, not a success. Gated at tier 'full';
-        refuses secure/password fields (secrets are entered by the human, never
-        this tool). Ideal for filling forms fast. The text is unchanged.
+        back matches. A mismatch is an error, not a success.
+        Text read-back does not verify activation or navigation, and an API
+        write does not guarantee keyboard focus. GTK path entries such as
+        Thunar's location bar and FileZilla's Local site field may display
+        the new path without navigating, even after Return. For those entries,
+        focus the field, select all, type the path, then Return. Verify the
+        folder title/file list in a fresh desktop_snapshot; Return without
+        target focus can activate a different control. set_value does not
+        send Return or activate the field automatically.
+        Gated at tier 'full'; refuses secure/password fields (secrets are
+        entered by the human, never this tool). Ideal for filling forms fast.
         Structured content adds outcome, next, and evidence. A combo, popup,
         or list is the select action: the same sentence, judged by read-back."""
         return _publish(await run(runtime.set_value, ref, value, _outcome=True, _tool="set_value"))
@@ -9170,7 +9265,9 @@ def build_server(
         Give text (substring of title or the field's full value, including
         text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
-        matching ref(s) or a not-found note. budget_s is how long the
+        matching ref(s) or a not-found note. An opaque container with no
+        readable contents returns container_not_readable before sending input;
+        this does not establish that the target is absent. budget_s is how long the
         search may go without the on-screen rows or the scroll offset
         changing (default 15, or A11Y_COMPUTER_USE_SCROLL_FIND_BUDGET_S).
         A step that changes either one starts that clock again. The search
@@ -9367,6 +9464,19 @@ def build_server(
         the page's file input has to show the file. Windows and the
         browser also return unsupported."""
         return await run(runtime.file_dialog, action, path, app)
+
+    @server.tool(name="files")
+    async def files_tool(action: str, path: str, destination: str | None = None) -> str:
+        """Linux file operations for file managers whose items are inaccessible.
+        action: list, mkdir, rename, move. Use absolute paths inside the host's
+        A11Y_COMPUTER_USE_FILE_ROOTS allowlist. Disabled unless configured.
+        list returns at most 200 names. mkdir creates one directory; rename
+        requires a destination in the same parent; move accepts an exact
+        destination path (including the name). Parents must already exist.
+        No overwrites, symlinks, special files, or cross-filesystem moves.
+        Mutations are audit logged and verified. This changes files directly;
+        it does not select items or inject clicks into the file manager."""
+        return await run(runtime.files, action, path, destination)
 
     @server.tool(name="notes")
     async def notes_tool(action: str, text: str | None = None) -> str:
