@@ -9514,6 +9514,34 @@ def test_writer_cell_replace_keeps_the_rebuilt_paragraph(fake_atspi, monkeypatch
     assert _atspi.writer_cell_text(cell) == "NEWB2-1"
 
 
+@pytest.mark.parametrize("value", ["150%", "150 %", "200%", "150"])
+def test_named_percent_slider_explains_unknown_scale_without_writing(fake_atspi, monkeypatch, value):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    def forbid_write(*_args):
+        raise AssertionError("unknown percent scale must not be written")
+
+    monkeypatch.setattr(fake_atspi.Value, "set_current_value", forbid_write)
+    with pytest.raises(ValueError) as exc:
+        _atspi.set_numeric_value(slider, value)
+    message = str(exc.value)
+    assert "185%" in message
+    assert "non-percent scale" in message
+    assert "-2.38087..1.91581" in message
+    assert "conversion is unknown" in message
+    assert slider.value == 0.5
+
+
+def test_named_percent_slider_keeps_verified_raw_values(fake_atspi):
+    slider = _Acc("slider", name="185%", value=0.5,
+                  minimum=-2.38087, maximum=1.91581)
+    assert _atspi.set_numeric_value(slider, "0.25") is True
+    assert slider.value == 0.25
+    ordinary = _Acc("slider", name="Volume", value=50, minimum=0, maximum=100)
+    assert _atspi.set_numeric_value(ordinary, "75") is True
+    assert ordinary.value == 75
+
+
 def test_missing_value_interface_is_not_numeric_and_a_real_range_still_is(
     fake_atspi, monkeypatch,
 ) -> None:
