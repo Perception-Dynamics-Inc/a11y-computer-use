@@ -735,6 +735,11 @@ _CACHEABLE = {
     "get_accessible_id": _nonempty_str,
     "get_toolkit_name": _nonempty_str,
     "getToolkitName": _nonempty_str,
+    # Toolkit/browser probes repeatedly resolve the same node's owner.
+    # LibreOffice makes this a costly bus call; ownership is stable until
+    # the operation ends or a mutator invalidates this cache.
+    "get_application": _present,
+    "getApplication": _present,
     "get_process_id": _positive_int,
     "get_child_at_index": _present,
     "getChildAtIndex": _present,
@@ -6094,6 +6099,33 @@ def focused_editable(app: str, *, max_nodes: int = 400):
             return None
         return paragraph
     return acc
+
+
+def gtk_toggle_cell(acc) -> bool:
+    """GTK renderer toggle cells need pointer input, not row selection."""
+    return (
+        _toolkit_name(acc).lower() == "gtk"
+        and not _gtk4_app(acc)
+        and _role_name(acc) == "table cell"
+        and "toggle" in _raw_action_names(acc)
+    )
+
+
+def checked_state(acc) -> bool:
+    """Read the cell itself, even when unchecked GTK cells omit CHECKABLE."""
+    return _state_has(acc, "CHECKED")
+
+
+def checked_state_flipped(acc, before: bool) -> bool:
+    """Require a stable checked change, independent of row selection."""
+    for attempt in range(8):
+        if checked_state(acc) != before:
+            time.sleep(0.04)
+            if checked_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
 
 
 def qt_toggle_only_control(acc) -> bool:
@@ -15297,6 +15329,23 @@ def _with_table_body(node, kids: list) -> list:
 
 def _child_at(acc, index: int):
     return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
+
+
+def terminal_ancestor(acc) -> bool:
+    """Whether an accessible is inside a terminal, before AX role mapping.
+
+    VTE's terminal role maps to AXTextArea. Inspect the native role so an
+    ordinary multiline editor is never mistaken for a command prompt.
+    """
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) == "terminal":
+            return True
+        acc = _parent_of(acc)
+    return False
 
 
 def _parent_of(acc):
