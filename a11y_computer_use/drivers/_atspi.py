@@ -10056,7 +10056,8 @@ def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
-    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    group, and 25.2 as a panel. Menus, toolbars, status bars, and the
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10065,7 +10066,7 @@ def _find_cell_editor(node, budget: list[int]):
     if _CELL_EDITOR_PANEL.match(_node_name(node)):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = _child_count(node)
@@ -10112,26 +10113,36 @@ def _without_child_cache(node, fn):
     every other cell's text interface stays empty, and A1 reads back as a
     mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
     the flag comes back. The desktop default is restored afterwards.
+    The operation-scoped getter cache is invalidated around the walk too,
+    since it can retain child counts and handles read before the edit. The
+    mask change and walk share the event thread, including direct native calls.
     A node without ``set_cache_mask`` is a test double and is walked as it is.
     """
-    app = _call_first(node, ("get_application", "getApplication"))
-    target = app if app is not None else node
-    setter = getattr(target, "set_cache_mask", None)
-    if setter is None:
-        return fn()
-    none, undefined = _cache_masks()
-    try:
-        setter(none)
-    except Exception:
-        return fn()
-    try:
-        return fn()
-    finally:
-        if undefined is not None:
-            try:
-                setter(undefined)
-            except Exception:
-                pass
+    from a11y_computer_use.drivers import _atspi_events
+
+    def read_uncached():
+        app = _call_first(node, ("get_application", "getApplication"))
+        target = app if app is not None else node
+        setter = getattr(target, "set_cache_mask", None)
+        if setter is None:
+            return fn()
+        none, undefined = _cache_masks()
+        try:
+            _drop_read_cache()
+            setter(none)
+        except Exception:
+            return fn()
+        try:
+            return fn()
+        finally:
+            _drop_read_cache()
+            if undefined is not None:
+                try:
+                    setter(undefined)
+                except Exception:
+                    pass
+
+    return _atspi_events.run(read_uncached)
 
 
 def sheet_editor_text(app: str) -> str | None:
