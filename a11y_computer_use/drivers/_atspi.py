@@ -10294,7 +10294,8 @@ def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
-    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    group, and 25.2 as a panel. Menus, toolbars, status bars, and the
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10303,7 +10304,7 @@ def _find_cell_editor(node, budget: list[int]):
     if _CELL_EDITOR_PANEL.match(_node_name(node)):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = _child_count(node)
@@ -10350,26 +10351,36 @@ def _without_child_cache(node, fn):
     every other cell's text interface stays empty, and A1 reads back as a
     mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
     the flag comes back. The desktop default is restored afterwards.
+    The operation-scoped getter cache is invalidated around the walk too,
+    since it can retain child counts and handles read before the edit. The
+    mask change and walk share the event thread, including direct native calls.
     A node without ``set_cache_mask`` is a test double and is walked as it is.
     """
-    app = _call_first(node, ("get_application", "getApplication"))
-    target = app if app is not None else node
-    setter = getattr(target, "set_cache_mask", None)
-    if setter is None:
-        return fn()
-    none, undefined = _cache_masks()
-    try:
-        setter(none)
-    except Exception:
-        return fn()
-    try:
-        return fn()
-    finally:
-        if undefined is not None:
-            try:
-                setter(undefined)
-            except Exception:
-                pass
+    from a11y_computer_use.drivers import _atspi_events
+
+    def read_uncached():
+        app = _call_first(node, ("get_application", "getApplication"))
+        target = app if app is not None else node
+        setter = getattr(target, "set_cache_mask", None)
+        if setter is None:
+            return fn()
+        none, undefined = _cache_masks()
+        try:
+            _drop_read_cache()
+            setter(none)
+        except Exception:
+            return fn()
+        try:
+            return fn()
+        finally:
+            _drop_read_cache()
+            if undefined is not None:
+                try:
+                    setter(undefined)
+                except Exception:
+                    pass
+
+    return _atspi_events.run(read_uncached)
 
 
 def sheet_editor_text(app: str) -> str | None:
@@ -10485,13 +10496,13 @@ def selected_sheet_text(app: str) -> str | None:
 
 
 def _find_spreadsheet(node, budget: list[int]):
-    """The Calc grid, without indexing its cells."""
+    """The Calc grid, without indexing cells or unrelated toolbar contents."""
     if budget[0] <= 0 or node is None:
         return None
     if _spreadsheet_table(node):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = min(_child_count(node), 40)
@@ -10820,17 +10831,16 @@ def sheet_grid_check(app: str, origin: str, text: str):
     committed = False
     deadline = time.monotonic() + _SHEET_GRID_WAIT_S
     while True:
+        # Reading another cell while Calc's editor is open can time out and
+        # make libatspi mark the application hung. Commit before any cell
+        # reads so the native connection remains usable for verification.
+        if not committed and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
-        # A blank or missing cell is not final while the editor from the
-        # type is open. One Return publishes the others and moves the caret
-        # the way Enter does. A disagreement is judged after that commit.
-        if not committed and _commit_open_sheet_editor(app):
-            committed = True
-            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
-            continue
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)
