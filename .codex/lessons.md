@@ -35,3 +35,5 @@
 - 2026-10-14 (#478): Kate gutter geometry regressions must stub the AT-SPI coordinate binding as well as state flags, so native GI availability cannot change synthetic extents. Keep the gutter opaque and never derive line targets from its measured box.
 
 - 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
+
+- 2026-10-14 (#568 repair): gucharmap Character Table is a childless GTK drawing area. Keep its surface label separate from statusbar selection: a codepoint/name there is not a character-cell ref, and scrolling the opaque table may change selection.
