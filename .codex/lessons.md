@@ -37,3 +37,4 @@
 - 2026-10-14 (#464 repair): When combining Calc commit fixes, marshal the editor commit and individual native reads to the event thread, but keep both the post-commit pause and the grid verification loop on the caller. Regression tests should assert that events can run between operations as well as that native reads retain thread ownership.
 
 - 2026-10-14 (#548 repair): GTK program names can differ from interpreter process names before AT-SPI registration. Measure startup age from an unambiguous WM_CLASS window PID and preserve the original caller name for this timing hint; titles alone are insufficient and permission routing must stay unchanged.
+- 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
