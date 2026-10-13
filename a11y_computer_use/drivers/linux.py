@@ -1450,15 +1450,20 @@ class LinuxDriver:
         # other case: the caller says LibreOffice and the bus says
         # soffice.bin, so the comm is used only after the given name misses.
         resolved, root = self._root_for_snapshot(app, scope)
-        # LibreOffice has a measured 3–13 s registration gap. Other listed
-        # apps get one short retry: a window alone does not promise that an
-        # accessibility bridge will ever register (e.g. VLC and Krita).
+        # Preserve the existing process-startup grace: GTK4 can map its
+        # window before registering its tree. Older non-office apps get one
+        # short retry, since a window alone does not promise a bridge.
         if root is None and (
             _atspi.should_wait_for_atspi(app) or _atspi.should_wait_for_atspi(resolved)
         ):
             office = _atspi.libreoffice_app(app) or _atspi.libreoffice_app(resolved)
             wait = (_atspi.ATSPI_REGISTER_WAIT_S if office
                     else _atspi.ATSPI_REGISTER_POLL_S)
+            if not office:
+                wait = max(wait, min(
+                    _atspi.ATSPI_REGISTER_WAIT_S,
+                    _atspi.registration_startup_remaining(resolved),
+                ))
             deadline = time.monotonic() + wait
             while root is None and time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()

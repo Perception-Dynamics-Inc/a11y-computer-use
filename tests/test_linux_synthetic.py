@@ -12493,6 +12493,8 @@ def test_running_app_without_atspi_tree_fails_fast(
     monkeypatch.setattr(_atspi, "find_root", lambda *_args: None)
     monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
     monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda _pid: 60.0)
     monkeypatch.setattr(_linux_system, "running_apps", lambda: (
         [{"bundle_id": app, "name": app, "pid": 123}]
         if listed_by == "apps" else []
@@ -12537,6 +12539,8 @@ def test_non_office_registration_can_complete_on_short_retry(fake_atspi, monkeyp
     monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
     monkeypatch.setattr(_atspi, "app_listed", lambda _app: True)
     monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda _pid: 60.0)
     monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
     monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
     clock = {"t": 0.0}
@@ -12551,3 +12555,77 @@ def test_non_office_registration_can_complete_on_short_retry(fake_atspi, monkeyp
     assert snap.app == "krita"
     assert snap.elements[0].role == "AXWindow"
     assert clock["t"] == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize("app", ["gnome-calculator", "gnome-text-editor"])
+def test_new_app_registration_uses_remaining_startup_grace(fake_atspi, monkeypatch, app) -> None:
+    """A mapped GTK4 window need not have registered its tree on the first retry."""
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    window = _Acc("frame", name=app, width=640, height=480)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args: window if clock["t"] >= 1.0 else None)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: 1.0 + clock["t"])
+    monkeypatch.setattr(_atspi, "primary_geometry", _geometry)
+    monkeypatch.setattr(_atspi, "_screen_size", lambda: (1280, 800))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep",
+                        lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    snap = LinuxDriver().snapshot(Scope.WINDOW, app)
+    assert snap.app == app
+    assert snap.elements[0].role == "AXWindow"
+    assert clock["t"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("age, remaining", [(1.0, 14.0), (14.75, 0.25), (15.0, 0.0), (60.0, 0.0), (None, 0.0)])
+def test_registration_grace_is_measured_from_process_start(monkeypatch, age, remaining) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: age)
+    assert _atspi.registration_startup_remaining("app") == pytest.approx(remaining)
+
+
+def test_registration_grace_does_not_guess_ambiguous_owner(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123, 456})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda pid: pytest.fail("ambiguous owner"))
+    assert _atspi.registration_startup_remaining("app") == 0.0
+
+
+def test_registration_grace_tolerates_unavailable_window_identity(monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    def unavailable(_app):
+        raise ComputerUseError(ErrorCode.MISSING_DEPENDENCY, "python-xlib unavailable")
+
+    monkeypatch.setattr(_linux_system, "pids_matching", unavailable)
+    assert _atspi.registration_startup_remaining("app") == 0.0
+
+
+def test_missing_tree_does_not_restart_the_process_startup_grace(fake_atspi, monkeypatch) -> None:
+    from a11y_computer_use.drivers import _linux_system
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args: None)
+    monkeypatch.setattr(_atspi, "raise_if_app_stopped", lambda _app: None)
+    monkeypatch.setattr(_atspi, "app_listed", lambda _app: True)
+    monkeypatch.setattr(_linux_system, "resolve_app", lambda name: name)
+    monkeypatch.setattr(_linux_system, "pids_matching", lambda _app: {123})
+    monkeypatch.setattr(_atspi, "process_age_s", lambda _pid: 14.5 + clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.monotonic", lambda: clock["t"])
+    monkeypatch.setattr("a11y_computer_use.drivers.linux.time.sleep",
+                        lambda seconds: clock.__setitem__("t", clock["t"] + seconds))
+    driver = LinuxDriver()
+    for expected_wait in (0.5, 0.25):
+        before = clock["t"]
+        with pytest.raises(ComputerUseError) as exc:
+            driver.snapshot(Scope.WINDOW, "gnome-calculator")
+        assert exc.value.code is ErrorCode.UNSUPPORTED
+        assert exc.value.detail["reason"] == "no_accessibility_bridge"
+        assert clock["t"] - before == pytest.approx(expected_wait)
