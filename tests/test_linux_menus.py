@@ -188,6 +188,45 @@ def test_list_reads_a_gtk_menu_without_pressing_it() -> None:
     assert checked["title"] == "Toolbar" and checked["checked"] is True
 
 
+def test_menu_state_drops_the_event_cache_before_the_read(monkeypatch) -> None:
+    """A check bit served from the event cache is read again.
+
+    Qt's checkable item has no ``.states`` set. ``get_state_set`` would
+    otherwise keep CHECKED from before the action. The drop is one node,
+    and only while the listener is up.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    class Item:
+        def __init__(self) -> None:
+            self.drops = 0
+            self.on = False
+
+        def get_role_name(self) -> str:
+            return "menu item"
+
+        def clear_cache_single(self) -> None:
+            self.drops += 1
+            self.on = True
+
+        def get_state_set(self):
+            on = self.on
+
+            class States:
+                def contains(self, _member: object) -> bool:
+                    return on
+
+            return States()
+
+    item = Item()
+    monkeypatch.setattr(_atspi_events, "listening", lambda: False)
+    assert _linux_menus._checked(item) is None
+    assert item.drops == 0
+    monkeypatch.setattr(_atspi_events, "listening", lambda: True)
+    assert _linux_menus._checked(item) is True
+    assert item.drops == 2
+
+
 def test_qt_checkable_menu_item_reports_checked_true_or_false() -> None:
     """A Qt QAction stays role ``menu item`` and adds the CHECKABLE state.
 

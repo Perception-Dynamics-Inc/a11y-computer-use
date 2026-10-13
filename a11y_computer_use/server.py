@@ -4718,6 +4718,17 @@ class Runtime:
             control = activated[0]
             control_note = f" (activated {control.ref} {control.role} {control.title!r})"
         msg = f"clicked {self._label(ref, target)}{control_note}{''.join(menu_note)}"
+        outline_note = (
+            isinstance(target, Element)
+            and not activated
+            and count == 1
+            and parsed_button is MouseButton.LEFT
+            and not mods
+            and target.note == "activates on double-click"
+        )
+        if outline_note:
+            # The click stayed a single click. The row opens on a double-click.
+            msg = f"{msg} (activates on double-click)"
         effect = self._effect_after(pre)
         text = f"{msg}\n\neffect: {effect}" if effect else msg
         judged_element = activated[0] if activated else (target if isinstance(target, Element) else None)
@@ -4730,6 +4741,8 @@ class Runtime:
                 verdict = self._opaque_click_verdict(target)
         if verdict is None and address and not activated:
             verdict = self._sheet_click_verdict(app, address)
+        if verdict is None and outline_note:
+            verdict = ("partial", "the row was selected and activates on double-click")
         result = self._conclude(
             text, tool="click", app=app, before=before,
             element=judged_element,
@@ -9161,9 +9174,15 @@ def build_server(
         types nothing. A combo or
         list is set through its own item (or its own entry, when it has one);
         a value that is not one of the options is invalid_arguments and lists
-        them. A spin button, slider, or other Value control is set through that
+        them.         A spin button, slider, or other Value control is set through that
         interface; a number outside the minimum and maximum is invalid_arguments
-        and includes both. A Chrome date, time, or month segment is typed, and
+        and includes both. A control whose text is a percent and whose Value
+        is log2 of that percent accepts ``50%``, and a bare number outside
+        the Value range, as that percent. A bare number inside the Value
+        range stays on that scale. A percent the control cannot represent
+        names the percent range and the Value scale. A percent literal on a
+        control whose text and Value do not agree is refused, and the Value
+        range is named. No keystrokes are sent for that conversion. A Chrome date, time, or month segment is typed, and
         the read-back is that segment's displayed text, not the Value float.
         An editable Linux field succeeds when the value read
         back matches. A mismatch is an error, not a success. Gated at tier 'full';
