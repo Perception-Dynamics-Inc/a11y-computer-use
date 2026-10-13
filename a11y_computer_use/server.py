@@ -7649,7 +7649,9 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
-                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
+                self._reject_terminal(
+                    AppOp(verb=verb, app=launch_name), launch_name, input_target=launch_argv,
+                )
 
             def launch() -> str | None:
                 before: list = []

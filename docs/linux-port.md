@@ -235,3 +235,15 @@ Native names and per-page children, when exposed, retain the normal role and
 label handling; the driver does not synthesize thumbnail targets or bounds.
 This fallback is covered by synthetic tests; a live Okular run has not been
 verified for this change.
+
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.
