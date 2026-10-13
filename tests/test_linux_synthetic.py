@@ -9766,6 +9766,15 @@ def test_outcome_confirms_a_calc_formula_the_cell_displays_as_a_number(
     assert typed == "confirmed", typed_evidence
     assert "Résumé ✓" in typed_evidence
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
+    runtime.driver._sheet_type_readback = ("soffice.bin", "42")
+    typed, typed_evidence = runtime._judge_mutation(
+        "soffice.bin", before, None, "42", previous="",
+    )
+    assert typed == "confirmed", typed_evidence
+    assert "42" in typed_evidence
+    assert runtime.driver._sheet_type_readback is None
+    # A read from another app cannot confirm this mutation.
+    runtime.driver._sheet_type_readback = ("other", "=Z9")
     monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: cell)
     untouched, untouched_evidence = runtime._judge_mutation(
         "soffice.bin", before, before_el, "=Z9", previous="",
@@ -10116,6 +10125,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     monkeypatch.setattr(_atspi, "sheet_editor_text", editor)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: None)
     assert driver.type_text("42") == 2
+    assert driver._sheet_type_readback == ("soffice.bin", "42")
 
     monkeypatch.setattr(_atspi, "sheet_editor_text", lambda _app: None)
     monkeypatch.setattr(_atspi, "selected_sheet_text", lambda _app: "42")
@@ -10127,6 +10137,7 @@ def test_calc_type_waits_for_the_cell_editor_or_the_cell_value(fake_atspi, monke
     assert exc.value.code is ErrorCode.UNSUPPORTED
     assert exc.value.detail["reason"] == "text_mismatch"
     assert exc.value.detail["actual"] in {None, ""}
+    assert driver._sheet_type_readback is None
 
 
 def test_chrome_file_chooser_type_reads_the_location_entry(fake_atspi, monkeypatch) -> None:
@@ -13144,10 +13155,15 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
         state["events_processed"] = True
 
     def check(app, origin, text):
-        assert state["in_operation"]
+        assert not state["in_operation"]
         assert state["events_processed"]
         assert origin == "A1"
         return None
+
+    def commit(app):
+        assert state["in_operation"]
+        assert app == "soffice.bin"
+        return True
 
     driver._run = run
     monkeypatch.setattr(linux, "_on_wayland", lambda: False)
@@ -13158,8 +13174,83 @@ def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, mon
     monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
     monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
     monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
-    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: True)
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", commit)
     monkeypatch.setattr(_atspi, "sheet_grid_check", check)
     monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
     monkeypatch.setattr(linux.time, "sleep", pause)
     assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+
+
+def test_sheet_child_cache_restores_default_after_read_failure(fake_atspi, monkeypatch):
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+    masks = []
+    app.set_cache_mask = masks.append
+
+    def fail():
+        assert masks == [0]
+        raise RuntimeError("read failed")
+
+    with pytest.raises(RuntimeError, match="read failed"):
+        _atspi._without_child_cache(app, fail)
+    assert masks == [0, 128]
+
+
+def test_direct_atspi_read_runs_on_event_thread(monkeypatch):
+    from a11y_computer_use.drivers import _atspi_events
+
+    on_thread = [False]
+    calls = []
+
+    def run(fn):
+        on_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_thread[0] = False
+
+    def native_read():
+        assert on_thread[0]
+        calls.append("table read")
+        return "Item"
+
+    monkeypatch.setattr(_atspi_events, "run", run)
+    assert _atspi._safe(native_read) == "Item"
+    assert calls == ["table read"]
+    assert not on_thread[0]
+
+
+def test_calc_grid_verification_leaves_event_loop_free(fake_atspi, monkeypatch):
+    driver = LinuxDriver()
+    driver._focused_editable = None
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._typed_readback = lambda _app: ""
+    on_event_thread = [False]
+
+    def run(fn):
+        on_event_thread[0] = True
+        try:
+            return fn()
+        finally:
+            on_event_thread[0] = False
+
+    driver._run = run
+    monkeypatch.setattr(_atspi, "focused_editable", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(_atspi, "focused_secure", lambda _app: False)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda _app: True)
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda _app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda _app: None)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda _app: "A1")
+    sent = []
+    monkeypatch.setattr(_linux_input, "type_string", sent.append)
+
+    def verify(app, origin, text):
+        # Verification waits for publication between native reads. Keeping
+        # this entire operation on the event thread starves those replies.
+        assert not on_event_thread[0]
+        assert (app, origin, text) == ("soffice.bin", "A1", "Item\tQ1")
+        return None
+
+    monkeypatch.setattr(_atspi, "sheet_grid_check", verify)
+    assert driver.type_text("Item\tQ1") == len("Item\tQ1")
+    assert sent == ["Item\tQ1"]
