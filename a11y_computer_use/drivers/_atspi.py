@@ -1209,6 +1209,38 @@ def _okular_thumbnail_surface(node) -> tuple[str, str]:
         parent = _parent_of(parent)
     return "", ""
 
+def _okular_page_surface(node) -> bool:
+    """Recognize Okular's opaque document viewport from its tree context."""
+    if _child_count(node) != 0 or not _parent_of(node):
+        return False
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return False
+    parent = _parent_of(node)
+    if parent is None:
+        return False
+    count = _child_count(parent)
+    if not isinstance(count, int) or count <= 0:
+        return False
+    if not any(_role_name(_child_at(parent, i)) == "scroll bar" for i in range(count)):
+        return False
+    layered = False
+    split = False
+    for _ in range(20):
+        if parent is None:
+            return False
+        role = _role_name(parent)
+        if role in {"dialog", "tool bar", "page tab", "page tab list"}:
+            return False
+        if role in {"frame", "window"}:
+            return layered and split
+        if role == "application" or _node_name(parent).strip():
+            return False
+        layered = layered or role == "layered pane"
+        split = split or role == "split pane"
+        parent = _parent_of(parent)
+    return False
+
 
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
@@ -3400,7 +3432,22 @@ class ATSPIAccessor:
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
-        if role_str == "panel" and role == "AXGroup":
+        if (
+            not surface_name
+            and role_str in {"filler", "panel"}
+            and role == "AXGroup"
+            and not str(name).strip()
+            and not str(description).strip()
+            and value is None
+            and _okular_page_surface(node)
+            and not _has_text_interface(node)
+        ):
+            surface_name = "Okular document / page view"
+            panel_note = (
+                "Page text is not exposed by AT-SPI; find and scroll_to_find cannot read it. "
+                "Use Okular's Ctrl+F Find bar explicitly and verify the result in the UI."
+            )
+        if role_str == "panel" and role == "AXGroup" and not surface_name:
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
                 role = panel_role

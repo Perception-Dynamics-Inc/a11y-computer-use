@@ -10,3 +10,4 @@
 - 2026-10-13 (#537): Repeated AT-SPI `get_application` calls are expensive in Calc snapshots. Cache successful owner lookups within the existing operation-scoped getter cache; preserve retries for missing owners and invalidate on mutations. A getter can return a fresh GI wrapper, so toolkit attributes attached to that wrapper alone do not prevent repeated owner lookups.
 
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
+- 2026-10-13 (#496): Okular's childless PDF filler has no AT-SPI Text interface. Keep document surface labels scoped to the unnamed layered/split document pane with a scrollbar sibling; exclude dialogs and named sidebar panes. Do not treat an in-app search invocation as a verified page-text match.
