@@ -232,3 +232,23 @@ def test_confirmation_from_the_gate_names_the_window(runtime, monkeypatch) -> No
     )
     assert card not in detail["summary"]
     assert safety.REDACTED in detail["summary"]
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("role", ["AXScrollArea", "AXList", "AXTable", "AXGrid", "AXOutline", "AXGroup"])
+def test_native_search_never_types_find_shortcuts(runtime, pinned, role) -> None:
+    """A native viewer may bind Escape to close; roles do not prove a find bar exists."""
+    element = dataclasses.replace(snapshot().elements[0], role=role)
+    runtime.driver.snapshots = [dataclasses.replace(snapshot(), elements=(element,))]
+    runtime._current = runtime.driver.snapshots[0]
+    inputs = []
+    runtime.driver.key_chord = lambda chord: inputs.append(chord)
+    runtime.driver.type_text = lambda text: inputs.append(text)
+
+    result = runtime.scroll_to_find(
+        "test-app", text="photo-05.png", ref="e1" if pinned else None, max_scrolls=1,
+    )
+
+    assert "not found" in result
+    assert inputs == []
+    assert len(runtime.driver.scrolls) == 1
