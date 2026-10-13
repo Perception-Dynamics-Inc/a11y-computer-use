@@ -4272,8 +4272,11 @@ class Runtime:
         if scrolled and snap.app:
             snap = self.driver.snapshot(snap.scope, snap.app)
             self._current = snap
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable,
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
         kept = tuple(el for el in matches if self._buffer_match_kind(el, text) != "hidden")
         return kept, not kept
@@ -7095,6 +7098,8 @@ class Runtime:
                         same_rows = 0
                     previous_rows = seen
                 matches = search_matches(snap)
+                if not matches and container_not_readable(snap, anchor_now):
+                    return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if (
                     matches
                     and issued == 0
@@ -7123,8 +7128,6 @@ class Runtime:
                                 f"not found after {issued} scroll(s): "
                                 f"{text!r} is in the document buffer and not in the visible text"
                             )
-                if not matches and container_not_readable(snap, anchor_now):
-                    return unfinished(issued, snap, anchor_now, budget_hit=False, unreadable=True)
                 if matches:
                     shown = visible_matches(snap)
                     if shown and issued == 0:
