@@ -3001,6 +3001,133 @@ def fake_atspi(monkeypatch):
     _atspi.reset_shown_rows()
 
 
+def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
+                         actions=("Toggle", "SetFocus"), bounds=Bounds(0, 40, 60, 100, 20)):
+    """Synthetic Qt Toggle changes state; only mouse input runs the handler."""
+    app = _Acc("application", name="toggleprobe")
+    app.get_toolkit_name = lambda: toolkit
+    control = _Acc(role, name="Option", states=("SHOWING", "VISIBLE", "ENABLED"))
+    control.get_application = lambda: app
+    control.get_action_iface = lambda: control
+    control.get_n_actions = lambda: len(actions)
+    control.get_action_name = lambda index: actions[index]
+    action_log = []
+    events = []
+
+    def do_action(index):
+        action_log.append(actions[index])
+        control.states.symmetric_difference_update({"CHECKED"})
+        return True
+
+    control.do_action = do_action
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: control)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: events.append(("raise", handle)))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._screen_span", lambda: (1280, 800))
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda x, y: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        control.handler_ran = True
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    element = Element(
+        "e493", _atspi._ROLE[role], "Option", None, bounds, "snap-toggle", clickable=True,
+    )
+    return driver, control, element, action_log, events
+
+
+@pytest.mark.parametrize("role", ["check box", "toggle button", "radio button", "list item"])
+@pytest.mark.parametrize("actions", [("Toggle",), ("SetFocus", "Toggle")])
+def test_qt_toggle_only_ref_click_runs_the_pointer_handler(fake_atspi, monkeypatch, role, actions):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role=role, actions=actions,
+    )
+    # Item-view selection can also silently bypass itemClicked. Neither
+    # Toggle nor Selection.select_child may run before the mouse handler.
+    if role == "list item":
+        parent = _adopt(_Acc("list"), control)
+        parent.get_selection_iface = lambda: parent
+        parent.select_child = lambda _index: pytest.fail("selection bypassed the click handler")
+
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert control.handler_ran is True
+    assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("toolkit", ["gtk", "Chromium", "Gecko", "VCL", "JAVA", ""])
+def test_other_toolkit_toggle_checkbox_keeps_atspi(fake_atspi, monkeypatch, toolkit):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch, toolkit=toolkit)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert "CHECKED" in control.states
+    assert not getattr(control, "handler_ran", False)
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, 40, 60, 100, 0),
+    Bounds(0, 40, 60, -1, -1), Bounds(0, -200, 60, 100, 20),
+    Bounds(0, 1280, 60, 100, 20), Bounds(0, 40, 800, 100, 20),
+])
+@pytest.mark.parametrize("role", ["check box", "list item"])
+def test_qt_toggle_without_usable_screen_bounds_falls_back(fake_atspi, monkeypatch, bounds, role):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=bounds, role=role,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_click_uses_the_visible_part_of_the_bounds(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=Bounds(0, -90, 60, 100, 20),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert events == [("raise", control), ("click", 5, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("action", ["Press", "Click", "activate", "select"])
+@pytest.mark.parametrize("toggle_first", [False, True])
+def test_qt_control_with_another_activating_action_keeps_atspi(
+    fake_atspi, monkeypatch, action, toggle_first,
+):
+    actions = ("Toggle", "SetFocus", action) if toggle_first else (action, "Toggle", "SetFocus")
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=actions,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == [actions[0]]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_on_wayland_keeps_atspi(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_pointer_failure_does_not_run_toggle(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+
+    def failed_click(*_args, **_kwargs):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "pointer input failed")
+
+    monkeypatch.setattr(_linux_input, "click", failed_click)
+    with pytest.raises(ComputerUseError, match="pointer input failed"):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
 def _scrolled_text():
     """text inside viewport inside a scroll pane that owns both bars."""
     text = _Acc("text")

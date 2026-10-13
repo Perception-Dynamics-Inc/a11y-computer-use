@@ -6083,6 +6083,31 @@ def focused_editable(app: str, *, max_nodes: int = 400):
     return acc
 
 
+def qt_toggle_only_control(acc) -> bool:
+    """Qt buttons and list items whose only activating action is Toggle.
+
+    Qt's Toggle changes checked/selected state without emitting the user
+    click signals. SetFocus is harmless here, but a real Press/Click or any
+    other activating action keeps the existing AT-SPI path. Table cells
+    and tree items keep their separate selection handling.
+    """
+    if not _qt_app(acc) or _role_name(acc) not in {
+        "check box", "radio button", "toggle button", "push button", "button",
+        "list item", "list box item",
+    }:
+        return False
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    activating = set()
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+            activating.add(raw)
+    return activating == {"toggle"}
+
+
 def do_press(acc) -> bool:
     """Perform the first activating AT-SPI action on ``acc`` (True on success)."""
     action = _action_iface(acc)
