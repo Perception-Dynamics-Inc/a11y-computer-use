@@ -1139,12 +1139,86 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _audacity_track_area(container) -> bool:
+    """Recognize a project track area by its published Timeline Options control.
+
+    Stay in this container: a separate wx dialog may also have role frame.
+    A bounded search fails closed when the project context is unavailable.
+    """
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth):
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH:
+            return False
+        budget -= 1
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog"} and depth:
+            return False
+        if _node_name(node).strip().casefold() == "timeline options":
+            return True
+        if role in _SURFACE_SKIP_ROLES:
+            return False
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return False
+        for index in range(min(count, _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None and walk(child, depth + 1):
+                return True
+        return False
+
+    return walk(container, 0)
+
+def _okular_thumbnail_surface(node) -> tuple[str, str]:
+    """Label an empty thumbnail strip from its native sidebar context.
+
+    No page labels or thumbnail bounds are inferred from this painted filler.
+    Native names and children take precedence over the fallback.
+    """
+    if _child_count(node) != 0:
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return "", ""
+    parent = _parent_of(node)
+    if parent is None or not any(
+        _role_name(child) == "scroll bar" for child in _direct_children(parent)
+    ):
+        return "", ""
+    thumbnails = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if _node_name(parent).casefold() == "sidebar" and thumbnails:
+                return (
+                    "Okular thumbnails",
+                    "Per-page thumbnails are not exposed by AT-SPI; use the page-number "
+                    "field, Go to Page…, or the Find bar for navigation.",
+                )
+            break
+        thumbnails = thumbnails or any(
+            _role_name(child) in {"label", "static", "text"}
+            and _node_name(child).casefold() == "thumbnails"
+            for child in _direct_children(parent)
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
-    Toolbar tools put their label in the tooltip. The track view and Time
+    Toolbar tools put their label in the tooltip; wxGTK may identify their
+    container only through a sibling grip's description. The track view and Time
     clock paint their contents without publishing controls or a value. Keep
     those surfaces opaque; never invent track names or clock readings.
+    Require Timeline Options in the local track area / project window for
+    surface hints: wxGTK dialogs can expose a frame rather than a dialog.
     """
     if _child_count(node) != 0 or not _parent_of(node):
         return "", "", ""
@@ -1170,13 +1244,27 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
         return "", "", ""
     name = _node_name(node).strip()
     description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is None and not name and description:
+        container = _parent_of(node)
+        if _role_name(container) == "panel":
+            for index in range(_child_count(container)):
+                sibling = _child_at(container, index)
+                marker = str(_call_first(
+                    sibling, ("get_description",), default="",
+                ) or "").strip().casefold()
+                if (_role_name(sibling) == "panel" and _child_count(sibling) == 0
+                        and marker.startswith("audacity ") and marker.endswith(" toolbar")):
+                    if description.casefold() != marker:
+                        return "AXButton", "", ""
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
-        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+        if (not name and not description
+                and _node_name(toolbar).casefold() in {"time", "time toolbar"}
+                and _audacity_track_area(parent)):
             return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     elif not name and not description and focusable and size is not None:
-        if size[0] >= 300 and size[1] >= 100:
+        if size[0] >= 300 and size[1] >= 100 and _audacity_track_area(_parent_of(node)):
             return (
                 "", "Audacity track / waveform",
                 "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",
@@ -1733,8 +1821,11 @@ _HTML_TAG_NAMES = (
 )
 # The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
 # not a tag: HTML does not allow a space between ``<`` and the name.
+# Quoted attributes may contain angle brackets; require the full tag name
+# so a literal ``<p-custom>`` is not mistaken for a paragraph.
 _HTML_TAG_RE = re.compile(
-    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    rf"<(/)?({_HTML_TAG_NAMES})(?=[\s/>])"
+    r"((?:[^<>\"']|\"[^\"]*\"|'[^']*')*)>",
     re.IGNORECASE,
 )
 _HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
@@ -2311,6 +2402,24 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     return (nx, ny), (float(window[2]), float(window[3]))
 
 
+def gtk4_in_window_dialog(acc) -> bool:
+    """GTK 4 dialog descendants whose WINDOW origin is not a screen box.
+
+    AdwAlertDialog is nested inside a frame, rather than an X window of its
+    own. Its positive WINDOW coordinates can still omit dialog offsets (#520).
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    dialog = False
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"alert", "dialog"}:
+            dialog = True
+        elif role in {"frame", "window"}:
+            return dialog
+    return False
+
+
 def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
@@ -2645,6 +2754,15 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _evince_page(node) -> bool:
+    """Evince PDF pages have reliable SHOWING state, but drifting extents."""
+    if _role_name(node) != "page":
+        return False
+    app = _application_of(node)
+    name = _call_first(app, ("get_name",), default="") if app is not None else ""
+    return str(name).strip().lower() == "evince"
+
+
 def _page_text(acc) -> str | None:
     """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
 
@@ -2725,7 +2843,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+        got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
@@ -3200,7 +3318,10 @@ class ATSPIAccessor:
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
         name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
-        description = _call_first(node, ("get_description",), default="") or ""
+        # The snapshot uses the description as its title when the name is empty.
+        description = _plain_accessible_name(
+            str(_call_first(node, ("get_description",), default="") or "")
+        )
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if role == "AXMenuItem" and not str(name).strip():
@@ -3257,6 +3378,11 @@ class ATSPIAccessor:
             page_text = _page_text(node)
             if page_text:
                 value = page_text
+                if _evince_page(node) and _state_has(node, "SHOWING"):
+                    # Evince's page boxes drift after scrolling. Keep the
+                    # visible text without offering those boxes for targeting.
+                    position, size = None, None
+                    unallocated = True
             else:
                 role = "AXGroup"
                 value = None
@@ -3283,6 +3409,11 @@ class ATSPIAccessor:
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         panel_note = ""
+        if (
+            role_str == "filler" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _okular_thumbnail_surface(node)
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
@@ -3480,6 +3611,12 @@ class ATSPIAccessor:
             if child is not None:
                 kids.append(child)
         role = _role_name(node)
+        # Evince's hidden pages can have on-screen rectangles, and its
+        # painted page can have an off-screen rectangle. Trust SHOWING.
+        kids = [
+            child for child in kids
+            if not _evince_page(child) or _state_has(child, "SHOWING")
+        ]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -7350,18 +7487,36 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
+def _read_full_text(acc, *, count=None):
+    """Retry GTK 4's empty sentinel result with a positive end offset.
+
+    Chromium's bounded read can echo a write instead of the actual contents,
+    so a nonempty sentinel result remains authoritative. NULL still means
+    unreadable; only an empty string with a positive count gets a retry.
+    """
+    Atspi = _atspi()
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if got == "":
+        if count is None:
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    return got
+
+
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. A bounded ``get_text(0, character_count)`` is not used. On a
-    Chromium web field that count can be the length of the string just passed
+    returns one. GTK 4's empty sentinel read is retried with a positive
+    character count. A nonempty sentinel read is kept: on a Chromium web
+    field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
     is dropped first so the read is not the pre-write value.
     """
     _call_first(acc, ("clear_cache", "clearCache"))
-    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    got = _read_full_text(acc)
     if got is None:
         return None
     return str(got)
@@ -12749,6 +12904,44 @@ def _qt_grid(acc):
     return None
 
 
+def gtk_icon_view_item(acc) -> bool:
+    """GTK icon-view images expose activate, which means open, not click."""
+    parent = _parent_of(acc)
+    return (
+        "gtk" in _toolkit_name(acc)
+        and _role_name(acc) == "image"
+        and parent is not None
+        and _role_name(parent) == "layered pane"
+    )
+
+
+def click_gtk_icon_view_item(acc) -> bool:
+    """Send one pointer click and confirm exclusive icon selection."""
+    parent = _parent_of(acc)
+    count = _child_count(parent)
+    pos, size = _extents(acc)
+    if (
+        not _x11_keys_available() or pos is None or size is None
+        or size[0] <= 0 or size[1] <= 0 or not 0 < count <= 500
+    ):
+        return False
+    try:
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.click(int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2))
+    except Exception:
+        return False
+    for attempt in range(8):
+        selected = [_child_at(parent, index) for index in range(count)]
+        if all(child is not None for child in selected):
+            selected = [child for child in selected if _state_has(child, "SELECTED")]
+            if len(selected) == 1 and selected[0] == acc:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def qt_table_cell(acc) -> bool:
     """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
     try:
@@ -13606,6 +13799,20 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return False
     if force:
         return _replace_editable_text(acc, text)
+    # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
+    # echo the requested spacing while OK discards it. We cannot observe
+    # that model through AT-SPI, so refuse before changing the buffer rather
+    # than claim a committed value or send an unverified activation key.
+    if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
+        app = _call_first(acc, ("get_application", "getApplication"))
+        name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "abiword":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "AbiWord entry values cannot be confirmed as committed; "
+                "use focused typing and verify the value after closing and reopening the dialog",
+                detail={"reason": "commit_unverified"},
+            )
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):

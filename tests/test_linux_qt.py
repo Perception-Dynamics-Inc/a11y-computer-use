@@ -1028,3 +1028,35 @@ def test_accessible_name_strips_rich_text_and_keeps_angle_brackets(atspi) -> Non
     assert 'button "<not-a-tag>"' in rendered
     assert 'button "a < b and c > d"' in rendered
     assert 'button "press <a>"' in rendered
+
+
+@pytest.mark.parametrize("use_description", [False, True])
+@pytest.mark.parametrize("markup, expected", [
+    ("<p style='white-space:pre'>Calculate number of words</p>", "Calculate number of words"),
+    ('<p title="Words > 0">Calculate <b>number</b> of words</p>', "Calculate number of words"),
+    ("<p title='Words > 0'>Calculate number of words</p>", "Calculate number of words"),
+    ("<p-custom>Literal label</p-custom>", "<p-custom>Literal label</p-custom>"),
+])
+def test_rich_text_snapshot_names_and_description_fallback(atspi, use_description, markup, expected):
+    from a11y_computer_use import observe
+    from a11y_computer_use.schema import Display, Scope
+
+    button = _Node(
+        "push button", "" if use_description else markup,
+        states={"SHOWING", "VISIBLE", "ENABLED"}, actions=["press"], toolkit="Qt",
+    )
+    if use_description:
+        button.get_description = lambda: markup
+    frame = _Node(
+        "frame", "FeatherPad", children=[button], toolkit="Qt",
+        states={"SHOWING", "VISIBLE", "ENABLED"}, x=0, y=0, w=400, h=300,
+    )
+    display = Display(display_id=0, width=1280, height=800, scale=1.0, is_main=True)
+    snap = observe.build_snapshot(
+        frame, ATSPIAccessor(), scope=Scope.WINDOW, app="featherpad", pid=None,
+        geometry=(observe.DisplayGeometry(display=display, origin=(0.0, 0.0)),),
+    )
+    control = next(el for el in snap.elements if el.role == "AXButton")
+    assert control.title == expected
+    assert f'button "{expected}"' in observe.render_text(snap)
+    assert control in observe.find_elements(snap, text=expected)
