@@ -3619,6 +3619,11 @@ class ATSPIAccessor:
     def read(self, node: object) -> RawNode:
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
+        if role_str == "status bar":
+            # GTK can register the bar before allocating it. Refresh before
+            # reading geometry: _state_flags refreshes later, after a cached
+            # zero-size rectangle would already have hidden the status text.
+            _drop_cached_properties(node)
         # GTK3 gives a single-line Gtk.Entry the same "text" role as a
         # Gtk.TextView. The entry carries SINGLE_LINE; the view carries
         # MULTI_LINE. A single-line entry is a text field, not a textarea.
@@ -3696,13 +3701,6 @@ class ATSPIAccessor:
                 if label:
                     name = _plain_accessible_name(label)
                     break
-        # Some GTK status bars (Geany's caret position) have no name but
-        # expose their displayed message through Text. Keep the statusbar
-        # role and avoid the generic Value probe used by numeric controls.
-        if role == "AXStatusBar" and not str(name).strip():
-            status_text = _direct_text(node)
-            if status_text:
-                name = _plain_accessible_name(status_text)
         button_name = str(name)
         if role_str == "push button":
             name = _gtk_button_row_name(node, button_name)
@@ -3720,6 +3718,18 @@ class ATSPIAccessor:
             label = _image_text_label(node)
             if label:
                 name = label
+        # GtkStatusbar can expose its changing label only through Text.
+        # Keep the statusbar role and avoid probing its numeric Value interface.
+        if role_str == "status bar" and not str(name).strip():
+            try:
+                Atspi = _atspi()
+                count = _safe(lambda: Atspi.Text.get_character_count(node))
+                if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                    text = _safe(lambda: Atspi.Text.get_text(node, 0, min(count, _IMAGE_LABEL_CHARS)))
+                    if isinstance(text, str) and text.strip():
+                        name = text.strip()
+            except ImportError:
+                pass
         unallocated = False
         if role_str == "page tab" and _negative_extent(size):
             # A notebook with one page hides the tab bar. GTK reports no
