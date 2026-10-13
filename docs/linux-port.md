@@ -222,3 +222,12 @@ use `Push current change to the left`, `Push current change to the right`, or
 pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+## Gnumeric name-box navigation
+
+Ref-based activation of Gnumeric's `AXImage` named `go-jump` is refused with an
+`unsupported` error because this name-box control has been reported to crash
+Gnumeric (#492). The guard covers accessibility activation and element pointer
+clicks. It does not substitute keyboard input or claim cell-address navigation
+succeeded. Coordinate-only clicks do not identify an accessible control and are
+not covered by this guard.
