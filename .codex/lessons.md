@@ -14,3 +14,5 @@
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
 
 - 2026-10-13 (#503): Keep the GTK 4 garbage-allocation filter limited to unnamed, childless panels; large real containers still need their extents for clipping and sampling. When merge conflicts join appended regression tests, retain both branches' tests and compare the final diff against main.
+
+- 2026-10-14 (#521): Header-only accessibility detection must stay within the selected container’s reported descendants and require header geometry plus a scrollbar. Unrelated rows, ordinary body controls, and unknown bounds must not trigger early refusal.
