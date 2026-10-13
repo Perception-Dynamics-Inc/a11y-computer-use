@@ -12,3 +12,5 @@
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
+
+- 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.

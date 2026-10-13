@@ -524,7 +524,6 @@ def test_non_gtk4_negative_window_origin_keeps_pointer_click(monkeypatch, toolki
     assert button.pressed == []
 
 
-<<<<<<< HEAD
 @pytest.mark.parametrize("role", ["AXTextField", "AXTextArea", "AXSearchField"])
 @pytest.mark.parametrize("focused", [True, False, None])
 def test_gtk4_text_click_requires_observed_focus(monkeypatch, role, focused) -> None:
@@ -584,7 +583,8 @@ def test_gtk4_text_click_refuses_untrusted_geometry_even_with_activate(monkeypat
     assert exc.value.detail["outcome"] == "refused"
     assert field.pressed == []
     assert clicks == []
-=======
+
+
 @pytest.mark.parametrize("role", ["alert", "dialog"])
 @pytest.mark.parametrize("kwargs", [{}, {"button": MouseButton.RIGHT}, {"count": 2}, {"modifiers": ("shift",)}])
 def test_gtk4_in_window_dialog_positive_box_refuses_click(monkeypatch, role, kwargs):
@@ -626,4 +626,3 @@ def test_other_dialogs_keep_pointer_click(monkeypatch, toolkit, version, nested)
     driver.click(_element(Bounds(0, 852, 447, 156, 44)))
     assert clicks == [(930, 469)]
     assert button.pressed == []
->>>>>>> origin/main
