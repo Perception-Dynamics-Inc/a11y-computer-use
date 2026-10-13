@@ -192,3 +192,16 @@ use `Push current change to the left`, `Push current change to the right`, or
 pane's text to verify the result. These are separate requested operations:
 an explicit gutter-arrow click must not be silently replaced with navigation
 or a header-bar action. If that arrow cannot be addressed, report the limitation.
+
+## Qt document searches
+
+Qt multiline editors (including FeatherPad) expose the entire document through
+AT-SPI Text. Snapshot values and text searches use `Text.get_bounded_ranges`
+inside the measured editor bounds, falling back to native point offsets and
+verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
+these ranges, so an off-screen match becomes searchable when it enters the
+viewport. When neither interface establishes visibility, the document value is
+omitted and its hint recommends in-document Find or line navigation. `find` and
+`scroll_to_find` cannot confirm document text through the whole buffer in that
+case. This path is covered by synthetic tests; FeatherPad has not been live-
+verified for this change.
