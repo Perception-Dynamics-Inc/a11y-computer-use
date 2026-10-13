@@ -99,6 +99,47 @@ def _atspi_actions(*names: str) -> tuple[str, ...]:
     return _atspi._action_names(_Acc())
 
 
+def test_meld_gutter_is_opaque_and_header_merge_controls_remain_addressable() -> None:
+    """Model the reported GTK tree, not the arrows painted inside its gutter.
+
+    The supported alternative documented in linux-port.md depends on retaining
+    the real named buttons and pane text without inventing gutter children.
+    """
+    commands = (
+        "Go to the next change",
+        "Go to the previous change",
+        "Push current change to the left",
+        "Push current change to the right",
+        "Delete change",
+    )
+    tree = _node(_atspi._ROLE["frame"], "left.txt : right.txt", children=(
+        *(_node(_atspi._ROLE["push button"], name,
+                actions=_atspi_actions("click"), pos=(float(i * 100), 0.0),
+                size=(90.0, 30.0)) for i, name in enumerate(commands)),
+        _node("AXTextArea", value="left text", pos=(0.0, 50.0), size=(500.0, 600.0)),
+        _node(_atspi._ROLE["drawing area"], pos=(500.0, 50.0), size=(50.0, 600.0)),
+        _node("AXTextArea", value="right text", pos=(550.0, 50.0), size=(500.0, 600.0)),
+    ))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="meld", pid=510, geometry=_geometry())
+
+    regions = observe.find_elements(snap, role="opaque_region")
+    assert len(regions) == 1
+    gutter = regions[0]
+    assert gutter.title == ""
+    assert gutter.bounds == Bounds(0, 500, 50, 50, 600)
+    assert not any(el.parent == gutter.ref for el in snap.elements)
+    buttons = observe.find_elements(snap, role="button")
+    assert {el.title for el in buttons} == set(commands)
+    assert all(el.clickable and el.ref for el in buttons)
+    assert {el.value for el in snap.elements if el.role == "AXTextArea"} == {
+        "left text", "right text",
+    }
+    rendered = observe.render_text(snap, mode="interactive")
+    assert f"{gutter.ref} opaque_region" in rendered
+    assert all(name in rendered for name in commands)
+
+
 def test_canvas_drawing_area_and_canvas_tag_read_as_a_canvas(monkeypatch) -> None:
     """AT-SPI canvas, GTK drawing area, and a ``<canvas>`` section are AXCanvas.
 
@@ -12311,6 +12352,167 @@ def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake
     assert _atspi.target_vanished(cell) is False
 
 
+@pytest.mark.parametrize("x,y,width,height", [
+    (0, 0, 1414920272, 22043),
+    (0, 0, 22043, 1414920272),
+    (0, 0, float("inf"), 80),
+    (0, 0, 120, float("nan")),
+])
+def test_impossible_atspi_panel_bounds_are_not_pointer_targets(
+    fake_atspi, monkeypatch, x, y, width, height,
+) -> None:
+    """Synthetic #503 garbage extents, not a live GTK or X session."""
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (-1.0, -1.0)
+    position, size = _atspi._extents(panel)
+    assert position == (x, y)
+    assert size[0] == width
+    assert size[1] == height or height != height
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+    # A previously issued ref may still contain the corrupt published box.
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503", clickable=True)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: panel)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *_args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+@pytest.mark.parametrize("x,y,width,height", [
+    (40, 80, 120, 60),
+    (40, -1400, 1100, 6400),
+    (0, -30000, 1200, 60000),
+    (-32768, 0, 65535, 80),
+])
+def test_normal_and_large_sane_atspi_boxes_keep_their_bounds(
+    fake_atspi, x, y, width, height,
+) -> None:
+    from a11y_computer_use.drivers.linux import _point_of
+
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert (raw.position, raw.size) == ((x, y), (width, height))
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.role == "opaque_region" and el.clickable for el in snap.elements)
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503")
+    assert _point_of(target) == (int(target.bounds.center.x), int(target.bounds.center.y))
+
+
+def test_large_panel_preserves_its_painted_children(fake_atspi) -> None:
+    panel = _Acc("panel", states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    panel.children = [_Acc("push button", name="Save")]
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+    child = _node("AXButton", "Save", actions=("AXPress",),
+                  pos=(40, 80), size=(120, 60))
+    tree = _node("AXWindow", "Editor", children=((raw, [child]),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.title == "Save" and el.clickable for el in snap.elements)
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+
+@pytest.mark.parametrize("toolkit,version,name", [
+    ("GTK", "3.24", ""), ("Qt", "6.8", ""), ("GTK", "4.18", "Document"),
+])
+def test_large_real_panel_keeps_extents(fake_atspi, toolkit, version, name):
+    panel = _Acc("panel", name=name, states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: toolkit, get_toolkit_version=lambda: version)
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+
+
+@pytest.mark.parametrize("x,y", [(32768, 0), (-32769, 0), (0, 32768), (0, -32769)])
+def test_ref_center_outside_x_range_is_not_actionable(x, y):
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXButton", "Save", None,
+                     Bounds(0, x - 60, y - 40, 120, 80), "snap-503")
+    with pytest.raises(ComputerUseError) as exc:
+        _point_of(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXGroup", "Document", None,
+                     Bounds(0, -50000, -100000, 100000, 200000), "snap-503")
+    assert _point_of(target) == (0, 0)
+
+
+@pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
+@pytest.mark.parametrize("named", [True, False])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+    driver, icon, element, actions, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+    )
+    icon.name = "Cherry" if named else ""
+    previous = _Acc("image", states=("SELECTED",))
+    _adopt(_Acc("layered pane"), previous, icon)
+    _place_row(icon, 40, 60, 100, 20)
+    if effect == "no_bounds":
+        icon.component = None
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        if effect in {"exclusive", "additive"}:
+            icon.states.add("SELECTED")
+        if effect == "exclusive":
+            previous.states.discard("SELECTED")
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if effect == "exclusive":
+        assert driver.press_element(element) is True
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "selection_unchanged"
+    assert actions == []
+    assert events == [("raise", icon)] + (
+        [] if effect == "no_bounds" else [("click", 90, 70, "left", 1)]
+    )
+
+
+def test_icon_view_detection_excludes_other_images(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda acc: acc.toolkit)
+    icon = _Acc("image")
+    icon.toolkit = "gtk"
+    _adopt(_Acc("panel"), icon)
+    assert not _atspi.gtk_icon_view_item(icon)
+    _adopt(_Acc("layered pane"), icon)
+    assert _atspi.gtk_icon_view_item(icon)
+    icon.toolkit = "Chromium"
+    assert not _atspi.gtk_icon_view_item(icon)
+
+
 
 @pytest.mark.parametrize("name", [
     "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
@@ -12475,3 +12677,46 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+def test_gtk_grid_button_names_follow_rows_not_child_order(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: ("AXPress",) if node.role == "push button" else ())
+    labels = ["Result font", "RPN stack font", "Module font", "Background color",
+              "Result font color", "RPN stack color", "Module color", "Module font color"]
+    buttons = [_place_row(_Acc("push button", name="Sans Bold" if i < 3 else ""),
+                          200, 100 + i * 40, 140, 30) for i in range(8)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 160, 20)
+             for i, name in enumerate(labels)]
+    grid = _adopt(_place_row(_Acc("panel"), 10, 80, 400, 400), *reversed(buttons), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Preferences"), 0, 0, 600, 600), grid)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="galculator", pid=561, geometry=_geometry())
+    for i, name in enumerate(labels):
+        found = [el for el in observe.find_elements(snap, text=name, role="button")
+                 if el.title == name]
+        assert len(found) == 1, [(el.role, el.title, el.value) for el in snap.elements]
+        assert found[0].title == name
+        assert found[0].value == ("Sans Bold" if i < 3 else None)
+        assert found[0].bounds == Bounds(0, 200, 100 + i * 40, 140, 30)
+        assert found[0].clickable
+    rendered = observe.render_text(snap, mode="interactive")
+    assert all(name in rendered for name in labels)
+
+
+@pytest.mark.parametrize("case", ["unique", "non_gtk", "missing", "other_row", "right", "tie", "relation"])
+def test_gtk_button_row_names_preserve_authority_and_require_geometry(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    button = _place_row(_Acc("push button", name="Choose" if case == "unique" else ""), 200, 100, 140, 30)
+    label = _place_row(_Acc("label", name="Result font:"),
+                       350 if case == "right" else 20, 200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), button, label)
+    if case == "missing":
+        button.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(button.parent, button, label, other)
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    assert _atspi.ATSPIAccessor().read(button).title == (
+        "Explicit" if case == "relation" else button.name
+    )

@@ -16,6 +16,7 @@ gi/Atspi/Xlib imports are lazy, inside the methods.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -80,10 +81,15 @@ def _point_of(target: Target) -> tuple[int, int]:
     """
     if isinstance(target, Point):
         return int(target.x), int(target.y)
-    if target.bounds is None:
+    bounds = target.bounds
+    center = bounds.center if bounds is not None else None
+    if center is None or any(
+        not math.isfinite(v) or v < -32768 or v > 32767
+        for v in (center.x, center.y)
+    ):
         raise ComputerUseError(
             ErrorCode.UNSUPPORTED,
-            f"{target.ref} ({target.role}) has no bounds; no pointer click was sent",
+            f"{target.ref} ({target.role}) has no usable bounds; no pointer click was sent",
             detail={"ref": target.ref, "role": target.role, "reason": "not_actionable"},
         )
     return int(target.bounds.center.x), int(target.bounds.center.y)
@@ -1923,6 +1929,14 @@ class LinuxDriver:
             return False
         if self._run(lambda: _atspi.is_libreoffice_shape_text(handle)):
             return False
+        if self._run(lambda: _atspi.gtk_icon_view_item(handle)):
+            if self._run(lambda: _atspi.click_gtk_icon_view_item(handle)):
+                return True
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                f"{element.ref} ({element.role}) click did not select only that icon",
+                detail={"ref": element.ref, "role": element.role, "reason": "selection_unchanged"},
+            )
         if element.editable:
             # Remember it so type_text can enter text via EditableText, and focus
             # it (best-effort — grab_focus is cursor-free but headless X may not
@@ -2380,6 +2394,16 @@ class LinuxDriver:
             handle = observe.ax_handle_for(target.snapshot_id, target.ref)
             self._refuse_hidden(target, handle)
             self._raise_handle_window(handle)
+            if handle is not None and self._run(lambda: _atspi.gtk4_in_window_dialog(handle)):
+                raise ComputerUseError(
+                    ErrorCode.UNSUPPORTED,
+                    f"{target.ref} ({target.role}) has unverified GTK 4 in-window dialog bounds; "
+                    "the pointer click was not sent. Use press for semantic activation.",
+                    detail={
+                        "ref": target.ref, "role": target.role,
+                        "reason": "not_actionable", "outcome": "refused",
+                    },
+                )
         revealed = None
         if isinstance(target, Element) and handle is not None:
             # An off-view table cell is scrolled, then clicked at its new
@@ -4283,6 +4307,41 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_system
 
         return _linux_system.app_at_point_id(point.x, point.y)
+
+    def same_app_window_cover(self, element: Element, app: str | None) -> str | None:
+        """Return a covering same-app sibling toplevel for a ref click.
+
+        Resolve the target's owning toplevel so controls in the front dialog
+        remain clickable. Missing X11/AT-SPI evidence preserves normal clicks.
+        """
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi, _linux_system
+
+        bounds = element.bounds
+        if bounds is None:
+            return None
+        try:
+            handle = observe.ax_handle_for(element.snapshot_id, element.ref)
+            if handle is None or self._gtk4_point_untrusted(element, handle):
+                return None
+            toplevel = self._run(lambda: _atspi.toplevel_raise_target(handle))
+            if toplevel is None:
+                return None
+            _active, title, pid, extents = toplevel
+            cx = float(bounds.x) + float(bounds.width) / 2.0
+            cy = float(bounds.y) + float(bounds.height) / 2.0
+            owner_pid = _linux_system.pid_at_point(cx, cy)
+            if not pid or not owner_pid or int(owner_pid) != int(pid):
+                return None
+            target_id = _linux_system.window_id_for_toplevel(
+                title=title, pid=pid, extents=extents,
+            )
+            front = _linux_system.window_at_point(cx, cy)
+            if target_id is not None and front is not None and front["window_id"] != target_id:
+                return front["title"] or "another window"
+        except Exception:  # no reliable toplevel hit-test
+            pass
+        return None
 
     def occlusion(self, element: Element, app: str | None) -> str | None:
         """None when the element's center belongs to ``app``.
