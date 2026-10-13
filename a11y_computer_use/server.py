@@ -2050,12 +2050,15 @@ class Runtime:
         fence_untrusted: bool | None = None,
         allowed_domains: str | object | None = None,
         blocked_domains: str | object | None = None,
+        allow_exec: bool = False,
     ) -> None:
         self._operation_lock = RLock()
         self._tool_depth = 0
         self._closed = False
         self.store = store if store is not None else safety.PermissionStore()
         self.audit = audit if audit is not None else safety.AuditLog()
+        #: Terminal GUI input requires the same opt-in as agent execution.
+        self.allow_exec = allow_exec
         #: The OS backend. Every platform op (observe/act/capture) routes through
         #: it, so the Runtime is OS-agnostic; defaults to the current platform.
         self.driver = driver if driver is not None else drivers.get_driver()
@@ -2464,6 +2467,37 @@ class Runtime:
 
     # -- gate + audit -------------------------------------------------------
 
+    def _reject_terminal(self, action, app: str, *, audit: bool = True, input_target=None) -> None:
+        """Audit and refuse terminal actions when execution is disabled."""
+        launch = isinstance(action, AppOp) and action.verb is AppVerb.LAUNCH
+        if self.allow_exec or not (launch or isinstance(action, (TypeText, KeyChord))):
+            return
+        check = getattr(self.driver, "terminal_target", None)
+        if check is None:
+            return
+        try:
+            terminal = check(app, input_target or getattr(action, "target", None), launch=launch)
+        except ComputerUseError as exc:
+            if audit:
+                self.audit.record_action(
+                    action, app=app, decision=safety.check_action(action, app, store=self.store),
+                    result=exc.code.value, secure=exc.code is ErrorCode.SECURE_FIELD,
+                )
+            raise
+        if not terminal:
+            return
+        if audit:
+            self.audit.record_action(
+                action, app=app, decision=safety.check_action(action, app, store=self.store),
+                result=ErrorCode.EXEC_DISABLED.value,
+                metrics={"security_violation": "exec_disabled"},
+            )
+        raise ComputerUseError(
+            ErrorCode.EXEC_DISABLED,
+            "terminal launch or input requires allow_exec",
+            detail={"app": app, "security_violation": "exec_disabled"},
+        )
+
     def _require_permission(self, action, app: str, *, secure: bool = False) -> safety.Decision:
         """Read the current grant and audit a refusal before any input."""
         decision = safety.check_action(action, app, store=self.store)
@@ -2482,7 +2516,8 @@ class Runtime:
         return safety.window_title(snap, element)
 
     def _run_gated(
-        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None
+        self, action, app: str, execute, *, recheck=None, secure: bool = False, confirm=None,
+        input_target=None,
     ):
         """check_action → confirm → recheck → execute → audit, for EVERY action.
 
@@ -2497,9 +2532,12 @@ class Runtime:
         errors are all audited before they propagate; a SECURE_FIELD failure
         forces redaction of injectable params. A disallowed browser origin
         raises `domain_blocked` before the grant check.
+        ``input_target`` carries the addressed element for text actions,
+        whose schema intentionally contains only the text, to the exec gate.
         """
         if self._domain_applies(action):
             self._reject_domain(action, app=app)
+        self._reject_terminal(action, app, input_target=input_target)
         decision = self._require_permission(action, app, secure=secure)
         try:
             if CONFIRMATION_GATE:
@@ -2526,6 +2564,7 @@ class Runtime:
                     decision = self._require_permission(action, app, secure=secure)
             if recheck is not None:
                 recheck(app)
+            self._reject_terminal(action, app, audit=False, input_target=input_target)
             started = time.perf_counter()
             result = execute()
             duration_ms = (time.perf_counter() - started) * 1000.0
@@ -2536,6 +2575,8 @@ class Runtime:
                 decision=decision,
                 result=exc.code.value,
                 secure=secure or exc.code is ErrorCode.SECURE_FIELD,
+                metrics={"security_violation": "exec_disabled"}
+                if exc.code is ErrorCode.EXEC_DISABLED else None,
             )
             raise
         # cu-meter: per-action latency + (for text results) size/token estimate,
@@ -5427,7 +5468,7 @@ class Runtime:
             self._refuse_vanished_target(live)
             return self._deliver_type_at_ref(live, text)
 
-        count = self._run_gated(action, gate, execute)
+        count = self._run_gated(action, gate, execute, input_target=live)
         shown = count if isinstance(count, int) and not isinstance(count, bool) else len(text)
         return self._conclude(
             f"typed {shown} characters into {ref}{''.join(note)}",
@@ -6020,7 +6061,7 @@ class Runtime:
             self._recheck_target(app, live)  # HID typing: the classic guard, right before injection
             self.driver.type_text(value)
 
-        self._run_gated(action, app, execute)
+        self._run_gated(action, app, execute, input_target=live)
         shown = landed[-1] if landed else value
         choice = live.role in {"AXComboBox", "AXPopUpButton", "AXList"}
         return self._conclude(
@@ -7483,6 +7524,7 @@ class Runtime:
         if name is None:
             raise ValueError(f"app {verb.value} requires name")
         if verb is AppVerb.LAUNCH:
+            self._reject_terminal(AppOp(verb=verb, app=name), name)
             # macOS can start an app behind the current one (`open -g`).
             # Other drivers ignore `activate` and still launch, which reports
             # success for a request they did not perform.
@@ -7506,6 +7548,7 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
+                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
 
             def launch() -> str | None:
                 before: list = []
