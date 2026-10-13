@@ -12,3 +12,5 @@
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
+
+- 2026-10-13 (#567): Lifecycle trace readers need flushed events, not physical-storage durability. `os.fsync` before every agent step can stall Windows runs; flushing and closing the file preserves cross-process visibility. Verify both MCP completion and subprocess cancellation when changing this path.
