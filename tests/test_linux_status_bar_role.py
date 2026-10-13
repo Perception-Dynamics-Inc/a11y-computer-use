@@ -4,6 +4,7 @@ Hermetic. The accessible is a fake: no display, no bus, no GTK process.
 """
 
 from __future__ import annotations
+import pytest
 
 from a11y_computer_use import observe
 from a11y_computer_use.drivers import _atspi
@@ -72,3 +73,21 @@ def test_status_bar_snapshot_says_statusbar(monkeypatch) -> None:
     bar = next(el for el in snap.elements if el.title == title)
     assert bar.role == "AXStatusBar"
     assert bar.bounds.width == 1276 and bar.bounds.height == 19
+
+
+def test_unnamed_status_bar_keeps_text_interface_label(monkeypatch) -> None:
+    """Geany's caret status survives without probing numeric Value."""
+    from types import SimpleNamespace
+
+    text = "line: 301 col: 1"
+    monkeypatch.setattr(_atspi, "_atspi", lambda: SimpleNamespace(Text=SimpleNamespace(
+        get_character_count=lambda node: len(text),
+        get_text=lambda node, start, end: text[start:end],
+    )))
+    monkeypatch.setattr(_atspi, "_state_flags", lambda acc: (True, False, None, False, None, False, False))
+    monkeypatch.setattr(_atspi, "_extents", lambda acc, keep_zero=False: ((2.0, 760.0), (1276.0, 19.0)))
+    monkeypatch.setattr(_atspi, "_value_text", lambda *args: pytest.fail("probed Value"))
+    raw = _atspi.ATSPIAccessor().read(_Bar(""))
+    assert raw.role == "AXStatusBar"
+    assert raw.title == text
+    assert raw.value is None
