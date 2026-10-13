@@ -3035,6 +3035,268 @@ def fake_atspi(monkeypatch):
     _atspi.reset_shown_rows()
 
 
+@pytest.fixture
+def gtk_font_combo(fake_atspi, monkeypatch):
+    from a11y_computer_use.drivers import _cdp_forms
+
+    def make(labels):
+        app = _Acc("application", name="AbiWord")
+        app.get_toolkit_name = lambda: "gtk"
+        combo = _Acc("combo box")
+        combo.get_application = lambda: app
+        menu = _adopt(_Acc("menu"), *[
+            _Acc("menu item", name=label) for label in labels
+        ])
+        _adopt(combo, menu)
+        selected = []
+        combo.get_selection_iface = lambda: combo
+        combo.get_selected_child = lambda index: menu.children[selected[-1] if selected else 0]
+
+        def select_child(index):
+            selected.append(index)
+            return True
+
+        combo.select_child = select_child
+        driver = LinuxDriver()
+        monkeypatch.setattr(driver, "_run", lambda fn: fn())
+        monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: None)
+        monkeypatch.setattr(observe, "ax_handle_for", lambda *args: combo)
+        monkeypatch.setattr(_cdp_forms, "write_element", lambda *args, **kwargs: None)
+        monkeypatch.setattr(_atspi, "peer_field_texts", lambda handle: {})
+        monkeypatch.setattr(_atspi, "is_sheet_cell", lambda handle: False)
+        element = Element("e1", "AXComboBox", "Font", labels[0],
+                          Bounds(0, 0, 0, 100, 20), "font-combo")
+        return driver, element, menu, selected
+
+    return make
+
+
+@pytest.mark.parametrize("option_number", [65, 300, 600])
+def test_gtk_font_combo_set_value_searches_all_options(gtk_font_combo, option_number):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    assert driver.set_value(element, labels[option_number - 1]) is True
+    assert selected == [option_number - 1]
+    assert menu.children[selected[-1]].name == labels[option_number - 1]
+
+
+def test_gtk_font_combo_missing_option_has_bounded_honest_message(gtk_font_combo):
+    labels = [f"Font {index:03}" for index in range(1, 601)]
+    driver, element, menu, selected = gtk_font_combo(labels)
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing Font")
+    message = str(exc.value)
+    assert "showing first 64 of 600 options (list truncated)" in message
+    assert "is not one of" not in message
+    assert len(message) < 2200
+    assert selected == []
+
+
+def test_gtk_small_combo_selection_and_missing_message_unchanged(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["Red", "Green", "Blue"])
+    assert driver.set_value(element, "Blue") is True
+    assert selected == [2]
+    with pytest.raises(ValueError, match="^value 'Missing' is not one of: Red, Green, Blue$"):
+        driver.set_value(element, "Missing")
+    assert selected == [2]
+
+
+def test_gtk_combo_missing_message_bounds_long_labels(gtk_font_combo):
+    driver, element, menu, selected = gtk_font_combo(["F" * 3000, "Blue"])
+    with pytest.raises(ValueError) as exc:
+        driver.set_value(element, "Missing")
+    assert "showing first 0 of 2 options (list truncated)" in str(exc.value)
+    assert len(str(exc.value)) < 2200
+    assert selected == []
+
+
+def _toggle_click_target(monkeypatch, *, toolkit="Qt", role="check box",
+                         actions=("Toggle", "SetFocus"), bounds=Bounds(0, 40, 60, 100, 20)):
+    """Synthetic Qt Toggle changes state; only mouse input runs the handler."""
+    app = _Acc("application", name="toggleprobe")
+    app.get_toolkit_name = lambda: toolkit
+    control = _Acc(role, name="Option", states=("SHOWING", "VISIBLE", "ENABLED"))
+    control.get_application = lambda: app
+    control.get_action_iface = lambda: control
+    control.get_n_actions = lambda: len(actions)
+    control.get_action_name = lambda index: actions[index]
+    action_log = []
+    events = []
+
+    def do_action(index):
+        action_log.append(actions[index])
+        control.states.symmetric_difference_update({"CHECKED"})
+        return True
+
+    control.do_action = do_action
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: control)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda handle: events.append(("raise", handle)))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._screen_span", lambda: (1280, 800))
+    monkeypatch.setattr(driver, "_pointer", lambda x, y: (x, y))
+    monkeypatch.setattr(driver, "_note_pointer", lambda x, y: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        control.handler_ran = True
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    element = Element(
+        "e493", _atspi._ROLE[role], "Option", None, bounds, "snap-toggle", clickable=True,
+    )
+    return driver, control, element, action_log, events
+
+
+@pytest.mark.parametrize("role", ["check box", "toggle button", "radio button", "list item"])
+@pytest.mark.parametrize("actions", [("Toggle",), ("SetFocus", "Toggle")])
+def test_qt_toggle_only_ref_click_runs_the_pointer_handler(fake_atspi, monkeypatch, role, actions):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, role=role, actions=actions,
+    )
+    # Item-view selection can also silently bypass itemClicked. Neither
+    # Toggle nor Selection.select_child may run before the mouse handler.
+    if role == "list item":
+        parent = _adopt(_Acc("list"), control)
+        parent.get_selection_iface = lambda: parent
+        parent.select_child = lambda _index: pytest.fail("selection bypassed the click handler")
+
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert control.handler_ran is True
+    assert events == [("raise", control), ("click", 90, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("toolkit", ["gtk", "Chromium", "Gecko", "VCL", "JAVA", ""])
+def test_other_toolkit_toggle_checkbox_keeps_atspi(fake_atspi, monkeypatch, toolkit):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch, toolkit=toolkit)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert "CHECKED" in control.states
+    assert not getattr(control, "handler_ran", False)
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, 40, 60, 100, 0),
+    Bounds(0, 40, 60, -1, -1), Bounds(0, -200, 60, 100, 20),
+    Bounds(0, 1280, 60, 100, 20), Bounds(0, 40, 800, 100, 20),
+])
+@pytest.mark.parametrize("role", ["check box", "list item"])
+def test_qt_toggle_without_usable_screen_bounds_falls_back(fake_atspi, monkeypatch, bounds, role):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=bounds, role=role,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_click_uses_the_visible_part_of_the_bounds(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, bounds=Bounds(0, -90, 60, 100, 20),
+    )
+    assert driver.press_element(element) is True
+    assert action_log == []
+    assert events == [("raise", control), ("click", 5, 70, "left", 1)]
+
+
+@pytest.mark.parametrize("action", ["Press", "Click", "activate", "select"])
+@pytest.mark.parametrize("toggle_first", [False, True])
+def test_qt_control_with_another_activating_action_keeps_atspi(
+    fake_atspi, monkeypatch, action, toggle_first,
+):
+    actions = ("Toggle", "SetFocus", action) if toggle_first else (action, "Toggle", "SetFocus")
+    driver, control, element, action_log, events = _toggle_click_target(
+        monkeypatch, actions=actions,
+    )
+    assert driver.press_element(element) is True
+    assert action_log == [actions[0]]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_on_wayland_keeps_atspi(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    assert driver.press_element(element) is True
+    assert action_log == ["Toggle"]
+    assert events == [("raise", control)]
+
+
+def test_qt_toggle_pointer_failure_does_not_run_toggle(fake_atspi, monkeypatch):
+    driver, control, element, action_log, events = _toggle_click_target(monkeypatch)
+
+    def failed_click(*_args, **_kwargs):
+        raise ComputerUseError(ErrorCode.UNSUPPORTED, "pointer input failed")
+
+    monkeypatch.setattr(_linux_input, "click", failed_click)
+    with pytest.raises(ComputerUseError, match="pointer input failed"):
+        driver.press_element(element)
+    assert action_log == []
+    assert events == [("raise", control)]
+
+
+@pytest.mark.parametrize("checked", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+@pytest.mark.parametrize("changes", [False, True])
+def test_gtk_toggle_cell_click_verifies_checked_not_selection(
+    fake_atspi, monkeypatch, checked, selected, changes,
+):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell",
+        actions=("toggle", "expand or contract", "edit", "activate"),
+    )
+    if checked:
+        cell.states.add("CHECKED")
+    if selected:
+        cell.states.add("SELECTED")
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        cell.states.add("SELECTED")
+        if changes:
+            cell.states.symmetric_difference_update({"CHECKED"})
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if changes:
+        assert driver.press_element(element) is True
+        assert ("CHECKED" in cell.states) != checked
+    else:
+        with pytest.raises(ComputerUseError, match="checked state") as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "checked_unchanged"
+    assert action_log == []
+    assert [event for event in events if event[0] == "click"] == [
+        ("click", 90, 70, "left", 1),
+    ]
+
+
+@pytest.mark.parametrize("bounds", [
+    None, Bounds(0, 40, 60, 0, 20), Bounds(0, -200, 60, 100, 20),
+])
+def test_gtk_toggle_cell_without_bounds_refuses_without_toggle(fake_atspi, monkeypatch, bounds):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",), bounds=bounds,
+    )
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
+
+
+def test_gtk_toggle_cell_wayland_refuses_without_toggle(fake_atspi, monkeypatch):
+    driver, cell, element, action_log, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="table cell", actions=("toggle",),
+    )
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: True)
+    with pytest.raises(ComputerUseError):
+        driver.press_element(element)
+    assert action_log == []
+    assert not any(event[0] == "click" for event in events)
+
+
 def _scrolled_text():
     """text inside viewport inside a scroll pane that owns both bars."""
     text = _Acc("text")
@@ -12094,3 +12356,169 @@ def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake
     cell = _Acc("table cell", name="ROW-030", states={"ENABLED", "VISIBLE"})
     cell.get_application = lambda: app
     assert _atspi.target_vanished(cell) is False
+
+
+
+@pytest.mark.parametrize("name", [
+    "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
+    "/usr/bin/xfce4-terminal", "org.gnome.Terminal.desktop", "x-terminal-emulator",
+])
+def test_terminal_launch_exec_disabled_is_audited(monkeypatch, tmp_path, name) -> None:
+    """A FULL app grant cannot authorize shell execution through a terminal."""
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kwargs: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["action"] == "appop" and row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+@pytest.mark.parametrize("operation", ["type", "set_value", "key", "cached_type"])
+def test_embedded_terminal_input_is_refused_and_redacted(
+    fake_atspi, monkeypatch, tmp_path, operation,
+) -> None:
+    """Native terminal ancestry survives AXTextArea mapping in an ordinary app."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    terminal = _Acc("terminal")
+    text = _Acc("text")
+    _adopt(_Acc("frame"), _adopt(terminal, text))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    focused = _Acc("text") if operation in {"set_value", "cached_type"} else text
+    if operation == "cached_type":
+        driver._focused_editable = text
+        monkeypatch.setattr(driver, "_verify_remembered_editable", lambda handle: "editor")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (focused, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    element = Element(
+        ref="e2", role="AXTextArea", title="", value=None, bounds=None,
+        snapshot_id="terminal-shot",
+    )
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: text)
+    actions = {
+        "type": TypeText(text="touch /tmp/forbidden\n"),
+        "cached_type": TypeText(text="touch /tmp/forbidden\n"),
+        "set_value": TypeText(text="touch /tmp/forbidden\n"),
+        "key": KeyChord(chord="Return"),
+    }
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    action = actions[operation]
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            action, "editor", lambda: pytest.fail("injected input"),
+            input_target=element if operation == "set_value" else None,
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert "forbidden" not in json.dumps(row)
+    # Explicit opt-in permits this path; a normal text area never needs it.
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, "editor", lambda: "allowed") == "allowed"
+    runtime.allow_exec = False
+    terminal.role = "text"
+    assert runtime._run_gated(action, "editor", lambda: "editor input") == "editor input"
+
+
+def test_terminal_focus_change_before_input_is_audited(fake_atspi, monkeypatch, tmp_path) -> None:
+    """A terminal appearing during the recheck cannot receive keyboard input."""
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import TypeText
+
+    field = _Acc("text")
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (field, False))
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: app)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("editor", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(
+            TypeText(text="command\n"), "editor", lambda: pytest.fail("injected input"),
+            recheck=lambda app: setattr(field, "role", "terminal"),
+        )
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_terminal_launch_alias_is_checked_after_resolution(monkeypatch, tmp_path) -> None:
+    """A launcher label is checked against the executable it would start."""
+    import json
+    from a11y_computer_use import safety, server
+
+    runtime = server.Runtime(
+        store=safety.PermissionStore(tmp_path / "permissions.json"),
+        audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver(),
+    )
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda name: ("xterm", "Terminal", None))
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "Terminal")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["app"] == "xterm" and row["result"] == "exec_disabled"
+
+
+def test_terminal_observation_remains_available(monkeypatch, tmp_path) -> None:
+    """Execution permission does not gate read-only terminal observations."""
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import AppOp, AppVerb
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xterm", safety.Tier.READ)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "terminal_target", lambda *_args, **_kwargs: pytest.fail("read gate"))
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    assert runtime._run_gated(AppOp(verb=AppVerb.LIST), "xterm", lambda: "observed") == "observed"
+
+
+@pytest.mark.parametrize("chord", [None, "Return", "ctrl+v", "a"])
+def test_granted_terminal_window_requires_explicit_exec(monkeypatch, tmp_path, chord):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    driver = LinuxDriver()
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda app: "xfce4-terminal")
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("Terminal", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    action = TypeText(text="command\n") if chord is None else KeyChord(chord=chord)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime._run_gated(action, "Terminal", lambda: pytest.fail("input reached terminal"))
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["metrics"]["security_violation"] == "exec_disabled"
+    runtime.allow_exec = True
+    assert runtime._run_gated(action, "Terminal", lambda: "injected") == "injected"
+
+
+def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
+    terminal = tmp_path / "xfce4-terminal"
+    terminal.touch()
+    alias = tmp_path / "console-alias"
+    alias.symlink_to(terminal)
+    monkeypatch.setattr("shutil.which", lambda app: str(alias))
+    assert LinuxDriver().terminal_target("console-alias", launch=True)

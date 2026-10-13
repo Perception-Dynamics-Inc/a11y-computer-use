@@ -735,6 +735,11 @@ _CACHEABLE = {
     "get_accessible_id": _nonempty_str,
     "get_toolkit_name": _nonempty_str,
     "getToolkitName": _nonempty_str,
+    # Toolkit/browser probes repeatedly resolve the same node's owner.
+    # LibreOffice makes this a costly bus call; ownership is stable until
+    # the operation ends or a mutator invalidates this cache.
+    "get_application": _present,
+    "getApplication": _present,
     "get_process_id": _positive_int,
     "get_child_at_index": _present,
     "getChildAtIndex": _present,
@@ -2317,6 +2322,19 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     if abs(nx - x) <= 1 and abs(ny - y) <= 1:
         return None
     return (nx, ny), (float(window[2]), float(window[3]))
+
+
+def gtk4_window_origin_untrusted(acc) -> bool:
+    """GTK 4 header-bar boxes can lie outside the frame's content origin.
+
+    Adding the recovered content origin fixes body widgets, but does not
+    make these negative WINDOW coordinates reliable pointer targets (#502).
+    Use the control's activation action rather than guessing another offset.
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    window = _raw_rect(acc, "WINDOW")
+    return window is not None and (window[0] < 0 or window[1] < 0)
 
 
 def published_origin_untrusted(acc) -> bool:
@@ -6094,6 +6112,58 @@ def focused_editable(app: str, *, max_nodes: int = 400):
             return None
         return paragraph
     return acc
+
+
+def gtk_toggle_cell(acc) -> bool:
+    """GTK renderer toggle cells need pointer input, not row selection."""
+    return (
+        _toolkit_name(acc).lower() == "gtk"
+        and not _gtk4_app(acc)
+        and _role_name(acc) == "table cell"
+        and "toggle" in _raw_action_names(acc)
+    )
+
+
+def checked_state(acc) -> bool:
+    """Read the cell itself, even when unchecked GTK cells omit CHECKABLE."""
+    return _state_has(acc, "CHECKED")
+
+
+def checked_state_flipped(acc, before: bool) -> bool:
+    """Require a stable checked change, independent of row selection."""
+    for attempt in range(8):
+        if checked_state(acc) != before:
+            time.sleep(0.04)
+            if checked_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
+def qt_toggle_only_control(acc) -> bool:
+    """Qt buttons and list items whose only activating action is Toggle.
+
+    Qt's Toggle changes checked/selected state without emitting the user
+    click signals. SetFocus is harmless here, but a real Press/Click or any
+    other activating action keeps the existing AT-SPI path. Table cells
+    and tree items keep their separate selection handling.
+    """
+    if not _qt_app(acc) or _role_name(acc) not in {
+        "check box", "radio button", "toggle button", "push button", "button",
+        "list item", "list box item",
+    }:
+        return False
+    action = _action_iface(acc)
+    if action is None:
+        return False
+    count = _call_first(action, ("get_n_actions", "get_nActions"), default=0) or 0
+    activating = set()
+    for index in range(int(count)):
+        raw = (_call_first(action, ("get_action_name", "get_name"), index, default="") or "").lower()
+        if raw in _PRESS_ACTION_NAMES or raw in _PICK_ACTION_NAMES:
+            activating.add(raw)
+    return activating == {"toggle"}
 
 
 def do_press(acc) -> bool:
@@ -10781,13 +10851,17 @@ def control_kind(acc) -> str | None:
 
 
 def _collect_options(acc) -> list[tuple[str, object, object, int]]:
-    """(label, node, parent, index) for each choice under ``acc``."""
+    """(label, node, parent, index) for each choice under ``acc``.
+
+    Enumerate every child: GTK font menus routinely have hundreds of items,
+    and the flattened order is also the combo's Selection model index.
+    """
     found: list[tuple[str, object, object, int]] = []
 
     def walk(node, depth: int) -> None:
         if depth > 5:
             return
-        count = min(_child_count(node), 64)
+        count = _child_count(node)
         for index in range(count):
             child = _child_at(node, index)
             if child is None:
@@ -11502,7 +11576,22 @@ def set_combo_value(acc, value: str) -> None:
             match = next((item for item in options if item[0] == value), None)
             if match is None:
                 labels = [label for label, *_rest in options if label]
-                listed = ", ".join(labels)
+                # Bound the diagnostic, independently of the choices searched.
+                shown: list[str] = []
+                size = 0
+                for label in labels[:64]:
+                    added = len(label) + (2 if shown else 0)
+                    if size + added > 2048:
+                        break
+                    shown.append(label)
+                    size += added
+                listed = ", ".join(shown)
+                if len(shown) < len(labels):
+                    raise ValueError(
+                        f"value {value!r} is not an available option; "
+                        f"showing first {len(shown)} of {len(labels)} options "
+                        f"(list truncated): {listed}"
+                    )
                 raise ValueError(f"value {value!r} is not one of: {listed}")
             _activate_combo_option(acc, options, match)
     finally:
@@ -15304,6 +15393,23 @@ def _with_table_body(node, kids: list) -> list:
 
 def _child_at(acc, index: int):
     return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
+
+
+def terminal_ancestor(acc) -> bool:
+    """Whether an accessible is inside a terminal, before AX role mapping.
+
+    VTE's terminal role maps to AXTextArea. Inspect the native role so an
+    ordinary multiline editor is never mistaken for a command prompt.
+    """
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) == "terminal":
+            return True
+        acc = _parent_of(acc)
+    return False
 
 
 def _parent_of(acc):

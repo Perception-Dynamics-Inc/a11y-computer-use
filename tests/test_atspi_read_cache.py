@@ -326,3 +326,56 @@ def test_linux_driver_run_caches_duplicate_getters(monkeypatch) -> None:
     assert LinuxDriver()._run(work) == "ok"
     assert node.role_calls == 1
     assert node.name_calls == 2
+
+
+def test_toolkit_probes_reuse_application_until_mutation() -> None:
+    """Calc row probes must not pay for each repeated owner lookup."""
+    class Application:
+        def get_toolkit_name(self):
+            return "gtk"
+
+        def get_name(self):
+            return "soffice"
+
+    class Node:
+        def __init__(self):
+            self.calls = 0
+
+        def get_application(self):
+            self.calls += 1
+            # Model GI wrappers that can disappear between getter calls.
+            return Application()
+
+        def clear_cache(self):
+            return True
+
+    node = Node()
+    with _atspi.read_cache():
+        assert not _atspi._qt_app(node)
+        assert not _atspi._chromium_app(node)
+        assert not _atspi._gecko_app(node)
+        assert node.calls == 1
+        _atspi._call_first(node, ("clear_cache",))
+        assert not _atspi._qt_app(node)
+        assert node.calls == 2
+    with _atspi.read_cache():
+        assert not _atspi._qt_app(node)
+    assert node.calls == 3
+
+
+def test_application_lookup_retries_missing_owner_and_caches_binding_alias() -> None:
+    class Node:
+        def __init__(self):
+            self.calls = 0
+            self.owner = object()
+
+        def getApplication(self):
+            self.calls += 1
+            return None if self.calls == 1 else self.owner
+
+    node = Node()
+    with _atspi.read_cache():
+        assert _atspi._call_first(node, ("get_application", "getApplication")) is None
+        assert _atspi._call_first(node, ("get_application", "getApplication")) is node.owner
+        assert _atspi._call_first(node, ("get_application", "getApplication")) is node.owner
+    assert node.calls == 2
