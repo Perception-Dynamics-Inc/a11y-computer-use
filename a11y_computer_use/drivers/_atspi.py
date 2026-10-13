@@ -479,7 +479,7 @@ def call_went_unanswered() -> bool:
     )
 
 
-def _safe(fn, default=None):
+def _safe(fn, default=None, *, marshal=True):
     watch = _current_watch()
     start = time.monotonic()
     failed = False
@@ -489,7 +489,7 @@ def _safe(fn, default=None):
         # caller so the GLib loop can process replies between reads.
         from a11y_computer_use.drivers import _atspi_events
 
-        result = _atspi_events.run(fn)
+        result = _atspi_events.run(fn) if marshal else fn()
     except ComputerUseError:
         raise
     except Exception:
@@ -778,16 +778,30 @@ def _call_first(obj, names, *args, default=None):
 
     Inside ``read_cache``, a successful stable getter is remembered for
     this object and these arguments. A mutator drops that memory first.
+
+    While ``event_main`` is running, the call moves onto that thread.
+    libatspi is not safe from the caller and the loop at once.
     """
     if obj is None:
         return default
+
+    def invoke():
+        return _call_first_inline(obj, names, *args, default=default)
+
+    from a11y_computer_use.drivers import _atspi_events
+
+    return _atspi_events.run(invoke)
+
+
+def _call_first_inline(obj, names, *args, default=None):
+    # _call_first already marshaled the entire getter/cache operation.
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
             continue
         if _is_mutator(name):
             _drop_read_cache()
-            return _safe(lambda m=method: m(*args), default)
+            return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
         if key is not None and _read_cache_stack():
             cached = _lookup_read_cache(obj, key)
@@ -795,7 +809,7 @@ def _call_first(obj, names, *args, default=None):
                 _reply_local.last_failed = False
                 _reply_local.last_elapsed = 0.0
                 return cached
-        result = _safe(lambda m=method: m(*args), default)
+        result = _safe(lambda m=method: m(*args), default, marshal=False)
         if (
             key is not None
             and _read_cache_stack()
@@ -3494,6 +3508,21 @@ class ATSPIAccessor:
             and not str(name).strip() and not str(description).strip()
         ):
             surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            role_str == "drawing area"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _child_count(node) == 0
+            and _parent_of(node)
+        ):
+            app = _application_ancestor(node)
+            if app is not None and _node_name(app).casefold() == "gnumeric":
+                surface_name = "Gnumeric drawing area"
+                panel_note = (
+                    "Cell content is not exposed by AT-SPI on this surface. "
+                    "The formula bar exposes only the active cell; inspect it to read "
+                    "that cell. Other cells require visual inspection."
+                )
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
@@ -3511,7 +3540,11 @@ class ATSPIAccessor:
                 name = label
         return RawNode(
             role=role,
-            subrole="terminal" if role_str == "terminal" else None,
+            subrole=(
+                "terminal" if role_str == "terminal"
+                else "label" if role_str == "label"
+                else None
+            ),
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -10341,7 +10374,7 @@ def _find_cell_editor(node, budget: list[int]):
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
     group, and 25.2 as a panel. Menus, toolbars, status bars, and the
-    sheet table are not descended: they cannot contain the cell editor.
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10429,6 +10462,15 @@ def _without_child_cache(node, fn):
     return _atspi_events.run(read_uncached)
 
 
+def _fresh_sheet_root(app, scope):
+    """Refresh desktop children before locating Calc's application/window."""
+    try:
+        desktop = _call_first(_atspi(), ("get_desktop",), 0)
+    except ImportError:
+        desktop = None
+    return _without_child_cache(desktop, lambda: find_root(app, scope))
+
+
 def sheet_editor_text(app: str) -> str | None:
     """Paragraph text of the open cell editor, or None.
 
@@ -10442,7 +10484,7 @@ def sheet_editor_text(app: str) -> str | None:
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
@@ -10478,7 +10520,7 @@ def _cell_editor_is_secure(app: str) -> bool | None:
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
@@ -10700,12 +10742,12 @@ def _sheet_table(app: str):
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.WINDOW)
+        root = _fresh_sheet_root(app, Scope.WINDOW)
     except Exception:
         return None
     if root is None:
         return None
-    return _find_spreadsheet(root, [80])
+    return _without_child_cache(root, lambda: _find_spreadsheet(root, [80]))
 
 
 def _cell_for_address(app: str, address: str):

@@ -3478,6 +3478,10 @@ class LinuxDriver:
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
+            # Return to the caller after committing so event_main can process
+            # the editor's removal before the next native tree operation.
+            if self._run(lambda: _atspi._commit_open_sheet_editor(app_id)):
+                time.sleep(_atspi._SHEET_GRID_COMMIT_PAUSE_S)
             # Each native read marshals through _safe/_call_first. The
             # verification waits must leave the event loop free to process
             # Calc's commit and cache updates between those reads.
@@ -4455,13 +4459,34 @@ class LinuxDriver:
         return _linux_system.running_apps()
 
     def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
-        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        """Recognize shell-capable launchers and native terminal input targets."""
         from pathlib import Path
         from a11y_computer_use import observe
         from a11y_computer_use.drivers import _atspi
 
         def known(name: str) -> bool:
             name = Path(name).name.casefold().removesuffix(".desktop")
+            # Run dialogs can execute arbitrary commands through ordinary input.
+            if name in {
+                "xfce4-appfinder", "xfce4-run", "gmrun", "gexec", "grun",
+                "krunner", "kstart", "kstart5", "dmenu", "dmenu_run", "rofi",
+                "ulauncher", "albert", "synapse",
+            }:
+                return True
+            if launch:
+                import re
+
+                # Interpreters and generic launch wrappers can start a shell.
+                # Do not classify a running Python GUI by its process comm.
+                if name in {
+                    "sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh",
+                    "ash", "busybox", "perl", "ruby", "irb", "node", "nodejs",
+                    "lua", "luajit", "tclsh", "wish", "php", "r", "rscript",
+                    "env", "sudo", "doas", "pkexec", "nohup", "setsid",
+                    "exo-open", "xdg-terminal", "xdg-terminal-exec",
+                    "gtk-launch", "xdg-open", "gio",
+                } or re.fullmatch(r"(?:python|pypy)(?:[23](?:\.\d+)*)?", name):
+                    return True
             return name in {
                 "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
                 "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
@@ -4479,11 +4504,38 @@ class LinuxDriver:
         if known(app):
             return True
         if launch:
+            import shlex
+
+            # Check command strings before app resolution (which may reject
+            # them), and every token of resolved desktop Exec argv afterward.
+            try:
+                parts = shlex.split(app)
+            except ValueError:
+                parts = [app]
+            if isinstance(target, tuple):
+                parts.extend(target)
+            if any(known(part) for part in parts):
+                return True
+
             # Resolve executable symlinks such as x-terminal-emulator.
             import shutil
 
-            executable = shutil.which(app)
-            return bool(executable and known(str(Path(executable).resolve())))
+            for part in parts:
+                executable = shutil.which(part)
+                if executable and known(str(Path(executable).resolve())):
+                    return True
+            from a11y_computer_use.drivers import _linux_system
+
+            # Match launch_app's executable-before-desktop precedence. Inspect
+            # Exec even when gtk-launch would delegate to the desktop service.
+            if not _linux_system._which_program(app):
+                entry = _linux_system._desktop_entry(app)
+                if entry:
+                    for part in _linux_system._desktop_match_names(app, entry[1]):
+                        executable = shutil.which(part)
+                        if known(part) or (executable and known(str(Path(executable).resolve()))):
+                            return True
+            return False
         if known(_resolved_app(app)):
             return True
         if isinstance(target, Element):

@@ -4224,7 +4224,9 @@ class Runtime:
         including a table that starts below the viewport, and scrolls the
         matching cell into that snapshot. A GTK table seeks through the
         Table interface, including a row that is not on screen. A cell
-        that stays off screen is reported with no bounds."""
+        that stays off screen is reported with no bounds. When a cell,
+        row, or other control has the exact name, that control is the
+        match. A label counts only when its own title is the text."""
         app = _required_app_arg(app, "find")
         if ocr:
             if not text:
@@ -4253,8 +4255,11 @@ class Runtime:
                 if armed:
                     self.driver._table_seek = previous
             self._current = snap  # refs from this call are what the agent acts on
-            matches = observe.find_elements(
-                snap, text=text, role=role, editable=editable, clickable=clickable
+            matches = observe.prefer_exact_targets(
+                observe.find_elements(
+                    snap, text=text, role=role, editable=editable, clickable=clickable,
+                ),
+                text,
             )
             return observe.render_matches(snap, matches, text=text)
 
@@ -6138,6 +6143,9 @@ class Runtime:
         return its ref — for targets not in the current snapshot because they're
         scrolled out of a long/virtualized list. Re-observes each step. Gated at
         CLICK tier (it scrolls); the inner READ snapshots are covered by it.
+        When a cell, row, or other control has the exact name, that control
+        is the match. A label counts only when its own title is the text,
+        so a label that merely mentions the name does not stop the search.
 
         ``ref`` names the element to wheel over (the scrolling list itself);
         without it the anchor is the overflow list, or the document on a
@@ -6318,7 +6326,7 @@ class Runtime:
         def search_matches(snap: Snapshot) -> tuple[Element, ...]:
             matches = tuple(query_hits(snap))
             if ref is not None or (role or "").lower().removeprefix("ax") == "statusbar" or not matches:
-                return matches
+                return observe.prefer_exact_targets(matches, text)
             by_ref = {el.ref: el for el in snap.elements}
 
             def in_statusbar(el: Element) -> bool:
@@ -6342,7 +6350,7 @@ class Runtime:
                     "an actionable content ref",
                     detail={"reason": "statusbar_only_match", "content_readable": False},
                 )
-            return matches
+            return observe.prefer_exact_targets(matches, text)
 
         def visible_matches(snap: Snapshot) -> list[Element]:
             return [
@@ -7839,7 +7847,9 @@ class Runtime:
                 launch_argv = None
             else:
                 launch_name, gate_key, launch_argv = self._prepare_launch(name)
-                self._reject_terminal(AppOp(verb=verb, app=launch_name), launch_name)
+                self._reject_terminal(
+                    AppOp(verb=verb, app=launch_name), launch_name, input_target=launch_argv,
+                )
 
             def launch() -> str | None:
                 before: list = []
@@ -9021,7 +9031,9 @@ def build_server(
         """Find elements in an app without dumping its whole tree — the targeted
         alternative to desktop_snapshot when you know what you're looking for.
         text = case-insensitive substring of an element's title or its full value
-        (text past the 200 characters kept on the element still matches). A
+        (text past the 200 characters kept on the element still matches). When
+        a cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. A
         terminal's shown value is the on-screen text; a match only in the
         scrolled-off buffer is still returned and marked above the view. role =
         substring of the accessibility role (e.g. 'button', 'textfield',
@@ -9462,7 +9474,9 @@ def build_server(
         comes into view, then return its ref — for a target that isn't in the
         current snapshot because it's scrolled out of a long or virtualized list.
         Give text (substring of title or the field's full value, including
-        text past the 200 characters a snapshot keeps) and/or role. Scrolls `direction`
+        text past the 200 characters a snapshot keeps) and/or role. When a
+        cell, row, or other control has that exact name, the match is that
+        control. A label counts only when its own title is the text. Scrolls `direction`
         ('down'|'up') up to max_scrolls times, re-observing each step; returns the
         matching ref(s) or a not-found note. An opaque container with no
         readable contents returns container_not_readable before sending input;
