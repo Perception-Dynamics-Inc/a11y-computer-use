@@ -21,21 +21,20 @@ def editor(monkeypatch):
 
         @staticmethod
         def get_range_extents(acc, start, end, coord):
-            if acc.visible is None:
-                raise RuntimeError('unsupported')
-            if any(0 <= lo <= start < end <= hi <= len(acc.text) for lo, hi in acc.visible):
-                return NS(x=40, y=40, width=100, height=20)
-            if any(0 <= lo < end and start < hi <= len(acc.text) for lo, hi in acc.visible):
-                return NS(x=40, y=20, width=100, height=40)
-            return NS(x=40, y=-100, width=100, height=20)
+            pytest.fail('native range extents must not be queried')
 
         @staticmethod
         def get_character_extents(acc, index, coord):
-            visible = any(0 <= lo <= index < hi <= len(acc.text) for lo, hi in acc.visible or ())
-            return NS(x=40, y=40 if visible else -100, width=10, height=20)
+            if acc.visible is None:
+                raise RuntimeError('unsupported')
+            valid = [(lo, hi) for lo, hi in acc.visible if 0 <= lo < hi <= len(acc.text)]
+            visible = any(lo <= index < hi for lo, hi in valid)
+            y = 40 if visible else (-100 if not valid or index < valid[0][0] else 800)
+            return NS(x=40, y=y, width=10, height=20)
 
     api = NS(Text=Text, CoordType=NS(SCREEN=0), TextClipType=NS(BOTH=3))
     monkeypatch.setattr(_atspi, '_atspi', lambda: api)
+    monkeypatch.setattr(_atspi, '_state_has', lambda acc, name: False)
     monkeypatch.setattr(_atspi, '_toolkit_name', lambda acc: 'gtk')
     monkeypatch.setattr(_atspi, '_state_flags', lambda acc: (True, True, None, False, None, True, True))
     monkeypatch.setattr(_atspi, '_extents', lambda acc, **kw: acc.box)
@@ -102,9 +101,6 @@ def test_scroll_to_find_waits_for_gtk_match_to_be_visible(editor, monkeypatch):
 
 def test_find_gtk_editor_checks_horizontal_clipping(editor, monkeypatch):
     api = _atspi._atspi()
-    monkeypatch.setattr(api.Text, 'get_range_extents', staticmethod(
-        lambda *args: NS(x=-100, y=40, width=300, height=20),
-    ))
     marker = editor.text.index('LEFT-MARKER-150')
     monkeypatch.setattr(api.Text, 'get_character_extents', staticmethod(
         lambda acc, index, coord: NS(
@@ -114,3 +110,62 @@ def test_find_gtk_editor_checks_horizontal_clipping(editor, monkeypatch):
     snap = snapshot(editor)
     assert observe.find_elements(snap, text='SHARED-001')
     assert not observe.find_elements(snap, text='LEFT-MARKER-150')
+
+
+def test_defunct_editor_never_reads_text_or_geometry(editor, monkeypatch):
+    monkeypatch.setattr(_atspi, '_state_has', lambda acc, name: name == 'DEFUNCT')
+    monkeypatch.setattr(_atspi, '_atspi', lambda: pytest.fail('defunct node queried'))
+    raw = _atspi.ATSPIAccessor().read(editor)
+    assert raw.value is None
+    assert raw.unallocated
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == ''
+
+
+def test_changed_editor_does_not_query_outdated_offsets(editor, monkeypatch):
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_count', staticmethod(lambda acc: 1))
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_extents',
+                        staticmethod(lambda *args: pytest.fail('outdated offset queried')))
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == ''
+
+
+def test_huge_single_line_uses_only_viewport_character_queries(editor, monkeypatch):
+    editor.text = 'x' * 1000000 + 'VISIBLE'
+    calls = []
+
+    def glyph(acc, index, coord):
+        assert 0 <= index < len(acc.text)
+        calls.append(index)
+        return NS(x=40, y=-100 if index < 1000000 else 40, width=10, height=20)
+
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_extents', staticmethod(glyph))
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == 'VISIBLE'
+    assert len(calls) < 50
+
+
+@pytest.mark.parametrize('rect', [None, NS(x=0, y=float('nan'), width=10, height=20),
+                                  NS(x=40, y=40, width=10, height=0)])
+def test_invalid_character_geometry_fails_closed(editor, monkeypatch, rect):
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_extents', staticmethod(lambda *args: rect))
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == ''
+
+
+def test_editor_becoming_defunct_aborts_geometry_reads(editor, monkeypatch):
+    calls = []
+    def glyph(acc, index, coord):
+        calls.append(index)
+        return NS(x=40, y=40, width=10, height=20)
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_extents', staticmethod(glyph))
+    monkeypatch.setattr(_atspi, '_state_has', lambda acc, name: name == 'DEFUNCT' and bool(calls))
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == ''
+    assert len(calls) == 1
+
+
+def test_unbounded_viewport_geometry_fails_closed(editor, monkeypatch):
+    editor.text = 'x' * 1000000
+    calls = []
+    def glyph(acc, index, coord):
+        calls.append(index)
+        return NS(x=40, y=40, width=10, height=20)
+    monkeypatch.setattr(_atspi._atspi().Text, 'get_character_extents', staticmethod(glyph))
+    assert _atspi._gtk_editor_on_screen(editor, editor.text) == ''
+    assert len(calls) < 50

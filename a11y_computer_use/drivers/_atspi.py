@@ -2683,49 +2683,69 @@ def _rect_hits_box(rect, box: tuple[float, float, float, float]) -> bool | None:
 
 
 def _gtk_editor_on_screen(acc, full: str) -> str:
-    """Only text ranges GTK places inside the editor's viewport are searchable.
+    """Search only characters with verified viewport geometry.
 
-    Missing geometry or an unsupported Text range query gives no evidence of
-    visible document text. Keep the full value for editing, but fail closed
-    for snapshot searches rather than claiming an off-screen buffer hit.
+    GTK range extents and bounded-range arrays can crash in native/GI code;
+    Python exception guards cannot contain SIGSEGV. Use character rectangles.
+    GTK lays out characters in increasing vertical order, including wrapped
+    lines. Binary searches avoid querying huge ranges or scanning the buffer.
+    Unknown geometry, defunct editors and changing buffers fail closed.
     """
+    if not full or accessible_gone(acc):
+        return ""
+    Atspi = _atspi()
+    count = _safe(lambda: Atspi.Text.get_character_count(acc))
+    if isinstance(count, bool) or not isinstance(count, int) or count != len(full):
+        return ""
     box = _raw_rect(acc, "SCREEN")
     if box is None or box[2] <= 0 or box[3] <= 0:
         return ""
-    Atspi = _atspi()
-    # GI's native TextRange array ownership can segfault on release, even
-    # for an ordinary GtkTextView. Use single rectangle queries instead.
     coord = Atspi.CoordType.SCREEN
-    parts = []
-    offset = 0
-    for line in full.splitlines(keepends=True):
-        end = offset + len(line)
-        rect = _safe(lambda: Atspi.Text.get_range_extents(acc, offset, end, coord))
-        if _rect_hits_box(rect, box):
-            left, top, width, height = box
-            if (
-                rect.x >= left and rect.y >= top
-                and rect.x + rect.width <= left + width
-                and rect.y + rect.height <= top + height
-            ):
-                parts.append(line)
+    rects = {}
+
+    def rectangle(index):
+        if index not in rects:
+            if accessible_gone(acc):
+                raise ValueError("defunct editor")
+            rect = _safe(lambda: Atspi.Text.get_character_extents(acc, index, coord))
+            if rect is None or not all(
+                math.isfinite(float(getattr(rect, key)))
+                for key in ("x", "y", "width", "height")
+            ) or rect.height <= 0:
+                raise ValueError("unreadable character geometry")
+            rects[index] = rect
+        return rects[index]
+
+    def lower_bound(predicate):
+        lo, hi = 0, count
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if predicate(rectangle(mid)):
+                hi = mid
             else:
-                # Clipped lines need character geometry, including horizontal
-                # clipping. Unknown geometry supplies no searchable text.
+                lo = mid + 1
+        return lo
+
+    try:
+        start = lower_bound(lambda rect: rect.y + rect.height > box[1])
+        end = lower_bound(lambda rect: rect.y >= box[1] + box[3])
+        # Malformed layouts must not trigger an unbounded native-call loop.
+        if end - start > 4096:
+            return ""
+        parts, run = [], []
+        for index in range(start, end):
+            if _rect_hits_box(rectangle(index), box):
+                run.append(full[index])
+            elif run:
+                parts.append("".join(run))
                 run = []
-                for index in range(offset, end):
-                    glyph = _safe(lambda index=index: Atspi.Text.get_character_extents(
-                        acc, index, coord,
-                    ))
-                    if _rect_hits_box(glyph, box):
-                        run.append(full[index])
-                    elif run:
-                        parts.append("".join(run))
-                        run = []
-                if run:
-                    parts.append("".join(run))
-        offset = end
-    return "\n".join(parts)
+        if run:
+            parts.append("".join(run))
+        if accessible_gone(acc) or _safe(lambda: Atspi.Text.get_character_count(acc)) != count:
+            return ""
+        return "\n".join(parts)
+    except (TypeError, ValueError, AttributeError):
+        return ""
 
 
 def _terminal_on_screen(acc, full: str) -> str:
@@ -3315,6 +3335,8 @@ class ATSPIAccessor:
             return False
 
     def read(self, node: object) -> RawNode:
+        if _state_has(node, "DEFUNCT"):
+            return RawNode(role="AXGroup", unallocated=True)
         role_str = _role_name(node)
         role = _ROLE.get(role_str, "AXGroup")
         # GTK3 gives a single-line Gtk.Entry the same "text" role as a
