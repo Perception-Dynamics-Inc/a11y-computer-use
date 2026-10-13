@@ -13311,3 +13311,347 @@ def test_linux_swing_column_headers_keep_their_own_names(tmp_path) -> None:
         assert xs["ID"] < xs["Item"] < xs["Qty"]
     finally:
         _stop(proc)
+
+
+def test_linux_geany_symbol_click_selects_and_double_click_jumps(tmp_path) -> None:
+    """Live Geany Symbols row. Not a synthetic tree.
+
+    The row has an activate action that a single click does not run. The
+    snapshot says the row activates on double-click, and count=1 stays a
+    single click: the caret does not move. count=2 is that double-click
+    and the caret moves to the function.
+    """
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    driver = LinuxDriver()
+    _require_bus(driver)
+    binary = _which("geany")
+    if not binary:
+        pytest.skip("geany is not installed")
+    lines = ["# pad"] * 300
+    lines.extend(["def target_fn_row150():", "    return 1", ""])
+    document = tmp_path / "geany-sym.py"
+    document.write_text("\n".join(lines))
+    home = tmp_path / "geany-home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["GTK_MODULES"] = "gail:atk-bridge"
+    env["NO_AT_BRIDGE"] = "0"
+    auth = os.environ.get("XAUTHORITY")
+    if not auth:
+        candidate = os.path.expanduser("~/.Xauthority")
+        if os.path.exists(candidate):
+            env["XAUTHORITY"] = candidate
+    runtime = _runtime_for(tmp_path, driver, "geany")
+    proc = subprocess.Popen(
+        [binary, "--no-plugins", str(document)],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        shot = _wait_named_tree(
+            driver,
+            "geany",
+            lambda snap: any("target_fn_row150" in (el.title or "") for el in snap.elements),
+            timeout_s=20,
+        )
+        assert shot is not None and proc.poll() is None, "geany never listed the symbol"
+        listed = runtime.desktop_snapshot("geany")
+        assert "(activates on double-click)" in listed
+        shot = runtime._current
+        assert shot is not None
+        cell = next(el for el in shot.elements if "target_fn_row150" in (el.title or ""))
+        assert cell.note == "activates on double-click"
+        single = runtime.click(cell.ref)
+        assert "clicked" in single
+        assert "(activates on double-click)" in single
+        assert single.outcome == "partial"
+        assert single.evidence == "the row was selected and activates on double-click"
+        after_single = driver.snapshot(Scope.WINDOW, "geany")
+        status = "\n".join(
+            f"{el.title or ''} {el.value or ''}" for el in after_single.elements
+        )
+        assert "line: 301" not in status, status
+        runtime._current = after_single
+        cell = next(el for el in after_single.elements if "target_fn_row150" in (el.title or ""))
+        double = runtime.click(cell.ref, count=2)
+        assert "clicked" in double
+        assert "(activates on double-click)" not in str(double)
+        assert double.outcome != "partial"
+        jumped = "\n".join(
+            f"{el.title or ''} {el.value or ''}"
+            for el in driver.snapshot(Scope.WINDOW, "geany").elements
+        )
+        assert "line: 301" in jumped, jumped
+    finally:
+        _stop_group(proc)
+
+
+_SWING_TABLE_APP = textwrap.dedent(
+    r"""
+    import javax.swing.*;
+    import java.awt.*;
+
+    public class SwingTableProbe {
+        static String status = "Status: idle";
+
+        public static void main(String[] args) {
+            SwingUtilities.invokeLater(() -> {
+                JFrame frame = new JFrame("SwingTableProbe");
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                JLabel statusLabel = new JLabel(status);
+                String[] columns = {"ID", "Item", "Qty"};
+                Object[][] rows = new Object[160][3];
+                for (int i = 0; i < rows.length; i++) {
+                    rows[i][0] = i;
+                    rows[i][1] = String.format("ROW-%03d", i);
+                    rows[i][2] = i;
+                }
+                JTable table = new JTable(rows, columns);
+                table.getSelectionModel().addListSelectionListener(e -> {
+                    if (e.getValueIsAdjusting() || table.getSelectedRow() < 0) return;
+                    status = "Status: row=" + table.getValueAt(table.getSelectedRow(), 1);
+                    statusLabel.setText(status);
+                });
+                JPanel panel = new JPanel(new BorderLayout());
+                panel.add(new JScrollPane(table), BorderLayout.CENTER);
+                panel.add(statusLabel, BorderLayout.SOUTH);
+                frame.setContentPane(panel);
+                frame.setSize(520, 360);
+                frame.setLocation(40, 40);
+                frame.setVisible(true);
+            });
+        }
+    }
+    """
+)
+
+
+def test_linux_swing_table_rows_scroll_into_view(tmp_path) -> None:
+    """Live Swing JTable, when the Java ATK wrapper is installed.
+
+    A row below the viewport is not listed with an off-window box.
+    ``find`` scrolls it into view. The click lands on that row.
+    """
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    jar = _java_atk_jar()
+    javac = _which("javac")
+    java = _which("java")
+    if jar is None or not javac or not java:
+        pytest.skip("Java ATK wrapper is not installed")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    source = tmp_path / "SwingTableProbe.java"
+    source.write_text(_SWING_TABLE_APP)
+    compiled = subprocess.run(
+        [javac, str(source)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    if compiled.returncode != 0:
+        pytest.skip(f"javac failed: {compiled.stderr[-400:]}")
+    proc = subprocess.Popen(
+        [
+            java,
+            "-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper",
+            "-cp", f"{jar}:{tmp_path}", "SwingTableProbe",
+        ],
+        cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    app = "java"
+    try:
+        deadline = time.monotonic() + 20
+        snap = None
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.skip(f"Swing table probe exited {proc.returncode} before it was on the bus")
+            try:
+                snap = driver.snapshot(Scope.WINDOW, app)
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                snap = None
+            if snap is not None and any(el.title == "ROW-000" for el in snap.elements):
+                break
+            time.sleep(0.3)
+        else:
+            pytest.skip("Swing table probe did not publish ROW-000 on the AT-SPI bus")
+        assert snap is not None
+        assert not any(el.title == "ROW-150" for el in snap.elements)
+        for el in snap.elements:
+            if el.title.startswith("ROW-") and el.bounds is not None:
+                assert el.bounds.y + el.bounds.height <= 800, (el.title, el.bounds)
+        store = safety.PermissionStore(tmp_path / "swing-table-permissions.json")
+        store.set_tier(app, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "swing-table-audit"), driver=driver,
+        )
+        found = runtime.find(app, text="ROW-150")
+        assert "no elements match" not in found, found
+        assert "ROW-150" in found
+        row = next(el for el in runtime._current.elements if el.title == "ROW-150" and el.bounds is not None)
+        assert row.bounds.y >= 0 and row.bounds.y < 800
+        clicked = runtime.click(row.ref)
+        assert "clicked" in str(clicked), clicked
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.APP, app)
+            shown = " ".join(f"{el.title or ''} {el.value or ''}" for el in shot.elements)
+            if "row=ROW-150" in shown:
+                break
+            time.sleep(0.2)
+        assert "row=ROW-150" in shown, shown
+    finally:
+        _stop(proc)
+
+
+_SWING_MENU_APP = textwrap.dedent(
+    r"""
+    import javax.swing.*;
+    import java.awt.*;
+
+    public class SwingMenuProbe {
+        static String status = "Status: idle";
+
+        public static void main(String[] args) {
+            SwingUtilities.invokeLater(() -> {
+                JFrame frame = new JFrame("SwingMenuProbe");
+                frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+                JMenu edit = new JMenu("Edit");
+                JMenuItem clear = new JMenuItem("Clear Notes");
+                JLabel statusLabel = new JLabel(status);
+                clear.addActionListener(e -> {
+                    status = "Status: notes-cleared";
+                    statusLabel.setText(status);
+                });
+                edit.add(clear);
+                JMenuBar bar = new JMenuBar();
+                bar.add(edit);
+                frame.setJMenuBar(bar);
+                JButton dialog = new JButton("Show Dialog");
+                dialog.addActionListener(e -> {
+                    int choice = JOptionPane.showConfirmDialog(
+                        frame, "Confirm the probe action?", "Confirm Probe",
+                        JOptionPane.YES_NO_OPTION);
+                    String word = choice == JOptionPane.YES_OPTION ? "yes"
+                        : choice == JOptionPane.NO_OPTION ? "no" : "closed";
+                    status = "Status: dialog=" + word;
+                    statusLabel.setText(status);
+                });
+                String[] columns = {"ID", "Item", "Qty"};
+                Object[][] rows = new Object[12][3];
+                for (int i = 0; i < rows.length; i++) {
+                    rows[i][0] = i + 1;
+                    rows[i][1] = String.format("ROW-%03d", i + 1);
+                    rows[i][2] = i;
+                }
+                JTable table = new JTable(rows, columns);
+                table.getSelectionModel().addListSelectionListener(e -> {
+                    if (e.getValueIsAdjusting() || table.getSelectedRow() < 0) return;
+                    status = "Status: row=" + table.getValueAt(table.getSelectedRow(), 1);
+                    statusLabel.setText(status);
+                });
+                JPanel panel = new JPanel(new BorderLayout());
+                panel.add(dialog, BorderLayout.NORTH);
+                panel.add(new JScrollPane(table), BorderLayout.CENTER);
+                panel.add(statusLabel, BorderLayout.SOUTH);
+                frame.setContentPane(panel);
+                frame.setSize(520, 360);
+                frame.setLocation(40, 40);
+                frame.setVisible(true);
+            });
+        }
+    }
+    """
+)
+
+
+def test_linux_swing_menu_press_does_not_cancel_the_next_dialog(tmp_path) -> None:
+    """Live Swing, when the Java ATK wrapper is installed.
+
+    ``menu(path='Edit > Clear Notes')`` must leave the popup closed. The
+    next Yes click confirms the dialog. It does not report success while
+    the click lands on the table behind a cancelled dialog.
+    """
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers.linux import LinuxDriver
+
+    jar = _java_atk_jar()
+    javac = _which("javac")
+    java = _which("java")
+    if jar is None or not javac or not java:
+        pytest.skip("Java ATK wrapper is not installed")
+    driver = LinuxDriver()
+    _require_bus(driver)
+    source = tmp_path / "SwingMenuProbe.java"
+    source.write_text(_SWING_MENU_APP)
+    compiled = subprocess.run(
+        [javac, str(source)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    if compiled.returncode != 0:
+        pytest.skip(f"javac failed: {compiled.stderr[-400:]}")
+    proc = subprocess.Popen(
+        [
+            java, f"-Djavax.accessibility.assistive_technologies=org.GNOME.Accessibility.AtkWrapper",
+            "-cp", f"{jar}:{tmp_path}", "SwingMenuProbe",
+        ],
+        cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    app = "java"
+    try:
+        deadline = time.monotonic() + 20
+        ready = False
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                pytest.skip(f"Swing probe exited {proc.returncode} before it was on the bus")
+            try:
+                rows = driver.menu_items(app, "Edit")
+            except ComputerUseError as exc:
+                if exc.code is not ErrorCode.APP_NOT_FOUND:
+                    raise
+                rows = []
+            if any(row.get("title") == "Clear Notes" for row in rows):
+                ready = True
+                break
+            time.sleep(0.3)
+        if not ready:
+            pytest.skip("Swing probe did not publish an Edit menu on the AT-SPI bus")
+        store = safety.PermissionStore(tmp_path / "swing-menu-permissions.json")
+        store.set_tier(app, safety.Tier.FULL)
+        runtime = server.Runtime(
+            store=store, audit=safety.AuditLog(tmp_path / "swing-menu-audit"), driver=driver,
+        )
+        pressed = runtime.menu(app, "Edit > Clear Notes")
+        assert "Clear Notes" in str(pressed)
+        state = driver.menu_state(app)
+        assert state.get("open") is False, state
+        listed = runtime.desktop_snapshot(app)
+        assert "open menu:" not in listed
+        assert "Show Dialog" in listed
+        dialog_button = next(
+            el for el in runtime._current.elements
+            if el.title == "Show Dialog" and el.clickable
+        )
+        runtime.click(dialog_button.ref)
+        found = runtime.find(app, text="Yes")
+        assert "Yes" in found and "no elements match" not in found
+        yes = next(el for el in runtime._current.elements if el.title == "Yes" and el.clickable)
+        clicked = runtime.click(yes.ref)
+        assert "clicked" in str(clicked), clicked
+        deadline = time.monotonic() + 4
+        shown = ""
+        while time.monotonic() < deadline:
+            shot = driver.snapshot(Scope.APP, app)
+            shown = " ".join(el.title or "" for el in shot.elements)
+            shown += " " + " ".join(str(el.value or "") for el in shot.elements)
+            if "dialog=yes" in shown:
+                break
+            time.sleep(0.2)
+        assert "dialog=yes" in shown, shown
+        assert "row=ROW-" not in shown
+    finally:
+        _stop(proc)
