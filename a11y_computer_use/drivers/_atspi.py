@@ -479,12 +479,17 @@ def call_went_unanswered() -> bool:
     )
 
 
-def _safe(fn, default=None):
+def _safe(fn, default=None, *, marshal=True):
     watch = _current_watch()
     start = time.monotonic()
     failed = False
     try:
-        result = fn()
+        # Direct native calls (e.g. Table.get_accessible_at) need the same
+        # thread ownership as version-tolerant getters. Keep waits on the
+        # caller so the GLib loop can process replies between reads.
+        from a11y_computer_use.drivers import _atspi_events
+
+        result = _atspi_events.run(fn) if marshal else fn()
     except ComputerUseError:
         raise
     except Exception:
@@ -773,16 +778,30 @@ def _call_first(obj, names, *args, default=None):
 
     Inside ``read_cache``, a successful stable getter is remembered for
     this object and these arguments. A mutator drops that memory first.
+
+    While ``event_main`` is running, the call moves onto that thread.
+    libatspi is not safe from the caller and the loop at once.
     """
     if obj is None:
         return default
+
+    def invoke():
+        return _call_first_inline(obj, names, *args, default=default)
+
+    from a11y_computer_use.drivers import _atspi_events
+
+    return _atspi_events.run(invoke)
+
+
+def _call_first_inline(obj, names, *args, default=None):
+    # _call_first already marshaled the entire getter/cache operation.
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
             continue
         if _is_mutator(name):
             _drop_read_cache()
-            return _safe(lambda m=method: m(*args), default)
+            return _safe(lambda m=method: m(*args), default, marshal=False)
         key = _cache_key(name, args)
         if key is not None and _read_cache_stack():
             cached = _lookup_read_cache(obj, key)
@@ -790,7 +809,7 @@ def _call_first(obj, names, *args, default=None):
                 _reply_local.last_failed = False
                 _reply_local.last_elapsed = 0.0
                 return cached
-        result = _safe(lambda m=method: m(*args), default)
+        result = _safe(lambda m=method: m(*args), default, marshal=False)
         if (
             key is not None
             and _read_cache_stack()
@@ -1139,12 +1158,86 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _audacity_track_area(container) -> bool:
+    """Recognize a project track area by its published Timeline Options control.
+
+    Stay in this container: a separate wx dialog may also have role frame.
+    A bounded search fails closed when the project context is unavailable.
+    """
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth):
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH:
+            return False
+        budget -= 1
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog"} and depth:
+            return False
+        if _node_name(node).strip().casefold() == "timeline options":
+            return True
+        if role in _SURFACE_SKIP_ROLES:
+            return False
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return False
+        for index in range(min(count, _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None and walk(child, depth + 1):
+                return True
+        return False
+
+    return walk(container, 0)
+
+def _okular_thumbnail_surface(node) -> tuple[str, str]:
+    """Label an empty thumbnail strip from its native sidebar context.
+
+    No page labels or thumbnail bounds are inferred from this painted filler.
+    Native names and children take precedence over the fallback.
+    """
+    if _child_count(node) != 0:
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return "", ""
+    parent = _parent_of(node)
+    if parent is None or not any(
+        _role_name(child) == "scroll bar" for child in _direct_children(parent)
+    ):
+        return "", ""
+    thumbnails = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if _node_name(parent).casefold() == "sidebar" and thumbnails:
+                return (
+                    "Okular thumbnails",
+                    "Per-page thumbnails are not exposed by AT-SPI; use the page-number "
+                    "field, Go to Page…, or the Find bar for navigation.",
+                )
+            break
+        thumbnails = thumbnails or any(
+            _role_name(child) in {"label", "static", "text"}
+            and _node_name(child).casefold() == "thumbnails"
+            for child in _direct_children(parent)
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
-    Toolbar tools put their label in the tooltip. The track view and Time
+    Toolbar tools put their label in the tooltip; wxGTK may identify their
+    container only through a sibling grip's description. The track view and Time
     clock paint their contents without publishing controls or a value. Keep
     those surfaces opaque; never invent track names or clock readings.
+    Require Timeline Options in the local track area / project window for
+    surface hints: wxGTK dialogs can expose a frame rather than a dialog.
     """
     if _child_count(node) != 0 or not _parent_of(node):
         return "", "", ""
@@ -1170,13 +1263,44 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
         return "", "", ""
     name = _node_name(node).strip()
     description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is None and not name and description:
+        container = _parent_of(node)
+        if _role_name(container) == "panel":
+            for index in range(_child_count(container)):
+                sibling = _child_at(container, index)
+                marker = str(_call_first(
+                    sibling, ("get_description",), default="",
+                ) or "").strip().casefold()
+                if (_role_name(sibling) == "panel" and _child_count(sibling) == 0
+                        and marker.startswith("audacity ") and marker.endswith(" toolbar")):
+                    if description.casefold() != marker:
+                        return "AXButton", "", ""
+    # wxGTK publishes the Time toolbar as a panel containing a labelled
+    # grip, the clock, and a resize grip, rather than a named tool bar.
+    container = _parent_of(node)
+    if not name and not description and _role_name(container) == "panel" and _child_count(container) == 3:
+        grip = _child_at(container, 0)
+        clock = _child_at(container, 1)
+        resize_grip = _child_at(container, 2)
+        if (
+            clock == node
+            and grip is not None
+            and resize_grip is not None
+            and _role_name(grip) == "panel"
+            and _role_name(resize_grip) == "panel"
+            and str(_call_first(grip, ("get_description",), default="") or "").strip().casefold()
+            == "audacity time toolbar"
+        ):
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
-        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+        if (not name and not description
+                and _node_name(toolbar).casefold() in {"time", "time toolbar"}
+                and _audacity_track_area(parent)):
             return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     elif not name and not description and focusable and size is not None:
-        if size[0] >= 300 and size[1] >= 100:
+        if size[0] >= 300 and size[1] >= 100 and _audacity_track_area(_parent_of(node)):
             return (
                 "", "Audacity track / waveform",
                 "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",
@@ -1733,8 +1857,11 @@ _HTML_TAG_NAMES = (
 )
 # The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
 # not a tag: HTML does not allow a space between ``<`` and the name.
+# Quoted attributes may contain angle brackets; require the full tag name
+# so a literal ``<p-custom>`` is not mistaken for a paragraph.
 _HTML_TAG_RE = re.compile(
-    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    rf"<(/)?({_HTML_TAG_NAMES})(?=[\s/>])"
+    r"((?:[^<>\"']|\"[^\"]*\"|'[^']*')*)>",
     re.IGNORECASE,
 )
 _HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
@@ -1820,6 +1947,8 @@ def _image_text_label(acc) -> str:
     pruner can still fold the icon. The read is bounded. ``get_text`` is
     not asked for ``-1``.
     """
+    if is_secure(acc):
+        return ""
     try:
         Atspi = _atspi()
     except ImportError:
@@ -1881,6 +2010,8 @@ def _text_is_blank(text: str | None) -> bool:
 
 
 def _direct_text(acc) -> str:
+    if is_secure(acc):
+        return ""
     got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
     return got if isinstance(got, str) else ""
 
@@ -1940,7 +2071,7 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     contributes its name when that name is not already in the surrounding
     words, so ``<p><input aria-label="Bare para input"></p>`` is not blank.
     """
-    if obj is None or depth > 6:
+    if obj is None or depth > 6 or is_secure(obj):
         return ""
     role_name = _role_name(obj)
     role = _ROLE.get(role_name, "AXGroup")
@@ -2055,6 +2186,8 @@ def _expand_embedded(acc, text: str, depth: int = 0) -> str:
 
 
 def _option_label(node) -> str:
+    if is_secure(node):
+        return ""
     label = _node_name(node)
     if label:
         return label
@@ -2311,6 +2444,24 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     return (nx, ny), (float(window[2]), float(window[3]))
 
 
+def gtk4_in_window_dialog(acc) -> bool:
+    """GTK 4 dialog descendants whose WINDOW origin is not a screen box.
+
+    AdwAlertDialog is nested inside a frame, rather than an X window of its
+    own. Its positive WINDOW coordinates can still omit dialog offsets (#520).
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    dialog = False
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"alert", "dialog"}:
+            dialog = True
+        elif role in {"frame", "window"}:
+            return dialog
+    return False
+
+
 def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
@@ -2502,6 +2653,53 @@ def _combo_display_name(acc, name: str) -> str:
     return title or name
 
 
+def _gtk_button_row_name(acc, name: str) -> str:
+    """Name ambiguous GTK grid buttons from measured same-row sibling labels.
+
+    Explicit relations win; unique names and missing or ambiguous geometry
+    retain the raw name. GTK child order need not match screen row order.
+    """
+    if "gtk" not in _toolkit_name(acc):
+        return name
+    label = _labelled_by_name(acc)
+    if label:
+        return _strip_label_colon(label) or name
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
+        return name
+    siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
+    if name.strip() and sum(
+        _role_name(child) == "push button" and _node_name(child) == name
+        for child in siblings if child is not None
+    ) < 2:
+        return name
+    position, size = _extents(acc)
+    if position is None or size is None:
+        return name
+    x, y = position
+    width, height = size
+    if not all(math.isfinite(v) for v in (*position, *size)) or min(width, height) <= 0:
+        return name
+    candidates = []
+    for child in siblings:
+        if child is None or _role_name(child) not in {"label", "static", "static text"}:
+            continue
+        text = _node_name(child)
+        pos, span = _extents(child)
+        if not text.strip() or pos is None or span is None:
+            continue
+        if not all(math.isfinite(v) for v in (*pos, *span)) or min(span) <= 0:
+            continue
+        left, top = pos
+        w, h = span
+        if left + w <= x and top < y + height and top + h > y:
+            candidates.append((x - left - w, text))
+    candidates.sort()
+    if not candidates or (len(candidates) > 1 and candidates[0][0] == candidates[1][0]):
+        return name
+    return _strip_label_colon(candidates[0][1]) or name
+
+
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
     """True for a Chromium custom ``role=spinbutton``, not a native number input.
 
@@ -2645,6 +2843,15 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _evince_page(node) -> bool:
+    """Evince PDF pages have reliable SHOWING state, but drifting extents."""
+    if _role_name(node) != "page":
+        return False
+    app = _application_of(node)
+    name = _call_first(app, ("get_name",), default="") if app is not None else ""
+    return str(name).strip().lower() == "evince"
+
+
 def _page_text(acc) -> str | None:
     """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
 
@@ -2654,6 +2861,8 @@ def _page_text(acc) -> str | None:
     longer. ``None`` is a missing interface or a blank page. An embedded
     object character is expanded the same way a paragraph's is.
     """
+    if is_secure(acc):
+        return None
     try:
         Atspi = _atspi()
     except ImportError:
@@ -2703,8 +2912,8 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     fields. The number is 0.0 or an uninitialized double (about ``1e-310``).
     Text, or the accessible name, is what those roles show. Value is read for
     a slider, spin button, or progress bar, and only when Qt's minimum and
-    maximum are a real range. GTK's fallback for a non-range control is
-    unchanged, except a dialog or a checkbox whose CurrentValue is a
+    maximum are a real range. GTK's fallback for a non-range control requires
+    a Value interface. A dialog or a checkbox whose CurrentValue is a
     subnormal double: that reading is absent. Zero and a small normalized
     value on those roles stay. An empty entry, text field, or paragraph
     (character count 0) has no value either: Chromium's empty input
@@ -2716,7 +2925,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     character count, a subnormal on a text role is absent too, and zero
     and a small normalized value stay when the interface is present.
     """
-    if role == "AXSecureTextField":
+    if role == "AXSecureTextField" or is_secure(acc):
         return None
     Atspi = _atspi()
     if role_name is None:
@@ -2725,7 +2934,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+        got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
@@ -2791,11 +3000,11 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     # current value is not a number the widget holds. The name is the title.
     if _qt_app(acc):
         return None
-    # GTK 4 text (the calculator display, a new text-editor document) has
-    # Text and no Value. Reading CurrentValue is an uninitialized double.
+    # GTK 4 text and popover menu items have no Value. Reading CurrentValue
+    # without that interface can return an uninitialized double.
     # ``_value_interface_present`` is false only when the accessible reports
     # the interface missing. A test double with no getter still reads Value.
-    if role_name in _TEXT_ROLE_NAMES and not _value_interface_present(acc):
+    if not _value_interface_present(acc):
         return None
     cur = _safe(lambda: Atspi.Value.get_current_value(acc))
     if cur is None:
@@ -3178,6 +3387,8 @@ class ATSPIAccessor:
         # input stays a text field. Chromium entries are not matched here.
         if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
             role = "AXTextArea"
+        if is_secure(node):
+            role = "AXSecureTextField"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -3200,9 +3411,37 @@ class ATSPIAccessor:
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
         name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
-        description = _call_first(node, ("get_description",), default="") or ""
+        # The snapshot uses the description as its title when the name is empty.
+        description = _plain_accessible_name(
+            str(_call_first(node, ("get_description",), default="") or "")
+        )
+        # GTK 4 can expose uninitialized allocations on empty anonymous
+        # panels (#503). Do not turn that filler into a clickable opaque
+        # region. A side longer than the full X coordinate span (65535)
+        # is suspect only here. Keep real containers' extents for clipping
+        # and row sampling.
+        if (
+            role_str == "panel"
+            and not str(name).strip()
+            and size is not None
+            and any(not math.isfinite(v) or v > 65535 for v in size)
+            and _gtk_major(node) == 4
+            and _child_count(node) == 0
+        ):
+            position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
+        if role == "AXMenuItem" and not str(name).strip():
+            # GTK 4 Gio.Menu labels live on LABELLED_BY targets, sometimes
+            # only as Text rather than an accessible name.
+            for target in _relation_targets(node, "labelled_by"):
+                label = _node_name(target) or _direct_text(target).strip()
+                if label:
+                    name = _plain_accessible_name(label)
+                    break
+        button_name = str(name)
+        if role_str == "push button":
+            name = _gtk_button_row_name(node, button_name)
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
         # An unnamed icon can still carry a caption on its Text interface.
@@ -3249,6 +3488,11 @@ class ATSPIAccessor:
             page_text = _page_text(node)
             if page_text:
                 value = page_text
+                if _evince_page(node) and _state_has(node, "SHOWING"):
+                    # Evince's page boxes drift after scrolling. Keep the
+                    # visible text without offering those boxes for targeting.
+                    position, size = None, None
+                    unallocated = True
             else:
                 role = "AXGroup"
                 value = None
@@ -3268,13 +3512,47 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        if role_str == "push button" and name != button_name and button_name.strip() and value is None:
+            value = button_name
         screen_text = None
+        if role == "AXTextArea":
+            owner = _application_of(node)
+            owner_name = str(_call_first(owner, ("get_name",), default="") or "")
+            if owner_name.casefold() == "kate":
+                # KTextEditor publishes the whole buffer, including off-screen
+                # characters. Its widget box cannot verify substring visibility,
+                # even for a document containing one long line. Keep the ref.
+                value = None
+                description = (
+                    f"{description} Document text visibility unavailable; "
+                    "use in-document navigation to locate text."
+                ).strip()
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
         name, description = _split_modifier_hints(str(name), str(description))
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         panel_note = ""
+        if (
+            role_str == "filler" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            role_str == "drawing area"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _child_count(node) == 0
+            and _parent_of(node)
+        ):
+            app = _application_ancestor(node)
+            if app is not None and _node_name(app).casefold() == "gnumeric":
+                surface_name = "Gnumeric drawing area"
+                panel_note = (
+                    "Cell content is not exposed by AT-SPI on this surface. "
+                    "The formula bar exposes only the active cell; inspect it to read "
+                    "that cell. Other cells require visual inspection."
+                )
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
@@ -3292,7 +3570,11 @@ class ATSPIAccessor:
                 name = label
         return RawNode(
             role=role,
-            subrole="terminal" if role_str == "terminal" else None,
+            subrole=(
+                "terminal" if role_str == "terminal"
+                else "label" if role_str == "label"
+                else None
+            ),
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -3472,6 +3754,12 @@ class ATSPIAccessor:
             if child is not None:
                 kids.append(child)
         role = _role_name(node)
+        # Evince's hidden pages can have on-screen rectangles, and its
+        # painted page can have an off-screen rectangle. Trust SHOWING.
+        kids = [
+            child for child in kids
+            if not _evince_page(child) or _state_has(child, "SHOWING")
+        ]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -4876,6 +5164,33 @@ def find_root(app: str, scope) -> object | None:
         raise
     except Exception:  # noqa: BLE001 - X11 may be unavailable (Wayland/headless)
         pids = set()
+    # A portal process can contain dialogs for several apps. Bind only its
+    # active, explicitly parented window, never its whole application tree.
+    portal = None
+    try:
+        row = _linux_system.active_window()
+        if row and row.get("app", "").lower() == needle:
+            pid = int(row.get("pid") or 0)
+            identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+            if identity in _linux_system._PORTAL_BACKENDS and row["app"] != identity:
+                rows = [r for r in _linux_system.windows()
+                        if r.get("pid") == pid and r.get("title") == row.get("title")]
+                if row.get("title") and len(rows) == 1:
+                    portal = row
+    except ComputerUseError:
+        raise
+    except Exception:  # noqa: BLE001 - unavailable X11 cannot authorize a portal
+        pass
+    if portal is not None:
+        for i in range(int(count)):
+            candidate = _call_first(desktop, ("get_child_at_index",), i)
+            if candidate is None or pid_of(candidate) != portal["pid"]:
+                continue
+            frames = [f for f in _frames(candidate)
+                      if _call_first(f, ("get_name",), default="") == portal["title"]]
+            if len(frames) == 1 and _is_active(frames[0]):
+                return frames[0]
+        return None
     best = None
     best_rank = -1
     hinted = next(iter(pids)) if len(pids) == 1 else None
@@ -4972,6 +5287,12 @@ def showing_toplevels(node) -> list:
         return []
     app = _application_of(node)
     if app is None:
+        return [node]
+    from a11y_computer_use.drivers import _linux_system
+
+    pid = pid_of(app)
+    identity = _linux_system._identity_for_pid(pid, _linux_system._comm_for_pid(pid))
+    if identity in _linux_system._PORTAL_BACKENDS:
         return [node]
     count = _child_count(app)
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
@@ -5070,9 +5391,23 @@ def desktop_application_roots() -> DesktopApplications:
 
 
 def is_secure(acc) -> bool:
-    """Whether ``acc`` is a password field (AT-SPI role name ``password text``,
-    the role the engine maps to ``AXSecureTextField``)."""
-    return _role_name(acc) == "password text"
+    """Recognize password roles, protected states, and explicit masking.
+
+    GTK 4 can omit every masking signal; its empty sentinel must also remain
+    empty in public text readback.
+    """
+    if _role_name(acc) == "password text":
+        return True
+    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED")):
+        return True
+    attrs = _get_attributes(acc)
+    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
+           for key in ("password", "protected")):
+        return True
+    if _role_name(acc) in {"entry", "text"}:
+        visibility = _call_first(acc, ("get_visibility",))
+        return visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}
+    return False
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -5231,6 +5566,60 @@ _BROWSER_BAR_CLEARED: set[int] = set()
 # of that opening must not schedule another cache clear: clearing on every
 # read walks an empty document and blows the scroll budget.
 _BROWSER_BAR_OPEN: set[int] = set()
+
+
+_FIND_ENTRY_ROLES = frozenset({
+    "text", "entry", "password text", "edit bar", "paragraph",
+})
+
+
+def focused_find_field(acc) -> bool:
+    """True when ``acc`` is a browser find field, not a page control or a cell.
+
+    Chrome names that field ``Find`` and gives it an entry role with no HTML
+    tag. A page input titled Find has a tag. A push button titled Find, a
+    table cell, and a Swing editor are not this field. A find-in-page frame
+    that itself holds focus counts too.
+    """
+    if acc is None:
+        return False
+    try:
+        name = _node_name(acc) or ""
+    except Exception:
+        return False
+    folded = name.lstrip().lower()
+    if folded.startswith("find in page"):
+        return True
+    if name != "Find":
+        return False
+    try:
+        attrs = _get_attributes(acc)
+    except Exception:
+        attrs = {}
+    tag = str(attrs.get("tag") or attrs.get("html-tag") or "").strip()
+    if tag:
+        return False
+    try:
+        role = _role_name(acc)
+    except Exception:
+        return False
+    if role in {"push button", "toggle button", "link", "menu item", "table cell", "cell"}:
+        return False
+    return role in _FIND_ENTRY_ROLES or role == "entry" or "text" in role
+
+
+def app_supports_in_page_find(root) -> bool:
+    """True for Chromium and Firefox, which open a find bar on Ctrl+F.
+
+    Java, Swing, GTK, Qt, and a tree with no toolkit are false. A failed
+    read is false, so the caller does not type into a table cell.
+    """
+    if root is None:
+        return False
+    try:
+        return bool(_chromium_app(root) or _gecko_app(root))
+    except Exception:
+        return False
 
 
 def snapshot_shows_browser_bar(elements) -> bool:
@@ -7342,18 +7731,48 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
+def _read_full_text(acc, *, count=None, verification=False):
+    """Keep ambiguous GTK 4 sentinel text empty outside boolean verification.
+
+    Chromium's bounded read can echo a write instead of the actual contents,
+    so a nonempty sentinel result remains authoritative. NULL still means
+    unreadable. A bounded retry may expose an unmarked masked entry, so
+    only private boolean write verification may request it.
+    """
+    if is_secure(acc):
+        return None
+    Atspi = _atspi()
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if got == "" and verification:
+        if count is None:
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    return got
+
+
+def _verification_matches(acc, text: str) -> bool:
+    """Compare a private read without returning its contents."""
+    if is_secure(acc):
+        return False
+    _call_first(acc, ("clear_cache", "clearCache"))
+    return _texts_match(_read_full_text(acc, verification=True), text)
+
+
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. A bounded ``get_text(0, character_count)`` is not used. On a
-    Chromium web field that count can be the length of the string just passed
+    returns one. GTK 4's empty sentinel stays empty because a bounded
+    read can expose a masked entry without any security signal. A nonempty
+    sentinel read is kept: on a Chromium web
+    field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
     is dropped first so the read is not the pre-write value.
     """
     _call_first(acc, ("clear_cache", "clearCache"))
-    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    got = _read_full_text(acc)
     if got is None:
         return None
     return str(got)
@@ -7799,10 +8218,12 @@ def _content_is_blank(acc) -> bool:
 
 
 def _confirm_text(acc, text: str) -> bool:
+    if is_secure(acc):
+        return False
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _verification_matches(acc, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -10043,7 +10464,8 @@ def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
-    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    group, and 25.2 as a panel. Menus, toolbars, status bars, and the
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10052,7 +10474,7 @@ def _find_cell_editor(node, budget: list[int]):
     if _CELL_EDITOR_PANEL.match(_node_name(node)):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = _child_count(node)
@@ -10066,34 +10488,114 @@ def _find_cell_editor(node, budget: list[int]):
     return None
 
 
+def _cache_masks():
+    """``(none, undefined)`` for ``set_cache_mask``.
+
+    ``none`` is ``0`` when the typelib has no ``Cache`` enum, which is the
+    same value as ``Atspi.Cache.NONE``. ``undefined`` is missing on a test
+    double; the caller then leaves the mask alone after the read.
+    """
+    none = 0
+    undefined = None
+    try:
+        cache = getattr(_atspi(), "Cache", None)
+    except Exception:
+        return none, undefined
+    if cache is None:
+        return none, undefined
+    member = getattr(cache, "NONE", None)
+    if member is not None:
+        none = member
+    return none, getattr(cache, "UNDEFINED", None)
+
+
+def _without_child_cache(node, fn):
+    """Run ``fn`` without trusting this application's child cache.
+
+    ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
+    children array in place. The next D-Bus call reenters the event loop.
+    A cache event then sets the children flag again, and
+    ``get_child_at_index`` returns that stale array. LibreOffice opens the
+    cell editor as a new sibling of the sheet. The pre-edit children do not
+    contain it, so the grid never sends Return. While that editor is open
+    every other cell's text interface stays empty, and A1 reads back as a
+    mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
+    the flag comes back. The desktop default is restored afterwards.
+    The operation-scoped getter cache is invalidated around the walk too,
+    since it can retain child counts and handles read before the edit. The
+    mask change and walk share the event thread, including direct native calls.
+    A node without ``set_cache_mask`` is a test double and is walked as it is.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    def read_uncached():
+        app = _call_first(node, ("get_application", "getApplication"))
+        target = app if app is not None else node
+        setter = getattr(target, "set_cache_mask", None)
+        if setter is None:
+            return fn()
+        none, undefined = _cache_masks()
+        try:
+            _drop_read_cache()
+            setter(none)
+        except Exception:
+            return fn()
+        try:
+            return fn()
+        finally:
+            _drop_read_cache()
+            if undefined is not None:
+                try:
+                    setter(undefined)
+                except Exception:
+                    pass
+
+    return _atspi_events.run(read_uncached)
+
+
+def _fresh_sheet_root(app, scope):
+    """Refresh desktop children before locating Calc's application/window."""
+    try:
+        desktop = _call_first(_atspi(), ("get_desktop",), 0)
+    except ImportError:
+        desktop = None
+    return _without_child_cache(desktop, lambda: find_root(app, scope))
+
+
 def sheet_editor_text(app: str) -> str | None:
     """Paragraph text of the open cell editor, or None.
 
     Only LibreOffice. The panel is a sibling of the sheet, named ``Cell F1``,
     and its paragraph is the in-progress string. Absent when no edit is open.
+    The walk does not trust the child cache: the editor is created when the
+    edit starts, and a stale children array still lists the sheet alone.
     """
     if not libreoffice_app(app):
         return None
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is None:
+                continue
+            text = _full_text(child)
+            if text:
+                return text
         return None
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is None:
-            continue
-        text = _full_text(child)
-        if text:
-            return text
-    return None
+
+    return _without_child_cache(root, read)
 
 
 def _cell_editor_is_secure(app: str) -> bool | None:
@@ -10109,22 +10611,26 @@ def _cell_editor_is_secure(app: str) -> bool | None:
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
-        return None
-    if is_secure(panel):
-        return True
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is not None and is_secure(child):
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        if is_secure(panel):
             return True
-    return False
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is not None and is_secure(child):
+                return True
+        return False
+
+    return _without_child_cache(root, read)
 
 
 def _selected_sheet_cell(app: str):
@@ -10169,13 +10675,13 @@ def selected_sheet_text(app: str) -> str | None:
 
 
 def _find_spreadsheet(node, budget: list[int]):
-    """The Calc grid, without indexing its cells."""
+    """The Calc grid, without indexing cells or unrelated toolbar contents."""
     if budget[0] <= 0 or node is None:
         return None
     if _spreadsheet_table(node):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = min(_child_count(node), 40)
@@ -10327,12 +10833,12 @@ def _sheet_table(app: str):
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.WINDOW)
+        root = _fresh_sheet_root(app, Scope.WINDOW)
     except Exception:
         return None
     if root is None:
         return None
-    return _find_spreadsheet(root, [80])
+    return _without_child_cache(root, lambda: _find_spreadsheet(root, [80]))
 
 
 def _cell_for_address(app: str, address: str):
@@ -10504,17 +11010,16 @@ def sheet_grid_check(app: str, origin: str, text: str):
     committed = False
     deadline = time.monotonic() + _SHEET_GRID_WAIT_S
     while True:
+        # Reading another cell while Calc's editor is open can time out and
+        # make libatspi mark the application hung. Commit before any cell
+        # reads so the native connection remains usable for verification.
+        if not committed and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
-        # A blank or missing cell is not final while the editor from the
-        # type is open. One Return publishes the others and moves the caret
-        # the way Enter does. A disagreement is judged after that commit.
-        if not committed and _commit_open_sheet_editor(app):
-            committed = True
-            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
-            continue
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)
@@ -10797,7 +11302,7 @@ def _collect_options(acc) -> list[tuple[str, object, object, int]]:
             if role in _OPTION_ROLE_NAMES:
                 label = _node_name(child)
                 if not label:
-                    raw = _safe(lambda c=child: _atspi().Text.get_text(c, 0, -1))
+                    raw = _direct_text(child)
                     label = _strip_objects(raw) if isinstance(raw, str) else ""
                 found.append((label, child, node, index))
                 continue
@@ -12741,6 +13246,44 @@ def _qt_grid(acc):
     return None
 
 
+def gtk_icon_view_item(acc) -> bool:
+    """GTK icon-view images expose activate, which means open, not click."""
+    parent = _parent_of(acc)
+    return (
+        "gtk" in _toolkit_name(acc)
+        and _role_name(acc) == "image"
+        and parent is not None
+        and _role_name(parent) == "layered pane"
+    )
+
+
+def click_gtk_icon_view_item(acc) -> bool:
+    """Send one pointer click and confirm exclusive icon selection."""
+    parent = _parent_of(acc)
+    count = _child_count(parent)
+    pos, size = _extents(acc)
+    if (
+        not _x11_keys_available() or pos is None or size is None
+        or size[0] <= 0 or size[1] <= 0 or not 0 < count <= 500
+    ):
+        return False
+    try:
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.click(int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2))
+    except Exception:
+        return False
+    for attempt in range(8):
+        selected = [_child_at(parent, index) for index in range(count)]
+        if all(child is not None for child in selected):
+            selected = [child for child in selected if _state_has(child, "SELECTED")]
+            if len(selected) == 1 and selected[0] == acc:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def qt_table_cell(acc) -> bool:
     """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
     try:
@@ -13543,7 +14086,9 @@ def _set_gecko_contenteditable(acc, text: str) -> bool:
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
-    GTK's ``set_text_contents`` replaces, and the snapshot read then equals
+    GTK's ``set_text_contents`` replaces; private bounded verification handles
+    empty GTK 4 sentinel reads without publishing their contents. On other
+    fields the snapshot read then equals
     ``text``, so nothing is deleted. Chromium's web fields implement that
     call as an insert and the editable-text adaptor still returns true. The
     success check is ``Text.get_text(0, -1)``, the same read a snapshot uses,
@@ -13592,12 +14137,28 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     table-cell path: one EditableText replace, with no selection and no
     keys. The cell writer polls until the new paragraph is the value.
     """
+    if is_secure(acc):
+        return False
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
         return False
     if force:
         return _replace_editable_text(acc, text)
+    # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
+    # echo the requested spacing while OK discards it. We cannot observe
+    # that model through AT-SPI, so refuse before changing the buffer rather
+    # than claim a committed value or send an unverified activation key.
+    if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
+        app = _call_first(acc, ("get_application", "getApplication"))
+        name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "abiword":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "AbiWord entry values cannot be confirmed as committed; "
+                "use focused typing and verify the value after closing and reopening the dialog",
+                detail={"reason": "commit_unverified"},
+            )
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
@@ -13614,7 +14175,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
-    if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
+    if _verification_matches(acc, text) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
         if wrote:
@@ -17261,13 +17822,20 @@ def _drop_cached_properties(acc) -> None:
 
     if not _atspi_events.listening():
         return
-    _reply_local.dropping_properties = True
-    try:
-        method()
-    except Exception:
-        return
-    finally:
-        _reply_local.dropping_properties = False
+
+    def drop() -> None:
+        # The guard is thread-local. It has to be set on the thread that
+        # actually calls libatspi, which is the event thread when the loop
+        # is up.
+        _reply_local.dropping_properties = True
+        try:
+            method()
+        except Exception:
+            return
+        finally:
+            _reply_local.dropping_properties = False
+
+    _atspi_events.run(drop)
 
 
 def _invalidate_tree_cache(acc) -> None:
