@@ -735,6 +735,11 @@ _CACHEABLE = {
     "get_accessible_id": _nonempty_str,
     "get_toolkit_name": _nonempty_str,
     "getToolkitName": _nonempty_str,
+    # Toolkit/browser probes repeatedly resolve the same node's owner.
+    # LibreOffice makes this a costly bus call; ownership is stable until
+    # the operation ends or a mutator invalidates this cache.
+    "get_application": _present,
+    "getApplication": _present,
     "get_process_id": _positive_int,
     "get_child_at_index": _present,
     "getChildAtIndex": _present,
@@ -5591,6 +5596,11 @@ def focused_text(app: str, *, max_nodes: int = 400) -> str | None:
         return None
     if truncated or acc is None:
         return None
+    # GTK can return an empty string from Text.get_text even for a drawing
+    # area without Text. That is no read-back, not a readable empty field.
+    getter = getattr(acc, "get_text_iface", None)
+    if callable(getter) and _safe(lambda: getter()) is None:
+        return None
     # A PDF page's Text interface is the document, not a field. Evince
     # leaves that page focused while Ctrl+F types into the find bar. Using
     # the page as the read-back makes the type look like a mismatch and
@@ -6094,6 +6104,33 @@ def focused_editable(app: str, *, max_nodes: int = 400):
             return None
         return paragraph
     return acc
+
+
+def gtk_toggle_cell(acc) -> bool:
+    """GTK renderer toggle cells need pointer input, not row selection."""
+    return (
+        _toolkit_name(acc).lower() == "gtk"
+        and not _gtk4_app(acc)
+        and _role_name(acc) == "table cell"
+        and "toggle" in _raw_action_names(acc)
+    )
+
+
+def checked_state(acc) -> bool:
+    """Read the cell itself, even when unchecked GTK cells omit CHECKABLE."""
+    return _state_has(acc, "CHECKED")
+
+
+def checked_state_flipped(acc, before: bool) -> bool:
+    """Require a stable checked change, independent of row selection."""
+    for attempt in range(8):
+        if checked_state(acc) != before:
+            time.sleep(0.04)
+            if checked_state(acc) != before:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
 
 
 def qt_toggle_only_control(acc) -> bool:
@@ -11997,6 +12034,32 @@ def set_numeric_value(acc, value: str) -> bool | str:
         # Chrome reports maximum 0 on <input type=number min=0> with no max.
         # A maximum that is not above the minimum is not a bound.
         open_upper = high <= low
+        # Some sliders (Xournal++ zoom) expose the percent only as their
+        # name. That label does not establish a conversion for the raw scale.
+        # Explain the mismatch before parsing, but preserve in-range raw input.
+        if _role_name(acc) == "slider":
+            shown = _node_name(acc)
+            percent = _percent_literal(shown)
+            if percent is not None and _outside_range(percent, low, high, open_upper=open_upper):
+                literal = _percent_literal(value)
+                try:
+                    requested = _parse_number(value) if literal is None else literal
+                except ValueError:
+                    requested = None
+                if literal is not None or (
+                    requested is not None
+                    and _outside_range(requested, low, high, open_upper=open_upper)
+                ):
+                    span_text = (
+                        f"minimum {_format_bound(low)}" if open_upper
+                        else f"{_format_bound(low)}..{_format_bound(high)}"
+                    )
+                    raise ValueError(
+                        f"value {value!r} cannot be interpreted as a percent; "
+                        f"the slider shows {shown!r} but uses a non-percent scale "
+                        f"with raw range {span_text}. The percent conversion is unknown; "
+                        "supply a raw value within that range"
+                    )
         unit = _percent_value_unit(acc)
         if unit is not None:
             kind, before = unit
@@ -15321,6 +15384,23 @@ def _with_table_body(node, kids: list) -> list:
 
 def _child_at(acc, index: int):
     return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
+
+
+def terminal_ancestor(acc) -> bool:
+    """Whether an accessible is inside a terminal, before AX role mapping.
+
+    VTE's terminal role maps to AXTextArea. Inspect the native role so an
+    ordinary multiline editor is never mistaken for a command prompt.
+    """
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) == "terminal":
+            return True
+        acc = _parent_of(acc)
+    return False
 
 
 def _parent_of(acc):
