@@ -1889,8 +1889,9 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
     """Live. Text Editor and the Chrome names share a grant. Terminals do not.
 
     mousepad, gedit, or gnome-text-editor is launched as Text Editor. A grant
-    for xterm does not launch gnome-terminal. Chrome's names are checked on
-    the real permission store; this test does not start a browser.
+    for xterm does not launch gnome-terminal when exec is enabled. With exec
+    disabled, even the granted terminal is blocked and audited. Chrome's names
+    are checked on the real permission store; this test does not start a browser.
     """
     import shutil
 
@@ -1924,6 +1925,15 @@ def test_agent_text_editor_and_chrome_grants_and_terminals_do_not_cross(tmp_path
         text = runtime.app("launch", "Text Editor")
         assert "needs_permission" not in text, text
         assert "launched" in text, text
+        for terminal in ("xterm", "gnome-terminal"):
+            with pytest.raises(ComputerUseError) as caught:
+                runtime.app("launch", terminal)
+            assert caught.value.code is ErrorCode.EXEC_DISABLED
+            rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+                    for line in path.read_text().splitlines()]
+            assert rows[-1]["result"] == "exec_disabled"
+            assert rows[-1]["metrics"]["security_violation"] == "exec_disabled"
+        runtime.allow_exec = True
         launched_other = False
         try:
             other = runtime.app("launch", "gnome-terminal")
