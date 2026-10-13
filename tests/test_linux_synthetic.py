@@ -11280,6 +11280,57 @@ def test_find_reaches_a_gtk_tree_row_that_is_off_screen(fake_atspi, monkeypatch)
     assert "ROW-00293" in landed
 
 
+def test_find_prefers_the_gtk_cell_over_a_label_that_mentions_the_row(
+    fake_atspi, xtest_recorder, monkeypatch
+) -> None:
+    """Synthetic GTK tree plus a label. Not a live window.
+
+    The label's name contains ROW-00000 and ROW-00293. find returns the
+    cell. scroll_to_find does not stop on the label at scroll 0. The
+    row-index jump then lands that cell.
+    """
+    from a11y_computer_use import server
+
+    window, table, state, place = _gtk_tree_page()
+    label = _Acc(
+        "label", name="See ROW-00000 and ROW-00293 in the list",
+        width=400, height=24,
+    )
+    _place_row(label, 90, 60, 400, 24)
+    app = table.get_application()
+    label.get_application = lambda: app
+    scroll = window.children[0]
+    _adopt(window, label, scroll)
+    driver = _wire_gtk_tree(monkeypatch, window)
+    driver.key_chord = lambda *_args, **_kwargs: None
+    driver.type_text = lambda *_args, **_kwargs: None
+    place(0)
+    monkeypatch.setattr(server, "_running_app", lambda name: (None, name))
+    runtime = _bare_runtime(driver)
+    shot = driver.snapshot(Scope.WINDOW, "treeprobe")
+    mentioned = next(el for el in shot.elements if el.title.startswith("See ROW-00000"))
+    assert mentioned.role == "AXStaticText"
+    assert mentioned.subrole == "label"
+    top = runtime.find("treeprobe", text="ROW-00000")
+    assert "ROW-00000" in top
+    assert "See ROW-00000" not in top
+    assert "cell" in top
+    assert state["head"] == 0
+    found = runtime.find("treeprobe", text="ROW-00293")
+    assert "ROW-00293" in found
+    assert "See ROW-00000" not in found
+    assert "no elements match" not in found
+    assert state["head"] == 293
+    place(0)
+    hunted = runtime.scroll_to_find("treeprobe", text="ROW-00293", max_scrolls=2)
+    assert not hunted.startswith("found after 0"), hunted
+    assert "See ROW-00000" not in hunted
+    assert hunted.startswith("found after "), hunted
+    assert "ROW-00293" in hunted
+    assert "cell" in hunted
+    assert state["head"] == 293
+
+
 def test_find_scrolls_a_gtk_tree_with_the_scrollbar_when_scroll_to_is_unsupported(
     fake_atspi, monkeypatch
 ) -> None:
@@ -12352,6 +12403,167 @@ def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake
     assert _atspi.target_vanished(cell) is False
 
 
+@pytest.mark.parametrize("x,y,width,height", [
+    (0, 0, 1414920272, 22043),
+    (0, 0, 22043, 1414920272),
+    (0, 0, float("inf"), 80),
+    (0, 0, 120, float("nan")),
+])
+def test_impossible_atspi_panel_bounds_are_not_pointer_targets(
+    fake_atspi, monkeypatch, x, y, width, height,
+) -> None:
+    """Synthetic #503 garbage extents, not a live GTK or X session."""
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (-1.0, -1.0)
+    position, size = _atspi._extents(panel)
+    assert position == (x, y)
+    assert size[0] == width
+    assert size[1] == height or height != height
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+    # A previously issued ref may still contain the corrupt published box.
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503", clickable=True)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: panel)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *_args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+@pytest.mark.parametrize("x,y,width,height", [
+    (40, 80, 120, 60),
+    (40, -1400, 1100, 6400),
+    (0, -30000, 1200, 60000),
+    (-32768, 0, 65535, 80),
+])
+def test_normal_and_large_sane_atspi_boxes_keep_their_bounds(
+    fake_atspi, x, y, width, height,
+) -> None:
+    from a11y_computer_use.drivers.linux import _point_of
+
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert (raw.position, raw.size) == ((x, y), (width, height))
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.role == "opaque_region" and el.clickable for el in snap.elements)
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503")
+    assert _point_of(target) == (int(target.bounds.center.x), int(target.bounds.center.y))
+
+
+def test_large_panel_preserves_its_painted_children(fake_atspi) -> None:
+    panel = _Acc("panel", states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    panel.children = [_Acc("push button", name="Save")]
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+    child = _node("AXButton", "Save", actions=("AXPress",),
+                  pos=(40, 80), size=(120, 60))
+    tree = _node("AXWindow", "Editor", children=((raw, [child]),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.title == "Save" and el.clickable for el in snap.elements)
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+
+@pytest.mark.parametrize("toolkit,version,name", [
+    ("GTK", "3.24", ""), ("Qt", "6.8", ""), ("GTK", "4.18", "Document"),
+])
+def test_large_real_panel_keeps_extents(fake_atspi, toolkit, version, name):
+    panel = _Acc("panel", name=name, states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: toolkit, get_toolkit_version=lambda: version)
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+
+
+@pytest.mark.parametrize("x,y", [(32768, 0), (-32769, 0), (0, 32768), (0, -32769)])
+def test_ref_center_outside_x_range_is_not_actionable(x, y):
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXButton", "Save", None,
+                     Bounds(0, x - 60, y - 40, 120, 80), "snap-503")
+    with pytest.raises(ComputerUseError) as exc:
+        _point_of(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXGroup", "Document", None,
+                     Bounds(0, -50000, -100000, 100000, 200000), "snap-503")
+    assert _point_of(target) == (0, 0)
+
+
+@pytest.mark.parametrize("effect", ["exclusive", "unchanged", "additive", "no_bounds"])
+@pytest.mark.parametrize("named", [True, False])
+def test_gtk_icon_ref_click_selects_without_activating(fake_atspi, monkeypatch, effect, named):
+    driver, icon, element, actions, events = _toggle_click_target(
+        monkeypatch, toolkit="gtk", role="image", actions=("activate",),
+    )
+    icon.name = "Cherry" if named else ""
+    previous = _Acc("image", states=("SELECTED",))
+    _adopt(_Acc("layered pane"), previous, icon)
+    _place_row(icon, 40, 60, 100, 20)
+    if effect == "no_bounds":
+        icon.component = None
+    monkeypatch.setattr(_atspi, "_x11_keys_available", lambda: True)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _seconds: None)
+
+    def click(x, y, *, button="left", count=1):
+        events.append(("click", x, y, button, count))
+        if effect in {"exclusive", "additive"}:
+            icon.states.add("SELECTED")
+        if effect == "exclusive":
+            previous.states.discard("SELECTED")
+
+    monkeypatch.setattr(_linux_input, "click", click)
+    if effect == "exclusive":
+        assert driver.press_element(element) is True
+    else:
+        with pytest.raises(ComputerUseError) as exc:
+            driver.press_element(element)
+        assert exc.value.detail["reason"] == "selection_unchanged"
+    assert actions == []
+    assert events == [("raise", icon)] + (
+        [] if effect == "no_bounds" else [("click", 90, 70, "left", 1)]
+    )
+
+
+def test_icon_view_detection_excludes_other_images(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda acc: acc.toolkit)
+    icon = _Acc("image")
+    icon.toolkit = "gtk"
+    _adopt(_Acc("panel"), icon)
+    assert not _atspi.gtk_icon_view_item(icon)
+    _adopt(_Acc("layered pane"), icon)
+    assert _atspi.gtk_icon_view_item(icon)
+    icon.toolkit = "Chromium"
+    assert not _atspi.gtk_icon_view_item(icon)
+
+
 
 @pytest.mark.parametrize("name", [
     "xfce4-terminal", "gnome-terminal", "gnome-terminal-", "xterm", "konsole",
@@ -12516,3 +12728,400 @@ def test_terminal_executable_symlink_is_detected(monkeypatch, tmp_path):
     alias.symlink_to(terminal)
     monkeypatch.setattr("shutil.which", lambda app: str(alias))
     assert LinuxDriver().terminal_target("console-alias", launch=True)
+
+
+@pytest.mark.parametrize("name", [
+    "xfce4-appfinder", "xfce4-run", "krunner", "rofi", "dmenu_run",
+    "python3", "python3.12", "/usr/bin/python3", "pypy3", "perl", "ruby",
+    "bash", "env python3", "exo-open --launch TerminalEmulator",
+    "xdg-terminal-exec", "gtk-launch org.gnome.Terminal", "gio launch shell.desktop",
+])
+def test_shell_capable_launcher_is_refused_before_resolution(monkeypatch, tmp_path, name):
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda *_: pytest.fail("resolved before gate"))
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kw: pytest.fail("launched"))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+    assert row["app"] == name
+    runtime.allow_exec = True
+    from a11y_computer_use.schema import AppOp, AppVerb
+    runtime._reject_terminal(AppOp(verb=AppVerb.LAUNCH, app=name), name)
+
+
+@pytest.mark.parametrize("command", ["python3 -c 'import os; os.system(\"sh\")'", "exo-open --launch TerminalEmulator"])
+def test_shell_desktop_exec_alias_is_refused_and_audited(monkeypatch, tmp_path, command):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    desktop = tmp_path / "innocent.desktop"
+    desktop.write_text("[Desktop Entry]\nName=Innocent\nType=Application\nExec=" + command + "\n")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: ("innocent", str(desktop)))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_a, **_kw: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_shell_capable_launch_alias_symlink_and_resolved_argv(monkeypatch, tmp_path):
+    interpreter = tmp_path / "python3.12"
+    interpreter.touch()
+    alias = tmp_path / "innocent"
+    alias.symlink_to(interpreter)
+    monkeypatch.setattr("shutil.which", lambda _: str(alias))
+    driver = LinuxDriver()
+    assert driver.terminal_target("innocent", launch=True)
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    assert driver.terminal_target("innocent", ("env", "python3"), launch=True)
+
+
+def test_python_gui_input_does_not_require_exec(fake_atspi, monkeypatch):
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda _: "python3")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _: (_Acc("text"), False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert not driver.terminal_target("python3")
+    assert not driver.terminal_target("mousepad", launch=True)
+
+
+def test_appfinder_input_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xfce4-appfinder", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    for action in (TypeText(text="sh\n"), KeyChord(chord="Return")):
+        with pytest.raises(ComputerUseError) as caught:
+            runtime._run_gated(action, "xfce4-appfinder", lambda: pytest.fail("input sent"))
+        assert caught.value.code is ErrorCode.EXEC_DISABLED
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert len(rows) == 2
+    assert all(row["metrics"]["security_violation"] == "exec_disabled" for row in rows)
+
+
+def test_resolved_shell_argv_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda _: ("innocent", "innocent", ("python3", "-c", "pass")))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_gtk_grid_button_names_follow_rows_not_child_order(fake_atspi, monkeypatch):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "gtk")
+    monkeypatch.setattr(_atspi, "_action_names", lambda node: ("AXPress",) if node.role == "push button" else ())
+    labels = ["Result font", "RPN stack font", "Module font", "Background color",
+              "Result font color", "RPN stack color", "Module color", "Module font color"]
+    buttons = [_place_row(_Acc("push button", name="Sans Bold" if i < 3 else ""),
+                          200, 100 + i * 40, 140, 30) for i in range(8)]
+    texts = [_place_row(_Acc("label", name=name + ":"), 20, 105 + i * 40, 160, 20)
+             for i, name in enumerate(labels)]
+    grid = _adopt(_place_row(_Acc("panel"), 10, 80, 400, 400), *reversed(buttons), *reversed(texts))
+    root = _adopt(_place_row(_Acc("frame", name="Preferences"), 0, 0, 600, 600), grid)
+    snap = build_snapshot(root, _atspi.ATSPIAccessor(), scope=Scope.WINDOW,
+                          app="galculator", pid=561, geometry=_geometry())
+    for i, name in enumerate(labels):
+        found = [el for el in observe.find_elements(snap, text=name, role="button")
+                 if el.title == name]
+        assert len(found) == 1, [(el.role, el.title, el.value) for el in snap.elements]
+        assert found[0].title == name
+        assert found[0].value == ("Sans Bold" if i < 3 else None)
+        assert found[0].bounds == Bounds(0, 200, 100 + i * 40, 140, 30)
+        assert found[0].clickable
+    rendered = observe.render_text(snap, mode="interactive")
+    assert all(name in rendered for name in labels)
+
+
+@pytest.mark.parametrize("case", ["unique", "non_gtk", "missing", "other_row", "right", "tie", "relation"])
+def test_gtk_button_row_names_preserve_authority_and_require_geometry(fake_atspi, monkeypatch, case):
+    monkeypatch.setattr(_atspi, "_toolkit_name", lambda node: "qt" if case == "non_gtk" else "gtk")
+    button = _place_row(_Acc("push button", name="Choose" if case == "unique" else ""), 200, 100, 140, 30)
+    label = _place_row(_Acc("label", name="Result font:"),
+                       350 if case == "right" else 20, 200 if case == "other_row" else 105, 160, 20)
+    _adopt(_Acc("panel"), button, label)
+    if case == "missing":
+        button.component = None
+    if case == "tie":
+        other = _place_row(_Acc("label", name="Other:"), 20, 105, 160, 20)
+        _adopt(button.parent, button, label, other)
+    monkeypatch.setattr(_atspi, "_labelled_by_name", lambda node: "Explicit:" if case == "relation" else "")
+    assert _atspi.ATSPIAccessor().read(button).title == (
+        "Explicit" if case == "relation" else button.name
+    )
+
+
+def test_sheet_editor_is_not_hidden_by_a_stale_child_cache(fake_atspi, monkeypatch) -> None:
+    """Synthetic tree. The cached children are the sheet without the editor.
+
+    ``get_child_at_index`` grows the panel only after the cache mask is
+    cleared. That is the read the grid uses to commit, and A1 stays empty
+    until it does. Not a live Calc document.
+    """
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    table = _Acc("table", name="grid")
+    doc = _Acc("document spreadsheet", name="Sheet")
+    state = {"live": False}
+    cached = [table]
+    fresh = [table, panel]
+
+    def child_count():
+        return len(fresh if state["live"] else cached)
+
+    def child_at(index):
+        kids = fresh if state["live"] else cached
+        return kids[index]
+
+    doc.get_child_count = child_count
+    doc.get_child_at_index = child_at
+    app = _Acc("application", name="soffice")
+    masks = []
+
+    def set_cache_mask(mask) -> None:
+        masks.append(mask)
+        state["live"] = mask == 0
+
+    app.set_cache_mask = set_cache_mask
+    _adopt(app, doc)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    assert _atspi.sheet_editor_text("soffice.bin") == "Item"
+    # The fake typelib has no Cache.UNDEFINED, so the cleared mask stays.
+    assert masks == [0]
+
+
+def test_sheet_editor_refreshes_operation_cached_children(fake_atspi, monkeypatch):
+    """An editor created during a grid operation invalidates cached child reads."""
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    table = _Acc("table", name="grid")
+    doc = _Acc("document spreadsheet", name="Sheet")
+    app = _Acc("application", name="soffice")
+    _adopt(app, doc)
+    state = {"live": False}
+    doc.get_child_count = lambda: 2 if state["live"] else 1
+    doc.get_child_at_index = lambda index: [table, panel][index]
+    app.set_cache_mask = lambda mask: state.update(live=mask == 0)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    with _atspi.read_cache():
+        assert _atspi._child_count(doc) == 1
+        assert _atspi.sheet_editor_text("soffice.bin") == "Item"
+
+
+def test_sheet_child_cache_mask_and_walk_share_the_event_thread(fake_atspi, monkeypatch):
+    """The cache mask must cover a whole walk, including direct native calls."""
+    from a11y_computer_use.drivers import _atspi_events
+
+    state = {"on_thread": False}
+    masks = []
+    fake_atspi.Cache = _NS(NONE=0, UNDEFINED=128)
+    app = _Acc("application", name="soffice")
+
+    def setter(mask):
+        assert state["on_thread"]
+        masks.append(mask)
+
+    def run(fn):
+        previous = state["on_thread"]
+        state["on_thread"] = True
+        try:
+            return fn()
+        finally:
+            state["on_thread"] = previous
+
+    def walk():
+        assert state["on_thread"]
+        assert masks == [0]
+        return "Item"
+
+    app.set_cache_mask = setter
+    monkeypatch.setattr(_atspi_events, "run", run)
+    assert _atspi._without_child_cache(app, walk) == "Item"
+    assert masks == [0, 128]
+
+
+def test_sheet_editor_walk_does_not_spend_its_budget_on_toolbars(fake_atspi, monkeypatch):
+    """An uncached Calc toolbar must not hide the editor later in the window."""
+    paragraph = _Acc("paragraph", name="")
+    paragraph.text = "Item"
+    panel = _Acc("panel", name="Cell C5")
+    _adopt(panel, paragraph)
+    toolbar = _Acc("tool bar", name="Formatting")
+    _adopt(toolbar, *[_Acc("panel", name="") for _ in range(40)])
+    window = _Acc("frame", name="Calc")
+    _adopt(window, toolbar, panel)
+    # A small remaining budget models the menus and sidebar preceding this
+    # toolbar; the production bound remains unchanged.
+    assert _atspi._find_cell_editor(window, [4]) is panel
+
+
+def test_sheet_grid_walk_preserves_budget_after_editor_cache_refresh(fake_atspi, monkeypatch):
+    """Fresh toolbar children cannot exhaust the subsequent cell lookup."""
+    toolbar = _Acc("tool bar", name="Standard")
+    _adopt(toolbar, *[_Acc("panel", name="") for _ in range(40)])
+    status = _Acc("status bar", name="")
+    _adopt(status, *[_Acc("panel", name="") for _ in range(12)])
+    table = _Acc("table", name="Sheet Sheet1")
+    window = _Acc("frame", name="Calc")
+    _adopt(window, toolbar, status, table)
+    monkeypatch.setattr(_atspi, "_spreadsheet_table", lambda node: node is table)
+    assert _atspi._find_spreadsheet(window, [4]) is table
+
+
+def test_sheet_grid_commits_editor_before_reading_other_cells(monkeypatch):
+    """A pre-commit cell read can poison libatspi's connection with a timeout."""
+    calls = []
+    def commit(app):
+        calls.append("commit")
+        return True
+    def scan(app, origin, grid):
+        assert calls == ["commit"]
+        calls.append("scan")
+        return ("match", None)
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", commit)
+    monkeypatch.setattr(_atspi, "_scan_sheet_grid", scan)
+    monkeypatch.setattr(_atspi.time, "sleep", lambda _: None)
+    assert _atspi.sheet_grid_check("soffice", "A1", "Item\tQ1") is None
+    assert calls == ["commit", "scan"]
+
+
+def test_an_atspi_call_from_another_thread_runs_on_the_event_thread(monkeypatch) -> None:
+    """The listener is up. A getter from this thread is handed to it.
+
+    A live child walk beside ``event_main`` segfaults the event thread.
+    The call is not handed over when that thread was never started, so a
+    fake that only reports the listener stays inline.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    calls = []
+
+    def submit(fn, timeout=15.0):
+        calls.append(timeout)
+        return fn()
+
+    class Alive:
+        def is_alive(self) -> bool:
+            return True
+
+    node = type("Node", (), {"get_name": lambda self: "A1"})()
+    monkeypatch.setattr(_atspi_events, "submit", submit)
+    monkeypatch.setattr(_atspi_events, "_thread", Alive())
+    _atspi_events._listening.set()
+    try:
+        assert _atspi._node_name(node) == "A1"
+        assert calls == [15.0]
+        calls.clear()
+        monkeypatch.setattr(_atspi_events, "_thread", None)
+        assert _atspi._node_name(node) == "A1"
+        assert calls == []
+    finally:
+        _atspi_events._listening.clear()
+
+
+def test_sheet_table_refreshes_children_after_editor_commit(fake_atspi, monkeypatch):
+    """The post-commit table lookup must not reuse pre-edit children."""
+    app = _Acc("application", name="soffice")
+    table = _Acc("table", name="Sheet Sheet1")
+    state = {"uncached": False}
+    app.get_child_count = lambda: 1 if state["uncached"] else 0
+    app.get_child_at_index = lambda index: table
+    app.set_cache_mask = lambda mask: state.update(uncached=mask == 0)
+    monkeypatch.setattr(_atspi, "find_root", lambda *_args, **_kwargs: app)
+    monkeypatch.setattr(_atspi, "_spreadsheet_table", lambda node: node is table)
+    with _atspi.read_cache():
+        assert _atspi._child_count(app) == 0
+        assert _atspi._sheet_table("soffice.bin") is table
+
+
+def test_sheet_root_refreshes_the_desktop_application_cache(fake_atspi, monkeypatch):
+    """A stale desktop app list must not hide Calc during grid verification."""
+    desktop = _Acc("desktop frame", name="Desktop")
+    state = {"fresh": False}
+    desktop.get_child_count = lambda: 1 if state["fresh"] else 0
+    desktop.set_cache_mask = lambda mask: state.update(fresh=mask == 0)
+    monkeypatch.setattr(fake_atspi, "get_desktop", lambda index: desktop, raising=False)
+    app = _Acc("application", name="soffice")
+    monkeypatch.setattr(_atspi, "find_root", lambda *_: app if _atspi._child_count(desktop) else None)
+    with _atspi.read_cache():
+        assert _atspi._child_count(desktop) == 0
+        assert _atspi._fresh_sheet_root("soffice", Scope.APP) is app
+
+
+def test_grid_commit_yields_the_event_thread_before_verification(fake_atspi, monkeypatch):
+    """Editor-removal events run between the commit and grid read operations."""
+    from a11y_computer_use.drivers import linux
+
+    driver = LinuxDriver()
+    driver.frontmost_app = lambda: ("soffice.bin", 1)
+    driver._refuse_xtest_password_focus = lambda: None
+    driver._typed_readback = lambda app: ""
+    state = {"in_operation": False, "events_processed": False}
+
+    def run(fn):
+        state["in_operation"] = True
+        try:
+            return fn()
+        finally:
+            state["in_operation"] = False
+
+    def pause(seconds):
+        assert not state["in_operation"]
+        state["events_processed"] = True
+
+    def check(app, origin, text):
+        assert state["in_operation"]
+        assert state["events_processed"]
+        assert origin == "A1"
+        return None
+
+    driver._run = run
+    monkeypatch.setattr(linux, "_on_wayland", lambda: False)
+    monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    monkeypatch.setattr(_atspi, "note_focused_find_bar", lambda app: None)
+    monkeypatch.setattr(_atspi, "drawing_focus_text", lambda app: ("skip", None))
+    monkeypatch.setattr(_atspi, "writer_type_before", lambda app: None)
+    monkeypatch.setattr(_atspi, "focused_shape_edit_text", lambda app: None)
+    monkeypatch.setattr(_atspi, "spreadsheet_open", lambda app: True)
+    monkeypatch.setattr(_atspi, "selected_sheet_address", lambda app: "A1")
+    monkeypatch.setattr(_atspi, "_commit_open_sheet_editor", lambda app: True)
+    monkeypatch.setattr(_atspi, "sheet_grid_check", check)
+    monkeypatch.setattr(_linux_input, "type_string", lambda text: None)
+    monkeypatch.setattr(linux.time, "sleep", pause)
+    assert driver.type_text("Item\tQ1") == len("Item\tQ1")
