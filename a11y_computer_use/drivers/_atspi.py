@@ -1256,6 +1256,23 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
                         and marker.startswith("audacity ") and marker.endswith(" toolbar")):
                     if description.casefold() != marker:
                         return "AXButton", "", ""
+    # wxGTK publishes the Time toolbar as a panel containing a labelled
+    # grip, the clock, and a resize grip, rather than a named tool bar.
+    container = _parent_of(node)
+    if not name and not description and _role_name(container) == "panel" and _child_count(container) == 3:
+        grip = _child_at(container, 0)
+        clock = _child_at(container, 1)
+        resize_grip = _child_at(container, 2)
+        if (
+            clock == node
+            and grip is not None
+            and resize_grip is not None
+            and _role_name(grip) == "panel"
+            and _role_name(resize_grip) == "panel"
+            and str(_call_first(grip, ("get_description",), default="") or "").strip().casefold()
+            == "audacity time toolbar"
+        ):
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
