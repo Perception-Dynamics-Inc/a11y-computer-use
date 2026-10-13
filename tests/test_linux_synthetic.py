@@ -12793,6 +12793,114 @@ def test_xournal_zoom_preserves_raw_value_input(fake_atspi):
     slider.get_application = lambda: _Acc("application", name="xournalpp")
     assert _atspi.set_numeric_value(slider, "0.25") is True
     assert slider.value == 0.25
+@pytest.mark.parametrize("name", [
+    "xfce4-appfinder", "xfce4-run", "krunner", "rofi", "dmenu_run",
+    "python3", "python3.12", "/usr/bin/python3", "pypy3", "perl", "ruby",
+    "bash", "env python3", "exo-open --launch TerminalEmulator",
+    "xdg-terminal-exec", "gtk-launch org.gnome.Terminal", "gio launch shell.desktop",
+])
+def test_shell_capable_launcher_is_refused_before_resolution(monkeypatch, tmp_path, name):
+    import json
+    from a11y_computer_use import safety, server
+
+    driver = LinuxDriver()
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier(name, safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda *_: pytest.fail("resolved before gate"))
+    monkeypatch.setattr(driver, "launch_app", lambda *_args, **_kw: pytest.fail("launched"))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", name)
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["result"] == "exec_disabled"
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+    assert row["app"] == name
+    runtime.allow_exec = True
+    from a11y_computer_use.schema import AppOp, AppVerb
+    runtime._reject_terminal(AppOp(verb=AppVerb.LAUNCH, app=name), name)
+
+
+@pytest.mark.parametrize("command", ["python3 -c 'import os; os.system(\"sh\")'", "exo-open --launch TerminalEmulator"])
+def test_shell_desktop_exec_alias_is_refused_and_audited(monkeypatch, tmp_path, command):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    desktop = tmp_path / "innocent.desktop"
+    desktop.write_text("[Desktop Entry]\nName=Innocent\nType=Application\nExec=" + command + "\n")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: ("innocent", str(desktop)))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "launch_app", lambda *_a, **_kw: pytest.fail("launched"))
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=driver)
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
+
+
+def test_shell_capable_launch_alias_symlink_and_resolved_argv(monkeypatch, tmp_path):
+    interpreter = tmp_path / "python3.12"
+    interpreter.touch()
+    alias = tmp_path / "innocent"
+    alias.symlink_to(interpreter)
+    monkeypatch.setattr("shutil.which", lambda _: str(alias))
+    driver = LinuxDriver()
+    assert driver.terminal_target("innocent", launch=True)
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    assert driver.terminal_target("innocent", ("env", "python3"), launch=True)
+
+
+def test_python_gui_input_does_not_require_exec(fake_atspi, monkeypatch):
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._resolved_app", lambda _: "python3")
+    monkeypatch.setattr(_atspi, "_focused_node", lambda _: (_Acc("text"), False))
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    assert not driver.terminal_target("python3")
+    assert not driver.terminal_target("mousepad", launch=True)
+
+
+def test_appfinder_input_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.schema import KeyChord, TypeText
+
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("xfce4-appfinder", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    for action in (TypeText(text="sh\n"), KeyChord(chord="Return")):
+        with pytest.raises(ComputerUseError) as caught:
+            runtime._run_gated(action, "xfce4-appfinder", lambda: pytest.fail("input sent"))
+        assert caught.value.code is ErrorCode.EXEC_DISABLED
+    rows = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert len(rows) == 2
+    assert all(row["metrics"]["security_violation"] == "exec_disabled" for row in rows)
+
+
+def test_resolved_shell_argv_is_refused_and_audited(monkeypatch, tmp_path):
+    import json
+    from a11y_computer_use import safety, server
+    from a11y_computer_use.drivers import _linux_system
+
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr(_linux_system, "_desktop_entry", lambda _: None)
+    store = safety.PermissionStore(tmp_path / "permissions.json")
+    store.set_tier("innocent", safety.Tier.FULL)
+    runtime = server.Runtime(store=store, audit=safety.AuditLog(tmp_path / "audit"), driver=LinuxDriver())
+    monkeypatch.setattr(runtime, "_prepare_launch", lambda _: ("innocent", "innocent", ("python3", "-c", "pass")))
+    with pytest.raises(ComputerUseError) as caught:
+        runtime.app("launch", "innocent")
+    assert caught.value.code is ErrorCode.EXEC_DISABLED
+    row, = [json.loads(line) for path in (tmp_path / "audit").glob("*.jsonl")
+            for line in path.read_text().splitlines()]
+    assert row["metrics"]["security_violation"] == "exec_disabled"
 
 
 def test_gtk_grid_button_names_follow_rows_not_child_order(fake_atspi, monkeypatch):
