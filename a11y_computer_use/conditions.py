@@ -424,7 +424,10 @@ class _ResolvedHTTPHandler(urllib.request.HTTPHandler):
 
 class _ResolvedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, infos: list, note_status: Callable[[int], None] | None = None) -> None:
-        super().__init__()
+        # HTTPSHandler eagerly loads a default TLS context, even for HTTP
+        # probes. Trust-store loading can consume their entire deadline on
+        # macOS. Our https_open creates the context only when it is needed.
+        urllib.request.AbstractHTTPHandler.__init__(self)
         self._infos = infos
         self._note_status = note_status
 

@@ -250,7 +250,8 @@ galculator-shaped regression tests; no local live verification.
 
 Qt multiline editors (including FeatherPad) expose the entire document through
 AT-SPI Text. Native multiline states or attributes select this path; ordinary
-Qt line edits retain their text without requesting document viewport ranges. Snapshot values and text searches use `Text.get_bounded_ranges`
+Qt line edits retain their text without requesting document viewport ranges.
+Snapshot values and text searches use `Text.get_bounded_ranges`
 inside the measured editor bounds, falling back to native point offsets and
 verified character rectangles when Qt omits bounded ranges. Each scroll re-reads
 these ranges, so an off-screen match becomes searchable when it enters the
@@ -259,3 +260,15 @@ omitted and its hint recommends in-document Find or line navigation. `find` and
 `scroll_to_find` cannot confirm document text through the whole buffer in that
 case. This path is covered by synthetic tests; FeatherPad has not been live-
 verified for this change.
+
+### Execution permission and launchers
+
+With `allow_exec=False` (the default), terminal launches and input require an
+explicit execution grant, independently of a FULL app grant. The same launch
+gate refuses known run dialogs/app finders, script interpreters, shells, and
+generic launch wrappers (including `exo-open`, `gtk-launch`, and `xdg-open`).
+It checks command strings before application resolution, executable symlinks,
+desktop-file Exec programs, and resolved launch arguments. Each refusal returns
+`exec_disabled` and writes an audit entry. Input to known app finders is also
+refused; a Python process hosting an ordinary GUI editor is not itself a
+terminal input target. These name-based checks are not a process sandbox.
