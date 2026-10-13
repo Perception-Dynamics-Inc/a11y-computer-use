@@ -4304,3 +4304,68 @@ async def test_window_list_for_an_app_includes_its_windows_on_other_spaces(bg, m
     rows = json.loads(result.content[0].text)
     assert rows == [{"window_id": 105, "app": APP, "title": "X Library", "on_screen": False,
                      "bounds": {"display_id": 1, "x": 0, "y": 160, "width": 3024, "height": 1804}}]
+
+
+
+@pytest.mark.parametrize("content", ["headers", "row", "button", "unrelated_row", "no_scrollbar", "unknown_bounds"])
+def test_scroll_to_find_header_only_container(monkeypatch, content):
+    """GTK-style header buttons must not masquerade as searchable rows."""
+    els = [Element(ref="box", role="AXScrollArea", title="", value=None,
+                   bounds=Bounds(0, 0, 0, 790, 664), snapshot_id="s")]
+    for i, name in enumerate(("Name", "ID", "CPU", "Memory", "Disk Read", "Disk Write")):
+        els.append(Element(ref=f"h{i}", role="AXButton", title=name, value=None,
+                           parent="box", bounds=Bounds(0, i * 100, 0, 100, 30), snapshot_id="s"))
+    els.append(Element(ref="bar", role="AXScrollBar", title="", value=None,
+                       parent="box", bounds=Bounds(0, 770, 30, 20, 634), snapshot_id="s"))
+    if content == "no_scrollbar":
+        els.pop()
+    if content == "unknown_bounds":
+        els[1] = dataclasses.replace(els[1], bounds=Bounds(0, 0, 0, 0, 0))
+    if content in {"row", "button", "unrelated_row"}:
+        els.append(Element(ref="extra", role="AXButton" if content == "button" else "AXRow",
+                           title="Other", value=None,
+                           parent=None if content == "unrelated_row" else "box",
+                           bounds=Bounds(0, 0, 300, 100, 30), snapshot_id="s"))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1, created_at=0,
+                    displays=(Display(0, 800, 700, 1, True),), elements=tuple(els))
+    scrolls = []
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def scroll(self, target, **kw):
+            scrolls.append(kw["dy"])
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    out = rt.scroll_to_find("app", text="python3", max_scrolls=1)
+    if content in {"headers", "unrelated_row"}:
+        assert "not found after 0 scroll(s)" in out
+        assert "container exposes no rows" in out
+        assert "last_rows: none" in out
+        assert scrolls == []
+    else:
+        assert "container exposes no rows" not in out
+        assert scrolls == [5]
+    assert "last_rows: Disk" not in out
+
+
+def test_scroll_to_find_can_still_find_header(monkeypatch):
+    # Existing visible controls remain valid search targets.
+    snap = _item_window(1)
+    snap = dataclasses.replace(snap, elements=(dataclasses.replace(snap.elements[1], role="AXButton"),))
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = type("Driver", (), {"ensure_trusted": lambda self: None,
+                                  "snapshot": lambda self, scope, app: snap})()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    monkeypatch.setattr(server, "_running_app", lambda a: (None, "com.a"))
+    assert "found after 0 scroll(s)" in rt.scroll_to_find("app", text="ITEM-001")
