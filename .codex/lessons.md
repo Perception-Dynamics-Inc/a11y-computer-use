@@ -12,3 +12,4 @@
 - 2026-10-13 (#530): `gh run view --log-failed` can return empty output for a failed job. Fetch `repos/{owner}/{repo}/actions/jobs/{job_id}/logs` directly before concluding there are no failure details.
 
 - 2026-10-13 (#406): Linux snapshot titles fall back to AT-SPI descriptions when names are empty; normalize both fields. Rich-text tag matching must respect quoted attribute delimiters and full tag names so `>` inside an attribute and literal `<p-custom>` labels are handled correctly.
+- 2026-10-13 (#548): A mapped GTK4 window can precede AT-SPI registration. Before reporting a missing bridge, preserve the remaining existing process-startup grace for an unambiguous owner; older apps still fail fast. Keep registration tests hermetic and run them with gi imports disabled to check non-Linux dependency isolation.
