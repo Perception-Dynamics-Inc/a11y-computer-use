@@ -37,3 +37,4 @@
 - 2026-10-14 (#560 merge repair): A sandboxed test process can see desktop windows with host PIDs that differ from subprocess PIDs. Such a session cannot validate live window ownership; run hermetic checks without DISPLAY/WAYLAND_DISPLAY and use CI for native verification. Keep the live ownership assertions intact.
 
 - 2026-10-14 (#570 repair): Writable worktree files do not guarantee writable linked Git metadata or protected lesson files. If those mounts refuse writes, use a writable temporary clone of the current remote PR branch, merge main there, and push normally to preserve branch history.
+- 2026-10-13 (#518): `_confirm_focus_on_target` may call `grab_focus` again, so explicit pointer clicks must poll `_focus_on_target` directly. A focus confirmation helper that mutates focus would hide a missed click and violate the requested action.
