@@ -484,7 +484,12 @@ def _safe(fn, default=None):
     start = time.monotonic()
     failed = False
     try:
-        result = fn()
+        # Direct native calls (e.g. Table.get_accessible_at) need the same
+        # thread ownership as version-tolerant getters. Keep waits on the
+        # caller so the GLib loop can process replies between reads.
+        from a11y_computer_use.drivers import _atspi_events
+
+        result = _atspi_events.run(fn)
     except ComputerUseError:
         raise
     except Exception:
@@ -768,27 +773,6 @@ def _is_mutator(name: str) -> bool:
 
 
 def _call_first(obj, names, *args, default=None):
-    """Call the first method in ``names`` that exists on ``obj`` (binding-version
-    tolerant — atspi2 renamed a few getters across releases).
-
-    Inside ``read_cache``, a successful stable getter is remembered for
-    this object and these arguments. A mutator drops that memory first.
-
-    While ``event_main`` is running, the call moves onto that thread.
-    libatspi is not safe from the caller and the loop at once.
-    """
-    if obj is None:
-        return default
-
-    def invoke():
-        return _call_first_inline(obj, names, *args, default=default)
-
-    from a11y_computer_use.drivers import _atspi_events
-
-    return _atspi_events.run(invoke)
-
-
-def _call_first_inline(obj, names, *args, default=None):
     """Call the first method in ``names`` that exists on ``obj`` (binding-version
     tolerant — atspi2 renamed a few getters across releases).
 

@@ -3472,7 +3472,14 @@ class LinuxDriver:
             origin = self._sheet_type_origin
             # Wait for the committed cells. Then leave the caret on the
             # cell Enter moves to, not on the last cell the read opened.
-            mismatch = self._run(lambda: _atspi.sheet_grid_check(app_id, origin, text))
+            # Each native read marshals through _safe/_call_first. The
+            # verification waits must leave the event loop free to process
+            # Calc's commit and cache updates between those reads.
+            from a11y_computer_use.drivers import _dbus_guard
+
+            mismatch = _dbus_guard.call_with_reconnect(
+                lambda: _atspi.sheet_grid_check(app_id, origin, text)
+            )
             if mismatch is None:
                 return len(text)
             self._sheet_type_origin = None
