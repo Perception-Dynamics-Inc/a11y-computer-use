@@ -2712,6 +2712,15 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _evince_page(node) -> bool:
+    """Evince PDF pages have reliable SHOWING state, but drifting extents."""
+    if _role_name(node) != "page":
+        return False
+    app = _application_of(node)
+    name = _call_first(app, ("get_name",), default="") if app is not None else ""
+    return str(name).strip().lower() == "evince"
+
+
 def _page_text(acc) -> str | None:
     """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
 
@@ -3316,6 +3325,11 @@ class ATSPIAccessor:
             page_text = _page_text(node)
             if page_text:
                 value = page_text
+                if _evince_page(node) and _state_has(node, "SHOWING"):
+                    # Evince's page boxes drift after scrolling. Keep the
+                    # visible text without offering those boxes for targeting.
+                    position, size = None, None
+                    unallocated = True
             else:
                 role = "AXGroup"
                 value = None
@@ -3539,6 +3553,12 @@ class ATSPIAccessor:
             if child is not None:
                 kids.append(child)
         role = _role_name(node)
+        # Evince's hidden pages can have on-screen rectangles, and its
+        # painted page can have an off-screen rectangle. Trust SHOWING.
+        kids = [
+            child for child in kids
+            if not _evince_page(child) or _state_has(child, "SHOWING")
+        ]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
