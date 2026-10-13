@@ -1678,6 +1678,8 @@ def test_clear_focus_waits_for_the_window_manager(monkeypatch, focus) -> None:
         return next(states)
 
     sleeps = []
+    ticks = iter([0, 0, 0.05])
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(_linux_system, "frontmost_app_id", frontmost)
     monkeypatch.setattr(time, "sleep", sleeps.append)
     assert _clear_focus(show_desktop=True) == "unknown"
