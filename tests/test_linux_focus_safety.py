@@ -35,6 +35,8 @@ def focus_driver(monkeypatch):
     monkeypatch.setattr(_atspi, "insert_text", lambda acc, text: inserted.append((acc, text)) or True)
     monkeypatch.setattr(_atspi, "focused_secure", lambda app: False)
     monkeypatch.setattr(_atspi, "focused_editable", lambda app: None)
+    # This fixture models an editor with no native terminal focused.
+    monkeypatch.setattr(_atspi, "_focused_node", lambda app: (None, False))
     monkeypatch.setattr(_atspi, "focused_text", lambda app: None)
     fake_input = types.ModuleType("a11y_computer_use.drivers._linux_input")
     fake_input.held = lambda modifiers: nullcontext()

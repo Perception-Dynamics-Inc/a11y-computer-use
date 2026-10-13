@@ -367,6 +367,9 @@ class ErrorCode(str, Enum):
     SECURE_FIELD = "secure_field"
     """Target is a secure/password field; requires human handoff."""
 
+    EXEC_DISABLED = "exec_disabled"
+    """Terminal launch or input attempted without execution permission."""
+
     FOCUS_CHANGED = "focus_changed"
     """The app in front of / under the target changed between the permission
     decision and injection (same-window recheck, PLAN.md §6); re-observe."""
