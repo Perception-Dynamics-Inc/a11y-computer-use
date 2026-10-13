@@ -1649,6 +1649,76 @@ def test_scroll_to_find_scrolls_until_match(monkeypatch) -> None:
     assert scrolls == [5, 5]  # scrolled twice, found on the third observation
 
 
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("readable", [False, "text", "group_value"])
+def test_scroll_to_find_refuses_opaque_contents(monkeypatch, pinned, readable) -> None:
+    """Synthetic wxGTK-style list; unrelated rows cannot justify blind input."""
+    elements = [
+        Element(ref="box", role="AXScrollArea", title="Files", value=None,
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="group", role="AXGroup", title="", value=None, parent="box",
+                bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="surface", role="opaque_region", title="File list", value=None,
+                parent="group", bounds=Bounds(0, 0, 0, 800, 600), snapshot_id="s"),
+        Element(ref="bar", role="AXScrollBar", title="Vertical", value=36,
+                parent="box", bounds=Bounds(0, 780, 0, 20, 600), snapshot_id="s"),
+        Element(ref="other", role="AXRow", title="Unrelated row", value=None,
+                bounds=Bounds(0, 810, 0, 80, 20), snapshot_id="s"),
+    ]
+    if readable == "group_value":
+        elements[1] = dataclasses.replace(elements[1], value="file-001.txt")
+    elif readable:
+        elements.append(Element(
+            ref="row", role="AXStaticText", title="file-001.txt", value=None,
+            parent="group", bounds=Bounds(0, 10, 10, 100, 20), snapshot_id="s",
+        ))
+    snap = Snapshot(snapshot_id="s", scope=Scope.WINDOW, app="a", pid=1,
+                    created_at=0.0, displays=(Display(0, 1000, 800, 1.0, True),),
+                    elements=tuple(elements))
+    inputs = []
+
+    class Driver:
+        def ensure_trusted(self):
+            pass
+
+        def snapshot(self, scope, app):
+            return snap
+
+        def resolve_ref(self, snapshot, ref, live=None):
+            return snap.element(ref)
+
+        def scroll(self, target, **kw):
+            inputs.append("scroll")
+
+        def key_chord(self, chord):
+            inputs.append(chord)
+
+        def type_text(self, text):
+            inputs.append(text)
+
+        def scroll_offset(self, anchor):
+            return 36
+
+    rt = server.Runtime.__new__(server.Runtime)
+    rt.driver = Driver()
+    rt._run_gated = lambda action, app, execute, **kw: execute()
+    rt._require_permission = lambda *args, **kwargs: None
+    rt._recheck_target = lambda *args: None
+    rt._anchor_audited = lambda *args: (snap, snap.element("box"))
+    monkeypatch.setattr(server, "_running_app", lambda app: (None, "a"))
+    out = rt.scroll_to_find("app", text="file-030.txt", max_scrolls=1,
+                            ref="box" if pinned else None)
+    if readable:
+        assert "container_not_readable" not in out
+        assert inputs
+    else:
+        assert out.startswith("container_not_readable after 0 scroll(s)")
+        assert "container: AXScrollArea 'Files' ref=box" in out
+        assert "scroll_position: 36" in out
+        assert "cannot determine whether the target is present" in out
+        assert inputs == []
+
+
 def _item_window(head: int) -> Snapshot:
     """Eight rows starting at ``head``. Synthetic snapshot, not a Chrome list."""
     els = [Element(ref="box", role="AXScrollArea", title="", value=None,
