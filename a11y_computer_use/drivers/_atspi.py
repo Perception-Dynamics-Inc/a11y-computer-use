@@ -1941,6 +1941,8 @@ def _image_text_label(acc) -> str:
     pruner can still fold the icon. The read is bounded. ``get_text`` is
     not asked for ``-1``.
     """
+    if is_secure(acc):
+        return ""
     try:
         Atspi = _atspi()
     except ImportError:
@@ -2002,6 +2004,8 @@ def _text_is_blank(text: str | None) -> bool:
 
 
 def _direct_text(acc) -> str:
+    if is_secure(acc):
+        return ""
     got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
     return got if isinstance(got, str) else ""
 
@@ -2061,7 +2065,7 @@ def _object_text(obj, depth: int, surrounding: str) -> str:
     contributes its name when that name is not already in the surrounding
     words, so ``<p><input aria-label="Bare para input"></p>`` is not blank.
     """
-    if obj is None or depth > 6:
+    if obj is None or depth > 6 or is_secure(obj):
         return ""
     role_name = _role_name(obj)
     role = _ROLE.get(role_name, "AXGroup")
@@ -2176,6 +2180,8 @@ def _expand_embedded(acc, text: str, depth: int = 0) -> str:
 
 
 def _option_label(node) -> str:
+    if is_secure(node):
+        return ""
     label = _node_name(node)
     if label:
         return label
@@ -2849,6 +2855,8 @@ def _page_text(acc) -> str | None:
     longer. ``None`` is a missing interface or a blank page. An embedded
     object character is expanded the same way a paragraph's is.
     """
+    if is_secure(acc):
+        return None
     try:
         Atspi = _atspi()
     except ImportError:
@@ -2911,7 +2919,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
     character count, a subnormal on a text role is absent too, and zero
     and a small normalized value stay when the interface is present.
     """
-    if role == "AXSecureTextField":
+    if role == "AXSecureTextField" or is_secure(acc):
         return None
     Atspi = _atspi()
     if role_name is None:
@@ -3373,6 +3381,8 @@ class ATSPIAccessor:
         # input stays a text field. Chromium entries are not matched here.
         if role == "AXTextField" and role_str == "entry" and _gecko_multiline_entry(node, attrs):
             role = "AXTextArea"
+        if is_secure(node):
+            role = "AXSecureTextField"
         override = self._visible_bounds.get(id(node))
         if override is not None:
             position, size = override
@@ -5322,9 +5332,23 @@ def desktop_application_roots() -> DesktopApplications:
 
 
 def is_secure(acc) -> bool:
-    """Whether ``acc`` is a password field (AT-SPI role name ``password text``,
-    the role the engine maps to ``AXSecureTextField``)."""
-    return _role_name(acc) == "password text"
+    """Recognize password roles, protected states, and explicit masking.
+
+    GTK 4 can omit every masking signal; its empty sentinel must also remain
+    empty in public text readback.
+    """
+    if _role_name(acc) == "password text":
+        return True
+    if any(_state_flag(acc, name, drop_cache=False) for name in ("PASSWORD", "PROTECTED")):
+        return True
+    attrs = _get_attributes(acc)
+    if any(str(attrs.get(key, "")).strip().lower() in {"true", "1"}
+           for key in ("password", "protected")):
+        return True
+    if _role_name(acc) in {"entry", "text"}:
+        visibility = _call_first(acc, ("get_visibility",))
+        return visibility is False or str(attrs.get("visibility", "")).strip().lower() in {"false", "0"}
+    return False
 
 
 def _focused_via_collection(root, Atspi, focused_state):
@@ -7594,16 +7618,19 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
-def _read_full_text(acc, *, count=None):
-    """Retry GTK 4's empty sentinel result with a positive end offset.
+def _read_full_text(acc, *, count=None, verification=False):
+    """Keep ambiguous GTK 4 sentinel text empty outside boolean verification.
 
     Chromium's bounded read can echo a write instead of the actual contents,
     so a nonempty sentinel result remains authoritative. NULL still means
-    unreadable; only an empty string with a positive count gets a retry.
+    unreadable. A bounded retry may expose an unmarked masked entry, so
+    only private boolean write verification may request it.
     """
+    if is_secure(acc):
+        return None
     Atspi = _atspi()
     got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
-    if got == "":
+    if got == "" and verification:
         if count is None:
             count = _safe(lambda: Atspi.Text.get_character_count(acc))
         if isinstance(count, int) and not isinstance(count, bool) and count > 0:
@@ -7611,12 +7638,21 @@ def _read_full_text(acc, *, count=None):
     return got
 
 
+def _verification_matches(acc, text: str) -> bool:
+    """Compare a private read without returning its contents."""
+    if is_secure(acc):
+        return False
+    _call_first(acc, ("clear_cache", "clearCache"))
+    return _texts_match(_read_full_text(acc, verification=True), text)
+
+
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. GTK 4's empty sentinel read is retried with a positive
-    character count. A nonempty sentinel read is kept: on a Chromium web
+    returns one. GTK 4's empty sentinel stays empty because a bounded
+    read can expose a masked entry without any security signal. A nonempty
+    sentinel read is kept: on a Chromium web
     field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
@@ -8069,10 +8105,12 @@ def _content_is_blank(acc) -> bool:
 
 
 def _confirm_text(acc, text: str) -> bool:
+    if is_secure(acc):
+        return False
     for attempt in range(_TEXT_CONFIRM_POLLS):
         shown = _full_text(acc)
         blank = text == "" and (_text_is_blank(shown) or _content_is_blank(acc))
-        if (blank or _texts_match(shown, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
+        if (blank or _verification_matches(acc, text) or writer_document_matches(acc, text)) and _qt_text_count_matches(acc, text):
             return True
         if attempt + 1 < _TEXT_CONFIRM_POLLS:
             time.sleep(_TEXT_CONFIRM_PAUSE_S)
@@ -11151,7 +11189,7 @@ def _collect_options(acc) -> list[tuple[str, object, object, int]]:
             if role in _OPTION_ROLE_NAMES:
                 label = _node_name(child)
                 if not label:
-                    raw = _safe(lambda c=child: _atspi().Text.get_text(c, 0, -1))
+                    raw = _direct_text(child)
                     label = _strip_objects(raw) if isinstance(raw, str) else ""
                 found.append((label, child, node, index))
                 continue
@@ -13935,7 +13973,9 @@ def _set_gecko_contenteditable(acc, text: str) -> bool:
 def set_text(acc, text: str, *, force: bool = False) -> bool:
     """Replace the element's whole text via AT-SPI EditableText.
 
-    GTK's ``set_text_contents`` replaces, and the snapshot read then equals
+    GTK's ``set_text_contents`` replaces; private bounded verification handles
+    empty GTK 4 sentinel reads without publishing their contents. On other
+    fields the snapshot read then equals
     ``text``, so nothing is deleted. Chromium's web fields implement that
     call as an insert and the editable-text adaptor still returns true. The
     success check is ``Text.get_text(0, -1)``, the same read a snapshot uses,
@@ -13984,6 +14024,8 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     table-cell path: one EditableText replace, with no selection and no
     keys. The cell writer polls until the new paragraph is the value.
     """
+    if is_secure(acc):
+        return False
     if drawing_text_editable(acc):
         return _replace_drawing_paragraph(acc, text)
     if not force and _blocks_text_replace(acc):
@@ -14020,7 +14062,7 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
     original = _full_text(acc)
     wrote = bool(_call_first(eti, ("set_text_contents",), text, default=False))
     current = _full_text(acc)
-    if (current == text or _texts_match(current, text)) and _qt_text_count_matches(acc, text):
+    if _verification_matches(acc, text) and _qt_text_count_matches(acc, text):
         return True
     if current is None:
         if wrote:
