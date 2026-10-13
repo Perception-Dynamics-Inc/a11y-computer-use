@@ -3369,6 +3369,20 @@ class ATSPIAccessor:
         description = _plain_accessible_name(
             str(_call_first(node, ("get_description",), default="") or "")
         )
+        # GTK 4 can expose uninitialized allocations on empty anonymous
+        # panels (#503). Do not turn that filler into a clickable opaque
+        # region. A side longer than the full X coordinate span (65535)
+        # is suspect only here. Keep real containers' extents for clipping
+        # and row sampling.
+        if (
+            role_str == "panel"
+            and not str(name).strip()
+            and size is not None
+            and any(not math.isfinite(v) or v > 65535 for v in size)
+            and _gtk_major(node) == 4
+            and _child_count(node) == 0
+        ):
+            position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         button_name = str(name)
