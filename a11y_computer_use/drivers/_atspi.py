@@ -773,9 +773,22 @@ def _call_first(obj, names, *args, default=None):
 
     Inside ``read_cache``, a successful stable getter is remembered for
     this object and these arguments. A mutator drops that memory first.
+
+    While ``event_main`` is running, the call moves onto that thread.
+    libatspi is not safe from the caller and the loop at once.
     """
     if obj is None:
         return default
+
+    def invoke():
+        return _call_first_inline(obj, names, *args, default=default)
+
+    from a11y_computer_use.drivers import _atspi_events
+
+    return _atspi_events.run(invoke)
+
+
+def _call_first_inline(obj, names, *args, default=None):
     for name in names:
         method = getattr(obj, name, None)
         if method is None:
@@ -1139,12 +1152,86 @@ def _panel_surface_name(node, size, focusable: bool) -> str:
     return title
 
 
+def _audacity_track_area(container) -> bool:
+    """Recognize a project track area by its published Timeline Options control.
+
+    Stay in this container: a separate wx dialog may also have role frame.
+    A bounded search fails closed when the project context is unavailable.
+    """
+    budget = _SURFACE_WALK_NODES
+
+    def walk(node, depth):
+        nonlocal budget
+        if budget <= 0 or depth > _SURFACE_WALK_DEPTH:
+            return False
+        budget -= 1
+        role = _role_name(node)
+        if role in {"application", "frame", "window", "dialog"} and depth:
+            return False
+        if _node_name(node).strip().casefold() == "timeline options":
+            return True
+        if role in _SURFACE_SKIP_ROLES:
+            return False
+        count = _child_count(node)
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            return False
+        for index in range(min(count, _SURFACE_WALK_CHILDREN)):
+            child = _child_at(node, index)
+            if child is not None and walk(child, depth + 1):
+                return True
+        return False
+
+    return walk(container, 0)
+
+def _okular_thumbnail_surface(node) -> tuple[str, str]:
+    """Label an empty thumbnail strip from its native sidebar context.
+
+    No page labels or thumbnail bounds are inferred from this painted filler.
+    Native names and children take precedence over the fallback.
+    """
+    if _child_count(node) != 0:
+        return "", ""
+    app = _application_ancestor(node)
+    if app is None or _node_name(app).casefold() != "okular":
+        return "", ""
+    parent = _parent_of(node)
+    if parent is None or not any(
+        _role_name(child) == "scroll bar" for child in _direct_children(parent)
+    ):
+        return "", ""
+    thumbnails = False
+    for _ in range(20):
+        if parent is None:
+            break
+        role = _role_name(parent)
+        if role in {"dialog", "application"}:
+            break
+        if role in {"frame", "window"}:
+            if _node_name(parent).casefold() == "sidebar" and thumbnails:
+                return (
+                    "Okular thumbnails",
+                    "Per-page thumbnails are not exposed by AT-SPI; use the page-number "
+                    "field, Go to Page…, or the Find bar for navigation.",
+                )
+            break
+        thumbnails = thumbnails or any(
+            _role_name(child) in {"label", "static", "text"}
+            and _node_name(child).casefold() == "thumbnails"
+            for child in _direct_children(parent)
+        )
+        parent = _parent_of(parent)
+    return "", ""
+
+
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
-    Toolbar tools put their label in the tooltip. The track view and Time
+    Toolbar tools put their label in the tooltip; wxGTK may identify their
+    container only through a sibling grip's description. The track view and Time
     clock paint their contents without publishing controls or a value. Keep
     those surfaces opaque; never invent track names or clock readings.
+    Require Timeline Options in the local track area / project window for
+    surface hints: wxGTK dialogs can expose a frame rather than a dialog.
     """
     if _child_count(node) != 0 or not _parent_of(node):
         return "", "", ""
@@ -1170,13 +1257,44 @@ def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
         return "", "", ""
     name = _node_name(node).strip()
     description = str(_call_first(node, ("get_description",), default="") or "").strip()
+    if toolbar is None and not name and description:
+        container = _parent_of(node)
+        if _role_name(container) == "panel":
+            for index in range(_child_count(container)):
+                sibling = _child_at(container, index)
+                marker = str(_call_first(
+                    sibling, ("get_description",), default="",
+                ) or "").strip().casefold()
+                if (_role_name(sibling) == "panel" and _child_count(sibling) == 0
+                        and marker.startswith("audacity ") and marker.endswith(" toolbar")):
+                    if description.casefold() != marker:
+                        return "AXButton", "", ""
+    # wxGTK publishes the Time toolbar as a panel containing a labelled
+    # grip, the clock, and a resize grip, rather than a named tool bar.
+    container = _parent_of(node)
+    if not name and not description and _role_name(container) == "panel" and _child_count(container) == 3:
+        grip = _child_at(container, 0)
+        clock = _child_at(container, 1)
+        resize_grip = _child_at(container, 2)
+        if (
+            clock == node
+            and grip is not None
+            and resize_grip is not None
+            and _role_name(grip) == "panel"
+            and _role_name(resize_grip) == "panel"
+            and str(_call_first(grip, ("get_description",), default="") or "").strip().casefold()
+            == "audacity time toolbar"
+        ):
+            return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     if toolbar is not None:
         if description and not name:
             return "AXButton", "", ""
-        if not name and not description and _node_name(toolbar).casefold() in {"time", "time toolbar"}:
+        if (not name and not description
+                and _node_name(toolbar).casefold() in {"time", "time toolbar"}
+                and _audacity_track_area(parent)):
             return "", "Audacity Time clock", "Clock reading is not exposed by AT-SPI."
     elif not name and not description and focusable and size is not None:
-        if size[0] >= 300 and size[1] >= 100:
+        if size[0] >= 300 and size[1] >= 100 and _audacity_track_area(_parent_of(node)):
             return (
                 "", "Audacity track / waveform",
                 "Track controls are not exposed by AT-SPI; use Tracks > Mute/Unmute menus.",
@@ -1733,8 +1851,11 @@ _HTML_TAG_NAMES = (
 )
 # The name starts immediately after ``<`` or ``</``. ``a < b and c > d`` is
 # not a tag: HTML does not allow a space between ``<`` and the name.
+# Quoted attributes may contain angle brackets; require the full tag name
+# so a literal ``<p-custom>`` is not mistaken for a paragraph.
 _HTML_TAG_RE = re.compile(
-    rf"<(/)?({_HTML_TAG_NAMES})\b([^<>]*)>",
+    rf"<(/)?({_HTML_TAG_NAMES})(?=[\s/>])"
+    r"((?:[^<>\"']|\"[^\"]*\"|'[^']*')*)>",
     re.IGNORECASE,
 )
 _HTML_VOID_TAGS = frozenset({"br", "hr", "img", "meta"})
@@ -2311,6 +2432,24 @@ def gtk4_recovered_box(acc, position, size, cache: dict | None = None):
     return (nx, ny), (float(window[2]), float(window[3]))
 
 
+def gtk4_in_window_dialog(acc) -> bool:
+    """GTK 4 dialog descendants whose WINDOW origin is not a screen box.
+
+    AdwAlertDialog is nested inside a frame, rather than an X window of its
+    own. Its positive WINDOW coordinates can still omit dialog offsets (#520).
+    """
+    if acc is None or not _gtk4_app(acc):
+        return False
+    dialog = False
+    for node in _ancestor_chain(acc):
+        role = _role_name(node)
+        if role in {"alert", "dialog"}:
+            dialog = True
+        elif role in {"frame", "window"}:
+            return dialog
+    return False
+
+
 def gtk4_window_origin_untrusted(acc) -> bool:
     """GTK 4 header-bar boxes can lie outside the frame's content origin.
 
@@ -2502,6 +2641,53 @@ def _combo_display_name(acc, name: str) -> str:
     return title or name
 
 
+def _gtk_button_row_name(acc, name: str) -> str:
+    """Name ambiguous GTK grid buttons from measured same-row sibling labels.
+
+    Explicit relations win; unique names and missing or ambiguous geometry
+    retain the raw name. GTK child order need not match screen row order.
+    """
+    if "gtk" not in _toolkit_name(acc):
+        return name
+    label = _labelled_by_name(acc)
+    if label:
+        return _strip_label_colon(label) or name
+    parent = _parent_of(acc)
+    if parent is None or _role_name(parent) not in {"panel", "filler", "grouping"}:
+        return name
+    siblings = [_child_at(parent, i) for i in range(_child_count(parent))]
+    if name.strip() and sum(
+        _role_name(child) == "push button" and _node_name(child) == name
+        for child in siblings if child is not None
+    ) < 2:
+        return name
+    position, size = _extents(acc)
+    if position is None or size is None:
+        return name
+    x, y = position
+    width, height = size
+    if not all(math.isfinite(v) for v in (*position, *size)) or min(width, height) <= 0:
+        return name
+    candidates = []
+    for child in siblings:
+        if child is None or _role_name(child) not in {"label", "static", "static text"}:
+            continue
+        text = _node_name(child)
+        pos, span = _extents(child)
+        if not text.strip() or pos is None or span is None:
+            continue
+        if not all(math.isfinite(v) for v in (*pos, *span)) or min(span) <= 0:
+            continue
+        left, top = pos
+        w, h = span
+        if left + w <= x and top < y + height and top + h > y:
+            candidates.append((x - left - w, text))
+    candidates.sort()
+    if not candidates or (len(candidates) > 1 and candidates[0][0] == candidates[1][0]):
+        return name
+    return _strip_label_colon(candidates[0][1]) or name
+
+
 def _aria_spinbutton(acc, role_name: str | None = None, attrs: dict | None = None) -> bool:
     """True for a Chromium custom ``role=spinbutton``, not a native number input.
 
@@ -2645,6 +2831,15 @@ def _terminal_on_screen(acc, full: str) -> str:
 _PAGE_TEXT_CHARS = 4000
 
 
+def _evince_page(node) -> bool:
+    """Evince PDF pages have reliable SHOWING state, but drifting extents."""
+    if _role_name(node) != "page":
+        return False
+    app = _application_of(node)
+    name = _call_first(app, ("get_name",), default="") if app is not None else ""
+    return str(name).strip().lower() == "evince"
+
+
 def _page_text(acc) -> str | None:
     """The page's Text interface, bounded by ``_PAGE_TEXT_CHARS``.
 
@@ -2725,7 +2920,7 @@ def _value_text(acc, role: str, role_name: str | None = None) -> object | None:
         return _aria_spin_value(acc)
     count = _safe(lambda: Atspi.Text.get_character_count(acc))
     if isinstance(count, int) and not isinstance(count, bool) and count > 0:
-        got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+        got = _read_full_text(acc, count=count)
         if isinstance(got, str) and got:
             if _OBJECT_REPLACEMENT in got:
                 if _is_choice_role(role, role_name or ""):
@@ -3200,7 +3395,24 @@ class ATSPIAccessor:
         if role_str == "combo box" and _gtk_combo(node):
             expanded = bool(_popup_open(node))
         name = _plain_accessible_name(str(_call_first(node, ("get_name",), default="") or ""))
-        description = _call_first(node, ("get_description",), default="") or ""
+        # The snapshot uses the description as its title when the name is empty.
+        description = _plain_accessible_name(
+            str(_call_first(node, ("get_description",), default="") or "")
+        )
+        # GTK 4 can expose uninitialized allocations on empty anonymous
+        # panels (#503). Do not turn that filler into a clickable opaque
+        # region. A side longer than the full X coordinate span (65535)
+        # is suspect only here. Keep real containers' extents for clipping
+        # and row sampling.
+        if (
+            role_str == "panel"
+            and not str(name).strip()
+            and size is not None
+            and any(not math.isfinite(v) or v > 65535 for v in size)
+            and _gtk_major(node) == 4
+            and _child_count(node) == 0
+        ):
+            position, size = (-1.0, -1.0), (-1.0, -1.0)
         if role_str == "combo box":
             name = _combo_display_name(node, str(name))
         if role == "AXMenuItem" and not str(name).strip():
@@ -3211,6 +3423,9 @@ class ATSPIAccessor:
                 if label:
                     name = _plain_accessible_name(label)
                     break
+        button_name = str(name)
+        if role_str == "push button":
+            name = _gtk_button_row_name(node, button_name)
         if _OBJECT_REPLACEMENT in str(name):
             name = _strip_objects(str(name))
         # An unnamed icon can still carry a caption on its Text interface.
@@ -3257,6 +3472,11 @@ class ATSPIAccessor:
             page_text = _page_text(node)
             if page_text:
                 value = page_text
+                if _evince_page(node) and _state_has(node, "SHOWING"):
+                    # Evince's page boxes drift after scrolling. Keep the
+                    # visible text without offering those boxes for targeting.
+                    position, size = None, None
+                    unallocated = True
             else:
                 role = "AXGroup"
                 value = None
@@ -3276,6 +3496,8 @@ class ATSPIAccessor:
             sentence = _div_inline_sentence(node, role_str, attrs)
             if sentence:
                 value = sentence
+        if role_str == "push button" and name != button_name and button_name.strip() and value is None:
+            value = button_name
         screen_text = None
         if role_str == "terminal" and isinstance(value, str) and value:
             screen_text = _terminal_on_screen(node, value)
@@ -3283,6 +3505,26 @@ class ATSPIAccessor:
         name, description, hint, shortcut = _split_tooltip_fields(str(name), str(description))
         surface_name = ""
         panel_note = ""
+        if (
+            role_str == "filler" and role == "AXGroup"
+            and not str(name).strip() and not str(description).strip()
+        ):
+            surface_name, panel_note = _okular_thumbnail_surface(node)
+        if (
+            role_str == "drawing area"
+            and not str(name).strip()
+            and not str(description).strip()
+            and _child_count(node) == 0
+            and _parent_of(node)
+        ):
+            app = _application_ancestor(node)
+            if app is not None and _node_name(app).casefold() == "gnumeric":
+                surface_name = "Gnumeric drawing area"
+                panel_note = (
+                    "Cell content is not exposed by AT-SPI on this surface. "
+                    "The formula bar exposes only the active cell; inspect it to read "
+                    "that cell. Other cells require visual inspection."
+                )
         if role_str == "panel" and role == "AXGroup":
             panel_role, surface_name, panel_note = _audacity_panel(node, size, focusable)
             if panel_role:
@@ -3300,7 +3542,11 @@ class ATSPIAccessor:
                 name = label
         return RawNode(
             role=role,
-            subrole="terminal" if role_str == "terminal" else None,
+            subrole=(
+                "terminal" if role_str == "terminal"
+                else "label" if role_str == "label"
+                else None
+            ),
             title=str(name),
             description=str(description),
             enabled=enabled,
@@ -3480,6 +3726,12 @@ class ATSPIAccessor:
             if child is not None:
                 kids.append(child)
         role = _role_name(node)
+        # Evince's hidden pages can have on-screen rectangles, and its
+        # painted page can have an off-screen rectangle. Trust SHOWING.
+        kids = [
+            child for child in kids
+            if not _evince_page(child) or _state_has(child, "SHOWING")
+        ]
         if self._tree_is_gecko(node):
             # Firefox keeps background tabs and the preloaded New Tab page in
             # the tree with on-screen bounds. They are not SHOWING. Drop the
@@ -7350,18 +7602,36 @@ _TEXT_CONFIRM_POLLS = 4
 _TEXT_CONFIRM_PAUSE_S = 0.02
 
 
+def _read_full_text(acc, *, count=None):
+    """Retry GTK 4's empty sentinel result with a positive end offset.
+
+    Chromium's bounded read can echo a write instead of the actual contents,
+    so a nonempty sentinel result remains authoritative. NULL still means
+    unreadable; only an empty string with a positive count gets a retry.
+    """
+    Atspi = _atspi()
+    got = _safe(lambda: Atspi.Text.get_text(acc, 0, -1))
+    if got == "":
+        if count is None:
+            count = _safe(lambda: Atspi.Text.get_character_count(acc))
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            got = _safe(lambda: Atspi.Text.get_text(acc, 0, count))
+    return got
+
+
 def _full_text(acc) -> str | None:
     """The text a snapshot shows: ``Text.get_text(acc, 0, -1)``.
 
     ``None`` means that read failed. ``""`` is an empty field when the toolkit
-    returns one. A bounded ``get_text(0, character_count)`` is not used. On a
-    Chromium web field that count can be the length of the string just passed
+    returns one. GTK 4's empty sentinel read is retried with a positive
+    character count. A nonempty sentinel read is kept: on a Chromium web
+    field that count can be the length of the string just passed
     to ``set_text_contents``, and the bounded read echoes that string while
     ``get_text(0, -1)`` still has the previous contents. The client text cache
     is dropped first so the read is not the pre-write value.
     """
     _call_first(acc, ("clear_cache", "clearCache"))
-    got = _safe(lambda: _atspi().Text.get_text(acc, 0, -1))
+    got = _read_full_text(acc)
     if got is None:
         return None
     return str(got)
@@ -10051,7 +10321,8 @@ def _find_cell_editor(node, budget: list[int]):
     """The ``Cell A1`` group opened while a cell is being edited.
 
     The name is matched on any role: LibreOffice 24.2 exposes it as a
-    group, and 25.2 as a panel. Menus and the sheet table are not descended.
+    group, and 25.2 as a panel. Menus, toolbars, status bars, and the
+    sheet table are not descended: their contents cannot be the cell editor.
     A Calc table's child count is huge, and the editor is a sibling of the
     table, not a cell.
     """
@@ -10060,7 +10331,7 @@ def _find_cell_editor(node, budget: list[int]):
     if _CELL_EDITOR_PANEL.match(_node_name(node)):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = _child_count(node)
@@ -10074,34 +10345,114 @@ def _find_cell_editor(node, budget: list[int]):
     return None
 
 
+def _cache_masks():
+    """``(none, undefined)`` for ``set_cache_mask``.
+
+    ``none`` is ``0`` when the typelib has no ``Cache`` enum, which is the
+    same value as ``Atspi.Cache.NONE``. ``undefined`` is missing on a test
+    double; the caller then leaves the mask alone after the read.
+    """
+    none = 0
+    undefined = None
+    try:
+        cache = getattr(_atspi(), "Cache", None)
+    except Exception:
+        return none, undefined
+    if cache is None:
+        return none, undefined
+    member = getattr(cache, "NONE", None)
+    if member is not None:
+        none = member
+    return none, getattr(cache, "UNDEFINED", None)
+
+
+def _without_child_cache(node, fn):
+    """Run ``fn`` without trusting this application's child cache.
+
+    ``clear_cache_single`` sets ``cached_properties`` to none and leaves the
+    children array in place. The next D-Bus call reenters the event loop.
+    A cache event then sets the children flag again, and
+    ``get_child_at_index`` returns that stale array. LibreOffice opens the
+    cell editor as a new sibling of the sheet. The pre-edit children do not
+    contain it, so the grid never sends Return. While that editor is open
+    every other cell's text interface stays empty, and A1 reads back as a
+    mismatch. ``set_cache_mask(NONE)`` makes the cache test fail even when
+    the flag comes back. The desktop default is restored afterwards.
+    The operation-scoped getter cache is invalidated around the walk too,
+    since it can retain child counts and handles read before the edit. The
+    mask change and walk share the event thread, including direct native calls.
+    A node without ``set_cache_mask`` is a test double and is walked as it is.
+    """
+    from a11y_computer_use.drivers import _atspi_events
+
+    def read_uncached():
+        app = _call_first(node, ("get_application", "getApplication"))
+        target = app if app is not None else node
+        setter = getattr(target, "set_cache_mask", None)
+        if setter is None:
+            return fn()
+        none, undefined = _cache_masks()
+        try:
+            _drop_read_cache()
+            setter(none)
+        except Exception:
+            return fn()
+        try:
+            return fn()
+        finally:
+            _drop_read_cache()
+            if undefined is not None:
+                try:
+                    setter(undefined)
+                except Exception:
+                    pass
+
+    return _atspi_events.run(read_uncached)
+
+
+def _fresh_sheet_root(app, scope):
+    """Refresh desktop children before locating Calc's application/window."""
+    try:
+        desktop = _call_first(_atspi(), ("get_desktop",), 0)
+    except ImportError:
+        desktop = None
+    return _without_child_cache(desktop, lambda: find_root(app, scope))
+
+
 def sheet_editor_text(app: str) -> str | None:
     """Paragraph text of the open cell editor, or None.
 
     Only LibreOffice. The panel is a sibling of the sheet, named ``Cell F1``,
     and its paragraph is the in-progress string. Absent when no edit is open.
+    The walk does not trust the child cache: the editor is created when the
+    edit starts, and a stale children array still lists the sheet alone.
     """
     if not libreoffice_app(app):
         return None
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is None:
+                continue
+            text = _full_text(child)
+            if text:
+                return text
         return None
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is None:
-            continue
-        text = _full_text(child)
-        if text:
-            return text
-    return None
+
+    return _without_child_cache(root, read)
 
 
 def _cell_editor_is_secure(app: str) -> bool | None:
@@ -10117,22 +10468,26 @@ def _cell_editor_is_secure(app: str) -> bool | None:
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.APP)
+        root = _fresh_sheet_root(app, Scope.APP)
     except Exception:
         return None
     if root is None:
         return None
-    panel = _find_cell_editor(root, [160])
-    if panel is None:
-        return None
-    if is_secure(panel):
-        return True
-    count = min(_child_count(panel), 8)
-    for index in range(count):
-        child = _child_at(panel, index)
-        if child is not None and is_secure(child):
+
+    def read():
+        panel = _find_cell_editor(root, [160])
+        if panel is None:
+            return None
+        if is_secure(panel):
             return True
-    return False
+        count = min(_child_count(panel), 8)
+        for index in range(count):
+            child = _child_at(panel, index)
+            if child is not None and is_secure(child):
+                return True
+        return False
+
+    return _without_child_cache(root, read)
 
 
 def _selected_sheet_cell(app: str):
@@ -10177,13 +10532,13 @@ def selected_sheet_text(app: str) -> str | None:
 
 
 def _find_spreadsheet(node, budget: list[int]):
-    """The Calc grid, without indexing its cells."""
+    """The Calc grid, without indexing cells or unrelated toolbar contents."""
     if budget[0] <= 0 or node is None:
         return None
     if _spreadsheet_table(node):
         return node
     role = _role_name(node)
-    if role in {"table", "menu", "menu bar", "popup menu"}:
+    if role in {"table", "menu", "menu bar", "popup menu", "tool bar", "status bar"}:
         return None
     budget[0] -= 1
     count = min(_child_count(node), 40)
@@ -10335,12 +10690,12 @@ def _sheet_table(app: str):
     try:
         from a11y_computer_use.schema import Scope
 
-        root = find_root(app, Scope.WINDOW)
+        root = _fresh_sheet_root(app, Scope.WINDOW)
     except Exception:
         return None
     if root is None:
         return None
-    return _find_spreadsheet(root, [80])
+    return _without_child_cache(root, lambda: _find_spreadsheet(root, [80]))
 
 
 def _cell_for_address(app: str, address: str):
@@ -10512,17 +10867,16 @@ def sheet_grid_check(app: str, origin: str, text: str):
     committed = False
     deadline = time.monotonic() + _SHEET_GRID_WAIT_S
     while True:
+        # Reading another cell while Calc's editor is open can time out and
+        # make libatspi mark the application hung. Commit before any cell
+        # reads so the native connection remains usable for verification.
+        if not committed and _commit_open_sheet_editor(app):
+            committed = True
+            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
         scanned = _scan_sheet_grid(app, origin, grid)
         kind = scanned[0]
         if kind == "match":
             return None
-        # A blank or missing cell is not final while the editor from the
-        # type is open. One Return publishes the others and moves the caret
-        # the way Enter does. A disagreement is judged after that commit.
-        if not committed and _commit_open_sheet_editor(app):
-            committed = True
-            time.sleep(_SHEET_GRID_COMMIT_PAUSE_S)
-            continue
         if kind == "differ":
             _status, address, wanted, actual = scanned
             return (address, wanted, actual)
@@ -12749,6 +13103,44 @@ def _qt_grid(acc):
     return None
 
 
+def gtk_icon_view_item(acc) -> bool:
+    """GTK icon-view images expose activate, which means open, not click."""
+    parent = _parent_of(acc)
+    return (
+        "gtk" in _toolkit_name(acc)
+        and _role_name(acc) == "image"
+        and parent is not None
+        and _role_name(parent) == "layered pane"
+    )
+
+
+def click_gtk_icon_view_item(acc) -> bool:
+    """Send one pointer click and confirm exclusive icon selection."""
+    parent = _parent_of(acc)
+    count = _child_count(parent)
+    pos, size = _extents(acc)
+    if (
+        not _x11_keys_available() or pos is None or size is None
+        or size[0] <= 0 or size[1] <= 0 or not 0 < count <= 500
+    ):
+        return False
+    try:
+        from a11y_computer_use.drivers import _linux_input
+
+        _linux_input.click(int(pos[0] + size[0] / 2), int(pos[1] + size[1] / 2))
+    except Exception:
+        return False
+    for attempt in range(8):
+        selected = [_child_at(parent, index) for index in range(count)]
+        if all(child is not None for child in selected):
+            selected = [child for child in selected if _state_has(child, "SELECTED")]
+            if len(selected) == 1 and selected[0] == acc:
+                return True
+        if attempt + 1 < 8:
+            time.sleep(0.05)
+    return False
+
+
 def qt_table_cell(acc) -> bool:
     """True for a cell in a Qt grid, not a tree item and not a GTK cell."""
     try:
@@ -13606,6 +13998,20 @@ def set_text(acc, text: str, *, force: bool = False) -> bool:
         return False
     if force:
         return _replace_editable_text(acc, text)
+    # AbiWord's GtkEntry buffer is not its dialog model: EditableText can
+    # echo the requested spacing while OK discards it. We cannot observe
+    # that model through AT-SPI, so refuse before changing the buffer rather
+    # than claim a committed value or send an unverified activation key.
+    if _role_name(acc) in {"text", "entry"} and "gtk" in _toolkit_name(acc):
+        app = _call_first(acc, ("get_application", "getApplication"))
+        name = _call_first(app, ("get_name",), default="") or ""
+        if str(name).casefold() == "abiword":
+            raise ComputerUseError(
+                ErrorCode.UNSUPPORTED,
+                "AbiWord entry values cannot be confirmed as committed; "
+                "use focused typing and verify the value after closing and reopening the dialog",
+                detail={"reason": "commit_unverified"},
+            )
     if is_writer_document(acc):
         return _set_writer_document_text(acc, text)
     if _chrome_date_segment(acc):
@@ -17269,13 +17675,20 @@ def _drop_cached_properties(acc) -> None:
 
     if not _atspi_events.listening():
         return
-    _reply_local.dropping_properties = True
-    try:
-        method()
-    except Exception:
-        return
-    finally:
-        _reply_local.dropping_properties = False
+
+    def drop() -> None:
+        # The guard is thread-local. It has to be set on the thread that
+        # actually calls libatspi, which is the event thread when the loop
+        # is up.
+        _reply_local.dropping_properties = True
+        try:
+            method()
+        except Exception:
+            return
+        finally:
+            _reply_local.dropping_properties = False
+
+    _atspi_events.run(drop)
 
 
 def _invalidate_tree_cache(acc) -> None:
