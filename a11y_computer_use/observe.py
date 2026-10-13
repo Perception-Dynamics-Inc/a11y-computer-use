@@ -291,11 +291,6 @@ class RawNode:
     #: childless panel still becomes an opaque region. The pruner copies it
     #: onto that region's title. Empty on macOS, Windows, and the browser.
     surface_name: str = ""
-    #: Linux only. A sentence such as ``canvas content isn't accessible``
-    #: when a drawing area has no text and no children. Empty when the
-    #: toolkit exposed that content. The pruner copies it onto the element.
-    #: It does not invent a box for a shape inside the canvas.
-    content_note: str = ""
     #: Tooltip sentence split off a multiline accessible name. Empty when
     #: the name was a single line. The snapshot prints it as ``hint=``, not
     #: inside the name.
@@ -307,6 +302,11 @@ class RawNode:
     #: GTK outline row only selects it. Empty everywhere else. The click is
     #: not turned into that double-click.
     note: str = ""
+    #: Linux only. A sentence such as ``canvas content isn't accessible``
+    #: when a drawing area has no text and no children. Empty when the
+    #: toolkit exposed that content. The pruner copies it onto the element.
+    #: It does not invent a box for a shape inside the canvas.
+    content_note: str = ""
 
 
 class TreeAccessor(Protocol):
@@ -2704,10 +2704,10 @@ def _flatten(
             instance_id=instance_id,
             document_id=document_id,
             subrole="terminal" if terminal else None,
-            content_note=node.raw.content_note,
             hint=node.raw.hint,
             shortcut=node.raw.shortcut,
             note=node.raw.note or None,
+            content_note=node.raw.content_note,
         )
     )
     if node.elided:

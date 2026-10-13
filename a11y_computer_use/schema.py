@@ -285,10 +285,6 @@ class Element:
     #: older output was omitted. ``find`` still searches the whole buffer.
     #: None for every other role.
     subrole: str | None = None
-    #: Set when a canvas has no accessible text and no children. The
-    #: snapshot and a find that misses print this sentence. Empty when the
-    #: toolkit exposed the content, and on every other role. It is not a box.
-    content_note: str = ""
     #: Tooltip sentence that was glued onto a control's accessible name.
     #: Empty when the name was a single line. ``find`` searches it. The
     #: rendered name does not include it.
@@ -300,6 +296,10 @@ class Element:
     #: ``activates on double-click`` is a GTK tree or tree-table row. None
     #: for every other element. A click is not rewritten into that double-click.
     note: str | None = None
+    #: Set when a canvas has no accessible text and no children. The
+    #: snapshot and a find that misses print this sentence. Empty when the
+    #: toolkit exposed the content, and on every other role. It is not a box.
+    content_note: str = ""
 
     @property
     def actionable(self) -> bool:

@@ -1206,6 +1206,8 @@ def _drawing_canvas_facts(node, size) -> tuple[str, str, str]:
     labels = _prefix_image_labels(frame, title)
     name = labels[0] if len(labels) == 1 else title
     return name, note, text
+
+
 def _audacity_panel(node, size, focusable: bool) -> tuple[str, str, str]:
     """Role, surface name, and note for Audacity's childless wx panels.
 
