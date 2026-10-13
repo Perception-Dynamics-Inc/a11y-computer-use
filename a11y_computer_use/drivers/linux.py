@@ -3159,6 +3159,24 @@ class LinuxDriver:
             actual=after,
         )
 
+    def _verify_remembered_editable(self, handle) -> str:
+        """Keep cached editable ownership checks ahead of terminal detection."""
+        from a11y_computer_use.drivers import _atspi
+        from a11y_computer_use.drivers import _linux_system
+
+        app_id, _pid = self.frontmost_app()
+        owner_pid = self._run(lambda: _atspi.pid_of(handle))
+        owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
+        if not owner or not app_id or owner != app_id:
+            self._focused_editable = None
+            raise ComputerUseError(
+                ErrorCode.FOCUS_CHANGED,
+                "the remembered editable does not belong to a verified frontmost app; "
+                "focus the intended field again or use set_value with its ref",
+                detail={"editable_app": owner, "frontmost_app": app_id},
+            )
+        return app_id
+
     def type_text(self, text: str, *, pre_check: Callable | None = None,
                   dry_run: bool = False) -> object:
         """Enter ``text`` into the focused editable.
@@ -3193,19 +3211,7 @@ class LinuxDriver:
         if handle is not None and self._run(lambda: _atspi.is_secure(handle)):
             raise _secure_focus_error("AT-SPI role 'password text' on the focused editable")
         if handle is not None:
-            from a11y_computer_use.drivers import _linux_system
-
-            app_id, _pid = self.frontmost_app()
-            owner_pid = self._run(lambda: _atspi.pid_of(handle))
-            owner = _linux_system._comm_for_pid(owner_pid) if owner_pid is not None else None
-            if not owner or not app_id or owner != app_id:
-                self._focused_editable = None
-                raise ComputerUseError(
-                    ErrorCode.FOCUS_CHANGED,
-                    "the remembered editable does not belong to a verified frontmost app; "
-                    "focus the intended field again or use set_value with its ref",
-                    detail={"editable_app": owner, "frontmost_app": app_id},
-                )
+            app_id = self._verify_remembered_editable(handle)
         else:
             app_id, _pid = self.frontmost_app()
             if app_id:
@@ -4316,6 +4322,47 @@ class LinuxDriver:
         from a11y_computer_use.drivers import _linux_system
 
         return _linux_system.running_apps()
+
+    def terminal_target(self, app: str, target=None, *, launch: bool = False) -> bool:
+        """Recognize terminal apps and native terminal accessibles for the exec gate."""
+        from pathlib import Path
+        from a11y_computer_use import observe
+        from a11y_computer_use.drivers import _atspi
+
+        def known(name: str) -> bool:
+            name = Path(name).name.casefold().removesuffix(".desktop")
+            return name in {
+                "xfce4-terminal", "gnome-terminal", "gnome-terminal-server",
+                "gnome-terminal-", "xterm", "uxterm", "konsole", "tilix",
+                "mate-terminal", "qterminal", "lxterminal", "alacritty",
+                "kitty", "foot", "footclient", "wezterm", "wezterm-gui",
+                "terminator", "terminology", "kgx", "ptyxis",
+                "ghostty", "rxvt", "urxvt", "urxvtc", "st", "cosmic-term",
+                "x-terminal-emulator", "sakura", "guake", "yakuake",
+                "org.gnome.terminal", "org.gnome.console", "org.gnome.ptyxis",
+                "org.kde.konsole", "com.gexperts.tilix",
+            }
+
+        if not launch and target is None and self._focused_editable is not None:
+            self._verify_remembered_editable(self._focused_editable)
+        if known(app):
+            return True
+        if launch:
+            # Resolve executable symlinks such as x-terminal-emulator.
+            import shutil
+
+            executable = shutil.which(app)
+            return bool(executable and known(str(Path(executable).resolve())))
+        if known(_resolved_app(app)):
+            return True
+        if isinstance(target, Element):
+            handle = observe.ax_handle_for(target.snapshot_id, target.ref)
+        else:
+            handle = self._focused_editable
+        if handle is not None and self._run(lambda: _atspi.terminal_ancestor(handle)):
+            return True
+        focused, _truncated = self._run(lambda: _atspi._focused_node(app))
+        return self._run(lambda: _atspi.terminal_ancestor(focused))
 
     def launch_app(self, identifier: str, *, argv: tuple[str, ...] | None = None) -> dict:
         from a11y_computer_use.drivers import _linux_system

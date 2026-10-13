@@ -15285,6 +15285,23 @@ def _child_at(acc, index: int):
     return _call_first(acc, ("get_child_at_index", "getChildAtIndex"), index)
 
 
+def terminal_ancestor(acc) -> bool:
+    """Whether an accessible is inside a terminal, before AX role mapping.
+
+    VTE's terminal role maps to AXTextArea. Inspect the native role so an
+    ordinary multiline editor is never mistaken for a command prompt.
+    """
+    seen = set()
+    for _ in range(64):
+        if acc is None or id(acc) in seen:
+            return False
+        seen.add(id(acc))
+        if _role_name(acc) == "terminal":
+            return True
+        acc = _parent_of(acc)
+    return False
+
+
 def _parent_of(acc):
     _drop_cached_properties(acc)
     return _call_first(acc, ("get_parent", "getParent"))
