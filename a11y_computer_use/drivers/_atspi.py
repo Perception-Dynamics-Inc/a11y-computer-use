@@ -735,6 +735,11 @@ _CACHEABLE = {
     "get_accessible_id": _nonempty_str,
     "get_toolkit_name": _nonempty_str,
     "getToolkitName": _nonempty_str,
+    # Toolkit/browser probes repeatedly resolve the same node's owner.
+    # LibreOffice makes this a costly bus call; ownership is stable until
+    # the operation ends or a mutator invalidates this cache.
+    "get_application": _present,
+    "getApplication": _present,
     "get_process_id": _positive_int,
     "get_child_at_index": _present,
     "getChildAtIndex": _present,
