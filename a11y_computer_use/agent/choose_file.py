@@ -2,9 +2,10 @@
 
 This is an agent macro. It is not the desktop ``file_dialog`` tool. On Linux
 that tool stays unsupported and is not called from here. The chooser is
-already open. The macro presses Ctrl+L, types the absolute path once, and
-presses Return. Success is only the dialog gone and the file name showing
-outside that dialog. A check that cannot be made is a failure.
+already open. The macro uses Ctrl+L or LibreOffice's accessible File name
+field to enter the absolute path, then presses Return. Success is only the
+dialog gone and the file name showing outside that dialog. A check that
+cannot be made is a failure.
 """
 
 from __future__ import annotations
@@ -237,7 +238,7 @@ def perform_choose_file(
     apps: list[str],
     timeout_s: float = 6.0,
 ) -> ChooseResult:
-    """Press Ctrl+L, type ``path``, press Return, and check the dialog.
+    """Enter ``path`` in the chooser, press Return, and check the dialog.
 
     ``apps`` are accessibility names to read after Return (the tracked app
     and the chooser's app). Return is not pressed unless the location entry
@@ -261,7 +262,9 @@ def perform_choose_file(
             )
         return _fail(
             "no_file_chooser",
-            "no GTK, Qt, or Chrome file chooser is open; open the file dialog first (e.g. Ctrl+O in the app)",
+            "no supported file chooser was detected; open the file dialog first "
+            "(e.g. Ctrl+O in the app). If LibreOffice's dialog is already open, "
+            "use its File name field to enter the absolute path manually",
         )
     if len(chosen) > 1:
         return _fail(
@@ -277,14 +280,25 @@ def perform_choose_file(
             io.focus(window_id)
         except ComputerUseError:
             pass
-    try:
-        io.key("ctrl+l")
-    except ComputerUseError as exc:
-        return _from_error(exc, default_reason="path_not_entered")
+    names = _app_names(apps, target)
+    chooser_apps = [str(target["app"])] if target.get("app") else names
+    office = any("libreoffice" in name.casefold() or "soffice" in name.casefold()
+                 for name in chooser_apps)
+    if office:
+        landed = _land_office_path(io, path, names, str(target.get("title") or ""))
+    else:
+        try:
+            io.key("ctrl+l")
+        except ComputerUseError as exc:
+            return _from_error(exc, default_reason="path_not_entered")
+        landed = _land_path(io, path, names)
 
-    if not _land_path(io, path, _app_names(apps, target)):
+    if not landed:
         return _fail(
             "path_not_entered",
+            ("the LibreOffice filename field could not be focused and read back; "
+             "use the dialog's File name field to enter the absolute path manually; "
+             "Return was not pressed") if office else
             "the location entry did not show the path, so Return was not pressed",
             path=path,
         )
@@ -297,6 +311,41 @@ def perform_choose_file(
     titles = {folded_title(target.get("title"))} if is_definite_title(target.get("title")) else set()
     names = _app_names(apps, target)
     return _verify(io, path, ids=ids, titles=titles, apps=names, timeout_s=timeout_s)
+
+
+def _land_office_path(io: ChooseIO, path: str, apps: list[str], title: str) -> bool:
+    """VCL has a File name field, rather than a Ctrl+L location entry.
+
+    Only use an observed, uniquely named field inside the mapped chooser.
+    Check focus after the mnemonic so Return cannot target another control.
+    """
+    try:
+        io.key("alt+n")
+    except ComputerUseError:
+        return False
+    for app in apps:
+        snap = _snap(io, app)
+        elements = _elements(snap)
+        by_ref = {getattr(element, "ref", ""): element for element in elements}
+        frames = {getattr(element, "ref", "") for element in elements
+                  if _role_key(getattr(element, "role", "")) in _WINDOW_ROLES
+                  and folded_title(getattr(element, "title", "")) == folded_title(title)
+                  and snapshot_looks_like_chooser(snap, title=title)}
+        entries = [element for element in elements
+                   if getattr(element, "editable", False)
+                   and _under_chooser(element, by_ref, frames)
+                   and str(getattr(element, "title", "") or "").casefold().strip(" :")
+                   in {"file name", "filename"}]
+        if len(entries) != 1 or not getattr(entries[0], "focused", False):
+            continue
+        ref = str(getattr(entries[0], "ref", "") or "")
+        if not ref:
+            continue
+        try:
+            return entered_path(io.set_value(ref, path), path)
+        except ComputerUseError:
+            return False
+    return False
 
 
 def _land_path(io: ChooseIO, path: str, apps: list[str]) -> bool:
