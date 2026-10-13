@@ -12019,3 +12019,117 @@ def test_java_button_without_showing_has_vanished_and_a_showing_one_has_not(fake
     cell = _Acc("table cell", name="ROW-030", states={"ENABLED", "VISIBLE"})
     cell.get_application = lambda: app
     assert _atspi.target_vanished(cell) is False
+
+
+@pytest.mark.parametrize("x,y,width,height", [
+    (0, 0, 1414920272, 22043),
+    (0, 0, 22043, 1414920272),
+    (0, 0, float("inf"), 80),
+    (0, 0, 120, float("nan")),
+])
+def test_impossible_atspi_panel_bounds_are_not_pointer_targets(
+    fake_atspi, monkeypatch, x, y, width, height,
+) -> None:
+    """Synthetic #503 garbage extents, not a live GTK or X session."""
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (-1.0, -1.0)
+    position, size = _atspi._extents(panel)
+    assert position == (x, y)
+    assert size[0] == width
+    assert size[1] == height or height != height
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+    # A previously issued ref may still contain the corrupt published box.
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503", clickable=True)
+    monkeypatch.setattr(observe, "ax_handle_for", lambda *_args: panel)
+    monkeypatch.setattr("a11y_computer_use.drivers.linux._on_wayland", lambda: False)
+    driver = LinuxDriver()
+    monkeypatch.setattr(driver, "_run", lambda fn: fn())
+    monkeypatch.setattr(driver, "_refuse_hidden", lambda *_args: None)
+    monkeypatch.setattr(driver, "_raise_handle_window", lambda *_args: None)
+    monkeypatch.setattr(_linux_input, "click", lambda *_args, **_kwargs: pytest.fail("pointer sent"))
+    with pytest.raises(ComputerUseError) as exc:
+        driver.click(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+@pytest.mark.parametrize("x,y,width,height", [
+    (40, 80, 120, 60),
+    (40, -1400, 1100, 6400),
+    (0, -30000, 1200, 60000),
+    (-32768, 0, 65535, 80),
+])
+def test_normal_and_large_sane_atspi_boxes_keep_their_bounds(
+    fake_atspi, x, y, width, height,
+) -> None:
+    from a11y_computer_use.drivers.linux import _point_of
+
+    panel = _Acc("panel", states=("SHOWING",), width=width, height=height)
+    panel.component = _Geom(width, height, x, y)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert (raw.position, raw.size) == ((x, y), (width, height))
+    tree = _node("AXWindow", "Editor", children=((raw, []),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.role == "opaque_region" and el.clickable for el in snap.elements)
+    target = Element("e503", "AXGroup", "", None,
+                     Bounds(0, x, y, width, height), "snap-503")
+    assert _point_of(target) == (int(target.bounds.center.x), int(target.bounds.center.y))
+
+
+def test_large_panel_preserves_its_painted_children(fake_atspi) -> None:
+    panel = _Acc("panel", states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: "GTK", get_toolkit_version=lambda: "4.18.6")
+    panel.get_application = lambda: app
+    panel.children = [_Acc("push button", name="Save")]
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+    child = _node("AXButton", "Save", actions=("AXPress",),
+                  pos=(40, 80), size=(120, 60))
+    tree = _node("AXWindow", "Editor", children=((raw, [child]),))
+    snap = build_snapshot(tree, _FakeAccessor(), scope=Scope.WINDOW,
+                          app="editor", pid=1, geometry=_geometry())
+    assert any(el.title == "Save" and el.clickable for el in snap.elements)
+    assert not any(el.role == "opaque_region" for el in snap.elements)
+
+
+@pytest.mark.parametrize("toolkit,version,name", [
+    ("GTK", "3.24", ""), ("Qt", "6.8", ""), ("GTK", "4.18", "Document"),
+])
+def test_large_real_panel_keeps_extents(fake_atspi, toolkit, version, name):
+    panel = _Acc("panel", name=name, states=("SHOWING",), width=1414920272, height=22043)
+    app = _NS(get_toolkit_name=lambda: toolkit, get_toolkit_version=lambda: version)
+    panel.get_application = lambda: app
+    raw = _atspi.ATSPIAccessor().read(panel)
+    assert raw.size == (1414920272, 22043)
+
+
+@pytest.mark.parametrize("x,y", [(32768, 0), (-32769, 0), (0, 32768), (0, -32769)])
+def test_ref_center_outside_x_range_is_not_actionable(x, y):
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXButton", "Save", None,
+                     Bounds(0, x - 60, y - 40, 120, 80), "snap-503")
+    with pytest.raises(ComputerUseError) as exc:
+        _point_of(target)
+    assert exc.value.code == ErrorCode.UNSUPPORTED
+    assert exc.value.detail["reason"] == "not_actionable"
+
+
+def test_ref_with_large_extents_and_addressable_center_keeps_its_click():
+    from a11y_computer_use.drivers.linux import _point_of
+
+    target = Element("e503", "AXGroup", "Document", None,
+                     Bounds(0, -50000, -100000, 100000, 200000), "snap-503")
+    assert _point_of(target) == (0, 0)
